@@ -4,7 +4,7 @@
 //! A poll-driven loop that turns the reducer's dispatch decisions into running
 //! work and matched results back into admitted facts:
 //!
-//! 1. **Drain + submit.** Each tick drains the store's `aether.bloomery.dispatch`
+//! 1. **Drain + submit.** Each tick drains the store's [`TOPIC_DISPATCH`]
 //!    outbox topic (its own connection, so the intake registry the pull side
 //!    reads/consumes is one store), decodes each
 //!    [`DispatchPayload`](aether_bloomery::DispatchPayload), submits it through the
@@ -64,7 +64,7 @@ use crate::store::{SqliteStore, StoreBackend};
 /// lineage path rides along for `control_mailbox` (`mailbox_id_from_path` —
 /// the control actor is not a native singleton, so the sibling-cap typed send
 /// does not apply).
-pub use aether_bloomery::{CONTROL_CORE_PATH, DISPATCH_TOPIC};
+pub use aether_bloomery::{CONTROL_CORE_PATH, TOPIC_DISPATCH};
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -253,7 +253,7 @@ fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(DISPATCH_TOPIC))?;
+    let entries = store.drain_outbox(Some(TOPIC_DISPATCH))?;
     let mut handles = Vec::new();
     let mut ack_through = None;
     // The outbox sequence of a transient submit failure that stopped the drain —
@@ -684,7 +684,7 @@ impl NativeActor for ExecutorDriverCapability {
             match drain_and_dispatch(store, &executor) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_outbox(Some(DISPATCH_TOPIC), sequence)
+                        && let Err(error) = store.ack_outbox(Some(TOPIC_DISPATCH), sequence)
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
                     }

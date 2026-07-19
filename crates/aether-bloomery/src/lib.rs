@@ -66,9 +66,10 @@ pub mod values;
 pub use control::ControlCore;
 pub use control::{
     Admit, AdmitResult, CONTROL_CORE_PATH, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease,
-    CompleteTransfer, DISPATCH_TOPIC, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, INTEGRATE_TOPIC,
-    IntegratePayload, JournalRecord, LAND_TOPIC, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult,
-    RECEIPT_TOPIC, REDISPATCH_TOPIC, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, TransferSeal,
+    CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord,
+    LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
+    ReplayJournalResult, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH,
+    TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};

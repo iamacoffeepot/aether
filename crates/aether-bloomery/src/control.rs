@@ -68,33 +68,41 @@ pub struct OutboxPayload {
 /// can route it.
 ///
 /// A topic string is a producer-consumer contract: the control actor enqueues
-/// under it and exactly one host driver drains it, so both sides import the
-/// one constant (this one and its siblings below) rather than re-typing the
+/// under it and a host driver drains it, so both sides import the one
+/// constant (this one and its siblings below) rather than re-typing the
 /// literal — a drifted copy would enqueue under a topic nobody drains,
 /// accumulating silently (#3668). Defined here (always compiled) like the
 /// payload types, so the `default-features = false` host consumers see them
 /// without the `runtime` actor.
-pub const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
+///
+/// Every topic carries the `topic:` prefix: a topic is a store-local routing
+/// key between the reducer's decisions and the driver that drains them, never
+/// an actor address — no mail can be sent to it — and the sigil (impossible in
+/// a dot-separated aether name) makes that unmistakable. The former
+/// `aether.bloomery.*` topic spellings read as addresses while matching no
+/// actor (and two collided byte-for-byte with real driver namespaces), so the
+/// class is now marked structurally.
+pub const TOPIC_LANDING_RECEIPT: &str = "topic:landing_receipt";
 
 /// The outbox topic a stage re-dispatch enqueues under, so the dispatch
 /// consumer (#3505) re-assembles the held attempt naming both question and
 /// answer digests (ADR-0151).
-pub const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
+pub const TOPIC_REDISPATCH: &str = "topic:redispatch";
 
 /// The outbox topic a per-member attempt dispatch enqueues under, so the
 /// executor dispatch consumer (#3505) drains it, wraps the transformation in a
 /// work order, and submits it through the executor port (ADR-0149 §The line).
-pub const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
+pub const TOPIC_DISPATCH: &str = "topic:dispatch";
 
 /// The outbox topic a land dispatch enqueues under, so the land driver
 /// (ADR-0149 migration step 3) drains it and issues the source-port
 /// compare-and-swap land.
-pub const LAND_TOPIC: &str = "aether.bloomery.land";
+pub const TOPIC_LAND: &str = "topic:land";
 
 /// The outbox topic an integration dispatch enqueues under (ADR-0152), so the
 /// host integrate driver drains it and folds the claimed candidates onto the
 /// bloom's integration branch.
-pub const INTEGRATE_TOPIC: &str = "aether.bloomery.integrate";
+pub const TOPIC_INTEGRATE: &str = "topic:integrate";
 
 /// The runtime mailbox path of the loaded control-core component — the
 /// ADR-0099 lineage address the component host registers the autoloaded actor
@@ -107,7 +115,7 @@ pub const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.blo
 
 /// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,
 /// and the adopting answer, each by digest. The wasm control actor enqueues it
-/// under the `aether.bloomery.redispatch` topic from a
+/// under [`TOPIC_REDISPATCH`] from a
 /// [`Decision::RedispatchStage`](crate::reduce::Decision::RedispatchStage); the
 /// executor dispatch consumer (#3505) decodes it to re-assemble the held attempt
 /// naming both digests. Defined here (always compiled) so the host consumer can
@@ -126,8 +134,8 @@ pub struct RedispatchPayload {
 /// bloom, the member, the stage, and the fully-built portable
 /// [`Transformation`] the executor dispatch
 /// consumer (#3505) wraps in a work order (adding an idempotency nonce) and
-/// submits through the executor port. The wasm control actor enqueues it under the
-/// `aether.bloomery.dispatch` topic from a
+/// submits through the executor port. The wasm control actor enqueues it under
+/// [`TOPIC_DISPATCH`] from a
 /// [`Decision::DispatchAttempt`](crate::reduce::Decision::DispatchAttempt).
 /// Defined here (always compiled) so the host consumer can decode it inward,
 /// cycle-free — like [`OutboxPayload`].

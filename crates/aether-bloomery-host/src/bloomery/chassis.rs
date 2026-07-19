@@ -236,7 +236,7 @@ impl BloomeryChassis {
             .with_actor::<ArtifactsCapability>(artifacts)
             .with_actor::<MirrorDriverCapability>(github.clone())
             // The executor dispatch driver (#3505): drains the reducer's
-            // `aether.bloomery.dispatch` decisions, submits them through the
+            // dispatch-topic decisions, submits them through the
             // executor port, and admits matched results back to the control core.
             // Reuses the one GitHub-connection config the mirror + source caps do.
             .with_actor::<ExecutorDriverCapability>(github.clone())

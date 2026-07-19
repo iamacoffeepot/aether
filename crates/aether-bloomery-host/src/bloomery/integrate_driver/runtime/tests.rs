@@ -12,7 +12,7 @@ use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::{INTEGRATE_TOPIC, drain_and_integrate};
+use super::{TOPIC_INTEGRATE, drain_and_integrate};
 use crate::bloomery::SourceShell;
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -36,7 +36,7 @@ fn seeded(candidate: &Digest) -> (FakeGithub, Digest) {
 
 fn enqueue_integration(store: &mut SqliteStore, bloom: BloomId, base: Digest, candidates: Vec<Digest>) -> u64 {
     let payload = IntegratePayload { bloom: bloom.0, base, candidates };
-    store.enqueue_outbox(INTEGRATE_TOPIC, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_outbox(TOPIC_INTEGRATE, &to_vec(&payload).unwrap()).unwrap()
 }
 
 fn decoded_resolve(admit: &aether_bloomery::Admit) -> (BloomId, Digest, Digest, Vec<Digest>) {
@@ -105,7 +105,7 @@ fn a_re_drain_after_the_fold_recovers_the_head_without_re_integrating() {
 
     enqueue_integration(&mut store, bloom, base, vec![candidate]);
     let (first, first_ack) = drain_and_integrate(&mut store, &source).unwrap();
-    store.ack_outbox(Some(INTEGRATE_TOPIC), first_ack.unwrap()).unwrap();
+    store.ack_outbox(Some(TOPIC_INTEGRATE), first_ack.unwrap()).unwrap();
 
     // The same decision re-enqueued (modeling a crash before the first ack /
     // a replayed outbox): the branch is already at the candidate.

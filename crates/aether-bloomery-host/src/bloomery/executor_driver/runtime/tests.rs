@@ -18,7 +18,7 @@ use aether_bloomery_github::{
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, DISPATCH_TOPIC, NameEvidenceClaims, TrackedHandle, backoff_delay, candidate_ref_name,
+    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, TOPIC_DISPATCH, TrackedHandle, backoff_delay, candidate_ref_name,
     drain_and_dispatch, is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
     select_stale_handles,
 };
@@ -153,7 +153,7 @@ fn enqueue_construct_dispatch(store: &mut SqliteStore, bloom: BloomId, workpiece
         scope_revision: digest(subject),
         candidate: None,
     };
-    let sequence = store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_outbox(TOPIC_DISPATCH, &to_vec(&payload).unwrap()).unwrap();
     (sequence, subject)
 }
 
@@ -176,8 +176,8 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     assert_eq!(order.workpiece, "wp-line");
 
     // Acking the prefix means the entry does not re-drain.
-    store.ack_outbox(Some(DISPATCH_TOPIC), sequence).unwrap();
-    assert!(store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().is_empty(), "the acked dispatch does not re-drain");
+    store.ack_outbox(Some(TOPIC_DISPATCH), sequence).unwrap();
+    assert!(store.drain_outbox(Some(TOPIC_DISPATCH)).unwrap().is_empty(), "the acked dispatch does not re-drain");
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
         scope_revision: digest(9),
         candidate: None,
     };
-    store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_outbox(TOPIC_DISPATCH, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
@@ -261,8 +261,8 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     assert_eq!(ack_through, Some(first), "the ack prefix stops at the last success, not a later one");
 
     // The subject-less entry and the one behind it re-drain — nothing acked them away.
-    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
-    let remaining = store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap();
+    store.ack_outbox(Some(TOPIC_DISPATCH), ack_through.unwrap()).unwrap();
+    let remaining = store.drain_outbox(Some(TOPIC_DISPATCH)).unwrap();
     assert_eq!(remaining.len(), 2, "the subject-less entry and the one behind it are not acked past");
 }
 
@@ -279,7 +279,7 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let (sequence, subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
-    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+    store.ack_outbox(Some(TOPIC_DISPATCH), ack_through.unwrap()).unwrap();
     let mut tracked = track(handles);
     let nonce = format!("dispatch-{sequence}");
 
@@ -326,7 +326,7 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
         let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
         let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
         assert_eq!(handles.len(), 1, "the order dispatched and was recorded before the simulated crash");
-        store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+        store.ack_outbox(Some(TOPIC_DISPATCH), ack_through.unwrap()).unwrap();
         format!("dispatch-{sequence}")
         // `store` drops here — the process stops before this dispatch's
         // result was ever pulled, with no in-memory `tracked` surviving it.
@@ -388,7 +388,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
-    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+    store.ack_outbox(Some(TOPIC_DISPATCH), ack_through.unwrap()).unwrap();
     assert_eq!(handles.len(), 1, "the construct order dispatched to the local backend");
     assert_eq!(handles[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
     let mut tracked = track(handles);
@@ -422,8 +422,8 @@ fn drain_and_dispatch_parks_a_permanent_refusal_instead_of_re_driving() {
     assert_eq!(ack_through, Some(sequence), "a permanent refusal acks the entry past rather than re-driving it");
     assert_eq!(transient_failure, None, "a permanent park is not a transient failure the backoff cursor tracks");
 
-    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
-    assert!(store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().is_empty(), "the parked entry does not re-drain");
+    store.ack_outbox(Some(TOPIC_DISPATCH), ack_through.unwrap()).unwrap();
+    assert!(store.drain_outbox(Some(TOPIC_DISPATCH)).unwrap().is_empty(), "the parked entry does not re-drain");
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn drain_and_dispatch_leaves_a_transient_refusal_undrained_to_retry() {
     assert_eq!(ack_through, None, "a transient refusal stops the ack prefix so the entry re-drains");
     assert_eq!(transient_failure, Some(sequence), "the transient failure names the head sequence for backoff");
     assert_eq!(
-        store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().len(),
+        store.drain_outbox(Some(TOPIC_DISPATCH)).unwrap().len(),
         1,
         "the un-acked entry re-drains on the next tick"
     );
@@ -556,7 +556,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         scope_revision: digest(5),
         candidate: Some(candidate_tree),
     };
-    let sequence = store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_outbox(TOPIC_DISPATCH, &to_vec(&payload).unwrap()).unwrap();
 
     drain_and_dispatch(&mut store, &shell).unwrap();
 

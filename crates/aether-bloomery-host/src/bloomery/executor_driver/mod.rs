@@ -3,7 +3,7 @@
 //!
 //! The reducer decides to dispatch a per-member attempt and enqueues a
 //! [`DispatchPayload`](aether_bloomery::DispatchPayload) on the store's
-//! `aether.bloomery.dispatch` outbox topic; nothing drained it until this
+//! [`TOPIC_DISPATCH`] outbox topic; nothing drained it until this
 //! capability. It is the executor-dispatch consumer the reducer's producer side
 //! (#3497) and the `MirrorDriverCapability` doc both reserved: a poll-driven drain
 //! that submits each dispatch through the [`ExecutorShell`] and records its intake
@@ -17,7 +17,7 @@
 
 use aether_actor::actor;
 
-pub use runtime::{DISPATCH_TOPIC, DispatchTick, ExecutorDriverState};
+pub use runtime::{DispatchTick, ExecutorDriverState, TOPIC_DISPATCH};
 
 /// Addressing identity for the executor dispatch-driver capability.
 #[actor(singleton)]
