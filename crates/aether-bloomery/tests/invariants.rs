@@ -438,6 +438,85 @@ fn successor_inherits_only_still_valid_claims() {
     assert_eq!(claims.len(), 1);
 }
 
+// #3663 — a successor member that does not arrive already integrated (an
+// inherited claim) is dispatched at supersede exactly as a seal dispatches a
+// fresh member: cursor seeded at the entry stage, first attempt dispatched
+// against the successor's sealed base. Catches the claimed-but-never-executed
+// strand — the wedged-member escape hatch (ADR-0151) re-admits a member whose
+// predecessor never integrated, and without the entry dispatch that member
+// never runs and the successor never resolves.
+#[test]
+fn supersession_dispatches_every_non_inherited_successor_member() {
+    let base = Snapshot::new(digest(1));
+    // Predecessor admits "kept" (integrates at rev 10) and "wedged" (never
+    // integrates — the escape-hatch case).
+    let members = vec![membership("kept", 10), membership("wedged", 11)];
+    let predecessor_spec = draft(1, members).seal();
+    let predecessor = predecessor_spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
+    let (snapshot, _) =
+        step(&snapshot, &event("i-kept", Fact::Integrate { bloom: predecessor, claim: claim("kept", 10, 100) }));
+
+    // The successor re-admits "kept" at the same revision (inherits), "wedged"
+    // at a fresh revision, and a net-new "grown".
+    let successor_spec =
+        draft(2, vec![membership("kept", 10), membership("wedged", 12), membership("grown", 13)]).seal();
+    let successor = successor_spec.id();
+    let successor_base = successor_spec.base();
+    let (after, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
+    assert!(matches!(decided.outcome, Outcome::Superseded { .. }));
+
+    // The non-inherited members are dispatched at the entry stage against the
+    // successor's sealed base; the inherited member is not re-run.
+    let dispatched: Vec<_> = decided
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, transformation, .. } => {
+                Some((workpiece.clone(), *stage, transformation.checkout))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dispatched,
+        vec![
+            (workpiece("wedged"), StageId::Construct, successor_base),
+            (workpiece("grown"), StageId::Construct, successor_base),
+        ],
+        "exactly the non-inherited members dispatch, at Construct, against the successor's base",
+    );
+
+    // The applied record seeds cursors for exactly the dispatched members.
+    let progress = &after.blooms.get(&successor).unwrap().progress;
+    assert!(progress.get(&workpiece("kept")).is_none(), "an inherited member never enters the line");
+    for name in ["wedged", "grown"] {
+        let cursor = progress.get(&workpiece(name)).unwrap();
+        assert_eq!((cursor.stage, cursor.attempts), (StageId::Construct, 1), "{name} is seeded at the entry stage");
+    }
+
+    // A completion for the inherited, cursor-less member refuses as
+    // NotDispatched — not a fabricated entry-stage StageMismatch.
+    let stray = reduce(
+        &after,
+        &event(
+            "stray",
+            Fact::AttemptCompleted {
+                bloom: successor,
+                workpiece: workpiece("kept"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
+    assert!(matches!(
+        stray.outcome,
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::NotDispatched(ref wp)) if *wp == workpiece("kept"),
+    ));
+}
+
 // M1 — claims are keyed by workpiece, latest-wins: a refined re-integration of a
 // member overwrites its stale predecessor claim, so resolve reads the refined
 // candidate, not the first one integrated.
