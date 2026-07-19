@@ -30,7 +30,8 @@ aether-actor = { path = "../aether-actor" }
 # marker face is off (`default-features = false`); the `host` feature the kit
 # forwards to turns on exactly the host surface, not the guest `runtime` SDK.
 aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
-aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["clipboard", "render", "text"] }
+aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render", "text"] }
+aether-clipboard = { path = "../aether-clipboard", default-features = false }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }

@@ -82,10 +82,6 @@ render = []
 # but the always-on `aether.input` cast kinds (`UnsubscribeAll`) already
 # pull `bytemuck` unconditionally, so this marker is empty like the rest.
 audio = []
-# Text-only clipboard marker. The native system backend rides the
-# `clipboard-runtime` layer below; wasm guests need only the identity and
-# request/reply kinds for typed sends.
-clipboard = []
 # ADR-0105 `aether.text` cap marker. CPU-only (no GPU dep) — it composes
 # the render texture surface entirely by mail — but gated the same two-
 # layer way so a wasm component can address it via
@@ -100,7 +96,6 @@ text = ["render"]
 # marker layer + `runtime` so chassis builds still see the full cap.
 render-runtime = ["render", "runtime", "aether-substrate/render", "dep:wgpu"]
 audio-runtime = ["audio", "runtime", "dep:cpal", "dep:crossbeam-queue", "dep:hound"]
-clipboard-runtime = ["clipboard", "runtime", "dep:arboard"]
 # `fontdue` rides `text-runtime` the way `hound` rides `audio-runtime`:
 # the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
 # off the hot path. Implies the marker layer + `runtime`.
@@ -127,7 +122,6 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
-arboard = { workspace = true, optional = true }
 # ADR-0129: the `Sec-WebSocket-Accept` handshake key is base64(SHA-1(key +
 # GUID)). SHA-1 is hand-rolled in `http/server/runtime.rs` (one fixed hash
 # does not earn a `sha1` crate); base64 is already a workspace dependency, so

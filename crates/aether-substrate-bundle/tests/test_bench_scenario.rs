@@ -33,9 +33,6 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use aether_capabilities::clipboard::{
-    GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult,
-};
 use aether_capabilities::fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
 use aether_capabilities::render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
@@ -43,6 +40,7 @@ use aether_capabilities::render::{
     TextureFormat, TexturedQuad, UpdateTexture, Vertex, ViewProjection, WHITE_TEXTURE_ID,
 };
 use aether_capabilities::text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
+use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult, FrameCheck,
