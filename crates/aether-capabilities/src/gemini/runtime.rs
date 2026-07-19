@@ -15,11 +15,11 @@ use super::{
     GeminiCapability, GeminiError, GroundingMetadata, LyriaGenerate, LyriaGenerateResult, NanobananaGenerate,
     NanobananaGenerateResult, lyria, nanobanana,
 };
-use crate::fs::{Access, FileAdapter, LocalFileAdapter};
 use crate::shared::contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiImageRequest, GeminiMusicRequest, GeminiResponse,
 };
 use crate::shared::contentgen::staging::stage_gen_output_under;
+use aether_fs::{Access, FileAdapter, LocalFileAdapter};
 
 pub use aether_substrate::actor::native::TaskQueue;
 pub use std::path::{Path, PathBuf};

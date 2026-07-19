@@ -12,13 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
-use aether_capabilities::{
-    FsCapability, InputCapability, InputConfig, TcpCapability, TextCapability, fs::NamespaceRoots,
-};
+use aether_capabilities::{InputCapability, InputConfig, TcpCapability, TextCapability};
 use aether_capabilities::{GameGatewayCapability, GameGatewayConfig, LifecycleCapability};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_data::Kind;
 use aether_data::KindId;
+use aether_fs::{FsCapability, NamespaceRoots};
 use aether_kinds::Tick;
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderHandles};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};

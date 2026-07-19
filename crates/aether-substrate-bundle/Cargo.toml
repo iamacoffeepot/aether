@@ -89,6 +89,9 @@ aether-window = { path = "../aether-window", features = ["runtime"] }
 # chassis mounts `TraceDispatchCapability`; the perf/test_bench harnesses
 # stitch trace trees via `walk`. Runtime half.
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
+# The `aether.fs` cap (iamacoffeepot/aether#3706) — the chassis wires
+# `FsCapability` + resolves `NamespaceRoots`, so it needs the fs runtime (default).
+aether-fs = { path = "../aether-fs" }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

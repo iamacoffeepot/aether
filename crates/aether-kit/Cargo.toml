@@ -35,6 +35,9 @@ aether-capabilities = { path = "../aether-capabilities", default-features = fals
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
 aether-clipboard = { path = "../aether-clipboard", default-features = false }
+# The `aether.fs` cap (iamacoffeepot/aether#3706) — kit loads meshes / worlds
+# through it. Marker face only (kit is a wasm component addressing fs by mail).
+aether-fs = { path = "../aether-fs", default-features = false }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }

@@ -18,10 +18,10 @@
 
 use std::path::Path;
 
-use crate::fs::{Access, FsError};
+use aether_fs::{Access, FsError};
 use uuid::Uuid;
 
-use crate::fs::{FileAdapter, LocalFileAdapter};
+use aether_fs::{FileAdapter, LocalFileAdapter};
 
 /// Subdirectory under the staging root every generated artifact lands
 /// in. Mail and replies refer to staged files as `gen/<uuid>.<ext>`,
@@ -50,7 +50,7 @@ pub fn stage_gen_output_under(root: &Path, bytes: &[u8], ext: &str) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::{GEN_PREFIX, stage_gen_output_under};
-    use crate::fs::{Access, FileAdapter, LocalFileAdapter};
+    use aether_fs::{Access, FileAdapter, LocalFileAdapter};
     use aether_substrate::testing::{cleanup, scratch_dir};
     use std::path::PathBuf;
 

@@ -6,7 +6,7 @@
 //! success after both replies match via `ctx.in_reply_to()`.
 
 use aether_actor::{ActorInitError, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::fs::{FsCapability, Read, ReadResult};
+use aether_fs::{FsCapability, Read, ReadResult};
 use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux, TEST_BENCH_OBSERVER_MAILBOX_NAME};
 
 #[derive(Default)]

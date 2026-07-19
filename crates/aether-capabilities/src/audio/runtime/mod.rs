@@ -75,7 +75,7 @@ pub use self::sample::{BankAssemblyContext, BankAssemblyOutput};
 pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
 pub use self::track::{DecodeOutput, TrackDecodeContext};
 use self::worker::spawn_audio_worker;
-pub use crate::fs::{FsCapability, Read, ReadResult};
+pub use aether_fs::{FsCapability, Read, ReadResult};
 
 /// Extract the sender's mailbox id for voice-table keying. Component
 /// senders come through as `EngineMailbox { mailbox_id }`; Claude

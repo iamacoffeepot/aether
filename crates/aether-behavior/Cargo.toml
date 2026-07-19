@@ -31,7 +31,7 @@ runtime = ["dep:aether-behavior-derive"]
 # embeds (no_std, built-in fuel metering), the capability crate for the
 # `aether.fs` surface the host fetches scripts through, and `tracing` for
 # the fail-open trap logs.
-host = ["dep:aether-actor", "dep:wasmi", "dep:aether-capabilities", "dep:tracing"]
+host = ["dep:aether-actor", "dep:wasmi", "dep:aether-capabilities", "dep:aether-fs", "dep:tracing"]
 
 [dependencies]
 aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
@@ -49,6 +49,9 @@ aether-actor = { path = "../aether-actor", optional = true }
 # `FsCapability` the host fetches an `FsRef` script through. Marker layer
 # only (`default-features = false`) — no substrate runtime.
 aether-capabilities = { path = "../aether-capabilities", default-features = false, optional = true }
+# The `aether.fs` cap (iamacoffeepot/aether#3706) — the script host fetches
+# scripts through it. Marker face only (default-features = false); no fs runtime.
+aether-fs = { path = "../aether-fs", default-features = false, optional = true }
 wasmi = { version = "1.1", default-features = false, optional = true }
 tracing = { workspace = true, default-features = false, optional = true }
 

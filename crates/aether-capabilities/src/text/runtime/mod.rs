@@ -18,8 +18,8 @@ pub use aether_substrate::Manual;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
-pub use crate::fs::{FsCapability, Read, ReadResult};
 use crate::text::MEMORY_FONT_NAMESPACE;
+pub use aether_fs::{FsCapability, Read, ReadResult};
 pub use aether_render::{
     CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad, UpdateTexture,
 };
@@ -635,8 +635,8 @@ mod tests {
     use super::atlas::{ATLAS_SIZE, GlyphKey, GlyphSlot};
     use super::layout::build_font_metrics;
     use super::{Arc, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState, UpdateTexture};
-    use crate::fs::FsError;
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
+    use aether_fs::FsError;
     use aether_math::Rgba;
     use aether_render::DrawTexturedQuads;
     use aether_substrate::actor::native::binding::NativeBinding;

@@ -54,7 +54,7 @@ pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
 /// Lifts the two most common HTTP verbs to a typed method so callers
 /// stop reconstructing `Fetch { method: HttpMethod::Get, headers:
 /// vec![], body: vec![], timeout_ms: None, .. }` for a basic
-/// request. Same shape and rationale as [`crate::fs::FsMailboxExt`].
+/// request. Same shape and rationale as [`aether_fs::FsMailboxExt`].
 ///
 /// All methods are fire-and-forget. Replies arrive as
 /// `aether.http.fetch_result`, correlated by the echoed `url`

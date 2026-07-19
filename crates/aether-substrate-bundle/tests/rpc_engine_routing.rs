@@ -20,7 +20,6 @@
 // routing, not sibling-cap addressing.
 #![allow(clippy::disallowed_methods)]
 
-use aether_capabilities::fs::{List, ListResult};
 use aether_capabilities::rpc::RpcServerHandle;
 use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, WIRE_VERSION,
@@ -29,6 +28,7 @@ use aether_capabilities::rpc::{
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
+use aether_fs::{List, ListResult};
 use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};

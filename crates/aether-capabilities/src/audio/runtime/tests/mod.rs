@@ -16,8 +16,8 @@ use super::voice::{
     MAX_VOICES, OscVoice, PartialBankVoice, STEAL_RELEASE_SECS, VoiceKernel, build_builtin_kernel, voice_seed,
 };
 use super::*;
-use crate::fs::FsError;
 use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+use aether_fs::FsError;
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::testing::{
     assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,

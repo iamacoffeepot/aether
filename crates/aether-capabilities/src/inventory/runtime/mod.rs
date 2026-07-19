@@ -237,8 +237,8 @@ mod tests {
     #[test]
     fn manifest_contains_chassis_name_and_worker_template() {
         // Force `FsCapability`'s `NameEntry` submission to link.
-        use crate::fs::FsCapability;
         use aether_actor::Addressable;
+        use aether_fs::FsCapability;
         assert_eq!(FsCapability::NAMESPACE, "aether.fs");
         // Force the substrate's worker / root / instanced thread-name
         // templates to link by referencing the resolve chain.

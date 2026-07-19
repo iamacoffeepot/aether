@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
-use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{Kind, encode_empty, mailbox_id_from_name};
+use aether_fs::NamespaceRoots;
 use aether_kinds::{AdvanceResult, CaptureFrameResult, LifecycleAdvance};
 use aether_substrate::chassis::settlement::{
     SettlementRegistry, TerminalDisposition, WaitOutcome, await_internal_signal,
