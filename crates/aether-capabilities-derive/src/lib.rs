@@ -866,14 +866,13 @@ fn emit_group_glue(group: &Group<'_>) -> TokenStream2 {
 /// guard, then capture and extractor binding, then the call.
 fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
     let seglen = route.template.segments.len();
-    // A no-capture template keeps ADR-0130 prefix semantics — it matches
-    // its head and everything under it; a capture template matches its
-    // exact segment structure so it never swallows a deeper path.
-    let len_check = if route.template.capture_count == 0 {
-        quote! { __aether_segs.len() >= #seglen }
-    } else {
-        quote! { __aether_segs.len() == #seglen }
-    };
+    // Every route matches its exact segment structure (#3697) — a route
+    // claims its own path, not the subtree beneath it, so it never swallows a
+    // deeper path (the rule capture templates already used). The cap still
+    // registers the template's static head as a prefix (ADR-0130), so the cap
+    // routes the whole subtree to this dispatcher; the dispatcher then answers
+    // only the exact path and 404s the rest.
+    let len_check = quote! { __aether_segs.len() == #seglen };
     // On a bind failure (unparseable capture / rejected extractor), a
     // synchronous glue returns the response; a deferred (`manual`) glue has
     // no return value, so it replies through the taken obligation and

@@ -295,13 +295,14 @@ impl WasmActor for WebSocketHandler {
 
 /// Routed sibling of [`HttpHandler`] for the ADR-0130 drop-purge e2e
 /// test, authored through the typed route surface (`#[http::router]` /
-/// `#[http::route]`, ADR-0131): the macro mints the route's kind and
+/// `#[http::route]`, ADR-0131): the macro mints each route's kind and
 /// injects the `register_route_self` registration, so this fixture is
 /// the wasm32 + `Lifecycle<S>` universality proof for the macro layer.
-/// It replies a fixed tag for `/routed`. `GET /routed/drop` doubles as
-/// the test's mail bridge into the chassis — the request body carries a
-/// decimal trampoline mailbox id, and the handler forwards a
-/// [`DropComponent`] for it to `aether.component` (detached: the drop
+/// It replies a fixed tag for `/routed`, and `/routed/drop` is a second
+/// exact route (#3697 — routes match their own path, no prefix-swallow)
+/// that doubles as the test's mail bridge into the chassis: the request
+/// body carries a decimal trampoline mailbox id, and the handler forwards
+/// a [`DropComponent`] for it to `aether.component` (detached: the drop
 /// teardown is not part of the request's causal chain), so the test can
 /// drop this component from outside without a chassis-level mail surface.
 pub struct RoutedHttpHandler;
@@ -315,32 +316,37 @@ impl WasmActor for RoutedHttpHandler {
         Ok(RoutedHttpHandler)
     }
 
-    /// Reply a fixed tag for anything under `/routed`; on
-    /// `/routed/drop` also forward a [`DropComponent`] for the mailbox
-    /// id named in the request body. The request arrives via the
-    /// identity [`HttpServerRequest`] extractor; `ctx` derefs to
-    /// `WasmCtx`, so the detached `DropComponent` send reads exactly as
-    /// an ordinary handler's.
+    /// Reply a fixed tag for `/routed`.
     ///
     /// # Agent
     /// Not sent manually — dispatched by `aether.http.server` for the
-    /// `/routed` prefix this actor claims (the `#[http::route]` macro
+    /// `/routed` route this actor claims (the `#[http::route]` macro
     /// injects the registration into `wire`).
     #[http::route(any, "/routed")]
-    fn on_routed(&mut self, ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
-        if req.path == "/routed/drop" {
-            let target = String::from_utf8_lossy(&req.body).trim().parse::<u64>();
-            let Ok(raw_id) = target else {
-                return HttpServerResponse {
-                    status: 400,
-                    headers: Vec::new(),
-                    body: b"body must be a decimal mailbox id".to_vec(),
-                };
-            };
-            ctx.actor::<ComponentHostCapability>().send_detached(&DropComponent { mailbox_id: MailboxId(raw_id) });
-            return HttpServerResponse { status: 200, headers: Vec::new(), body: b"dropping".to_vec() };
-        }
+    fn on_routed(&mut self, _ctx: http::Ctx<'_, WasmCtx<'_>>) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: b"routed handler".to_vec() }
+    }
+
+    /// `/routed/drop` doubles as the test's mail bridge: the request body
+    /// names a decimal mailbox id, and the handler forwards a detached
+    /// [`DropComponent`] for it to `aether.component`. `ctx` derefs to
+    /// `WasmCtx`, so the detached send reads exactly as an ordinary
+    /// handler's.
+    ///
+    /// # Agent
+    /// Not sent manually — dispatched by `aether.http.server` for the
+    /// `/routed/drop` route this actor claims.
+    #[http::route(any, "/routed/drop")]
+    fn on_routed_drop(&mut self, ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
+        let Ok(raw_id) = String::from_utf8_lossy(&req.body).trim().parse::<u64>() else {
+            return HttpServerResponse {
+                status: 400,
+                headers: Vec::new(),
+                body: b"body must be a decimal mailbox id".to_vec(),
+            };
+        };
+        ctx.actor::<ComponentHostCapability>().send_detached(&DropComponent { mailbox_id: MailboxId(raw_id) });
+        HttpServerResponse { status: 200, headers: Vec::new(), body: b"dropping".to_vec() }
     }
 }
 
