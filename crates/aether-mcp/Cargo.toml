@@ -88,6 +88,9 @@ aether-actor = { path = "../aether-actor" }
 # `tools.rs` test module boots against. Dev-dependency feature unification
 # applies to test builds only, so it stays out of the production graph.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The `boot_hub_with_inventory` test fixture installs the `aether.inventory`
+# cap, so the (test-only) `test_support` module constructs its runtime.
+aether-inventory = { path = "../aether-inventory", features = ["runtime"] }
 # `StreamReader` bridges reqwest's byte stream into an `AsyncRead` so the
 # tunnel's SSE integration test can read events line-by-line as they
 # arrive (the back-pressure / no-buffering guard).

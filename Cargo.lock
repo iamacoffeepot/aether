@@ -296,6 +296,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-inventory"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-fs",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
+ "serde",
+]
+
+[[package]]
 name = "aether-kinds"
 version = "0.3.0-alpha"
 dependencies = [
@@ -346,6 +359,7 @@ dependencies = [
  "aether-capabilities",
  "aether-codec",
  "aether-data",
+ "aether-inventory",
  "aether-kinds",
  "aether-substrate",
  "aether-trace",
@@ -434,6 +448,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-fs",
+ "aether-inventory",
  "aether-kinds",
  "aether-kit",
  "aether-math",
