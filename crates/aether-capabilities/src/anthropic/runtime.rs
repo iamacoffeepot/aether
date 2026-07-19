@@ -14,7 +14,7 @@ use super::{
 };
 use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
-pub use crate::shared::contentgen::task_queue::TaskQueue;
+pub use aether_substrate::actor::native::TaskQueue;
 pub use std::sync::Arc;
 
 use aether_actor::OutboundReply;

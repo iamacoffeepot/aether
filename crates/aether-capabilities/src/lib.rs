@@ -106,7 +106,7 @@ pub use component::{ComponentHostCapability, resolve_embedded};
 pub use shared::contentgen::ContentGenConfigLayer;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use shared::contentgen::{
-    AnthropicAdapter, ContentGenConfig, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter, TaskQueue,
+    AnthropicAdapter, ContentGenConfig, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter,
 };
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind

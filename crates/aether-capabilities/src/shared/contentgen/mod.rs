@@ -7,8 +7,9 @@
 //! loop, the root-relative `gen/` staging convention, or the stub-adapter
 //! shapes:
 //!
-//! - [`TaskQueue`] — the cap-level rate-limit + queue over the
-//!   substrate's ADR-0093 hold-until-resolve dispatch primitive
+//! - [`TaskQueue`](aether_substrate::actor::native::TaskQueue) — the
+//!   cap-level rate-limit + queue over the substrate's ADR-0093
+//!   hold-until-resolve dispatch primitive
 //!   (`NativeCtx::dispatch_blocking`). The embedding cap calls `submit`
 //!   from its generate handlers and `on_complete` from its
 //!   `#[handler(task)]` completion handlers; the framework owns the
@@ -25,7 +26,6 @@
 pub mod adapter;
 pub mod config;
 pub mod staging;
-pub mod task_queue;
 pub mod transport;
 
 pub use adapter::{
@@ -36,4 +36,3 @@ pub use config::ContentGenConfig;
 #[cfg(feature = "runtime")]
 pub use config::{ContentGenConfigLayer, ContentGenOverlay};
 pub use staging::{GEN_PREFIX, stage_gen_output_under};
-pub use task_queue::{DEFAULT_MAX_IN_FLIGHT, TaskQueue};

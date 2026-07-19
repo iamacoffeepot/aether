@@ -74,6 +74,7 @@ pub mod local;
 pub mod mailbox;
 pub mod spawn;
 pub mod spawn_thread;
+pub mod task_queue;
 
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
@@ -90,6 +91,10 @@ pub use envelope::Envelope;
 pub use mailbox::NativeActorMailbox;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};
+// iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the
+// ADR-0093 `dispatch_blocking` primitive it wraps — a substrate-tier native
+// helper, used by the content-gen provider caps and the rpc test-echo actor.
+pub use task_queue::{DEFAULT_MAX_IN_FLIGHT, TaskQueue};
 
 use aether_actor::{Addressable, Lifecycle};
 
