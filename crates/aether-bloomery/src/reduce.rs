@@ -706,6 +706,13 @@ pub enum AttemptCompletedError {
     /// `Verify` integrates the member through [`Fact::Integrate`] and never
     /// completes here, so such a completion is mis-routed.
     TerminalStage(StageId),
+    /// The member holds no stage cursor — it never entered the dispatched line
+    /// (a successor member that arrived already integrated as an inherited
+    /// claim), so no attempt can complete for it. Distinct from
+    /// [`StageMismatch`](Self::StageMismatch): a missing cursor is not a cursor
+    /// at the entry stage (#3663). Appended so the prior variants' wire
+    /// discriminants are unchanged.
+    NotDispatched(WorkpieceId),
 }
 
 /// A land refused because mainline had moved off the bloom's sealed base.
@@ -955,6 +962,21 @@ fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &Bloo
             effects.push(Decision::InheritClaim { bloom: successor_id, claim: claim.clone() });
         }
     }
+    // Every successor member that does not arrive already integrated (an
+    // inherited claim above) enters the line fresh: seed its cursor at the
+    // entry stage and dispatch its first attempt against the successor's
+    // sealed base — the same entry dispatch a seal runs (#3663). Net-new
+    // members, scope-changed members, and re-admitted members whose
+    // predecessor never integrated (the wedged-member escape hatch) would
+    // otherwise be claimed but never executed, leaving the successor
+    // unresolvable.
+    for member in successor.members() {
+        let inherited =
+            record.claims.get(&member.workpiece).is_some_and(|claim| claim.scope_revision == member.scope_revision);
+        if !inherited {
+            effects.extend(entry_dispatch_effects(successor_id, member, successor.base()));
+        }
+    }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
 }
@@ -1168,21 +1190,28 @@ fn reduce_attempt_completed(
     if passed && next.is_none() {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(stage)));
     }
-    // The completion must name the member's current cursor stage; a result for a
-    // stage the member has already left is stale/out-of-order and is not acted on.
-    let cursor = record.progress.get(workpiece).copied();
-    if cursor.map(|progress| progress.stage) != Some(stage) {
+    // The completion must name the member's current cursor stage. A member with
+    // no cursor never entered the dispatched line (it arrived as an inherited
+    // claim), which is its own refusal — not a mismatch against a fabricated
+    // entry-stage cursor (#3663); a result for a stage the member has already
+    // left is stale/out-of-order and is not acted on.
+    let Some(cursor) = record.progress.get(workpiece).copied() else {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::NotDispatched(
+            workpiece.clone(),
+        )));
+    };
+    if cursor.stage != stage {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
-            expected: cursor.map_or_else(StageCatalog::entry_stage, |progress| progress.stage),
+            expected: cursor.stage,
             got: stage,
         }));
     }
-    let attempts = cursor.map_or(1, |progress| progress.attempts);
+    let attempts = cursor.attempts;
     // The member's candidate after this completion (ADR-0152): a passing attempt
     // adopts the capture it carried (a mechanical lane carries none — the prior
     // candidate rides forward); a failing attempt adopts nothing, so its capture
     // is discarded and the member stays at the candidate its last pass produced.
-    let prior = cursor.and_then(|progress| progress.candidate);
+    let prior = cursor.candidate;
     let candidate = if passed {
         captured.or(prior)
     } else {
@@ -1200,7 +1229,7 @@ fn reduce_attempt_completed(
     // A passing gate advances the cursor to the next member stage and dispatches
     // it. `next` is `Some` on this branch — a passing terminal completion was
     // rejected above, so a passing stage always has a successor.
-    let repair_rolls = cursor.map_or(0, |progress| progress.repair_rolls);
+    let repair_rolls = cursor.repair_rolls;
     if let Some(next) = next.filter(|_| passed) {
         let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls };
         effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
