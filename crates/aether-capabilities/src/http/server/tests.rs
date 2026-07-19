@@ -329,18 +329,18 @@ mod test_handlers {
             Ok(DeferRouteHandlerState)
         }
 
-        /// `GET /echo` — forward to the echo peer, answer on its reply.
+        /// `GET /echo` — forward to the echo peer by type, answer on its
+        /// reply. `peer::<R>()` names the peer; `.defer` forwards to it.
         #[http::route(Get, "/echo")]
         fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-            let peer = ctx.actor::<EchoPeer>().mailbox_id();
-            ctx.defer(peer, &EchoAsk { text: "hi".to_string() })
+            ctx.peer::<EchoPeer>().defer(&EchoAsk { text: "hi".to_string() })
         }
 
-        /// `GET /blackhole` — forward to the silent peer; the `504` net answers.
+        /// `GET /blackhole` — forward to the silent peer; it settles without a
+        /// reply, so the server's own `502` net answers.
         #[http::route(Get, "/blackhole")]
         fn blackhole(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-            let peer = ctx.actor::<SilentPeer>().mailbox_id();
-            ctx.defer(peer, &EchoAsk { text: "void".to_string() })
+            ctx.peer::<SilentPeer>().defer(&EchoAsk { text: "void".to_string() })
         }
 
         /// Map the peer's `EchoSay` reply into the response answered through
@@ -1620,11 +1620,12 @@ fn path_template_routes_dispatch_and_capture() {
     assert!(miss.starts_with("HTTP/1.1 404 "), "no exact template match is a 404: {miss:?}");
 }
 
-/// ADR-0154 §2 deferred routes end to end: `GET /echo` forwards its request
-/// to a peer cap over a detached dispatch, holds the request obligation,
-/// and answers on the peer's reply; `GET /blackhole` forwards to a peer
-/// that never replies and is answered `504` by the settlement net when that
-/// chain settles without a reply.
+/// ADR-0154 §2 deferred routes end to end (relay pattern): `GET /echo`
+/// forwards its request to a peer by type via `defer::<EchoPeer>` — an
+/// inherited `send_with_context` that keeps the request's chain open — and
+/// the reply route answers on the peer's `EchoSay`. `GET /blackhole` forwards
+/// to a peer that settles without replying, so the request's chain settles
+/// response-less and the server's own `502` net answers.
 #[test]
 fn deferred_route_forwards_and_answers_on_reply() {
     let chassis = routed_chassis!(DeferRouteHandler, EchoPeer, SilentPeer);
@@ -1634,16 +1635,17 @@ fn deferred_route_forwards_and_answers_on_reply() {
     // request; poll it live past the async route registration.
     poll_body(port, b"GET /echo HTTP/1.1\r\nHost: localhost\r\n\r\n", "echoed:hi");
 
-    // The silent peer never replies, so the deferred chain settles and the
-    // 504 net answers. Before the `/blackhole` registration lands the path
-    // takes the `/` catch-all (a 200), so poll until the 504 appears.
+    // The silent peer settles its inbound without replying, so the request's
+    // chain settles response-less and the server answers `502`. Before the
+    // `/blackhole` registration lands the path takes the `/` catch-all (a
+    // 200), so poll until the 502 appears.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let response = round_trip(port, b"GET /blackhole HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        if response.starts_with("HTTP/1.1 504 ") {
+        if response.starts_with("HTTP/1.1 502 ") {
             break;
         }
-        assert!(Instant::now() < deadline, "expected a 504 within 10s; last response: {response:?}");
+        assert!(Instant::now() < deadline, "expected a 502 within 10s; last response: {response:?}");
         thread::sleep(Duration::from_millis(50));
     }
 }

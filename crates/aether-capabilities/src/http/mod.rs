@@ -28,15 +28,14 @@ pub use kinds::*;
 pub use aether_capabilities_derive::{reply, route, router};
 pub use typed::{Ctx, FromPathSegment, FromRequest, Outcome, Path, Route};
 
-// Native deferred-reply glue helper the `#[http::route]` / `#[http::reply]`
-// macros emit calls to (ADR-0154), plus the `Settled` kind the generated
-// `504` handler dispatches on — re-exported here so the macro emits one
-// `::aether_capabilities::http::…` path a consumer resolves through its
-// existing dependency. Runtime-only.
+// Deferred-route glue helpers the `#[http::route]` / `#[http::reply]` macros
+// emit calls to (ADR-0154): `answer_deferred` (answer a held request from its
+// downstream reply, recovering the requester via `take_context`) and
+// `answer_now` (the synchronous `Outcome::Reply` arm). Re-exported here so the
+// macro emits one `::aether_capabilities::http::…` path a consumer resolves
+// through its existing dependency. Runtime-only — `reply_to` is native.
 #[cfg(feature = "runtime")]
-pub use aether_kinds::trace::Settled;
-#[cfg(feature = "runtime")]
-pub use defer::take_deferred;
+pub use defer::{Peer, answer_deferred, answer_now};
 
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the

@@ -166,18 +166,18 @@ impl<C> DerefMut for Ctx<'_, C> {
 ///
 /// - [`Reply`](Outcome::Reply) answers the request now with the carried
 ///   response.
-/// - [`Deferred`](Outcome::Deferred) is what [`Ctx::defer`] returns on the
-///   native transport: it has taken the request's reply obligation across
-///   the async boundary and dispatched downstream, so the glue holds — a
-///   later `#[http::reply]` route (or the `504` settlement net) answers.
+/// - [`Deferred`](Outcome::Deferred) is what `ctx.peer::<R>().defer(&request)`
+///   returns on the native transport: the request was forwarded to a peer over
+///   an inherited send that holds the route's chain open, so a later
+///   `#[http::reply]` route answers when the peer's reply lands.
 ///
-/// `Ctx::defer` is native-only, so `Deferred` is only reachable on the
-/// native transport; a wasm-guest route returns `Reply` (or an
-/// `HttpServerResponse` directly).
+/// `defer` is native-only, so `Deferred` is only reachable on the native
+/// transport; a wasm-guest route returns `Reply` (or an `HttpServerResponse`
+/// directly).
 pub enum Outcome {
     /// Answer the request now with this response.
     Reply(HttpServerResponse),
-    /// The reply obligation was taken by [`Ctx::defer`]; the glue holds and
-    /// a later reply route answers.
+    /// The request was forwarded to a peer by `ctx.peer::<R>().defer(&request)`;
+    /// a later `#[http::reply]` route answers when the peer replies.
     Deferred,
 }
