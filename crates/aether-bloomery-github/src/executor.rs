@@ -32,7 +32,7 @@ use aether_bloomery::{
     Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
 };
 
-use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun};
+use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
 use crate::correspondence::CorrespondenceError;
 use crate::source::SharedCorrespondence;
 
@@ -136,26 +136,6 @@ impl<C: ActionsApi> ActionsExecutor<C> {
             .find_run(&self.workflow_file, &handle.nonce.0)?
             .ok_or_else(|| ExecutorError::NoRunForNonce(handle.nonce.clone()))
     }
-}
-
-// Does `name` carry `nonce` as a delimiter-bounded segment? The wrapper embeds
-// the nonce in an artifact's name between non-alphanumeric delimiters (or at a
-// name edge, e.g. `evidence-{nonce}-log`). A raw `contains` would let a nonce
-// that is a prefix of a longer one (`n-1` inside `n-12`) pull an unrelated
-// concern's evidence into this order's set, so a match counts only when the
-// character on each side of the occurrence is a boundary — a non-alphanumeric
-// character or the string's edge. The nonce itself may contain `-`, so a
-// split-on-delimiter test would over-segment it; bounding each occurrence is
-// the delimiter-safe form.
-fn name_carries_nonce(name: &str, nonce: &str) -> bool {
-    if nonce.is_empty() {
-        return false;
-    }
-    name.match_indices(nonce).any(|(start, matched)| {
-        let before_is_boundary = name[..start].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
-        let after_is_boundary = name[start + matched.len()..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric());
-        before_is_boundary && after_is_boundary
-    })
 }
 
 // Lowercase-hex a digest's 32 bytes — the evidence-binding form the wrapper's
