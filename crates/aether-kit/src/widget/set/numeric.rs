@@ -12,8 +12,6 @@
 //! selection and parse paths as typed edits.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::TextCapability;
-use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef};
 use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_V, KEY_X,
@@ -21,6 +19,7 @@ use aether_kinds::keycode::{
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
 };
+use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 use alloc::string::{String, ToString};
 
 use crate::widget::set::{

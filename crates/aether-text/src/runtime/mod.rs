@@ -1,5 +1,5 @@
 //! The `aether.text` runtime half (ADR-0122 identity/runtime split). Compiled
-//! only under `feature = "text-runtime"` (the `mod runtime;` declaration in the
+//! only under `feature = "runtime"` (the `mod runtime;` declaration in the
 //! parent carries the gate), so a transport-only build of the `TextCapability`
 //! identity never names these types nor pulls `fontdue` / `aether_substrate`.
 //! The substrate-typed imports are gated once by this module rather than
@@ -18,7 +18,7 @@ pub use aether_substrate::Manual;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
-use crate::text::MEMORY_FONT_NAMESPACE;
+use crate::MEMORY_FONT_NAMESPACE;
 pub use aether_fs::{FsCapability, Read, ReadResult};
 pub use aether_render::{
     CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad, UpdateTexture,
@@ -627,7 +627,7 @@ impl NativeActor for TextCapability {
     }
 }
 
-#[cfg(all(test, feature = "text-runtime"))]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
@@ -1115,7 +1115,7 @@ mod tests {
     /// The raw bytes of [`test_font`], for the read-result tests that
     /// feed the parse path a real TTF.
     fn test_font_bytes() -> &'static [u8] {
-        include_bytes!("../../../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
+        include_bytes!("../../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
     }
 
     /// `build_font_metrics`'s table scales back to fontdue's draw-path

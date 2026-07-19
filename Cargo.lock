@@ -171,8 +171,6 @@ dependencies = [
  "aether-data",
  "aether-fs",
  "aether-kinds",
- "aether-math",
- "aether-render",
  "aether-substrate",
  "aether-trace",
  "aether-window",
@@ -181,7 +179,6 @@ dependencies = [
  "clap",
  "confique",
  "dirs",
- "fontdue",
  "httparse",
  "inventory",
  "serde",
@@ -335,6 +332,7 @@ dependencies = [
  "aether-mesh",
  "aether-render",
  "aether-substrate-bundle",
+ "aether-text",
  "inventory",
  "serde",
  "tracing",
@@ -455,6 +453,7 @@ dependencies = [
  "aether-render",
  "aether-substrate",
  "aether-test-fixtures-kinds",
+ "aether-text",
  "aether-trace",
  "aether-window",
  "anyhow",
@@ -560,6 +559,23 @@ dependencies = [
  "aether-data",
  "aether-test-fixtures-kinds",
  "serde",
+]
+
+[[package]]
+name = "aether-text"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-fs",
+ "aether-kinds",
+ "aether-math",
+ "aether-render",
+ "aether-substrate",
+ "fontdue",
+ "inventory",
+ "serde",
+ "tracing",
 ]
 
 [[package]]

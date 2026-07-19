@@ -76,32 +76,9 @@ runtime = [
     "aether-trace/runtime",
 ]
 
-# Wasm-safe marker layers. Activate from a wasm component that wants to
-# address the cap via `ctx.actor::<TextCapability>().send(&kind)` —
-# the feature gates the cap module so its always-on `Actor` /
-# `Singleton` / `HandlesKind` impls + wasm-stub `pub struct` are
-# reachable, without dragging the `fontdue` native dep in.
-# (The render cap was extracted to the `aether-render` crate,
-# iamacoffeepot/aether#3721, and the audio cap to `aether-audio`,
-# iamacoffeepot/aether#3723; their marker/identity now ride their own
-# crates, not a local feature.)
-# ADR-0105 `aether.text` cap marker. CPU-only (no GPU dep) — it composes
-# the render texture surface entirely by mail — but gated the same two-
-# layer way so a wasm component can address it via
-# `ctx.actor::<TextCapability>()` without dragging `fontdue` into the wasm
-# graph. The text cap receives the render-owned `CreateTextureResult`
-# reply kind (ADR-0121) and addresses the render texture/quad kinds, both
-# in the retained `aether-render` dep — whose identity is always present
-# (non-optional, `default-features = false`), so no marker feature.
-text = []
-
-# Runtime impl layers — adds the substrate-side runtime + heavy deps
-# atop the marker layer. Chassis bins activate these. Each implies its
-# marker layer + `runtime` so chassis builds still see the full cap.
-# `fontdue` rides `text-runtime`: the pure-Rust TTF parse + rasterize +
-# horizontal layout the cap runs off the hot path. Implies the marker
-# layer + `runtime`.
-text-runtime = ["text", "runtime", "aether-render/runtime", "dep:fontdue"]
+# The render / audio / text caps were extracted to their own crates
+# (iamacoffeepot/aether#3721, #3723, #3727); their marker/identity now ride
+# those crates, not a local feature.
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
@@ -120,7 +97,6 @@ aether-fs = { path = "../aether-fs", default-features = false }
 # an unconditional dep leaves the wasm-header-only build unaffected.
 aether-capabilities-derive = { path = "../aether-capabilities-derive" }
 aether-kinds = { path = "../aether-kinds" }
-aether-math = { path = "../aether-math" }
 # `alloc` rides along for the `rpc::wire` + `trace_walk` modules (folded
 # in per ADR-0124), whose owned-`String`/`Vec` wire types need serde's
 # alloc impls even in the marker-only isolated build.
@@ -143,15 +119,6 @@ aether-window = { path = "../aether-window", default-features = false }
 # forwards `aether-trace/runtime` so chassis / test builds get the
 # `TraceDispatchCapability` runtime half.
 aether-trace = { path = "../aether-trace", default-features = false }
-# iamacoffeepot/aether#3721: the `aether.render` cap was extracted to its
-# own `aether-render` crate, but capabilities RETAINS an identity-only
-# dependency on it — the `aether.text` cap (which stays here) composes the
-# render surface: `text/mod.rs`, `text/runtime/mod.rs`, and
-# `text/runtime/layout.rs` reference `aether_render` items (the texture /
-# quad kinds + `RenderCapability`). `default-features = false` keeps only
-# the wasm-safe identity + kinds; the `text-runtime` feature above forwards
-# `aether-render/runtime` so chassis / test builds get the wgpu runtime half.
-aether-render = { path = "../aether-render", default-features = false }
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
@@ -201,10 +168,6 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 # version aether-substrate uses; chassis builds get a single wasmtime
 # in the dep tree.
 wasmtime = { workspace = true, optional = true }
-# ADR-0105 §text: pure-Rust TTF parse + glyph rasterize + horizontal
-# layout metrics for the `aether.text` cap. Rides the `text-runtime`
-# feature so wasm / marker-only builds skip it.
-fontdue = { version = "0.9", optional = true }
 
 # ADR-0121: the `Kind` derive (used by caps that own their kinds, e.g.
 # `http/kinds.rs`) emits a `cfg(not(target_family = "wasm"))`-gated

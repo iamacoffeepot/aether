@@ -6,7 +6,6 @@ use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_capabilities::WasmTrampoline;
-use aether_capabilities::text::{LoadFontBytes, LoadFontResult};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::{KEY_A, KEY_ENTER, KEY_UP};
 use aether_kinds::{
@@ -28,6 +27,7 @@ use aether_kit::world::{
 };
 use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Rect, decode_png, run_checks, target_color_stats};
+use aether_text::{LoadFontBytes, LoadFontResult};
 
 #[allow(unused_imports)]
 use aether_kit as _;

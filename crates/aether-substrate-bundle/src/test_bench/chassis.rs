@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_capabilities::{GameGatewayCapability, GameGatewayConfig, LifecycleCapability};
-use aether_capabilities::{InputCapability, InputConfig, TcpCapability, TextCapability};
+use aether_capabilities::{InputCapability, InputConfig, TcpCapability};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_data::Kind;
 use aether_data::KindId;
@@ -25,6 +25,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
     Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
+use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
