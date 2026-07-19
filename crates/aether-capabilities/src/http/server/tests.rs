@@ -98,7 +98,7 @@ mod test_handlers {
     }
 
     /// Claims `/extract` and threads a real [`QueryName`] extractor into
-    /// the routed method, so a request under the prefix either dispatches
+    /// the routed method, so a request to `/extract` either dispatches
     /// with the extracted value (echoed at `200`) or short-circuits to
     /// the extractor's `400` before the handler runs.
     pub struct ExtractRouteHandler;
@@ -1559,17 +1559,25 @@ fn round_trip_live(port: u16, request: &[u8]) -> String {
 }
 
 /// A `wire`-registered route dispatches as the registered kind — the
-/// handler's typed `#[handler]` decodes the request-shaped payload
-/// under the minted kind and echoes the path — and an unrouted path
-/// falls back to the `/` catch-all route (ADR-0130).
+/// handler's typed `#[handler]` decodes the request-shaped payload under
+/// the minted kind and echoes the path — a deeper path under the claimed
+/// prefix is not swallowed but 404s (#3697), and an unrouted path falls
+/// back to the `/` catch-all route (ADR-0130).
 #[test]
 fn routed_prefix_dispatches_as_registered_kind() {
     let chassis = routed_chassis!(ApiRouteHandler);
     let port = port_of(&chassis);
 
-    poll_body(port, b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api/widgets");
+    poll_body(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api");
 
-    // The `/` catch-all is its own async registration, so poll it live too.
+    // A deeper path under the claimed prefix is not swallowed (#3697): the cap
+    // routes it to the `/api` dispatcher, which matches exactly and 404s rather
+    // than absorbing the deeper path.
+    let deeper = round_trip(port, b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(deeper.starts_with("HTTP/1.1 404 "), "an exact route does not swallow a deeper path: {deeper:?}");
+
+    // A path under no claimed prefix falls back to the `/` catch-all — its own
+    // async registration, so poll it live.
     poll_body(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 
@@ -1602,7 +1610,8 @@ fn path_template_routes_dispatch_and_capture() {
     let port = port_of(&chassis);
 
     // Collection and captured-member routes share one (Get, /books) group;
-    // the exact `/books/{id}` wins over the `/books` prefix for a member.
+    // `/books` and `/books/{id}` each match their exact segment count, so a
+    // member request selects the capture route.
     poll_body(port, b"GET /books HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:list");
     poll_body(port, b"GET /books/42 HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:get:42");
 
@@ -1650,23 +1659,31 @@ fn deferred_route_forwards_and_answers_on_reply() {
     }
 }
 
-/// Longest prefix wins among overlapping routes, matching stops at
-/// segment boundaries (`/apiary` is not under `/api`), and an exact
-/// prefix hit routes (ADR-0130).
+/// Longest registered prefix wins among overlapping routes (an exact
+/// `/api/v2` request beats the `/api` route), matching stops at segment
+/// boundaries (`/apiary` is not under `/api`), and a deeper path under the
+/// winning prefix is not swallowed — it 404s at that dispatcher (#3697,
+/// ADR-0130).
 #[test]
 fn longest_prefix_wins_on_segment_boundaries() {
     let chassis = routed_chassis!(ApiRouteHandler, ApiV2Handler);
     let port = port_of(&chassis);
 
-    // Prove both routes live before the precedence assertions.
-    poll_body(port, b"GET /api/other HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api/other");
-    poll_body(port, b"GET /api/v2/x HTTP/1.1\r\nHost: localhost\r\n\r\n", "api-v2");
+    // The exact `/api` hit routes to the `/api` handler.
+    poll_body(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api");
 
-    let exact = round_trip(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&exact), "api:/api", "exact prefix hit routes");
+    // Longest registered prefix wins: `/api/v2` beats `/api` for an exact
+    // `/api/v2` request (had `/api` won, its exact route would not match the
+    // deeper path and would 404 — so `api-v2` proves `/api/v2` was selected).
+    poll_body(port, b"GET /api/v2 HTTP/1.1\r\nHost: localhost\r\n\r\n", "api-v2");
 
-    // `/apiary` is not under `/api`, so it takes the `/` catch-all; poll it
-    // live (its own async registration) before the segment-boundary assertion.
+    // A deeper path under the winning prefix is not swallowed (#3697): it
+    // routes to the `/api/v2` dispatcher, which matches exactly and 404s.
+    let deeper = round_trip(port, b"GET /api/v2/x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(deeper.starts_with("HTTP/1.1 404 "), "exact route does not swallow a deeper path: {deeper:?}");
+
+    // `/apiary` is not under `/api` (segment boundary), so it takes the `/`
+    // catch-all; poll it live (its own async registration) before asserting.
     poll_body(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 

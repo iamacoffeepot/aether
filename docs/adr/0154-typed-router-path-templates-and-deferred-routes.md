@@ -27,6 +27,7 @@ The route macro owns the whole route tree. Two additions, each a self-contained 
 
 - registers the static head of the template (`/drafts`) as the claimed prefix with the cap, exactly as today — the ADR-0130 `(prefix, method)` registration, conflict, and dead-target semantics are untouched;
 - compiles every route that shares a claimed prefix into **one** generated dispatcher that switches on `(method, remaining segments)` and binds captures — the macro generates the `match (method, segments)` bloomery wrote by hand;
+- matches each route by its **exact** segment structure, capture and no-capture routes alike — a template claims its own path, not the subtree beneath it, so `POST /drafts` answers `/drafts` and a deeper `/drafts/x` the group has no exact template for `404`s rather than being swallowed. This is the exact `match` bloomery wrote by hand; the static-head prefix registration above is only how the cap routes a request to this dispatcher, never a wildcard the route itself matches. A subtree claim is not a route-template feature (#3697);
 - binds each capture through the ADR-0131 `FromRequest` machinery (a `PathParam`-style extractor), so a malformed capture becomes the same guest-side `400` an ordinary `FromRequest` failure does, and the routed method receives typed parameters.
 
 The capture matching runs entirely guest-side in generated glue. The cap does **not** gain a routing trie or any knowledge of sub-paths — the load-bearing invariant from ADR-0130 that keeps route shape out of the capability.
