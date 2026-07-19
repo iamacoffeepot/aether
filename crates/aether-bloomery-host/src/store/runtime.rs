@@ -175,6 +175,15 @@ pub trait StoreBackend: Send {
     /// [`Transformation::description`](aether_bloomery::Transformation) `None` and
     /// warns rather than dispatching blind.
     fn lookup_dispatch_description(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Record the review critic's findings for (`bloom`, `workpiece`) (#3656) —
+    /// what a Refine re-entry is directed by. Last-writer-wins on the key: a
+    /// newer review's findings supersede older ones.
+    fn record_review_findings(&mut self, bloom: &[u8], workpiece: &str, findings: &str) -> rusqlite::Result<()>;
+    /// The review findings recorded for (`bloom`, `workpiece`), or `None` when
+    /// no failing review has stamped any (or a passing review cleared them).
+    fn lookup_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Clear the member's recorded findings — a passing review makes them stale.
+    fn clear_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
     /// Drop every study index row — the first half of a projection rebuild
     /// (`clear` then re-`record` from the artifact bytes).
     fn clear_study_index(&mut self) -> rusqlite::Result<()>;
@@ -283,6 +292,12 @@ CREATE TABLE IF NOT EXISTS dispatch_description (
     description TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE TABLE IF NOT EXISTS review_findings (
+    bloom     BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    findings  TEXT NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
+);
 ";
 
 /// Is a rusqlite error a UNIQUE / PRIMARY KEY constraint violation? A seal that
@@ -383,6 +398,29 @@ impl StoreBackend for SqliteStore {
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
         rows.next().transpose()
+    }
+
+    fn record_review_findings(&mut self, bloom: &[u8], workpiece: &str, findings: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO review_findings (bloom, workpiece, findings) VALUES (?1, ?2, ?3)",
+            rusqlite::params![bloom, workpiece, findings],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT findings FROM review_findings WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
+        // The (bloom, workpiece) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn clear_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM review_findings WHERE bloom = ?1 AND workpiece = ?2",
+            rusqlite::params![bloom, workpiece],
+        )?;
+        Ok(())
     }
 
     fn clear_study_index(&mut self) -> rusqlite::Result<()> {

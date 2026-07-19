@@ -152,6 +152,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
+        findings: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -191,6 +192,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         verdict: StageVerdict::Parked,
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
+        findings: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -220,6 +222,7 @@ fn an_unknown_nonce_is_refused() {
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
+        findings: None,
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -245,6 +248,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
+        findings: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -313,6 +317,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
+            findings: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -360,6 +365,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
+            findings: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -457,6 +463,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
+        findings: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -509,6 +516,7 @@ fn a_failing_terminal_review_admits_attempt_completed_not_integrate() {
         verdict: StageVerdict::ReviewFinding,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
+        findings: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-review upload is admitted (the gate decides its fate, not the broker)");
@@ -546,6 +554,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
+        findings: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -583,7 +592,8 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         let subject = Digest::from_bytes([subject_seed; 32]);
         let detail = Digest::from_bytes([detail_seed; 32]);
         let name = attempt_artifact_name(&nonce, &subject, verdict, &detail);
-        let reference = EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10, candidate: None };
+        let reference =
+            EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10, candidate: None, findings: None };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
         assert_eq!(decoded.nonce, nonce);
@@ -600,6 +610,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         artifact_id: 2,
         size_bytes: 3,
         candidate: None,
+        findings: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }
@@ -645,4 +656,51 @@ fn dispatch_error_is_permanent_is_false_for_every_non_status_fault() {
     for error in [transport, decode, pagination, no_run, local, store] {
         assert!(!error.is_permanent(), "{error} is a transient fault, not permanent");
     }
+}
+
+// #3656 — a failing review's findings persist keyed by the member (what the
+// Refine re-entry is directed by), and a passing review clears the stale row.
+// Catches both leaks: findings never recorded (a blind re-entry), and stale
+// findings surviving the pass that resolved them (a poisoned later prompt).
+#[test]
+fn review_findings_persist_on_a_failing_review_and_clear_on_a_pass() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-findings".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+
+    let upload = |nonce: &str, verdict: StageVerdict, findings: Option<&str>| UploadedEvidence {
+        nonce: Nonce(nonce.to_owned()),
+        subject: candidate,
+        verdict,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: findings.map(str::to_owned),
+    };
+
+    record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
+        .unwrap();
+    let AdmitDecision::Admitted(_) =
+        admit_uploaded(&mut store, &upload("n-f1", StageVerdict::ReviewFinding, Some("pillar 2: off-by-one"))).unwrap()
+    else {
+        panic!("the failing review admits");
+    };
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), &workpiece.0).unwrap().as_deref(),
+        Some("pillar 2: off-by-one"),
+        "a failing review's findings persist for the re-entry",
+    );
+
+    record_dispatch(&mut store, &dispatch_record("n-f2", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
+        .unwrap();
+    let AdmitDecision::Admitted(_) =
+        admit_uploaded(&mut store, &upload("n-f2", StageVerdict::VerificationPassed, None)).unwrap()
+    else {
+        panic!("the passing review admits");
+    };
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), &workpiece.0).unwrap(),
+        None,
+        "a passing review clears the stale findings",
+    );
 }
