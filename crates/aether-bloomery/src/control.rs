@@ -66,7 +66,7 @@ pub struct OutboxPayload {
 }
 
 /// A first-class outbox topic — the stringly projection of an effectful
-/// [`Decision`](crate::reduce::Decision) variant across the store boundary
+/// [`Decision`] variant across the store boundary
 /// (ADR-0149 §The boundary). A topic is a producer-consumer contract: the
 /// control actor enqueues a decision's payload under it and exactly one host
 /// driver drains it, so a drifted spelling would enqueue under a topic nobody
@@ -92,30 +92,30 @@ pub struct OutboxPayload {
 pub struct Topic(&'static str);
 
 impl Topic {
-    /// A landing receipt (from [`Decision::EmitReceipt`](crate::reduce::Decision::EmitReceipt)),
+    /// A landing receipt (from [`Decision::EmitReceipt`]),
     /// drained by the mirror driver and routed to #3499's republisher.
     pub const LANDING_RECEIPT: Topic = Topic("topic:landing_receipt");
     /// A stage re-dispatch (from
-    /// [`Decision::RedispatchStage`](crate::reduce::Decision::RedispatchStage)),
+    /// [`Decision::RedispatchStage`]),
     /// re-assembling the held attempt naming both question and answer digests
     /// (ADR-0151). Still awaiting a draining consumer (#3664).
     pub const REDISPATCH: Topic = Topic("topic:redispatch");
     /// A per-member attempt dispatch (from
-    /// [`Decision::DispatchAttempt`](crate::reduce::Decision::DispatchAttempt)),
+    /// [`Decision::DispatchAttempt`]),
     /// drained by the executor driver, wrapped in a work order, and submitted
     /// through the executor port (ADR-0149 §The line).
     pub const DISPATCH: Topic = Topic("topic:dispatch");
-    /// A land dispatch (from [`Decision::DispatchLand`](crate::reduce::Decision::DispatchLand)),
+    /// A land dispatch (from [`Decision::DispatchLand`]),
     /// drained by the land driver, which issues the source-port compare-and-swap
     /// land (ADR-0149 migration step 3).
     pub const LAND: Topic = Topic("topic:land");
     /// An integration dispatch (from
-    /// [`Decision::DispatchIntegration`](crate::reduce::Decision::DispatchIntegration)),
+    /// [`Decision::DispatchIntegration`]),
     /// drained by the integrate driver, which folds the claimed candidates onto
     /// the bloom's integration branch (ADR-0152).
     pub const INTEGRATE: Topic = Topic("topic:integrate");
     /// A whole-bloom aggregate-review dispatch (from
-    /// [`Decision::DispatchAggregateReview`](crate::reduce::Decision::DispatchAggregateReview)),
+    /// [`Decision::DispatchAggregateReview`]),
     /// drained by the executor driver, which runs the `review.critic` lane
     /// against the integrated head under a bloom-level order record (ADR-0153).
     pub const AGGREGATE_REVIEW: Topic = Topic("topic:aggregate_review");
@@ -136,7 +136,7 @@ impl Topic {
         self.0
     }
 
-    /// The outbox [`Topic`] an effectful [`Decision`](crate::reduce::Decision)
+    /// The outbox [`Topic`] an effectful [`Decision`]
     /// enqueues its payload under, or `None` for a snapshot-only or
     /// membership-only decision that carries no outbox row. An exhaustive match
     /// over the closed `Decision` enum — the compile-time guard that a new
@@ -184,7 +184,7 @@ pub const CONTROL_CORE_NAMESPACE: &str = "aether.bloomery.control";
 /// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,
 /// and the adopting answer, each by digest. The wasm control actor enqueues it
 /// under [`Topic::REDISPATCH`] from a
-/// [`Decision::RedispatchStage`](crate::reduce::Decision::RedispatchStage); the
+/// [`Decision::RedispatchStage`]; the
 /// executor dispatch consumer (#3505) decodes it to re-assemble the held attempt
 /// naming both digests. Defined here (always compiled) so the host consumer can
 /// decode it inward, cycle-free — like [`OutboxPayload`].
@@ -204,7 +204,7 @@ pub struct RedispatchPayload {
 /// consumer (#3505) wraps in a work order (adding an idempotency nonce) and
 /// submits through the executor port. The wasm control actor enqueues it under
 /// [`Topic::DISPATCH`] from a
-/// [`Decision::DispatchAttempt`](crate::reduce::Decision::DispatchAttempt).
+/// [`Decision::DispatchAttempt`].
 /// Defined here (always compiled) so the host consumer can decode it inward,
 /// cycle-free — like [`OutboxPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -229,7 +229,7 @@ pub struct DispatchPayload {
 /// The integration dispatch outbox payload (ADR-0152 §Resolution drives
 /// integration): the wasm control actor enqueues it under
 /// [`Topic::INTEGRATE`] from a
-/// [`Decision::DispatchIntegration`](crate::reduce::Decision::DispatchIntegration);
+/// [`Decision::DispatchIntegration`];
 /// the host integrate driver drains it, folds each candidate tree onto the
 /// bloom's integration branch in member order, and admits the resulting
 /// [`Fact::Resolve`](crate::reduce::Fact::Resolve).
@@ -248,7 +248,7 @@ pub struct IntegratePayload {
 /// integrated tree the returned evidence binds, its `checkout` the landable
 /// head the critic checks out), and which review pass this is. The wasm
 /// control actor enqueues it under [`Topic::AGGREGATE_REVIEW`] from a
-/// [`Decision::DispatchAggregateReview`](crate::reduce::Decision::DispatchAggregateReview).
+/// [`Decision::DispatchAggregateReview`].
 /// Defined here (always compiled) so the host consumer can decode it inward,
 /// cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -297,7 +297,7 @@ impl ReviewPass {
 /// the resolved bloom plus the compare-and-swap arguments the host's land driver
 /// issues through the source port's `aether.source.land` op. The wasm control
 /// actor enqueues it under [`Topic::LAND`] from a
-/// [`Decision::DispatchLand`](crate::reduce::Decision::DispatchLand) the moment a
+/// [`Decision::DispatchLand`] the moment a
 /// bloom resolves. Defined here (always compiled) so the host consumer can decode
 /// it inward, cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
