@@ -49,12 +49,11 @@ use serde::Serialize;
 use super::CONSTRUCT_IMPLEMENT_COMMAND;
 use super::intake::attempt_artifact_name;
 
-/// The typed id of the model-driven review lane (`Transformation::for_member_stage`
-/// dispatches it for the Review stage). It rides the same model-lane plumbing as
-/// the construct command — subject/model/effort/task argv — but not the
-/// construct-specific evidence gate: its verdict comes from the `status` its own
-/// evidence stamps.
-const REVIEW_CRITIC_COMMAND: &str = "review.critic";
+// The typed id of the model-driven review lane. It rides the same model-lane
+// plumbing as the construct command — subject/model/effort/task argv — but not
+// the construct-specific evidence gate: its verdict comes from the `status`
+// its own evidence stamps. The catalog's exported constant (#3668).
+use aether_bloomery::REVIEW_CRITIC_COMMAND;
 
 /// A local-process executor-port fault. Its own type because the port needs an
 /// arm the value vocabulary does not carry — a message asked to act on a run

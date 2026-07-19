@@ -12,7 +12,7 @@
 
 use aether_actor::actor;
 
-pub use runtime::{INTEGRATE_TOPIC, IntegrateDriverState, IntegrateTick};
+pub use runtime::{IntegrateDriverState, IntegrateTick, TOPIC_INTEGRATE};
 
 /// Addressing identity for the integrate-driver capability.
 #[actor(singleton)]

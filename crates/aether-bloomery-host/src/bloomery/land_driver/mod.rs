@@ -8,7 +8,7 @@
 
 use aether_actor::actor;
 
-pub use runtime::{LAND_TOPIC, LandDriverState, LandTick};
+pub use runtime::{LandDriverState, LandTick, TOPIC_LAND};
 
 /// Addressing identity for the land-driver capability.
 #[actor(singleton)]

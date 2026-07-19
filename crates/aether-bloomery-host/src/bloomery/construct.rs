@@ -14,9 +14,10 @@ use aether_bloomery::{Digest, Nonce, ResolvedModel, ScopeRevision, StageCatalog,
 
 /// The typed command id the model-driven construct lane dispatches. The runner's
 /// `xtask transform` entrypoint maps this id to a headless-Claude invocation.
-/// The canonical lane details live in [`Transformation::for_member_stage`]; this
-/// constant is retained for the study/dispatch consumers that name the command.
-pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
+/// The canonical lane details live in [`Transformation::for_member_stage`]; the
+/// catalog's exported constant is re-exported here for the study/dispatch
+/// consumers that name the command (#3668).
+pub use aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 
 /// Build the `construct.implement` work order for a member and report the
 /// effective model + effort it resolves to.

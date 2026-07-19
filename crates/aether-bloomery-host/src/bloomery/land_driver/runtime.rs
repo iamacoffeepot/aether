@@ -33,7 +33,7 @@ use std::time::Duration;
 use aether_actor::runtime;
 use aether_bloomery::{Admit, BloomId, Digest, Event, Fact, IdempotencyKey, LandOutcome, LandPayload};
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -46,16 +46,13 @@ use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
+use aether_bloomery::CONTROL_CORE_NAMESPACE;
 /// The outbox topic the reducer enqueues a resolved bloom's land under — the
-/// mirror of the control actor's `LAND_TOPIC` producer constant. This capability
-/// is its sole consumer.
-pub const LAND_TOPIC: &str = "aether.bloomery.land";
-
-/// The autoloaded control-core component's lineage mailbox — where an admitted
-/// `Fact::Land` is sent. Resolved from the lineage path, mirroring the executor
-/// driver's `control_mailbox`; the control actor is not a native singleton, so
-/// the sibling-cap typed send does not apply.
-const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+/// control actor's producer constant, imported so the two sides cannot drift
+/// (#3668). This capability is its sole consumer; the control-core lineage
+/// path rides along for `control_mailbox`, mirroring the executor driver's.
+pub use aether_bloomery::TOPIC_LAND;
+use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the land topic and issues each land. Zero-field — the timer carries only the
@@ -92,7 +89,7 @@ impl LandDriverState {
         Self {
             source,
             store,
-            control_mailbox: mailbox_id_from_path(CONTROL_CORE_PATH),
+            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
             mailer,
             self_mailbox,
             _timer: None,
@@ -122,7 +119,7 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
 /// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
 /// shell without the mail harness.
 fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(LAND_TOPIC))?;
+    let entries = store.drain_outbox(Some(TOPIC_LAND))?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -192,7 +189,7 @@ impl NativeActor for LandDriverCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LandDriverState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = mailbox_id_from_path(CONTROL_CORE_PATH);
+        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
 
         // Unconfigured → disabled: no shell, no store, no timer. The land outbox
         // accumulates and drains once a token/owner/repo is supplied.
@@ -265,7 +262,7 @@ impl NativeActor for LandDriverCapability {
         match drain_and_land(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_outbox(Some(LAND_TOPIC), sequence)
+                    && let Err(error) = store.ack_outbox(Some(TOPIC_LAND), sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::land", %error, "land ack failed; entries re-drive");
                 }

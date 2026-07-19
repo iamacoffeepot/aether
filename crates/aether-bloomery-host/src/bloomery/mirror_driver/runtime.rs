@@ -47,13 +47,14 @@ use crate::bloomery::{GithubMirrorConfig, ProjectionShell, SourceShell};
 use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
 
 /// The outbox topic carrying `ViewDocument` payloads — reconciled onto the
-/// outward mirror.
-pub const TOPIC_VIEW_DOCUMENT: &str = "view_document";
-/// The outbox topic carrying `LandingReceipt` payloads — projected outward. Must
-/// equal the control actor's producer constant (`RECEIPT_TOPIC` in
-/// `aether-bloomery`), which enqueues receipts under this exact string; a
-/// mismatch silently strands every receipt undrained.
-pub const TOPIC_LANDING_RECEIPT: &str = "aether.bloomery.landing_receipt";
+/// outward mirror. Host-produced and host-drained (this driver is both
+/// sides), under the same `topic:` non-address scheme as the control actor's
+/// topics (#3668).
+pub const TOPIC_VIEW_DOCUMENT: &str = "topic:view_document";
+/// The outbox topic carrying `LandingReceipt` payloads — projected outward.
+/// The control actor's producer constant, imported under its producer name so
+/// the coupling is greppable and the two sides cannot drift (#3668).
+pub use aether_bloomery::TOPIC_LANDING_RECEIPT;
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.

@@ -65,10 +65,11 @@ pub mod values;
 #[cfg(feature = "runtime")]
 pub use control::ControlCore;
 pub use control::{
-    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease, CompleteTransfer,
-    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload,
-    MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
-    ReplayJournalResult, TransferSeal,
+    Admit, AdmitResult, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease,
+    CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord,
+    LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
+    ReplayJournalResult, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH,
+    TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -90,8 +91,9 @@ pub use sign::Ed25519KeyProvider;
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
-    AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CandidateRef, Evidence, EvidenceKind, Forecast,
-    LandingReceipt, Membership, ModelOverride, NetworkProfile, Observation, Provenance, Question, ReasoningEffort,
-    ResolutionClaim, ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement,
-    StudyCost, StudyRecord, ToolPolicy, Transformation, Workpiece,
+    AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef,
+    Evidence, EvidenceKind, Forecast, LandingReceipt, Membership, ModelOverride, NetworkProfile, Observation,
+    Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedModel,
+    ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy,
+    Transformation, Workpiece,
 };

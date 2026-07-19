@@ -4,7 +4,7 @@
 //! A poll-driven loop that turns the reducer's dispatch decisions into running
 //! work and matched results back into admitted facts:
 //!
-//! 1. **Drain + submit.** Each tick drains the store's `aether.bloomery.dispatch`
+//! 1. **Drain + submit.** Each tick drains the store's [`TOPIC_DISPATCH`]
 //!    outbox topic (its own connection, so the intake registry the pull side
 //!    reads/consumes is one store), decodes each
 //!    [`DispatchPayload`](aether_bloomery::DispatchPayload), submits it through the
@@ -41,7 +41,7 @@ use aether_actor::runtime;
 use aether_bloomery::{Admit, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, WorkHandle, WorkOrder};
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -58,16 +58,15 @@ use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
+use aether_bloomery::CONTROL_CORE_NAMESPACE;
 /// The outbox topic the reducer enqueues a per-member attempt dispatch under —
-/// the mirror of the control actor's `DISPATCH_TOPIC` producer constant. This
-/// capability is its sole consumer.
-pub const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
-
-/// The autoloaded control-core component's lineage mailbox — where an admitted
-/// attempt result is sent. Resolved from the lineage path (`mailbox_id_from_path`),
-/// mirroring the REST API's `control_mailbox()`; the control actor is not a native
-/// singleton, so the sibling-cap typed send does not apply.
-const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+/// the control actor's producer constant, imported so the two sides cannot
+/// drift (#3668). This capability is its sole consumer; the control-core
+/// lineage path rides along for `control_mailbox` (`mailbox_id_from_path` —
+/// the control actor is not a native singleton, so the sibling-cap typed send
+/// does not apply).
+pub use aether_bloomery::TOPIC_DISPATCH;
+use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -221,7 +220,7 @@ impl ExecutorDriverState {
             store,
             claims: NameEvidenceClaims,
             tracked: Vec::new(),
-            control_mailbox: mailbox_id_from_path(CONTROL_CORE_PATH),
+            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
             mailer,
             self_mailbox,
             _timer: None,
@@ -256,7 +255,7 @@ fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(DISPATCH_TOPIC))?;
+    let entries = store.drain_outbox(Some(TOPIC_DISPATCH))?;
     let mut handles = Vec::new();
     let mut ack_through = None;
     // The outbox sequence of a transient submit failure that stopped the drain —
@@ -578,7 +577,7 @@ impl NativeActor for ExecutorDriverCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ExecutorDriverState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = mailbox_id_from_path(CONTROL_CORE_PATH);
+        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
 
         // Unconfigured → disabled: no shell, no store, no timer. The dispatch
         // outbox accumulates and drains once a token/owner/repo is supplied.
@@ -687,7 +686,7 @@ impl NativeActor for ExecutorDriverCapability {
             match drain_and_dispatch(store, &executor) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_outbox(Some(DISPATCH_TOPIC), sequence)
+                        && let Err(error) = store.ack_outbox(Some(TOPIC_DISPATCH), sequence)
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
                     }

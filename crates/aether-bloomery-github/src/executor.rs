@@ -33,6 +33,22 @@ use aether_bloomery::{
 };
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
+
+/// The `workflow_dispatch` input key carrying the typed lane command — the
+/// correlation contract with the external wrapper workflow, whose `inputs:`
+/// block names these exact strings (#3668). One constant per key (its siblings
+/// below), shared with the fake and the tests, so a drifted key cannot
+/// silently dispatch a run the wrapper reads as blank.
+pub const INPUT_COMMAND: &str = "command";
+
+/// The input key carrying the evidence-binding subject — see [`INPUT_COMMAND`].
+pub const INPUT_SUBJECT: &str = "subject";
+
+/// The input key carrying the correlation nonce — see [`INPUT_COMMAND`].
+pub const INPUT_NONCE: &str = "nonce";
+
+/// The input key carrying the displayed digest — see [`INPUT_COMMAND`].
+pub const INPUT_DISPLAYED: &str = "displayed";
 use crate::correspondence::CorrespondenceError;
 use crate::source::SharedCorrespondence;
 
@@ -194,9 +210,9 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
             .ok_or_else(|| ExecutorError::UnresolvedCheckout(order.nonce.clone()))?
             .to_hex();
         let mut inputs = BTreeMap::new();
-        inputs.insert("command".to_owned(), order.transformation.command.clone());
-        inputs.insert("subject".to_owned(), subject);
-        inputs.insert("nonce".to_owned(), order.nonce.0.clone());
+        inputs.insert(INPUT_COMMAND.to_owned(), order.transformation.command.clone());
+        inputs.insert(INPUT_SUBJECT.to_owned(), subject);
+        inputs.insert(INPUT_NONCE.to_owned(), order.nonce.0.clone());
         // The scope-revision `inputs[0]` binds the returned evidence: the wrapper
         // embeds it in the attempt artifact's name (`attempt.<verdict>.<subject_hex>.
         // <detail_hex>.<nonce>`, #3501), which the pull-side `NameEvidenceClaims`
@@ -204,7 +220,7 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         // An input-less order (a bare smoke-run shape) omits it and the wrapper
         // falls back to the legacy `evidence-<nonce>` name the intake skips.
         if let Some(displayed) = order.transformation.inputs.first() {
-            inputs.insert("displayed".to_owned(), digest_hex(displayed));
+            inputs.insert(INPUT_DISPLAYED.to_owned(), digest_hex(displayed));
         }
         self.client.dispatch_workflow(&self.workflow_file, &self.git_ref, &inputs)?;
         Ok(WorkHandle::new(order.nonce.clone()))

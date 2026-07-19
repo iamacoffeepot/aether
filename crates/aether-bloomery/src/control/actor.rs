@@ -39,6 +39,7 @@ use super::{
     EnumerateClaimsResult, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult,
     RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
+use super::{TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH};
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
@@ -69,33 +70,6 @@ const SOURCE: &str = "aether.source";
 /// count toward the same per-key cap ([`ControlCore::inflight_for_key`]), so the
 /// pre-commit ref stage cannot dodge the back-pressure.
 const MAX_INFLIGHT_PER_KEY: usize = 64;
-
-/// The outbox topic a landing receipt enqueues under, so #3499's republisher
-/// can route it.
-const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
-
-/// The outbox topic a stage re-dispatch enqueues under, so the dispatch consumer
-/// (#3505) re-assembles the held attempt naming both question and answer digests
-/// (ADR-0151). Producer-only here, like [`RECEIPT_TOPIC`].
-const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
-
-/// The outbox topic a per-member attempt dispatch enqueues under, so the executor
-/// dispatch consumer (#3505) drains it, wraps the transformation in a work order,
-/// and submits it through the executor port (ADR-0149 §The line). Producer-only
-/// here, like [`RECEIPT_TOPIC`] / [`REDISPATCH_TOPIC`].
-const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
-
-/// The outbox topic a land dispatch enqueues under, so the land driver (ADR-0149
-/// migration step 3) drains it and issues the source-port compare-and-swap land.
-/// Producer-only here, like the other dispatch topics; the land driver's
-/// consumer-side constant mirrors this string.
-const LAND_TOPIC: &str = "aether.bloomery.land";
-
-/// The outbox topic an integration dispatch enqueues under (ADR-0152), so the
-/// host integrate driver drains it and folds the claimed candidates onto the
-/// bloom's integration branch. Producer-only here, like the other dispatch
-/// topics; the integrate driver's consumer-side constant mirrors this string.
-const INTEGRATE_TOPIC: &str = "aether.bloomery.integrate";
 
 /// An admit awaiting its durable commit reply — the reply handle to answer, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -159,7 +133,9 @@ pub struct ControlCore {
 
 #[actor]
 impl WasmActor for ControlCore {
-    const NAMESPACE: &'static str = "aether.bloomery.control";
+    // Forward-fed from the always-compiled control module (#3668): the one
+    // literal, registered here and resolved by the host consumers.
+    const NAMESPACE: &'static str = super::CONTROL_CORE_NAMESPACE;
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self { snapshot: Snapshot::default(), pending: BTreeMap::new(), pending_claims: BTreeMap::new() })
@@ -582,11 +558,11 @@ fn project(
                     .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
             }
             Decision::EmitReceipt(receipt) => {
-                outbox.push(OutboxPayload { topic: RECEIPT_TOPIC.to_owned(), payload: to_vec(receipt)? });
+                outbox.push(OutboxPayload { topic: TOPIC_LANDING_RECEIPT.to_owned(), payload: to_vec(receipt)? });
             }
             Decision::RedispatchStage { bloom, question, answer } => {
                 let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
-                outbox.push(OutboxPayload { topic: REDISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload { topic: TOPIC_REDISPATCH.to_owned(), payload: to_vec(&payload)? });
             }
             Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {
                 let payload = DispatchPayload {
@@ -597,15 +573,15 @@ fn project(
                     scope_revision: *scope_revision,
                     candidate: *candidate,
                 };
-                outbox.push(OutboxPayload { topic: DISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload { topic: TOPIC_DISPATCH.to_owned(), payload: to_vec(&payload)? });
             }
             Decision::DispatchLand { bloom, expected_base, new_head } => {
                 let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-                outbox.push(OutboxPayload { topic: LAND_TOPIC.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload { topic: TOPIC_LAND.to_owned(), payload: to_vec(&payload)? });
             }
             Decision::DispatchIntegration { bloom, base, candidates } => {
                 let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
-                outbox.push(OutboxPayload { topic: INTEGRATE_TOPIC.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload { topic: TOPIC_INTEGRATE.to_owned(), payload: to_vec(&payload)? });
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
