@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
-use aether_capabilities::{InputCapability, InputConfig, TcpCapability, TextCapability};
 use aether_capabilities::{GameGatewayCapability, GameGatewayConfig, LifecycleCapability};
+use aether_capabilities::{InputCapability, InputConfig, TcpCapability, TextCapability};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_data::Kind;
 use aether_data::KindId;

@@ -69,7 +69,6 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-behavior-derive",
- "aether-capabilities",
  "aether-data",
  "aether-fs",
  "serde",

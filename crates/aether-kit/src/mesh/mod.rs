@@ -36,8 +36,8 @@ mod kinds;
 pub use kinds::*;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::LifecycleCapability;
+use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_fs::{FsCapability, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_math::{Rgb, Vec3};
