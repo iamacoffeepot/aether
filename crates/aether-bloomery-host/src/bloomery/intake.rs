@@ -360,42 +360,34 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // — *before* consuming the order: consuming first and then failing the encode
     // would lose the evidence with the nonce already spent and no retry.
     //
-    // Route the attempt result by stage (#3505):
+    // Route the attempt result by stage (#3505, ADR-0153):
     //
     // - A parked attempt normalizes to a Question evidence admitted through
     //   Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
     //   failure: the order is consumed, but the parked outcome burns no stage
     //   retry, because a decision pending is not a defect.
-    // - A non-terminal per-member stage (Construct / Verify / Refine, i.e. one
-    //   with a successor in the member line) admits as Fact::AttemptCompleted: the
-    //   reducer advances the member's cursor on a passing verdict, re-dispatches
-    //   the stage within its retry budget on a failing one, and wedges once the
-    //   budget is exhausted.
-    // - The terminal Review admits by verdict: a *passing* one produces the member's
-    //   ResolutionClaim through Fact::Integrate (the existing integrate path); a
-    //   *failing* one admits as Fact::AttemptCompleted so the reducer retries within
-    //   Review's retry budget and wedges on exhaustion — the completion gate applies
-    //   across the whole member line, so a failing review is never silently integrated.
-    // - An out-of-line stage (not in the member line) is a corrupt order and is
-    //   refused, never routed to Integrate.
+    // - The terminal Verify admits by verdict: a *passing* one produces the
+    //   member's ResolutionClaim through Fact::Integrate (the existing integrate
+    //   path) — the verification evidence binds the exact candidate tree, which
+    //   is what reduce_integrate re-checks; a *failing* one admits as
+    //   Fact::AttemptCompleted so the reducer routes the member into the Refine
+    //   repair re-entry within the repair ceiling and wedges on exhaustion — the
+    //   completion gate applies across the whole member line, so a failing
+    //   verify is never silently integrated.
+    // - Any other dispatched member stage (Construct — one with a successor in
+    //   the member line — or the repair-only Refine) admits as
+    //   Fact::AttemptCompleted: the reducer advances the member's cursor on a
+    //   passing verdict, re-dispatches the stage within its retry budget on a
+    //   failing one, and wedges once the budget is exhausted.
+    // - An out-of-line stage (Review included — the model review is the
+    //   bloom-level AggregateReview position, never a member dispatch) is a
+    //   corrupt order and is refused, never routed to Integrate.
     let event = if upload.verdict == StageVerdict::Parked {
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
-    } else if StageCatalog::next_member_stage(record.stage).is_some() {
-        Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
-            fact: Fact::AttemptCompleted {
-                bloom: record.bloom,
-                workpiece: record.workpiece.clone(),
-                stage: record.stage,
-                passed: verdict_passed(upload.verdict),
-                evidence,
-                candidate: upload.candidate,
-            },
-        }
-    } else if record.stage == StageId::Review {
+    } else if record.stage == StageId::Verify {
         if verdict_passed(upload.verdict) {
             let claim = ResolutionClaim {
                 workpiece: record.workpiece.clone(),
@@ -422,6 +414,18 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 },
             }
         }
+    } else if StageCatalog::next_member_stage(record.stage).is_some() || record.stage == StageId::Refine {
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
+            fact: Fact::AttemptCompleted {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                passed: verdict_passed(upload.verdict),
+                evidence,
+                candidate: upload.candidate,
+            },
+        }
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The
@@ -434,10 +438,11 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if !store.consume_order(&record.nonce.0)? {
         return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
     }
-    // A failing Review's findings persist keyed by the member so the Refine
-    // re-entry is directed by them; a passing Review clears the stale row
-    // (#3656). Only after the consume — a refused upload writes nothing.
-    if record.stage == StageId::Review {
+    // A failing Verify's findings — the mechanical failure output — persist
+    // keyed by the member so the Refine repair re-entry is directed by them; a
+    // passing Verify clears the stale row (#3656, ADR-0153). Only after the
+    // consume — a refused upload writes nothing.
+    if record.stage == StageId::Verify {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
         } else if let Some(findings) = &upload.findings {

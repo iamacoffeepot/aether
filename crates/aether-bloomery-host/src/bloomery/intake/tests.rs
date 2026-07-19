@@ -68,10 +68,11 @@ fn dispatch_record(
         scope_revision,
         candidate,
         displayed_digest: candidate,
-        // The terminal per-member stage, so a resolving verdict admits as a
-        // `Fact::Integrate` — the existing accept/refuse tests' oracle. The
-        // non-terminal `AttemptCompleted` path is exercised by its own test.
-        stage: StageId::Review,
+        // The terminal per-member stage (ADR-0153: Verify), so a resolving
+        // verdict admits as a `Fact::Integrate` — the existing accept/refuse
+        // tests' oracle. The non-terminal `AttemptCompleted` path is exercised
+        // by its own test.
+        stage: StageId::Verify,
     }
 }
 
@@ -496,36 +497,37 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
 }
 
 #[test]
-fn a_failing_terminal_review_admits_attempt_completed_not_integrate() {
+fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
     // Tripwire: the completion gate applies across the whole member line, the
-    // terminal Review included. A *failing* Review upload admits as a
+    // terminal Verify included (ADR-0153). A *failing* Verify upload admits as a
     // Fact::AttemptCompleted { passed: false } — never a Fact::Integrate — so the
-    // reducer retries/wedges it rather than recording a failing review as resolved.
+    // reducer routes it into the Refine repair re-entry rather than recording a
+    // failing verify as resolved.
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
-    let workpiece = WorkpieceId("wp-review".to_owned());
+    let workpiece = WorkpieceId("wp-verify".to_owned());
     let candidate = Digest::from_bytes([5; 32]);
-    // dispatch_record's default stage is the terminal Review.
-    let record = dispatch_record("n-rev", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
-    assert_eq!(record.stage, StageId::Review, "the record is at the terminal Review stage");
+    // dispatch_record's default stage is the terminal Verify.
+    let record = dispatch_record("n-ver", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    assert_eq!(record.stage, StageId::Verify, "the record is at the terminal Verify stage");
     record_dispatch(&mut store, &record).unwrap();
 
     let upload = UploadedEvidence {
-        nonce: Nonce("n-rev".to_owned()),
+        nonce: Nonce("n-ver".to_owned()),
         subject: candidate,
-        verdict: StageVerdict::ReviewFinding,
+        verdict: StageVerdict::VerificationFailed,
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
-        panic!("a matching failing-review upload is admitted (the gate decides its fate, not the broker)");
+        panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
     };
     let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
-        panic!("a failing terminal Review admits AttemptCompleted, not Integrate");
+        panic!("a failing terminal Verify admits AttemptCompleted, not Integrate");
     };
-    assert_eq!(*stage, StageId::Review);
-    assert!(!*passed, "a ReviewFinding verdict fails the gate");
+    assert_eq!(*stage, StageId::Verify);
+    assert!(!*passed, "a VerificationFailed verdict fails the gate");
 
     // The order is consumed on accept, like any admitted result.
     assert!(matches!(
@@ -536,8 +538,9 @@ fn a_failing_terminal_review_admits_attempt_completed_not_integrate() {
 
 #[test]
 fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
-    // A well-formed dispatch only ever carries a member-line stage (Construct /
-    // Verify / Refine / Review); an order at any other stage is corrupt. It is
+    // A well-formed dispatch only ever carries a dispatched member stage
+    // (Construct / Verify / the repair-only Refine); an order at any other
+    // stage — the retired member Review included (ADR-0153) — is corrupt. It is
     // refused as OutOfLineStage rather than folded into the member's resolution,
     // and (like a digest mismatch) the order is NOT consumed.
     let mut store = store();
@@ -658,12 +661,13 @@ fn dispatch_error_is_permanent_is_false_for_every_non_status_fault() {
     }
 }
 
-// #3656 — a failing review's findings persist keyed by the member (what the
-// Refine re-entry is directed by), and a passing review clears the stale row.
-// Catches both leaks: findings never recorded (a blind re-entry), and stale
-// findings surviving the pass that resolved them (a poisoned later prompt).
+// #3656 / ADR-0153 — a failing verify's findings (the mechanical failure
+// output) persist keyed by the member (what the Refine repair re-entry is
+// directed by), and a passing verify clears the stale row. Catches both leaks:
+// findings never recorded (a blind re-entry), and stale findings surviving the
+// pass that resolved them (a poisoned later prompt).
 #[test]
-fn review_findings_persist_on_a_failing_review_and_clear_on_a_pass() {
+fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let workpiece = WorkpieceId("wp-findings".to_owned());
@@ -680,15 +684,17 @@ fn review_findings_persist_on_a_failing_review_and_clear_on_a_pass() {
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
         .unwrap();
-    let AdmitDecision::Admitted(_) =
-        admit_uploaded(&mut store, &upload("n-f1", StageVerdict::ReviewFinding, Some("pillar 2: off-by-one"))).unwrap()
-    else {
-        panic!("the failing review admits");
+    let AdmitDecision::Admitted(_) = admit_uploaded(
+        &mut store,
+        &upload("n-f1", StageVerdict::VerificationFailed, Some("clippy: unused variable `head`")),
+    )
+    .unwrap() else {
+        panic!("the failing verify admits");
     };
     assert_eq!(
         store.lookup_review_findings(bloom.0.as_bytes(), &workpiece.0).unwrap().as_deref(),
-        Some("pillar 2: off-by-one"),
-        "a failing review's findings persist for the re-entry",
+        Some("clippy: unused variable `head`"),
+        "a failing verify's findings persist for the re-entry",
     );
 
     record_dispatch(&mut store, &dispatch_record("n-f2", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
@@ -696,11 +702,11 @@ fn review_findings_persist_on_a_failing_review_and_clear_on_a_pass() {
     let AdmitDecision::Admitted(_) =
         admit_uploaded(&mut store, &upload("n-f2", StageVerdict::VerificationPassed, None)).unwrap()
     else {
-        panic!("the passing review admits");
+        panic!("the passing verify admits");
     };
     assert_eq!(
         store.lookup_review_findings(bloom.0.as_bytes(), &workpiece.0).unwrap(),
         None,
-        "a passing review clears the stale findings",
+        "a passing verify clears the stale findings",
     );
 }

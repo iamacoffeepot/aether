@@ -306,14 +306,14 @@ fn drain_and_dispatch(
                     "no work-order description persisted for the dispatched construct member; assembling a subject-only prompt",
                 );
             }
-            // A failing review's persisted findings ride the same advisory
-            // channel as their own labeled section (#3656), so a Refine
-            // re-entry's prompt names both the original order and what the
-            // critic flagged. The assembled prompt is plain markdown
+            // A failing verdict's persisted findings ride the same advisory
+            // channel as their own labeled section (#3656, ADR-0153), so a
+            // Refine re-entry's prompt names both the original order and what
+            // the failing gate flagged. The assembled prompt is plain markdown
             // concatenation, so the section header composes in-channel.
             if let Some(findings) = store.lookup_review_findings(payload.bloom.as_bytes(), &payload.workpiece.0)? {
                 let task = transformation.description.take().unwrap_or_default();
-                transformation.description = Some(format!("{task}\n\n## Review findings\n\n{findings}"));
+                transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
             }
         }
         let nonce = Nonce(format!("dispatch-{}", entry.sequence));

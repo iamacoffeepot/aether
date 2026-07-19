@@ -618,18 +618,19 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     assert!(issued[0].1.ends_with("/candidate/wp-cand"), "the workpiece segment is sanitized to ref-safe characters");
 }
 
-// #3656 — persisted review findings compose onto the construct-lane dispatch as
-// their own labeled section after the work-order description, so a Refine
-// re-entry's prompt names both the original order and what the critic flagged.
-// Catches the findings never reaching the model (a blind re-entry).
+// #3656 / ADR-0153 — persisted findings from the failing verdict compose onto
+// the construct-lane dispatch as their own labeled section after the work-order
+// description, so a Refine re-entry's prompt names both the original order and
+// what the failing gate flagged. Catches the findings never reaching the model
+// (a blind re-entry).
 #[test]
-fn drain_threads_persisted_review_findings_onto_the_construct_order() {
+fn drain_threads_persisted_findings_onto_the_construct_order() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let bloom = BloomId(digest(1));
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-line", "the original order").unwrap();
-    store.record_review_findings(bloom.0.as_bytes(), "wp-line", "pillar 2: off-by-one in the loop bound").unwrap();
+    store.record_review_findings(bloom.0.as_bytes(), "wp-line", "clippy: off-by-one in the loop bound").unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
     drain_and_dispatch(&mut store, &shell).unwrap();
@@ -638,7 +639,7 @@ fn drain_threads_persisted_review_findings_onto_the_construct_order() {
     let description = orders[0].transformation.description.as_deref().unwrap();
     assert!(description.starts_with("the original order"), "the order text leads");
     assert!(
-        description.contains("## Review findings\n\npillar 2: off-by-one in the loop bound"),
+        description.contains("## Findings\n\nclippy: off-by-one in the loop bound"),
         "the findings follow as their own labeled section",
     );
 }

@@ -116,13 +116,13 @@ pub struct StageProgress {
     /// base). Later dispatches re-target from it: evidence binds `tree`, the
     /// worker checks out `checkout`.
     pub candidate: Option<CandidateRef>,
-    /// How many failing terminal-Review verdicts this member has consumed
-    /// (#3657) — the model-review ceiling's counter, carried across the Refine
-    /// re-entry a failing Review routes into (the `attempts` reset on every
+    /// How many failing terminal-Verify verdicts this member has consumed
+    /// (ADR-0153) — the repair ceiling's counter, carried across the Refine
+    /// re-entry a failing Verify routes into (the `attempts` reset on every
     /// stage advance, so the ceiling needs its own cursor field). A failing
-    /// Review at `review_rolls >= retry_budget_of(Review)` wedges instead of
+    /// Verify at `repair_rolls >= retry_budget_of(Verify)` wedges instead of
     /// re-entering.
-    pub review_rolls: u32,
+    pub repair_rolls: u32,
 }
 
 /// A bloom's position in the one-way lifecycle.
@@ -231,15 +231,17 @@ pub enum Fact {
         answer: Statement,
     },
     /// A dispatched per-member attempt completed with evidence (ADR-0149 §The
-    /// line). Admitted when a nonce/digest-matched attempt result arrives from
-    /// evidence intake (#3502) for a non-terminal member stage
-    /// (`Construct` / `Verify` / `Refine`). The reducer evaluates the stage's
+    /// line, ADR-0153). Admitted when a nonce/digest-matched attempt result
+    /// arrives from evidence intake (#3502) for `Construct`, a failing
+    /// `Verify`, or the repair-only `Refine`. The reducer evaluates the stage's
     /// completion gate against `passed` and the member's cursor: a passing gate
-    /// advances the cursor and dispatches the next stage; a failing one
-    /// re-dispatches the same stage while the `retry_budget` allows and wedges the
-    /// member once it is exhausted. The terminal `Review` stage's passing result
-    /// integrates the member through [`Fact::Integrate`] instead — the intake is
-    /// stage-aware and never routes a `Review` result here.
+    /// advances the cursor and dispatches the next stage (a passing `Refine`
+    /// returns to `Verify` for the delta-confirm); a failing `Construct` or
+    /// `Refine` re-dispatches the same stage while the `retry_budget` allows
+    /// and wedges the member once it is exhausted; a failing `Verify` re-enters
+    /// `Refine` under the repair ceiling. The terminal `Verify` stage's passing
+    /// result integrates the member through [`Fact::Integrate`] instead — the
+    /// intake is stage-aware and never routes a passing `Verify` result here.
     ///
     /// `passed` is the completion gate's outcome as the intake broker read it from
     /// the worker's verdict — the reducer owns the *advance* decision the gate
@@ -377,17 +379,17 @@ pub enum Outcome {
     /// An attempt completion was refused (unknown bloom, non-member, or a stage
     /// that is not the member's current cursor).
     AttemptCompletedRejected(AttemptCompletedError),
-    /// A failing terminal Review routed the member back into Refine (#3657) —
-    /// the findings-directed re-entry that replaces re-rolling the critic on an
-    /// unchanged candidate. Appended so the prior outcomes' wire discriminants
-    /// are unchanged.
-    ReviewReentered {
+    /// A failing terminal Verify routed the member back into Refine
+    /// (ADR-0153) — the findings-directed repair re-entry that replaces
+    /// re-running the mechanical gate on an unchanged candidate. Appended so
+    /// the prior outcomes' wire discriminants are unchanged.
+    RefineReentered {
         /// The bloom the member belongs to.
         bloom: BloomId,
         /// The re-entered member.
         workpiece: WorkpieceId,
-        /// The count of failing Review verdicts consumed, this one included —
-        /// the model-review ceiling's cursor (wedges at Review's retry budget).
+        /// The count of failing Verify verdicts consumed, this one included —
+        /// the repair ceiling's cursor (wedges at Verify's retry budget).
         rolls: u32,
     },
 }
@@ -699,10 +701,10 @@ pub enum AttemptCompletedError {
         /// The stage the completion named.
         got: StageId,
     },
-    /// The named stage is the terminal `Review` (or otherwise outside the
-    /// non-terminal per-member line): a passing `Review` integrates the member
-    /// through [`Fact::Integrate`] and never completes here, so a `Review`
-    /// completion is mis-routed.
+    /// The named stage is the terminal `Verify` with a passing verdict (or a
+    /// passing stage otherwise off the dispatched member line): a passing
+    /// `Verify` integrates the member through [`Fact::Integrate`] and never
+    /// completes here, so such a completion is mis-routed.
     TerminalStage(StageId),
 }
 
@@ -764,7 +766,7 @@ fn entry_dispatch_effects(bloom: BloomId, member: &Membership, checkout: Digest)
         Decision::AdvanceStage {
             bloom,
             workpiece: member.workpiece.clone(),
-            progress: StageProgress { stage, attempts: 1, candidate: None, review_rolls: 0 },
+            progress: StageProgress { stage, attempts: 1, candidate: None, repair_rolls: 0 },
         },
         Decision::DispatchAttempt {
             bloom,
@@ -1090,17 +1092,20 @@ fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement)
 /// and reports raw outcomes but never advances state (the ADR-0149 invariant, and
 /// the reason the "host evaluates the gate" alternative was rejected).
 ///
-/// A passing gate advances the cursor to the next member stage and dispatches it;
-/// a failing gate re-dispatches the same stage while the stage's `retry_budget`
-/// allows and wedges the member once it is exhausted (a wedged member stops
-/// dispatching — a supersession is the escape). The attempt's evidence is recorded
-/// in the bloom's evidence log either way. The terminal `Review` is the exception
-/// to same-stage retry (#3657): a *passing* `Review` integrates the member through
-/// [`Fact::Integrate`] and never completes here (a passing terminal completion is
-/// a mis-route, [`AttemptCompletedError::TerminalStage`]); a *failing* `Review`
-/// re-enters `Refine` — the findings-directed fix, since re-rolling the critic on
-/// an unchanged candidate changes nothing — bounded by Review's `retry_budget`
-/// over the cursor-carried `review_rolls`, wedging on the second failing verdict.
+/// A passing gate advances the cursor to the next member stage and dispatches it
+/// (a passing repair-only `Refine` returns to `Verify` for the delta-confirm,
+/// ADR-0153); a failing gate re-dispatches the same stage while the stage's
+/// `retry_budget` allows and wedges the member once it is exhausted (a wedged
+/// member stops dispatching — a supersession is the escape). The attempt's
+/// evidence is recorded in the bloom's evidence log either way. The terminal
+/// `Verify` is the exception to same-stage retry: a *passing* `Verify` integrates
+/// the member through [`Fact::Integrate`] and never completes here (a passing
+/// terminal completion is a mis-route,
+/// [`AttemptCompletedError::TerminalStage`]); a *failing* `Verify` re-enters
+/// `Refine` — the findings-directed fix, since re-running the mechanical gate on
+/// an unchanged candidate changes nothing — bounded by Verify's `retry_budget`
+/// over the cursor-carried `repair_rolls`, wedging once the budget's worth of
+/// failing verdicts is consumed.
 fn reduce_attempt_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -1121,13 +1126,19 @@ fn reduce_attempt_completed(
             workpiece.clone(),
         )));
     };
-    // A *passing* terminal `Review` is a mis-route — a passing Review integrates
+    // A *passing* terminal `Verify` is a mis-route — a passing Verify integrates
     // through `Fact::Integrate` and never completes here, so a passing completion
-    // whose stage has no successor is rejected. A *failing* `Review` does complete
-    // here (retry/wedge below), so the guard fires only on the passing terminal
-    // case; a mis-routed passing terminal is caught before the cursor check so it
-    // reads as `TerminalStage` rather than a `StageMismatch`.
-    let next = StageCatalog::next_member_stage(stage);
+    // whose stage has no successor is rejected. A *failing* `Verify` does complete
+    // here (the Refine re-entry below), so the guard fires only on the passing
+    // terminal case; a mis-routed passing terminal is caught before the cursor
+    // check so it reads as `TerminalStage` rather than a `StageMismatch`. The
+    // repair-only `Refine` sits off the standing line (ADR-0153) with an explicit
+    // successor: its pass returns the member to `Verify` for the delta-confirm.
+    let next = if stage == StageId::Refine {
+        Some(StageId::Verify)
+    } else {
+        StageCatalog::next_member_stage(stage)
+    };
     if passed && next.is_none() {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(stage)));
     }
@@ -1163,12 +1174,12 @@ fn reduce_attempt_completed(
     // A passing gate advances the cursor to the next member stage and dispatches
     // it. `next` is `Some` on this branch — a passing terminal completion was
     // rejected above, so a passing stage always has a successor.
-    let review_rolls = cursor.map_or(0, |progress| progress.review_rolls);
+    let repair_rolls = cursor.map_or(0, |progress| progress.repair_rolls);
     if let Some(next) = next.filter(|_| passed) {
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
-            progress: StageProgress { stage: next, attempts: 1, candidate, review_rolls },
+            progress: StageProgress { stage: next, attempts: 1, candidate, repair_rolls },
         });
         effects.push(Decision::DispatchAttempt {
             bloom: *bloom,
@@ -1183,21 +1194,22 @@ fn reduce_attempt_completed(
             effects,
         };
     }
-    // A failing terminal Review re-enters Refine instead of re-rolling the
-    // critic on an unchanged candidate (#3657): only a findings-directed fix
-    // changes the next verdict, so the member routes back to the stage that can
-    // produce one (the host threads the persisted findings onto the dispatch,
-    // #3656). The ceiling is Review's retry budget over `review_rolls` — the
-    // cursor-carried count the per-stage `attempts` reset cannot clear — so the
-    // second failing verdict wedges: never a third roll, never a silent
-    // integrate.
-    if stage == StageId::Review {
-        let rolls = review_rolls + 1;
-        if rolls < StageCatalog::retry_budget_of(StageId::Review).unwrap_or(1) {
+    // A failing terminal Verify re-enters Refine instead of re-running the
+    // mechanical gate on an unchanged candidate (ADR-0153): only a
+    // findings-directed fix changes the next verdict, so the member routes back
+    // to the repair stage that can produce one (the host threads the persisted
+    // failure findings onto the dispatch, #3656). The ceiling is Verify's retry
+    // budget over `repair_rolls` — the cursor-carried count the per-stage
+    // `attempts` reset cannot clear — so once the budget's worth of failing
+    // verdicts is consumed the member wedges: never an extra roll, never a
+    // silent integrate.
+    if stage == StageId::Verify {
+        let rolls = repair_rolls + 1;
+        if rolls < StageCatalog::retry_budget_of(StageId::Verify).unwrap_or(1) {
             effects.push(Decision::AdvanceStage {
                 bloom: *bloom,
                 workpiece: workpiece.clone(),
-                progress: StageProgress { stage: StageId::Refine, attempts: 1, candidate, review_rolls: rolls },
+                progress: StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: rolls },
             });
             effects.push(Decision::DispatchAttempt {
                 bloom: *bloom,
@@ -1208,7 +1220,7 @@ fn reduce_attempt_completed(
                 candidate: candidate.map(|current| current.tree),
             });
             return Decisions {
-                outcome: Outcome::ReviewReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
+                outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
                 effects,
             };
         }
@@ -1226,7 +1238,7 @@ fn reduce_attempt_completed(
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
-            progress: StageProgress { stage, attempts: attempt, candidate, review_rolls },
+            progress: StageProgress { stage, attempts: attempt, candidate, repair_rolls },
         });
         effects.push(Decision::DispatchAttempt {
             bloom: *bloom,
