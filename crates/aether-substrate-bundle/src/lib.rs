@@ -15,8 +15,7 @@
 //! The substrate-bench chassis machinery and the in-process
 //! `SubstrateBench` harness live in the `aether-substrate-bench` crate
 //! (GPU capture support in `aether-substrate-bench-capture`); this
-//! crate keeps the `aether-substrate-bench` binary entry point and the
-//! transitional [`FullBenchExt`] composition bridge (issue #3765).
+//! crate keeps the `aether-substrate-bench` binary entry point.
 //!
 //! The lib root re-exports a convenience surface (the most-used
 //! `aether-substrate` runtime types) so external consumers —
@@ -37,8 +36,6 @@ pub use chassis_common::{
 pub mod chassis_root;
 pub mod cli;
 pub mod desktop;
-mod full_bench;
-pub use full_bench::FullBenchExt;
 pub mod headless;
 pub mod hub;
 
