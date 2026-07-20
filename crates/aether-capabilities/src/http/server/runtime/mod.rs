@@ -53,7 +53,11 @@ pub use crate::http::kinds::{
 use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
+use aether_kinds::MonitorNotice;
 pub use aether_kinds::trace::Settled;
+// `state.rs` reaches `MonitorHandle` through the module-root glob like the
+// rest of the substrate surface, so the re-export rides `pub use`.
+pub use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::net::teardown_connect_addr;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -170,6 +174,7 @@ impl NativeActor for HttpServerCapability {
             shards: Vec::new(),
             next_shard: 0,
             next_stream_id: Arc::new(AtomicU64::new(0)),
+            monitors: HashMap::new(),
         })
     }
 
@@ -237,13 +242,18 @@ impl NativeActor for HttpServerCapability {
     #[handler::single]
     fn on_register_route(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         payload: RegisterRoute,
     ) -> RegisterRouteResult {
         if let Err(error) = validate_route_mailbox(state.mailer.registry(), payload.mailbox) {
             return RegisterRouteResult::Err { error };
         }
-        state.register_route(&payload.prefix, payload.method, payload.kind, payload.mailbox, payload.shared)
+        let result =
+            state.register_route(&payload.prefix, payload.method, payload.kind, payload.mailbox, payload.shared);
+        if matches!(result, RegisterRouteResult::Ok) {
+            state.watch(ctx, payload.mailbox);
+        }
+        result
     }
 
     /// Claim a route for the *sending* actor (ADR-0130), resolved from
@@ -264,7 +274,12 @@ impl NativeActor for HttpServerCapability {
     ) -> RegisterRouteResult {
         match ctx.source_mailbox() {
             Some(mailbox) => {
-                state.register_route(&payload.prefix, payload.method, payload.kind, mailbox, payload.shared)
+                let result =
+                    state.register_route(&payload.prefix, payload.method, payload.kind, mailbox, payload.shared);
+                if matches!(result, RegisterRouteResult::Ok) {
+                    state.watch(ctx, mailbox);
+                }
+                result
             }
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.register_route_self requires a local sender; an \
@@ -312,10 +327,10 @@ impl NativeActor for HttpServerCapability {
         }
     }
 
-    /// Release every route held by a mailbox (ADR-0130). Issued by
-    /// `ComponentHostCapability` on `DropComponent`, alongside its
-    /// input / lifecycle unsubscribe fan-out, so the route table
-    /// doesn't keep dispatching at a dropped trampoline. Idempotent;
+    /// Release every route held by a mailbox (ADR-0130) in one shot.
+    /// The externally sendable bulk form — drop-time cleanup happens
+    /// through [`Self::on_monitor_notice`] instead, so nothing mails
+    /// this on the component path anymore. Idempotent;
     /// fire-and-forget.
     ///
     /// # Agent
@@ -323,5 +338,19 @@ impl NativeActor for HttpServerCapability {
     #[handler::single]
     fn on_unregister_routes_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: UnregisterRoutesAll) {
         state.unregister_routes_all(payload.mailbox);
+    }
+
+    /// Purge a departed mailbox's routes (ADR-0079 §8 amended). The
+    /// substrate fires one notice per [`HttpSupervisorState::watch`]ed
+    /// mailbox when it vacates (the wasm trampoline on
+    /// `DropComponent`) or closes, so the route table stops
+    /// dispatching at a dropped trampoline without any drop-time
+    /// fan-out from the component host. Releasing the handle keeps the
+    /// monitor map bounded by live route holders; a later occupant of
+    /// the same mailbox re-registers through its own route claim.
+    #[handler::single]
+    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+        state.monitors.remove(&notice.target);
+        state.unregister_routes_all(notice.target);
     }
 }

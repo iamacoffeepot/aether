@@ -13,10 +13,13 @@
 //! plain field on `&mut self` (single-threaded — every handler runs on
 //! the cap's dispatcher thread). Drivers don't read the table; they push
 //! input events as mail to `aether.input` and the cap fans out one mail
-//! per subscriber via `Mailer::push`. `ComponentHostCapability` mails
-//! `SubscribeInput` (one per stream-shaped handler the loaded wasm
-//! declares) on load and `UnsubscribeAll` on drop, so cap-state mutation
-//! is also mail-driven.
+//! per subscriber via `Mailer::push`. Subscribers register themselves by
+//! mail (typically from `wire`), and the cap monitors each subscribing
+//! mailbox (ADR-0079 §8 amended): a `MonitorNotice` — the trampoline
+//! vacates on `DropComponent`; close fires the same signal — purges that
+//! mailbox from every stream, so no drop-time fan-out from the component
+//! host is needed. `UnsubscribeAll` remains the externally sendable bulk
+//! form.
 //!
 //! Pre-issue-638 the `subscribe_input` / `unsubscribe_input` kinds rode
 //! `aether.control`; Phase 2 of the split rehomed them to their real
@@ -48,11 +51,12 @@ use aether_actor::actor;
 // at module root too: `#[actor]` emits `impl HandlesKind<K> for
 // InputCapability {}` markers always-on, outside the `feature = "runtime"`
 // gate, for every `#[handler]` parameter type the moved `#[runtime] impl`
-// declares — including these ten stream-event kinds, not just the
+// declares — including these ten stream-event kinds and `MonitorNotice`
+// (the ADR-0079 vacate/close purge signal), not just the
 // subscribe/unsubscribe family.
 use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowSize,
+    ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    TextInput, WindowSize,
 };
 
 /// `aether.input` cap **identity** (ADR-0122 identity/runtime split). A
@@ -120,8 +124,8 @@ mod runtime;
 ///
 /// All methods are fire-and-forget. `subscribe` / `unsubscribe` reply
 /// via `aether.input.subscribe_result`; reply handling stays on the
-/// caller. `unsubscribe_all` has no reply (issued by the trampoline on
-/// drop, when nobody's listening).
+/// caller. `unsubscribe_all` has no reply — it is the bulk cleanup
+/// form, typically fired when its target can no longer answer.
 ///
 /// The generic escape hatch is unaffected: `mailbox.send(&SubscribeInput { .. })`
 /// still works for any `K` the cap declares via `HandlesKind<K>`,

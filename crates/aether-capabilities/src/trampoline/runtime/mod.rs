@@ -148,7 +148,7 @@ impl NativeActor for WasmTrampoline {
     /// [`Self::forward_to_wasm`], which warn-drops because
     /// `state.component` is `None`.
     #[handler::single]
-    fn on_drop_component(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
+    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
         if let Some(mut component) = state.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
             // single pre-shutdown hook — the legacy `on_drop`
@@ -168,6 +168,14 @@ impl NativeActor for WasmTrampoline {
         // inside `with_stamped`, so both indexes clear together.
         state.mailer.cost_table().drop_mailbox(state.mailbox);
         CostCells::try_with_mut(|cells| cells.seed(Vec::new()));
+        // ADR-0079 §8 (amended, issue 3741): declare the mailbox
+        // vacated — drain this trampoline's watchers and fire one
+        // `MonitorNotice` each, so every cap holding state keyed by
+        // this mailbox (input subscriptions, lifecycle stages, http
+        // routes) purges its own rows. The slot stays live for a
+        // `replace` refill; the next occupant's watchers register
+        // fresh.
+        ctx.vacate();
         DropResult::Ok
     }
 

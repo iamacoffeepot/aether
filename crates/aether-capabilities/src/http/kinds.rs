@@ -467,11 +467,11 @@ pub enum RegisterRouteResult {
 }
 
 /// `aether.http.server.unregister_routes_all` — release every route
-/// held by `mailbox`. Issued by `ComponentHostCapability` on
-/// `DropComponent` (alongside its `aether.input.unsubscribe_all` /
-/// `aether.lifecycle.unsubscribe_all` sends) so the route table
-/// doesn't keep dispatching at a dropped trampoline. Idempotent: a
-/// mailbox holding no routes is a no-op. Fire-and-forget; no reply.
+/// held by `mailbox` in one shot. The externally sendable bulk form;
+/// drop-time cleanup rides the ADR-0079 vacate/close `MonitorNotice`
+/// instead, so the route table stops dispatching at a dropped
+/// trampoline without anyone mailing this. Idempotent: a mailbox
+/// holding no routes is a no-op. Fire-and-forget; no reply.
 /// Cast-shape (Pod) — one `MailboxId`, fixed size.
 #[repr(C)]
 #[derive(

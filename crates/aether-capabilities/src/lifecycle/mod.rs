@@ -38,9 +38,12 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_kinds::trace::Settled;
+// `MonitorNotice` rides the handled-kind list like the subscribe family:
+// the `#[actor]` macro emits its always-on `HandlesKind` marker for the
+// runtime half's ADR-0079 vacate/close purge handler.
 use aether_kinds::{
     LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeAll,
-    LifecycleUnsubscribeSelf, Quit,
+    LifecycleUnsubscribeSelf, MonitorNotice, Quit,
 };
 // `LifecycleSubscribeResult` rides the native gate (not `runtime`): the
 // `#[actor]` macro's ADR-0109 `HandlerEntry` inventory submission —

@@ -34,16 +34,14 @@ use aether_kinds::{
 
 pub use aether_actor::Manual;
 
-// Crate-local wiring the `#[runtime] impl` handler bodies name (sibling caps it
-// mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary), the
-// state struct, and `forward_to_trampoline` — all used within this module.
-use crate::http::HttpServerCapability;
-use crate::http::kinds::UnregisterRoutesAll;
-use crate::input::{InputCapability, UnsubscribeAll};
-use crate::lifecycle::LifecycleCapability;
-use aether_actor::{Addressable, OutboundReply, ReplyMode};
+// Crate-local wiring the `#[runtime] impl` handler bodies name (the
+// `Kind` / `MailboxCategory` vocabulary), the state struct, and
+// `forward_to_trampoline` — all used within this module. No sibling-cap
+// imports: drop-time cleanup rides the ADR-0079 vacate/close
+// `MonitorNotice` (each cap monitors its registrants and purges its own
+// rows), so the host names no peer cap's type or kinds.
+use aether_actor::{OutboundReply, ReplyMode};
 use aether_data::{Kind, MailboxCategory, Source};
-use aether_kinds::LifecycleUnsubscribeAll;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,9 +61,9 @@ use aether_substrate::mail::{KindId, MailboxId};
 /// the `mailer` / `outbound` egress handles, and the monotonic
 /// `default_name_counter` for `component_N` default names. Plain fields (no
 /// `Arc<Inner>` wrapper) per ADR-0078 — the cap is single-threaded, every
-/// handler runs on the cap's dispatcher thread. Input subscribe / unsubscribe
-/// go through `aether.input` via mail (post-issue-640): no `input_mailbox`
-/// field; `ctx.actor::<InputCapability>().send(...)` resolves it inline.
+/// handler runs on the cap's dispatcher thread. The host addresses no
+/// sibling cap: drop-time registration cleanup rides the ADR-0079
+/// vacate/close `MonitorNotice` fired from the trampoline, not host mail.
 ///
 /// The dispatcher holds this as the cap's state and routes envelopes through
 /// the macro-emitted `Dispatch` impl; the addressing identity is the distinct
@@ -151,32 +149,6 @@ where
     let _ = ctx.send_envelope_tracked_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
 }
 
-impl ComponentHostCapabilityState {
-    /// Purge a trampoline mailbox from every cap's fan-out / routing table so no
-    /// cap keeps firing at a torn-down mailbox: `aether.input`'s input-stream
-    /// tables ([`UnsubscribeAll`]), `aether.lifecycle`'s per-stage tables
-    /// ([`LifecycleUnsubscribeAll`]), and `aether.http.server`'s route table
-    /// ([`UnregisterRoutesAll`], ADR-0130). Mail rather than direct mutation
-    /// (post-issue-640 — each cap owns its own subscriber table).
-    ///
-    /// Shared by the external drop path ([`NativeActor::on_drop_component`]) and
-    /// the ADR-0147 internal boot-teardown paths ([`Self::release_boot_ref`] at
-    /// refcount zero, and the load-time freshly-inserted-boot rollback), so a
-    /// boot torn down internally clears the same registrations an external drop
-    /// would — without self-sending a `DropComponent` back through the guarded
-    /// `on_drop_component` (which rejects boot mailboxes, ADR-0147).
-    pub fn purge_trampoline_registrations<M: ReplyMode>(&self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
-        ctx.actor::<InputCapability>().send(&UnsubscribeAll { mailbox });
-        ctx.actor::<LifecycleCapability>().send(&LifecycleUnsubscribeAll { mailbox: mailbox.0 });
-        // The http server registers only when a bind is configured (ADR-0108),
-        // so gate its route purge on the cap being live — an unguarded typed
-        // send would warn-drop on every drop in a chassis that serves no HTTP.
-        if self.registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).is_some() {
-            ctx.actor::<HttpServerCapability>().send(&UnregisterRoutesAll { mailbox });
-        }
-    }
-}
-
 #[runtime]
 impl NativeActor for ComponentHostCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
@@ -231,14 +203,11 @@ impl NativeActor for ComponentHostCapability {
     /// Drop a component by its mailbox id. Forwards
     /// [`DropComponent`] mail to the addressed trampoline; the
     /// trampoline's `WasmTrampoline::on_drop_component` handler
-    /// replies `DropResult::Ok` and shuts itself down.
-    ///
-    /// Before forwarding, purges the dying trampoline's mailbox from
-    /// every fan-out / routing table so no cap keeps firing at a
-    /// dropped mailbox: `aether.input`'s input-stream tables (via
-    /// [`UnsubscribeAll`]), `aether.lifecycle`'s per-stage tables
-    /// (via [`LifecycleUnsubscribeAll`]), and `aether.http.server`'s
-    /// route table (via [`UnregisterRoutesAll`], ADR-0130).
+    /// replies `DropResult::Ok` and vacates its mailbox (ADR-0079 §8
+    /// amended), which is what purges the mailbox from every sibling
+    /// cap's fan-out / routing table — each cap monitors its
+    /// registrants and drops its own rows on the `MonitorNotice`, so
+    /// the host mails no cap anything at drop time.
     ///
     /// # Agent
     /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
@@ -264,13 +233,10 @@ impl NativeActor for ComponentHostCapability {
             });
             return;
         }
-        // Cap-side cleanup: purge the dying trampoline from every cap's fan-out
-        // sets before forwarding the drop.
-        state.purge_trampoline_registrations(ctx, payload.mailbox_id);
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
-        // boot-bearing module tears the boot down here (which purges the boot's
-        // own registrations via `release_boot_ref`).
+        // boot-bearing module tears the boot down here (the boot trampoline's
+        // own `DropComponent` handler vacates its registrations).
         state.release_boot_ref(ctx, payload.mailbox_id);
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }

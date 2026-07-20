@@ -233,17 +233,17 @@ impl ComponentHostCapabilityState {
                 // singleton (first sight of its content hash), the requested
                 // actor never spawned, so nothing will ever refcount against
                 // that boot. Tear it back down — the same cleanup
-                // `release_boot_ref` performs at refcount zero (purge fan-out
-                // registrations, then a detached `DropComponent` to the boot
-                // trampoline, plus registry removal) — rather than leaking the
-                // boot singleton and its registrations. A load that only found an
-                // existing boot leaves it untouched: its other actors still hold
-                // the refcount.
+                // `release_boot_ref` performs at refcount zero (a detached
+                // `DropComponent` to the boot trampoline, whose drop handler
+                // vacates the mailbox's registrations, plus registry removal)
+                // — rather than leaking the boot singleton and its
+                // registrations. A load that only found an existing boot
+                // leaves it untouched: its other actors still hold the
+                // refcount.
                 if boot_freshly_inserted
                     && let Some(hash) = &boot_hash
                     && let Some(entry) = self.boot_registry.remove(hash)
                 {
-                    self.purge_trampoline_registrations(ctx, entry.mailbox_id);
                     let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
                     let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
                 }
@@ -361,10 +361,11 @@ impl ComponentHostCapabilityState {
 
     /// ADR-0147: account a departing non-boot actor against its module's boot
     /// singleton. Decrements the owning module's refcount; when it reaches zero
-    /// (the last non-boot actor from the module is gone), purges the boot
-    /// mailbox's own fan-out registrations and self-sends a fire-and-forget
-    /// [`DropComponent`] to the boot trampoline — tearing it down through the
-    /// same cleanup any component drop takes — then forgets the registry entry.
+    /// (the last non-boot actor from the module is gone), self-sends a
+    /// fire-and-forget [`DropComponent`] to the boot trampoline — tearing it
+    /// down through the same cleanup any component drop takes (the trampoline's
+    /// drop handler vacates the mailbox's registrations, ADR-0079 §8 amended)
+    /// — then forgets the registry entry.
     /// A no-op for an actor from a bootless module (nothing was tracked). The
     /// teardown send is detached, not a `forward_to_trampoline`: the boot's
     /// `DropResult` must not route back to whoever originated the external drop,
@@ -383,7 +384,6 @@ impl ComponentHostCapabilityState {
         if entry.refcount == 0 {
             let boot_mailbox = entry.mailbox_id;
             self.boot_registry.remove(&hash);
-            self.purge_trampoline_registrations(ctx, boot_mailbox);
             let bytes = DropComponent { mailbox_id: boot_mailbox }.encode_into_bytes();
             let _ = ctx.send_envelope_detached(boot_mailbox, DropComponent::ID, &bytes);
         }

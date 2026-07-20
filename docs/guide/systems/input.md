@@ -78,7 +78,7 @@ genuine input interrupts and stay on `aether.input`.
 - `aether.input.unsubscribe { kind, mailbox }` — remove it. Idempotent; same
   reply.
 - `aether.input.unsubscribe_all { mailbox }` — drop `mailbox` from every stream.
-  No reply; this is what the component host fires on drop.
+  No reply; the bulk cleanup form.
 
 A named (`subscribe` / `unsubscribe`) subscribe is validated: the mailbox must
 name a live, dispatchable actor — a dropped or unknown id is rejected with
@@ -94,7 +94,8 @@ dropped before it's ever enqueued.
 **Subscriptions are keyed by mailbox, so they belong to the component across
 instances.** A `replace_component` keeps the same mailbox id, so the new instance
 inherits the old one's subscriptions with nothing to redo. A `drop` is the end of
-them — the component host mails `unsubscribe_all`, so a torn-down mailbox can't
+them — the cap monitors each subscribing mailbox and purges its rows when the
+substrate signals the mailbox vacated (ADR-0079), so a torn-down mailbox can't
 keep receiving fan-out.
 
 **Text entry rides its own streams.** `aether.key` carries a physical scancode —
