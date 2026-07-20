@@ -43,7 +43,7 @@ pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
 /// both the `--bin` selector and the output filename.
 pub const CHASSIS_BINS: &[(&str, &str)] = &[
     (CHASSIS_PACKAGE, "aether-substrate"),
-    (CHASSIS_PACKAGE, "aether-substrate-headless"),
+    ("aether-chassis-headless", "aether-substrate-headless"),
     ("aether-chassis-hub", "aether-substrate-hub"),
 ];
 

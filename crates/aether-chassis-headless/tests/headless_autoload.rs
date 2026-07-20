@@ -28,13 +28,13 @@ use std::time::Duration;
 use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::boot_manifest_autoload;
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
+use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
-use aether_substrate_bundle::Chassis as _;
-use aether_substrate_bundle::headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
+use aether_substrate::Chassis as _;
 
 mod tests {
     use super::*;
@@ -83,8 +83,8 @@ mod tests {
             tick_period: Duration::from_millis(16),
             rpc_addr: None,
             workers: None,
-            ring_caps: aether_substrate_bundle::RingCapacities::default(),
-            scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            ring_caps: aether_substrate::RingCapacities::default(),
+            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
@@ -154,8 +154,8 @@ mod tests {
             tick_period: Duration::from_millis(16),
             rpc_addr: None,
             workers: None,
-            ring_caps: aether_substrate_bundle::RingCapacities::default(),
-            scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
+            ring_caps: aether_substrate::RingCapacities::default(),
+            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
             autoload,

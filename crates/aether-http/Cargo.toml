@@ -122,13 +122,11 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # iamacoffeepot/aether#3782: the http serving test (`http_serving`, guest
 # `aether.http.server` handler path over a real TcpStream) rehomed here
-# from aether-substrate-bundle. It boots a full `HeadlessChassis` — which
-# lives bundle-side — so the dev-dep is on the bundle itself: a
-# SubstrateHarness composition can't stand in until the loopback harness
-# grows a real-TcpStream ingress path. A permitted test-target dev-dep
-# cycle; whole-graph in `xtask affected` until the by-chassis bundle
-# split.
-aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+# from aether-substrate-bundle. It boots a full `HeadlessChassis` — now
+# in its own chassis crate (#3811), so the dev-dep closure narrowed from
+# the whole bundle to the headless chassis alone. A permitted
+# test-target dev-dep cycle.
+aether-chassis-headless = { path = "../aether-chassis-headless" }
 # The boot-manifest autoload entries the test's `HeadlessEnv` carries
 # moved to the shared chassis layer (issue #3809).
 aether-chassis = { path = "../aether-chassis" }

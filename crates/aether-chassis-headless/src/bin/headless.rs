@@ -10,8 +10,8 @@
 
 use aether_chassis::chassis_config_dump;
 use aether_chassis::cli::HeadlessCli;
+use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate::Chassis;
-use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {

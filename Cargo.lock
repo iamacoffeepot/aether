@@ -225,6 +225,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-chassis-headless"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-anthropic",
+ "aether-audio",
+ "aether-chassis",
+ "aether-clipboard",
+ "aether-component",
+ "aether-contentgen",
+ "aether-data",
+ "aether-fs",
+ "aether-game",
+ "aether-gemini",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-http",
+ "aether-input",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-render",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-window",
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "serde_json",
+ "signal-hook 0.4.4",
+ "tracing",
+]
+
+[[package]]
 name = "aether-chassis-hub"
 version = "0.3.0-alpha"
 dependencies = [
@@ -497,6 +530,7 @@ dependencies = [
  "aether-actor",
  "aether-anthropic",
  "aether-chassis",
+ "aether-chassis-headless",
  "aether-component",
  "aether-contentgen",
  "aether-data",
@@ -505,7 +539,6 @@ dependencies = [
  "aether-http-derive",
  "aether-kinds",
  "aether-substrate",
- "aether-substrate-bundle",
  "aether-test-fixtures-bundle",
  "aether-trace",
  "base64",
@@ -752,6 +785,7 @@ dependencies = [
  "aether-anthropic",
  "aether-audio",
  "aether-chassis",
+ "aether-chassis-headless",
  "aether-clipboard",
  "aether-component",
  "aether-contentgen",

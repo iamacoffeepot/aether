@@ -2,12 +2,11 @@
 //!
 //! Standard Cargo layout:
 //!
-//! - `src/<chassis>/` — chassis-specific source (chassis impl,
-//!   driver capability, render plumbing, etc.) for the desktop and
-//!   headless chassis. The hub chassis lives in `aether-chassis-hub`.
+//! - `src/desktop/` — the desktop chassis (chassis impl, winit driver
+//!   capability, render plumbing). The hub and headless chassis live
+//!   in `aether-chassis-hub` / `aether-chassis-headless`.
 //! - `src/bin/<chassis>.rs` — minimal entry point per binary
-//!   (`aether-substrate`, `aether-substrate-headless`,
-//!   `aether-substrate-harness`).
+//!   (`aether-substrate`, `aether-substrate-harness`).
 //!
 //! The substrate-harness chassis machinery and the in-process
 //! `SubstrateHarness` live in the `aether-harness-substrate` crate
@@ -27,7 +26,6 @@
 //! chassis surface.
 
 pub mod desktop;
-pub mod headless;
 
 pub use aether_component::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{
@@ -59,17 +57,14 @@ mod chassis_source_guard {
         // cap's flag key here when a new opt-in / opt-out cap lands.
         const CAP_FLAG_KEYS: &[&str] = &["AETHER_HTTP_SERVER_ENABLED", "AETHER_AUDIO_DISABLE"];
         let desktop = include_str!("desktop/chassis.rs");
-        let headless = include_str!("headless/chassis.rs");
         for key in CAP_FLAG_KEYS {
             let raw_read = format!("env::var(\"{key}\")");
-            for (chassis, src) in [("desktop", desktop), ("headless", headless)] {
-                assert!(
-                    !src.contains(&raw_read),
-                    "{chassis} chassis reads {key} via raw env::var — route it through the \
-                     cap's config API instead (see the `config` module's \
-                     \"Enable / disable convention\")",
-                );
-            }
+            assert!(
+                !desktop.contains(&raw_read),
+                "desktop chassis reads {key} via raw env::var — route it through the \
+                 cap's config API instead (see the `config` module's \
+                 \"Enable / disable convention\")",
+            );
         }
     }
 }

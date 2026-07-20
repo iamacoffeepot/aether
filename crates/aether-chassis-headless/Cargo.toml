@@ -1,0 +1,69 @@
+[package]
+name = "aether-chassis-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The headless chassis (issue #3811): std-timer tick driver, no GPU, no
+# window — the fleet engine the hub forks. Produces the
+# `aether-substrate-headless` binary over the shared `aether-chassis`
+# composition layer.
+
+[[bin]]
+name = "aether-substrate-headless"
+path = "src/bin/headless.rs"
+
+# Same `runtime` convention as the other chassis crates (ADR-0122).
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-chassis = { path = "../aether-chassis" }
+aether-substrate = { path = "../aether-substrate" }
+# The headless cap set: the common-cap configs the env threads through
+# `with_common_caps`, plus the headless fail-fast stubs — the nop
+# renderer, the Err-replying window/clipboard caps, and the unsupported
+# substrate-harness cap.
+aether-render = { path = "../aether-render", features = ["runtime"] }
+aether-window = { path = "../aether-window", features = ["runtime"] }
+aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-lifecycle = { path = "../aether-lifecycle" }
+aether-component = { path = "../aether-component" }
+aether-http = { path = "../aether-http" }
+aether-fs = { path = "../aether-fs" }
+aether-input = { path = "../aether-input" }
+# The headless chassis absorbs audio mail with a typed Err reply, so it
+# names the `SetMasterGain` kind pair without the cpal runtime.
+aether-audio = { path = "../aether-audio", features = ["runtime"] }
+aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
+aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
+aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
+aether-game = { path = "../aether-game" }
+aether-rpc = { path = "../aether-rpc" }
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+# `--describe` prints the BinaryManifest as JSON (ADR-0115).
+serde_json = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+# The tick driver's SIGINT/SIGTERM shutdown flag: signal-hook on Unix,
+# the `ctrlc` Ctrl-C fallback on Windows.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
+
+[dev-dependencies]
+# `locate_component_wasm` / `init_save_sandbox` / `test_namespace_roots`
+# — the shared wasm-discovery + sandbox helpers the autoload test boots
+# with.
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+
+[lints]
+workspace = true
