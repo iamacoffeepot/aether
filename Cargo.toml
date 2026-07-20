@@ -23,6 +23,8 @@ members = [
     "crates/aether-mesh",
     "crates/aether-kit",
     "crates/aether-capabilities",
+    "crates/aether-rpc",
+    "crates/aether-engine",
     "crates/aether-clipboard",
     "crates/aether-window",
     "crates/aether-trace",

@@ -41,10 +41,10 @@ use clap::{Args, Parser};
 // reading.
 pub use aether_anthropic::AnthropicOverlay;
 pub use aether_audio::AudioOverlay;
-pub use aether_capabilities::EngineOverlay;
 pub use aether_capabilities::http::HttpOverlay;
 pub use aether_capabilities::http::HttpServerOverlay;
 pub use aether_contentgen::ContentGenOverlay;
+pub use aether_engine::EngineOverlay;
 pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_gemini::GeminiOverlay;
 

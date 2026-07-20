@@ -1,8 +1,6 @@
 //! The `aether.engine.proxy:<id>` runtime half (ADR-0122 identity/runtime
-//! split). Compiled only under `feature = "runtime"` (the `mod runtime;`
-//! declaration in the parent carries the gate), so a transport-only build of
-//! the [`EngineProxy`](super::EngineProxy) identity never names these types
-//! nor pulls `aether_substrate`. The substrate-typed imports are gated once by
+//! split). The [`EngineProxy`](super::EngineProxy) identity file names none of
+//! these types. The substrate-typed imports are collected once by
 //! this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state, ctx types, and connect/heartbeat helpers through the single
 //! `use runtime::*` glob in the parent.
@@ -13,15 +11,15 @@
 //! state.
 
 use super::{EngineProxy, EngineProxyConfig};
-pub use crate::engine::kinds::{EngineAlive, EngineDied};
-use crate::engine::kinds::{EngineHeartbeatTick, ForwardEnvelope};
-use crate::rpc::RpcInboundReady;
-pub use crate::rpc::{CallSettled, MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
+pub use crate::kinds::{EngineAlive, EngineDied};
+use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 pub use aether_actor::Addressable;
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
+use aether_rpc::RpcInboundReady;
+pub use aether_rpc::{CallSettled, MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
 pub use aether_substrate::Mail;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -32,7 +30,7 @@ pub use std::process::Child;
 pub use std::sync::Arc;
 
 use super::heartbeat::HeartbeatHandle;
-use crate::engine::EngineServer;
+use crate::EngineServer;
 
 // The init-only bring-up helpers live in the native-only `connect` /
 // `heartbeat` submodules; re-export them here so the parent's `use runtime::*`

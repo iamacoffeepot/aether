@@ -243,7 +243,7 @@ impl Drop for Tunnel {
     /// Last-resort reap: if the process is torn down without an orderly
     /// `terminate_all`, still SIGTERM→SIGKILL the children so no hub /
     /// `aether-mcp` is orphaned. Mirrors `EngineProxy`'s Drop
-    /// (`aether-capabilities/src/engine/proxy.rs:320`).
+    /// (`aether-engine/src/proxy`).
     fn drop(&mut self) {
         let children = self.children.get_mut();
         for sup in children.values_mut() {

@@ -1,17 +1,15 @@
 //! Test-support for the RPC server round-trip path: a minimal echo actor
 //! plus its request / reply kinds — the far-end receiver of an RPC `Call`
-//! that actually replies. Used by the `rpc::server` round-trip tests
-//! (the client half lives in `aether-rpc` per ADR-0102) and by the
-//! `engine::proxy` test, which forwards onto this same `Call` path
-//! through a booted `RpcServerCapability`.
+//! that actually replies. Used by this crate's `server` round-trip tests
+//! and by `aether-engine`'s proxy test, which forwards onto this same `Call`
+//! path through a booted `RpcServerCapability`.
 //!
-//! Lives under `rpc::server` (not the crate root) because both consumers
-//! are RPC-server round-trips — `engine::proxy` already reaches into
-//! `crate::rpc::server` for the server cap. The whole module is
-//! `#[cfg(test)] pub mod` (gated at its `mod` declaration in the server
-//! `mod.rs`): `pub` only exists in test builds, so it is never part of
-//! the cap's shipped surface, and it stays reachable crate-wide from the
-//! sibling `engine::proxy` subtree.
+//! Lives under `server` (not the crate root) because both consumers are
+//! RPC-server round-trips — `aether-engine`'s proxy already reaches into
+//! `aether_rpc::server` for the server cap. The module is gated at its `mod`
+//! declaration on `any(test, feature = "test-support")`, so the `pub` reaches
+//! this crate's own tests and a sibling crate's dev-dependency build, never
+//! the shipped surface.
 //!
 //! The kinds live at this module's root (not nested in a `mod tests`)
 //! so the `Kind` derive's inventory submission stays addressable from a
@@ -21,13 +19,12 @@
 
 use serde::{Deserialize, Serialize};
 
-// The actor halves are substrate-typed (ADR-0122 split). The whole module
-// is `#[cfg(test)]` (gated at its `mod` declaration in `lib.rs`) and
-// tests always carry `runtime`, so these resolve; the `#[actor]` macro
-// additionally gates the emitted `NativeActor` / `Dispatch` runtime impls
-// behind `feature = "runtime"`. The kind types above stay always-on so
-// their `Kind`-derived inventory submissions register for the test
-// substrate's registry walk.
+// The actors are substrate-typed; the module's own gate keeps them out of a
+// shipped build. Both are the un-split `type State = Self` shape — the fixture
+// form the ADR-0122 split reserves for test-only actors — so their runtime
+// impls ride the macro's `not(wasm)` gate rather than a feature. The kind types
+// stay always-on so their `Kind`-derived inventory submissions register for the
+// test substrate's registry walk.
 use aether_actor::actor;
 use aether_substrate::actor::native::TaskQueue;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
@@ -57,29 +54,22 @@ pub struct TestEchoReply {
 /// Test-only echo actor: handles [`TestEchoRequest`] and replies with a
 /// matching [`TestEchoReply`]. The minimum viable receiver for
 /// exercising the RPC `Call → ReplyEvent → ReplyEnd` path without
-/// coupling a test to a production cap's semantics.
-/// `aether.rpc.test.echo` identity (ADR-0122 split). A ZST carrying only
-/// the addressing markers `#[actor]` emits always-on; the (empty) runtime
-/// state lives in `TestEchoActorState`.
+/// coupling a test to a production cap's semantics. Holds nothing.
 pub struct TestEchoActor;
-
-/// Runtime state for [`TestEchoActor`]: a named empty stand-in (ADR-0122
-/// hard rule — never `()` / `Self`) for an actor that holds nothing.
-pub struct TestEchoActorState;
 
 #[actor(singleton)]
 impl NativeActor for TestEchoActor {
-    type State = TestEchoActorState;
     type Config = ();
     const NAMESPACE: &'static str = "aether.rpc.test.echo";
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<TestEchoActorState, BootError> {
-        Ok(TestEchoActorState)
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
     }
 
-    /// Stateless echo handler — the empty state is unused.
+    /// Stateless echo handler.
+    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::single]
-    fn on_echo(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) -> TestEchoReply {
+    fn on_echo(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) -> TestEchoReply {
         TestEchoReply { value: mail.value }
     }
 }
@@ -117,27 +107,19 @@ pub struct DeferredEchoReply {
 /// caps' deferred-reply shape (submit -> spawned worker -> completion wake
 /// -> re-reply). The whole point is that the reply happens *after* the
 /// handler returns, so the framework-held settlement hold must keep the
-/// chain open across the gap.
-/// `aether.rpc.test.deferred_echo` identity (ADR-0122 split). A ZST
-/// carrying the addressing markers; its runtime state — the
-/// `TaskQueue` backing the off-thread dispatch — lives in
-/// `DeferredEchoActorState`.
-pub struct DeferredEchoActor;
-
-/// Runtime state for [`DeferredEchoActor`]: the ADR-0093 hold-until-resolve
-/// task queue the deferred handler submits onto.
-pub struct DeferredEchoActorState {
+/// chain open across the gap. Holds the [`TaskQueue`] the deferred handler
+/// submits onto.
+pub struct DeferredEchoActor {
     tasks: TaskQueue,
 }
 
 #[actor(singleton)]
 impl NativeActor for DeferredEchoActor {
-    type State = DeferredEchoActorState;
     type Config = ();
     const NAMESPACE: &'static str = "aether.rpc.test.deferred_echo";
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<DeferredEchoActorState, BootError> {
-        Ok(DeferredEchoActorState { tasks: TaskQueue::new(4) })
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { tasks: TaskQueue::new(4) })
     }
 
     /// Submit the echo off-thread via the ADR-0093 dispatch primitive.
@@ -146,9 +128,9 @@ impl NativeActor for DeferredEchoActor {
     /// bug used to settle in. The framework-held `SettlementHold` keeps
     /// the chain open until the deferred re-reply.
     #[handler::single]
-    fn on_deferred_echo(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DeferredEchoRequest) {
+    fn on_deferred_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: DeferredEchoRequest) {
         let value = mail.value;
-        state.tasks.submit(ctx, move || {
+        self.tasks.submit(ctx, move || {
             // Brief blocking work standing in for a provider call.
             thread::sleep(Duration::from_millis(50));
             DeferredEchoReply { value }
@@ -159,8 +141,8 @@ impl NativeActor for DeferredEchoActor {
     /// hold after the reply — `Sent` precedes `Release`), then free the
     /// in-flight slot.
     #[handler(task)]
-    fn on_deferred_echo_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<DeferredEchoReply>) {
+    fn on_deferred_echo_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<DeferredEchoReply>) {
         done.resolve(ctx);
-        state.tasks.on_complete(ctx);
+        self.tasks.on_complete(ctx);
     }
 }

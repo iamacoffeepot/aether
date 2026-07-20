@@ -1,6 +1,6 @@
-use aether_capabilities::rpc::MailEnvelope;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{KindDescriptor, KindId};
+use aether_rpc::MailEnvelope;
 use rmcp::ErrorData as McpError;
 use std::collections::HashMap;
 

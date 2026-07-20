@@ -1,7 +1,7 @@
 //! `aether.http.server` — substrate HTTP server capability (ADR-0108,
 //! issue 1760).
 //!
-//! Singleton actor modeled on [`RpcServerCapability`]. It binds a
+//! Singleton actor modeled on `RpcServerCapability`. It binds a
 //! `TcpListener` on the configured address at init, runs a sidecar accept
 //! thread that hands each accepted socket to a per-connection reader
 //! thread. A reader parses one HTTP/1.1 request (request line + headers +
@@ -27,8 +27,6 @@
 //! [`HttpServerCapability`]; the state-bearing runtime (the listener, the
 //! accept thread, the connection table) lives in the `runtime` module behind the
 //! one `feature = "runtime"` gate.
-//!
-//! [`RpcServerCapability`]: crate::rpc::RpcServerCapability
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the decoded

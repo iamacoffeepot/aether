@@ -21,7 +21,6 @@ use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::LifecycleCapability;
-use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
     ComponentHostConfig, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
@@ -33,6 +32,7 @@ use aether_gemini::GeminiConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
 use aether_render::HeadlessRenderCapability;
+use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};

@@ -64,23 +64,15 @@ runtime = [
     "dep:base64",
     "dep:clap",
     "dep:confique",
-    "dep:dirs",
     "dep:httparse",
-    "dep:serde_json",
     "dep:sha2",
     "dep:tracing",
     "dep:ureq",
     "dep:url",
     "dep:wasmtime",
-    # The retained `aether-window` dep (below) is identity-only by default;
-    # forward its runtime half so chassis / test builds of this crate boot
-    # the fail-fast `HeadlessWindowCapability` runtime the `rpc` server test
-    # exercises.
-    "aether-window/runtime",
     # The retained `aether-trace` dep (below) is identity-only by default;
     # forward its runtime half so chassis / test builds of this crate boot
-    # the `TraceDispatchCapability` runtime that `engine/proxy` addresses
-    # and the `rpc` / `http` server tests exercise.
+    # the `TraceDispatchCapability` runtime the `http` server tests exercise.
     "aether-trace/runtime",
 ]
 
@@ -109,27 +101,17 @@ aether-fs = { path = "../aether-fs", default-features = false }
 # an unconditional dep leaves the wasm-header-only build unaffected.
 aether-capabilities-derive = { path = "../aether-capabilities-derive" }
 aether-kinds = { path = "../aether-kinds" }
-# `alloc` rides along for the `rpc::wire` + `trace_walk` modules (folded
-# in per ADR-0124), whose owned-`String`/`Vec` wire types need serde's
-# alloc impls even in the marker-only isolated build.
+# `alloc` rides along for the wire-shaped kind types whose owned-`String` /
+# `Vec` fields need serde's alloc impls even in the marker-only isolated
+# build.
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
-# iamacoffeepot/aether#3717: the `aether.window` cap was extracted to its
-# own `aether-window` crate, but capabilities RETAINS an identity-only
-# dependency on it — the `rpc` server test (`rpc/server/tests.rs`) still
-# addresses `HeadlessWindowCapability` to exercise the `Component`
-# local-RPC-server reply path. `default-features = false` keeps only the
-# wasm-safe identity; the `runtime` feature above forwards
-# `aether-window/runtime` so chassis / test builds get the fail-fast
-# runtime half.
-aether-window = { path = "../aether-window", default-features = false }
 # iamacoffeepot/aether#3719: the `aether.trace` cap was extracted to its
 # own `aether-trace` crate, but capabilities RETAINS an identity-only
-# dependency on it — `engine/proxy` (real code) plus the `rpc` and `http`
-# server tests still address the trace cap. `default-features = false`
-# keeps only the wasm-safe identity + walk; the `runtime` feature above
-# forwards `aether-trace/runtime` so chassis / test builds get the
-# `TraceDispatchCapability` runtime half.
+# dependency on it — the `http` server tests still address the trace cap.
+# `default-features = false` keeps only the wasm-safe identity + walk; the
+# `runtime` feature above forwards `aether-trace/runtime` so chassis / test
+# builds get the `TraceDispatchCapability` runtime half.
 aether-trace = { path = "../aether-trace", default-features = false }
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
@@ -151,19 +133,14 @@ clap = { workspace = true, optional = true }
 # `*Config::from_env`. `default-features = false` keeps it env-only —
 # no TOML/YAML file parsers until ADR-0090's config-file step.
 confique = { workspace = true, optional = true }
-dirs = { version = "6", optional = true }
 # ADR-0108 §1: the inbound HTTP/1.1 request-line + header parser for the
 # `aether.http.server` cap. Pure-Rust, no_std-capable, already a transitive
 # dependency; rides the `runtime` feature so wasm / marker-only builds skip it.
 httparse = { version = "1", optional = true }
-# JSON serialization for the engine artifact registry + the hub binary
-# store (`engine/server/artifacts.rs`, `engine/store`).
-serde_json = { workspace = true, optional = true }
-# ADR-0115 (issue 1953): sha256 content addressing for the hub binary
-# store. Rides the `runtime` feature — the store is native-only (it forks
-# `--describe` and reads staged paths), so wasm / marker builds skip it.
-# The workspace entry is `default-features = false` (for the no_std
-# `aether-bloomery` consumer); this native store re-adds `std`.
+# sha256 content addressing for the component-load path
+# (`component/runtime`). Rides the `runtime` feature — that path is
+# native-only. The workspace entry is `default-features = false` (for the
+# no_std `aether-bloomery` consumer); this consumer re-adds `std`.
 sha2 = { workspace = true, optional = true, features = ["std"] }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 ureq = { version = "3", optional = true, features = ["rustls"] }

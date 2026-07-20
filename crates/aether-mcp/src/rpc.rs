@@ -20,10 +20,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_capabilities::rpc::{
-    MailEnvelope, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcReaderHandle, WireFrame,
-};
 use aether_codec::frame::FrameError;
+use aether_rpc::{MailEnvelope, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcReaderHandle, WireFrame};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -538,9 +536,9 @@ fn register_call(
 #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::RpcSession;
-    use aether_capabilities::rpc::{HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{KindId, MailboxId};
+    use aether_rpc::{HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
     use std::io::{BufReader, ErrorKind};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};

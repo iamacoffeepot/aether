@@ -21,10 +21,10 @@ fallback or omits the runtime.
 | `aether.http` | outbound HTTP fetch | `aether-capabilities/src/http/client` | [HTTP egress](../systems/http.md) |
 | `aether.http.server` | inbound HTTP, routes, streams, websocket | `aether-capabilities/src/http/server` | [HTTP server](../systems/http-server.md) |
 | `aether.tcp` | listener/connect control and session actors | `aether-capabilities/src/tcp` | [TCP](../systems/tcp.md) |
-| `aether.rpc.server` | framed internal process RPC | `aether-capabilities/src/rpc` | [RPC](../systems/rpc.md) |
+| `aether.rpc.server` | framed internal process RPC | `aether-rpc/src` | [RPC](../systems/rpc.md) |
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-capabilities/src/inventory` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-capabilities/src/trace` | [Tracing](../systems/tracing-and-settlement.md) |
-| `aether.engine` | hub fleet and artifact control | `aether-capabilities/src/engine` | [Engine fleet](../operating/engine-fleet.md) |
+| `aether.engine` | hub fleet and artifact control | `aether-engine/src` | [Engine fleet](../operating/engine-fleet.md) |
 | `aether.anthropic` | Messages API and CLI text generation | `aether-capabilities/src/anthropic` | [Content generation](../systems/content-generation.md) |
 | `aether.gemini` | image and music generation | `aether-capabilities/src/gemini` | [Content generation](../systems/content-generation.md) |
 | `aether.game.gateway` | trusted player/session-to-sim binding | `aether-capabilities/src/game` | [Player sessions](../systems/player-sessions.md) |

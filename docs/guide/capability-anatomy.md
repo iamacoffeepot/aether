@@ -192,7 +192,7 @@ pretend capability.
 | hub/process routing | FleetBench |
 
 Shared RPC test echo code currently lives under
-`aether-capabilities/src/rpc/server/test_echo.rs`; engine/proxy tests reuse it.
+`aether-rpc/src/server/test_echo.rs`; engine/proxy tests reuse it.
 Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 
 ## Review checklist

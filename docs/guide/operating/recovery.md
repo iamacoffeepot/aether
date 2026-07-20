@@ -219,7 +219,7 @@ invalidating the successful engine capture, so inspect both results. See
 
 - Recovery-visible tool contracts: `crates/aether-mcp/src/tools/mod.rs`
 - Fleet outcomes: `crates/aether-mcp/src/tools/engine.rs` and
-  `crates/aether-capabilities/src/engine/server/runtime.rs`
+  `crates/aether-engine/src/server/runtime.rs`
 - RPC reconnect and timeout behavior: `crates/aether-mcp/src/rpc.rs`
 - Mail timeout projections: `crates/aether-mcp/src/tools/mail.rs`
 - Live kind/component lookup: `crates/aether-mcp/src/tools/state.rs` and

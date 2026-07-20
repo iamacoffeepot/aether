@@ -215,7 +215,7 @@ it. This does not delete the hub's stored component artifacts.
   `crates/aether-mcp/src/tools/components.rs`
 - Selector resolution, boot staging, and live kind caching:
   `crates/aether-mcp/src/tools/state.rs`
-- Hub artifact store: `crates/aether-capabilities/src/engine/store/`
+- Hub artifact store: `crates/aether-engine/src/store/`
 - Component host load/list/describe/drop/replace:
   `crates/aether-capabilities/src/component/`
 - Empty-slot drop behavior:

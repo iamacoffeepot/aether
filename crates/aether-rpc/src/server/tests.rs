@@ -2,7 +2,7 @@
 // address Call frames — reference id derivation, not sibling-cap addressing.
 #![allow(clippy::disallowed_methods)]
 use super::*;
-use crate::rpc::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+use crate::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
@@ -42,7 +42,7 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
 /// handshake. Shared by the deferred-reply settlement tests. Returns
 /// `(chassis, stream)`; both must stay alive for the listener.
 fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, TcpStream) {
-    use crate::rpc::server::test_echo::DeferredEchoActor;
+    use crate::server::test_echo::DeferredEchoActor;
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -61,7 +61,7 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
 }
 
 fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
-    use crate::rpc::server::test_echo::TestEchoActor;
+    use crate::server::test_echo::TestEchoActor;
 
     let (registry, mailer) = fresh_substrate();
     Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -157,8 +157,8 @@ fn ping_pong_roundtrip() {
 /// phase 2.
 #[test]
 fn call_echo_round_trip_event_then_end() {
-    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
-    use crate::rpc::{MailEnvelope, MailboxAddress};
+    use crate::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
+    use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
@@ -223,7 +223,7 @@ fn call_echo_round_trip_event_then_end() {
 /// `Err` rides home as a `ReplyEvent` before the `ReplyEnd`.
 #[test]
 fn call_headless_window_set_mode_err_reaches_component_reply() {
-    use crate::rpc::{MailEnvelope, MailboxAddress};
+    use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::{SetWindowMode, SetWindowModeResult, WindowMode};
@@ -297,8 +297,8 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
 /// `ReplyEnd`, then the late reply dropped).
 #[test]
 fn call_deferred_echo_settles_after_reply() {
-    use crate::rpc::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
-    use crate::rpc::{MailEnvelope, MailboxAddress};
+    use crate::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
+    use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
@@ -371,8 +371,8 @@ fn call_deferred_echo_settles_after_reply() {
 /// behind 50ms sleeps); the test pairs by `value`.
 #[test]
 fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
-    use crate::rpc::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
-    use crate::rpc::{MailEnvelope, MailboxAddress};
+    use crate::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
+    use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::NamedMail;
@@ -467,8 +467,8 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
 /// no stale `ReplyEvent` / `ReplyEnd` frames are in the way.
 #[test]
 fn call_without_cid_is_fire_and_forget() {
-    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
-    use crate::rpc::{MailEnvelope, MailboxAddress};
+    use crate::server::test_echo::{TestEchoActor, TestEchoRequest};
+    use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
@@ -548,7 +548,7 @@ fn wire_version_mismatch_kicks_connection() {
 /// as `Pong`, proving the session survived.
 #[test]
 fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
-    use crate::rpc::RpcError;
+    use crate::RpcError;
     use aether_codec::frame::{MAX_FRAME_SIZE, max_frame_size};
     use std::io::Write;
 
@@ -612,7 +612,7 @@ fn client_peer_kind() -> PeerKind {
 
 /// Full socket round-trip: boot `RpcServerCapability` + the echo
 /// actor + `TraceDispatchCapability`, connect a real
-/// [`RpcClient`](crate::rpc::wire::RpcClient), fire a `Call` carrying a
+/// [`RpcClient`](crate::wire::RpcClient), fire a `Call` carrying a
 /// `TestEchoRequest`, and drain the inbound channel — expect
 /// `ReplyEvent { TestEchoReply }` then `ReplyEnd { Ok }`. This is the
 /// only test exercising the actual TCP client↔server path end to end
@@ -620,8 +620,8 @@ fn client_peer_kind() -> PeerKind {
 /// ADR-0124; this integration test stays here, where the server lives).
 #[test]
 fn call_echo_round_trips_over_the_socket() {
-    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
-    use crate::rpc::{MailEnvelope, MailboxAddress, RpcClient};
+    use crate::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
+    use crate::{MailEnvelope, MailboxAddress, RpcClient};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 

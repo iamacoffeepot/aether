@@ -1,18 +1,15 @@
 //! The `aether.engine` engines-cap runtime half (ADR-0122 identity/runtime
-//! split). Compiled only under `feature = "runtime"` (the `mod runtime;`
-//! declaration in the parent carries the gate), so a transport-only build of
-//! the [`EngineServer`](super::EngineServer) identity never names these types
-//! nor pulls `aether_substrate`. The substrate-typed imports are gated once by
+//! split). The [`EngineServer`](super::EngineServer) identity file names none
+//! of these types. The substrate-typed imports are collected once by
 //! this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state, ctx types, artifact/fleet helpers, and result kinds through the
 //! single `use runtime::*` glob in the parent.
 
 use super::{EngineConfig, EngineServer};
-pub use crate::engine::kinds::ForwardEnvelope;
-use crate::engine::kinds::{EngineAlive, EngineDied};
-pub use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
-pub use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
-use crate::rpc::RouteEnvelope;
+pub use crate::kinds::ForwardEnvelope;
+use crate::kinds::{EngineAlive, EngineDied};
+pub use crate::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
+pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
 pub use aether_kinds::{
@@ -24,6 +21,7 @@ use aether_kinds::{
     ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
     UploadBinary, UploadComponent,
 };
+use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Mail;
 pub use aether_substrate::Subname;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
