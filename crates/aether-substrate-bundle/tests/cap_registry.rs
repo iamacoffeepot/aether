@@ -82,7 +82,7 @@ fn cap_registry_reports_accepted_kinds() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "probe");
     let caps = bench.capability_registry();
 
@@ -100,7 +100,7 @@ fn cap_registry_reports_fallback() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "strict");
     let caps = bench.capability_registry();
 
@@ -124,7 +124,7 @@ fn cap_registry_updates_on_replace() {
     let Some(kit_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_named(&mut bench, &probe_path, "swappable");
 
     // Pre-replace: probe accepts SetRender, rejects CameraCreate.
@@ -179,7 +179,7 @@ fn cap_registry_clears_on_drop() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "victim");
     assert!(bench.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
@@ -208,8 +208,12 @@ fn cap_registry_covers_native_cap() {
         return;
     }
     let sandbox = init_save_sandbox("cap-registry-fs");
-    let bench =
-        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let bench = SubstrateBench::builder()
+        .full()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let fs_mbox = mailbox_id_from_name(FsCapability::NAMESPACE);
     let caps = bench.capability_registry();

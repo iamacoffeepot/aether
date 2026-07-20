@@ -57,14 +57,14 @@ fn same_payload_fs_replies_demux_by_request_id() {
     };
 
     let sandbox = init_save_sandbox("reply-correlation");
-    let mut bench = match SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build()
-    {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-            return;
-        }
-    };
+    let mut bench =
+        match SubstrateBench::builder().full().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
 
     let path = write_fixture("same-payload.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");

@@ -145,7 +145,7 @@ fn assets_dir() -> PathBuf {
 fn build_bench() -> SubstrateBench {
     let sandbox = init_save_sandbox("widget-render-interaction");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
+    SubstrateBench::builder().full().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
 }
 
 /// Deterministically load `RobotoMono.ttf` into the shared `aether.text`

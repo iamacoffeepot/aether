@@ -61,7 +61,7 @@ fn build_bench_without_assets_root() -> SubstrateBench {
 fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateBench {
     let sandbox = init_save_sandbox(sandbox_name);
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets, config: sandbox.to_path_buf() };
-    SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
+    SubstrateBench::builder().full().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {

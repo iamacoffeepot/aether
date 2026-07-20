@@ -241,8 +241,11 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     let server_addr = listener.local_addr().expect("controlled peer address").to_string();
     let session_identity = resolve_embedded("controlled-player-session");
     let (event_rx, command_tx, peer) = spawn_controlled_peer(listener, session_identity);
-    let mut bench =
-        SubstrateBench::start_with_size(FRAME_WIDTH, FRAME_HEIGHT).expect("boot controlled client SubstrateBench");
+    let mut bench = SubstrateBench::builder()
+        .size(FRAME_WIDTH, FRAME_HEIGHT)
+        .full()
+        .build()
+        .expect("boot controlled client SubstrateBench");
 
     load_export(&mut bench, &wasm, "aether.kit.camera", CAMERA_NAME, Vec::new());
     bench
@@ -336,6 +339,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
     let sim_mailbox = resolve_embedded(SIM_NAME);
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .game_gateway(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),

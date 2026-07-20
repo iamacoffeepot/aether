@@ -235,7 +235,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // `save://` / `config://` sink into a per-process sandbox tempdir.
     let sandbox = init_save_sandbox("widget-text-alignment");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    let mut bench = SubstrateBench::builder().size(240, 220).namespace_roots(roots).build().expect("boot");
+    let mut bench = SubstrateBench::builder().full().size(240, 220).namespace_roots(roots).build().expect("boot");
     let font_id = load_font(&mut bench);
     load_panel(&mut bench, &wasm, font_id);
 

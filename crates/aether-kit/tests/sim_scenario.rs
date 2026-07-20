@@ -80,7 +80,7 @@ fn turn_sim_moves_in_tick_order_and_replays_byte_identically_through_real_wasm()
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(96, 96).expect("boot");
+    let mut bench = SubstrateBench::builder().size(96, 96).full().build().expect("boot");
     let first = load_sim(&mut bench, &wasm_path, FIRST_SIM_NAME);
     let second = load_sim(&mut bench, &wasm_path, SECOND_SIM_NAME);
 

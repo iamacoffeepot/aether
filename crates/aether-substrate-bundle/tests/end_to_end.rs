@@ -55,7 +55,7 @@ fn tick_roundtrip_component_to_sink() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
@@ -83,7 +83,7 @@ fn batched_ticks_preserve_per_mailbox_count() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 

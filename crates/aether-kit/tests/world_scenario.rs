@@ -131,7 +131,7 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::builder().size(WIDTH, HEIGHT).full().build().expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 
@@ -214,7 +214,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::builder().size(WIDTH, HEIGHT).full().build().expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
     let edge_brush_source = MarkRef { id: MarkId::new(14), revision: 1 };
@@ -434,7 +434,7 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::builder().size(WIDTH, HEIGHT).full().build().expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 

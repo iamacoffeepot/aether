@@ -81,7 +81,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(200, 100).expect("boot");
+    let mut bench = SubstrateBench::builder().size(200, 100).full().build().expect("boot");
     let region_a = load_probe(&mut bench, &fixtures_wasm, "region-a");
     let region_b = load_probe(&mut bench, &fixtures_wasm, "region-b");
     let mut b_lanes = RegionInputLanes::ALL;
@@ -151,7 +151,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(200, 100).expect("boot");
+    let mut bench = SubstrateBench::builder().size(200, 100).full().build().expect("boot");
     let region_a = load_probe(&mut bench, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut bench, &fixtures_wasm, "focus-b");
     let a = region("focus-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL);

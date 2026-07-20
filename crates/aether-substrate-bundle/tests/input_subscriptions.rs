@@ -92,7 +92,7 @@ fn empty_subscribers_means_no_delivery() {
     if require_runtime("aether_test_fixtures_bundle").is_none() {
         return;
     }
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     send_keys(&mut bench, 2);
     assert_eq!(
         bench.count_observed(KeyObserved::NAME),
@@ -113,7 +113,7 @@ fn subscribed_component_receives_published_text_input() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let _mbox = load_probe_named(&mut bench, &wasm_path, "typist");
     let baseline = bench.count_observed(TextInputObserved::NAME);
 
@@ -131,7 +131,7 @@ fn subscribed_component_receives_published_keys() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let _mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(KeyObserved::NAME);
 
@@ -148,7 +148,7 @@ fn two_subscribers_each_receive_every_key() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let _mbox_a = load_probe_named(&mut bench, &wasm_path, "a");
     let _mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
     let baseline = bench.count_observed(KeyObserved::NAME);
@@ -171,7 +171,7 @@ fn unsubscribe_stops_delivery() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(KeyObserved::NAME);
 
@@ -203,7 +203,7 @@ fn drop_clears_subscriptions() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_probe_named(&mut bench, &wasm_path, "victim");
     let baseline = bench.count_observed(KeyObserved::NAME);
 

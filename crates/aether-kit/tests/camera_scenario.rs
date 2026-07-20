@@ -87,7 +87,7 @@ fn camera_component_lifecycle() {
         return;
     };
 
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     // A few ticks lets the component finish init, run on_tick, and
@@ -112,7 +112,7 @@ fn camera_default_static_publishes_view_proj() {
         return;
     };
 
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     // Five ticks: enough for init + a handful of publishes to surface
@@ -142,7 +142,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
         return;
     };
 
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     bench.execute(vec![("pre", BenchOp::advance(2))]).expect("pre-destroy advance");

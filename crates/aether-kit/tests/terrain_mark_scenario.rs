@@ -155,6 +155,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     fs::write(sandbox.join(water_world_path), authored_water.to_bytes()).expect("write authored water world fixture");
 
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(WIDTH, HEIGHT)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()

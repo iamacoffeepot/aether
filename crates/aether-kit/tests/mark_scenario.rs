@@ -58,7 +58,7 @@ fn mark_crud_and_allocation_survive_component_replace() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mailbox_id = load_mark_book(&mut bench, &wasm_path);
     let address = component_address();
 

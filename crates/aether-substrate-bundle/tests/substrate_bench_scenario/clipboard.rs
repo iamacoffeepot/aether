@@ -9,7 +9,7 @@ fn clipboard_set_then_get_round_trips_in_memory() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).build().expect("boot");
+    let mut bench = SubstrateBench::builder().full().size(64, 48).build().expect("boot");
 
     let result = bench
         .execute(vec![
@@ -37,6 +37,7 @@ fn unavailable_clipboard_err_replies_to_get_and_set() {
         return;
     }
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(64, 48)
         .clipboard_mode(SubstrateBenchClipboardMode::Unavailable)
         .build()

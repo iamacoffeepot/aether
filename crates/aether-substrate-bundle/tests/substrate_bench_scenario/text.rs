@@ -24,6 +24,7 @@ fn text_draws_a_screen_space_string() {
 
     let (frame_width, frame_height) = (128u32, 64u32);
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(frame_width, frame_height)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -114,8 +115,12 @@ fn text_draw_clip_bounds_glyph_pixels() {
     let sandbox = init_save_sandbox("substrate-bench-text-clip");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
-    let mut bench =
-        SubstrateBench::builder().size(128, 64).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .full()
+        .size(128, 64)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
     let loaded = bench
         .execute(vec![(
             "load",
@@ -207,8 +212,12 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     let sandbox = init_save_sandbox("substrate-bench-font-metrics");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
-    let mut bench =
-        SubstrateBench::builder().size(64, 32).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .full()
+        .size(64, 32)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     // Grab by path with no prior load — exercises load-on-miss.
     let grabbed = bench
@@ -268,6 +277,7 @@ fn text_screen_origin_shifts_centroid() {
 
     let (frame_width, frame_height) = (256u32, 128u32);
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(frame_width, frame_height)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -372,6 +382,7 @@ fn text_draws_world_space_label() {
 
     let (frame_width, frame_height) = (128u32, 96u32);
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(frame_width, frame_height)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()

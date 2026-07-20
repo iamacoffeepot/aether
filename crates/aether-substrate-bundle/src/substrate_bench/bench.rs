@@ -41,18 +41,22 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Addressable;
+use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_fs::NamespaceRoots;
-use aether_game::GameGatewayConfig;
+use aether_game::{GameGatewayCapability, GameGatewayConfig};
+use aether_input::{InputCapability, InputConfig};
 use aether_render::{DrawTexturedQuads, RenderCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning, Source,
-    SourceAddr, SubstrateBoot,
+    EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
+    Source, SourceAddr, SubstrateBoot,
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
+use aether_tcp::TcpCapability;
+use aether_text::TextCapability;
 
-use super::chassis::{SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS};
+use super::chassis::{ComposeFn, SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS};
 use super::config::SubstrateBenchClipboardMode;
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
@@ -151,7 +155,9 @@ pub struct SubstrateBench {
     capture_queue: CaptureQueue,
     events_rx: EventReceiver,
 
-    gpu: Gpu,
+    /// Offscreen wgpu pipeline, `Some` iff the builder composed render
+    /// (issue #3764). Captures and overlay snapshots require it.
+    gpu: Option<Gpu>,
 
     /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
     /// fires one `LifecycleAdvance` here per requested tick; the
@@ -243,8 +249,11 @@ pub struct SubstrateBenchBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
-    clipboard_mode: SubstrateBenchClipboardMode,
-    game_gateway: GameGatewayConfig,
+    clipboard_mode: Option<SubstrateBenchClipboardMode>,
+    game_gateway: Option<GameGatewayConfig>,
+    render: bool,
+    component_host: bool,
+    compose: Vec<ComposeFn>,
 }
 
 impl Default for SubstrateBenchBuilder {
@@ -258,8 +267,11 @@ impl Default for SubstrateBenchBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
-            clipboard_mode: SubstrateBenchClipboardMode::default(),
-            game_gateway: GameGatewayConfig::default(),
+            clipboard_mode: None,
+            game_gateway: None,
+            render: false,
+            component_host: false,
+            compose: Vec::new(),
         }
     }
 }
@@ -342,55 +354,83 @@ impl SubstrateBenchBuilder {
         self
     }
 
-    /// Select the clipboard actor composed into this bench. The default is
-    /// deterministic in-memory storage; `Unavailable` composes the fail-fast
-    /// companion for negative-path scenarios.
+    /// Compose a clipboard actor into this bench: `InMemory` is
+    /// deterministic storage, `Unavailable` the fail-fast companion for
+    /// negative-path scenarios. The default composes no clipboard at all
+    /// — clipboard mail warn-drops (issue #3764).
     #[must_use]
     pub fn clipboard_mode(mut self, mode: SubstrateBenchClipboardMode) -> Self {
-        self.clipboard_mode = mode;
+        self.clipboard_mode = Some(mode);
         self
     }
 
-    /// Configure the trusted player gateway for a real tcp loopback
-    /// scenario. The default is inert and binds no listener.
+    /// Compose the trusted player gateway, for a real tcp loopback
+    /// scenario. The default composes no gateway at all.
     #[must_use]
     pub fn game_gateway(mut self, config: GameGatewayConfig) -> Self {
-        self.game_gateway = config;
+        self.game_gateway = Some(config);
         self
     }
 
-    /// Boot the bench. Equivalent to `SubstrateBench::start_with_size` for
-    /// the default builder; overrides applied via the builder methods
-    /// flow through to `SubstrateBoot::builder` and the chassis-side
-    /// IO sink wiring.
+    /// Compose an arbitrary capability into this bench. The bench boots
+    /// its basics (trace dispatch, the bench cap, lifecycle, fail-fast
+    /// headless window) and each scenario composes exactly the caps it
+    /// needs on top (issue #3764); this is the generic surface for any
+    /// cap without boot-internal wiring — `.with_actor::<TextCapability>(())`,
+    /// `.with_actor::<InputCapability>(config)`, a scenario-local
+    /// `NativeActor`, and so on. Applied to the chassis builder in push
+    /// order, between the bench basics and lifecycle.
+    #[must_use]
+    pub fn with_actor<A>(mut self, config: A::Config) -> Self
+    where
+        A: NativeActor,
+        A::Config: Send + 'static,
+    {
+        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(config)));
+        self
+    }
+
+    /// Compose the render cap, its capture backend, and the offscreen
+    /// wgpu pipeline. Without this, captures and
+    /// [`SubstrateBench::committed_overlay_snapshot`] are unavailable and
+    /// `aether.render` mail warn-drops.
+    #[must_use]
+    pub fn with_render(mut self) -> Self {
+        self.render = true;
+        self
+    }
+
+    /// Compose the component host, the cap behind
+    /// `aether.component.{load,replace,drop}`. Any scenario that loads
+    /// wasm needs this.
+    #[must_use]
+    pub fn with_component_host(mut self) -> Self {
+        self.component_host = true;
+        self
+    }
+
+    /// Compose the full pre-#3764 cap set: render + component host +
+    /// input + tcp + text + in-memory clipboard + inert game gateway
+    /// (fs still rides `namespace_roots`). Transitional bridge for the
+    /// bundle-resident scenario tests and the standalone binary; a test
+    /// rehoming to its cap crate states its minimal composition instead.
+    #[must_use]
+    pub fn full(mut self) -> Self {
+        self.clipboard_mode.get_or_insert_with(SubstrateBenchClipboardMode::default);
+        self.game_gateway.get_or_insert_with(GameGatewayConfig::default);
+        self.with_render()
+            .with_component_host()
+            .with_actor::<InputCapability>(InputConfig::default())
+            .with_actor::<TcpCapability>(())
+            .with_actor::<TextCapability>(())
+    }
+
+    /// Boot the bench. Overrides applied via the builder methods flow
+    /// through to `SubstrateBoot::builder` and the chassis-side sink
+    /// wiring; the composed cap set is exactly the basics plus what the
+    /// builder chain added.
     pub fn build(self) -> Result<SubstrateBench, SubstrateBenchError> {
-        // Lower the per-field `Option` overrides onto the `Copy`
-        // `RingCapacities`, defaulting each unset field to the
-        // `aether-actor` const cap.
-        let default = RingCapacities::default();
-        let trace = self.trace_ring_capacity.unwrap_or(default.trace);
-        let ring_caps = RingCapacities {
-            log: self.log_ring_capacity.unwrap_or(default.log),
-            trace,
-            // The bench defaults the ceiling to the floor (a fixed,
-            // non-growing ring) so eviction tests that pin a small floor
-            // observe `truncated_before` deterministically; growth is
-            // opt-in via `trace_ring_max_capacity`. (Production chassis
-            // default the ceiling to `DEFAULT_TRACE_RING_MAX_CAP` instead,
-            // via `ActorRingConfig`.)
-            trace_max: self.trace_ring_max_capacity.unwrap_or(trace),
-        };
-        let settlement_cap = self.settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
-        SubstrateBench::start_inner(
-            self.width,
-            self.height,
-            self.namespace_roots,
-            self.pool_workers,
-            ring_caps,
-            settlement_cap,
-            self.clipboard_mode,
-            self.game_gateway,
-        )
+        SubstrateBench::start_inner(self)
     }
 }
 
@@ -403,40 +443,71 @@ impl SubstrateBench {
         SubstrateBenchBuilder::default()
     }
 
-    /// Boot a `SubstrateBench` at the default 800x600 offscreen size.
+    /// Boot a basics-only `SubstrateBench` at the default 800x600
+    /// offscreen size. Compose caps via [`Self::builder`].
     pub fn start() -> Result<Self, SubstrateBenchError> {
-        Self::start_with_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        Self::builder().build()
     }
 
-    /// Boot a `SubstrateBench` with a specific offscreen target size.
-    /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
+    /// Boot a basics-only `SubstrateBench` with a specific offscreen
+    /// target size. Width / height are clamped to a minimum of 1 inside
+    /// `Gpu::new` when render is composed.
     pub fn start_with_size(width: u32, height: u32) -> Result<Self, SubstrateBenchError> {
-        Self::start_inner(
+        Self::builder().size(width, height).build()
+    }
+
+    fn start_inner(builder: SubstrateBenchBuilder) -> Result<Self, SubstrateBenchError> {
+        let SubstrateBenchBuilder {
             width,
             height,
-            None,
-            None,
-            RingCapacities::default(),
-            SettlementConfig::from_env().to_cap(),
-            SubstrateBenchClipboardMode::default(),
-            GameGatewayConfig::default(),
-        )
-    }
+            namespace_roots,
+            pool_workers,
+            log_ring_capacity,
+            trace_ring_capacity,
+            trace_ring_max_capacity,
+            settlement_cap,
+            clipboard_mode,
+            game_gateway,
+            render,
+            component_host,
+            mut compose,
+        } = builder;
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "private lowering seam for the SubstrateBenchBuilder's independent boot overrides"
-    )]
-    fn start_inner(
-        width: u32,
-        height: u32,
-        namespace_roots: Option<NamespaceRoots>,
-        pool_workers: Option<usize>,
-        ring_caps: RingCapacities,
-        settlement_cap: Duration,
-        clipboard_mode: SubstrateBenchClipboardMode,
-        game_gateway: GameGatewayConfig,
-    ) -> Result<Self, SubstrateBenchError> {
+        // Lower the per-field `Option` overrides onto the `Copy`
+        // `RingCapacities`, defaulting each unset field to the
+        // `aether-actor` const cap. The bench defaults the trace ceiling
+        // to the floor (a fixed, non-growing ring) so eviction tests
+        // that pin a small floor observe `truncated_before`
+        // deterministically; growth is opt-in via
+        // `trace_ring_max_capacity`. (Production chassis default the
+        // ceiling to `DEFAULT_TRACE_RING_MAX_CAP` instead, via
+        // `ActorRingConfig`.)
+        let default = RingCapacities::default();
+        let trace = trace_ring_capacity.unwrap_or(default.trace);
+        let ring_caps = RingCapacities {
+            log: log_ring_capacity.unwrap_or(default.log),
+            trace,
+            trace_max: trace_ring_max_capacity.unwrap_or(trace),
+        };
+        let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
+
+        // Lower the typed clipboard / game options onto the generic
+        // compose surface — they are plain caps with no boot-internal
+        // wiring, kept as named builder options for discoverability.
+        if let Some(mode) = clipboard_mode {
+            compose.push(match mode {
+                SubstrateBenchClipboardMode::InMemory => {
+                    Box::new(|b| b.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory))
+                }
+                SubstrateBenchClipboardMode::Unavailable => {
+                    Box::new(|b| b.with_actor::<HeadlessClipboardCapability>(()))
+                }
+            });
+        }
+        if let Some(config) = game_gateway {
+            compose.push(Box::new(move |b| b.with_actor::<GameGatewayCapability>(config)));
+        }
+
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -459,8 +530,9 @@ impl SubstrateBench {
             events_tx,
             capture_queue: capture_queue.clone(),
             namespace_roots,
-            clipboard_mode,
-            game_gateway,
+            render,
+            component_host,
+            compose,
             // Issue #2509: the teardown gate honors the same resolved cap
             // (env knob or programmatic override) as the settlement-await
             // loops the bench stores this value for.
@@ -476,7 +548,7 @@ impl SubstrateBench {
         let (recording, loopback_rx) = RecordingBackend::new();
         boot.outbound.attach_backend(Arc::new(recording));
 
-        let gpu = Gpu::new(width, height, render_handles);
+        let gpu = render_handles.map(|handles| Gpu::new(width, height, handles));
 
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
@@ -557,9 +629,16 @@ impl SubstrateBench {
     /// advance or capture. An advance that commits an empty overlay frame
     /// clears the snapshot. Returned values own their data and are isolated
     /// from later frames.
+    ///
+    /// # Panics
+    /// Panics if the bench was built without [`SubstrateBenchBuilder::with_render`]
+    /// — there is no overlay pipeline to snapshot (issue #3764).
     #[must_use]
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
-        self.gpu.committed_overlay_snapshot()
+        self.gpu
+            .as_ref()
+            .expect("committed_overlay_snapshot requires a bench built with .with_render() (issue #3764)")
+            .committed_overlay_snapshot()
     }
 
     /// Tail `mailbox_name`'s per-actor log ring (ADR-0081). Mirrors
@@ -701,7 +780,7 @@ impl SubstrateBench {
         config: A::Config,
     ) -> aether_substrate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + aether_substrate::NativeActor,
+        A: aether_actor::Instanced + NativeActor,
     {
         self.passive.spawn_actor::<A>(subname, config)
     }
@@ -1255,7 +1334,14 @@ impl SubstrateBench {
                         ));
                     }
                 }
-                let result = CaptureFrameResult::from(self.gpu.render_and_capture(&req.checks, req.reference.as_ref()));
+                // A capture request can only originate from the render
+                // cap's capture backend, so `gpu` is `Some` on every
+                // reachable path; reply `Err` rather than panic if that
+                // invariant ever breaks.
+                let result = match self.gpu.as_mut() {
+                    Some(gpu) => CaptureFrameResult::from(gpu.render_and_capture(&req.checks, req.reference.as_ref())),
+                    None => CaptureFrameResult::Err { error: "render not composed — no capture pipeline".to_owned() },
+                };
                 for mail in req.after_mails {
                     self.queue.push(mail);
                 }
@@ -1273,7 +1359,9 @@ impl SubstrateBench {
                 // to move the reply below other work in this arm.
             }
             None => {
-                self.gpu.render();
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.render();
+                }
             }
         }
 
@@ -1386,7 +1474,7 @@ mod tests {
     /// the boot result rather than a separate adapter probe).
     #[test]
     fn boot_advance_capture_round_trip() {
-        let mut tb = match SubstrateBench::start_with_size(64, 48) {
+        let mut tb = match SubstrateBench::builder().size(64, 48).with_render().build() {
             Ok(tb) => tb,
             Err(e) => {
                 eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
@@ -1418,7 +1506,7 @@ mod tests {
     /// in-process.
     #[test]
     fn capture_frame_send_and_await_returns_png() {
-        let mut tb = match SubstrateBench::start_with_size(64, 48) {
+        let mut tb = match SubstrateBench::builder().size(64, 48).with_render().build() {
             Ok(tb) => tb,
             Err(e) => {
                 eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");

@@ -73,7 +73,7 @@ fn session_source_returns_none() {
     let Some(wasm_path) = require_runtime(SOURCE_OBSERVER) else {
         return;
     };
-    let mut bench = match SubstrateBench::start_with_size(64, 48) {
+    let mut bench = match SubstrateBench::builder().size(64, 48).full().build() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
@@ -104,7 +104,7 @@ fn component_source_returns_sender_mailbox() {
     let Some(wasm_path) = require_runtime(SOURCE_OBSERVER) else {
         return;
     };
-    let mut bench = match SubstrateBench::start_with_size(64, 48) {
+    let mut bench = match SubstrateBench::builder().size(64, 48).full().build() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
