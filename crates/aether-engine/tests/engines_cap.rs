@@ -47,60 +47,41 @@ pub struct ReplyCells {
     pub terminate: Arc<Mutex<Option<TerminateEngineResult>>>,
 }
 
-/// `aether.engine.test.reply_sink` **identity** (ADR-0122 identity/runtime
-/// split). A ZST carrying only the addressing — `Addressable` and the
-/// per-handler `HandlesKind` markers, emitted always-on by `#[actor]`. The
-/// state-bearing runtime (`ReplySinkState`) lives behind the bundle's one
-/// `feature = "runtime"` gate (default-on; the integration target rides it
-/// like the lib).
-pub struct ReplySink;
+/// Test-only reply sink registered at `aether.engine.test.reply_sink`,
+/// recording the latest reply of each engines-cap reply kind into the
+/// shared [`ReplyCells`]. A field-bearing test actor, so it stays the
+/// un-split `type State = Self` shape (ADR-0122), matching the cap's own
+/// `proxy::sinks` fixtures — this crate carries no `runtime` feature for
+/// a split shape to gate on.
+pub struct ReplySink {
+    cells: ReplyCells,
+}
 
-// The `#[actor]` attribute path stays always-on (the macro divides what
-// it emits). The substrate-typed ctx imports + the runtime state live in
-// the gated `runtime` module below, reached through the `use runtime::*`
-// glob.
 use aether_actor::actor;
-#[cfg(feature = "runtime")]
-#[allow(clippy::wildcard_imports)]
-use runtime::*;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 
 #[actor(singleton)]
 impl NativeActor for ReplySink {
-    type State = ReplySinkState;
     type Config = ReplyCells;
     const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
 
-    fn init(cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<ReplySinkState, BootError> {
-        Ok(ReplySinkState { cells })
+    fn init(cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { cells })
     }
 
     #[handler::single]
-    fn on_list_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
-        *state.cells.list.lock().expect("test setup: list cell mutex is never poisoned") = Some(reply);
+    fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
+        *self.cells.list.lock().expect("test setup: list cell mutex is never poisoned") = Some(reply);
     }
 
     #[handler::single]
-    fn on_spawn_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
-        *state.cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
+    fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
+        *self.cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
     }
 
     #[handler::single]
-    fn on_terminate_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
-        *state.cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
-    }
-}
-
-// The runtime half — the substrate-typed ctx imports + the state — gated
-// once here; the `#[actor] impl` above reaches it through the glob.
-#[cfg(feature = "runtime")]
-mod runtime {
-    use super::ReplyCells;
-    pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-
-    /// Runtime state for the reply sink: the shared cells the handlers
-    /// record into. The addressing identity is the ZST `ReplySink`.
-    pub struct ReplySinkState {
-        pub(super) cells: ReplyCells,
+    fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
+        *self.cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
     }
 }
 
@@ -212,7 +193,11 @@ mod tests {
 
     #[test]
     fn engines_cap_spawns_lists_and_terminates_a_real_headless_substrate() {
-        let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
+        // The forked headless chassis resolves through `dist/manifest.json`
+        // (`cargo xtask dist` first) — `CARGO_BIN_EXE_*` only resolves inside
+        // the package that defines the binary, and this suite lives in
+        // `aether-engine`, not the bundle.
+        let headless = aether_fleet_bench::headless_bin_path().to_string_lossy().into_owned();
         // Bootstrap the binary store with the headless bin so the cap
         // resolves a `default` selector to it (ADR-0115, #1954). Before
         // `boot()` — init reads the bootstrap env. Cleaned on success.
@@ -220,7 +205,7 @@ mod tests {
         let store_dir = env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
 
-        let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, headless));
+        let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
 
         // Spawn: the cap assigns a port, forks the substrate, and the
         // proxy retries the dial until the fresh process binds. Generous

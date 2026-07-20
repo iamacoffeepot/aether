@@ -296,6 +296,7 @@ dependencies = [
  "aether-actor",
  "aether-codec",
  "aether-data",
+ "aether-fleet-bench",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
