@@ -3,12 +3,8 @@
 //! `ActorLogRing` (ADR-0081) for the `typed_send_alive` info entry, then walk
 //! the `since` cursor to confirm it does not re-yield the seen entry.
 
-// Skip diagnostics emit `eprintln!` so `cargo test` runners surface a visible
-// "skipping: ..." line alongside `test ... ok` (issue 891).
-#![allow(clippy::print_stderr)]
-
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor` entries are
-// present in this test binary (same rationale as substrate_bench_scenario.rs).
+// present in this test binary (same rationale as cap_registry.rs).
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
@@ -19,9 +15,8 @@ mod tests {
 
     use aether_actor::Addressable;
     use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
+    use aether_substrate_bench::test_helpers::require_wasm;
     use aether_substrate_bench::{BenchOp, SubstrateBench};
-    use aether_substrate_bench_capture::test_helpers::require_runtime;
-    use aether_substrate_bundle::FullBenchExt;
 
     const PROBE_NAME: &str = "probe";
 
@@ -46,16 +41,10 @@ mod tests {
     /// `fleetbench_actor_logs_surface_the_probe_first_tick_entry`.
     #[test]
     fn substrate_bench_actor_logs_surface_the_probe_first_tick_entry() {
-        let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+        let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
             return;
         };
-        let mut bench = match SubstrateBench::builder().size(64, 48).full().build() {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-                return;
-            }
-        };
+        let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
 
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
         let loaded = bench
