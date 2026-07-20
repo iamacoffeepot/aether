@@ -116,6 +116,38 @@ bytemuck = { workspace = true, features = ["derive"] }
 # (push / open-append-seal / release / reclaim) checked against a shadow
 # model after every op. Lives in `mod heavy`. Dev-only.
 proptest.workspace = true
+# iamacoffeepot/aether#3770: the substrate-owned bench tests (cap_registry,
+# cost_table, substrate_bench_logs) rehomed here from
+# aether-substrate-bundle. They boot the in-process `SubstrateBench`
+# harness (issue #3765) — a dev-dep cycle (the bench depends on
+# aether-substrate), which cargo allows; aether-kit's bundle dev-dep was
+# the standing precedent.
+aether-substrate-bench = { path = "../aether-substrate-bench" }
+# The tests address the component host and probe the fs cap's registry
+# rows by its namespace/kinds.
+aether-actor = { path = "../aether-actor" }
+aether-component = { path = "../aether-component" }
+aether-fs = { path = "../aether-fs" }
+# The shared fixture `Kind` definitions the tests assert against, pinned
+# (`use … as _`) so the fixture kinds' descriptor entries land in each
+# test binary.
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+# The cap-registry replace test swaps the probe wasm for aether-kit's
+# camera export and asserts on `aether_kit::camera::CameraCreate`.
+aether-kit = { path = "../aether-kit" }
+# iamacoffeepot/aether#3766: the fixture crate whose wasm these tests
+# load, declared so the source→consumer coupling is cargo-visible —
+# determinator re-runs these tests when the fixture changes, and xtask's
+# wasm-consumer rule fires the dist pre-build. The tests locate the built
+# wasm by stem, so the code never imports the crate.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+
+# cargo-machete's source-only scan cannot see the wasm-coupling dev-dep:
+# the tests load the fixture's built wasm by stem rather than importing
+# the crate, so the cargo edge exists purely for determinator /
+# dist-pre-build visibility (iamacoffeepot/aether#3766).
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true

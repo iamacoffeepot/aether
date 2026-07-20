@@ -601,9 +601,15 @@ name = "aether-substrate"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-data",
  "aether-derive",
+ "aether-fs",
  "aether-kinds",
+ "aether-kit",
+ "aether-substrate-bench",
+ "aether-test-fixtures-bundle",
+ "aether-test-fixtures-kinds",
  "bytemuck",
  "confique",
  "crossbeam-channel",

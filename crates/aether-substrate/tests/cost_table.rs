@@ -12,10 +12,9 @@
 //! a fold only records if the cache holds the cell, so a nonzero sample
 //! count after dispatch is end-to-end evidence the stamp ran.
 //!
-//! Skipped when no wgpu adapter / no pre-built component wasm (same gates
-//! as the other bench integration tests).
+//! Skipped when the component wasm hasn't been pre-built (the bench
+//! composes no render cap, so there is no wgpu gate).
 
-use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
@@ -23,8 +22,8 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -57,10 +56,10 @@ fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
 /// real component — the path the in-crate unit tests can only stub.
 #[test]
 fn init_seeds_cells_and_dispatch_folds() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let mbox = load_probe(&mut bench, &wasm_path);
 
     // At construction, before any dispatch: both declared handlers
