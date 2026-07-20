@@ -400,7 +400,7 @@ async fn describe_component_reads_the_cache() {
     // the fold `registry.lookup` uses), so a cache seeded under that key
     // is found by name without a `mbx-` id. This is the MCP half of the
     // boot-manifest path; the live substrate forward-on-miss is covered
-    // end-to-end by FleetBench (it needs a real loaded component).
+    // end-to-end by FleetHarness (it needs a real loaded component).
     let lineage = "aether.component/aether.embedded:fake_component";
     let by_name_key = mailbox_id_from_path(lineage);
     let named_caps = ComponentCapabilities {

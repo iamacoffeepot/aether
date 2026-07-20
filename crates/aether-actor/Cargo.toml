@@ -64,13 +64,13 @@ bytemuck = { workspace = true, features = ["derive"] }
 # Tests run native, so an unconditional dev-dep is fine.
 inventory = { workspace = true }
 # iamacoffeepot/aether#3777: the addressing fleet tests
-# (`fleetbench_inline_child`, `fleetbench_matrix_sweep`) rehomed here
+# (`fleetharness_inline_child`, `fleetharness_matrix_sweep`) rehomed here
 # from aether-substrate-bundle — their subject is the lineage addressing
 # this crate's SDK defines. They drive the real hub → RPC →
-# forked-headless stack through `FleetBench` (a dev-dep cycle back
+# forked-headless stack through `FleetHarness` (a dev-dep cycle back
 # through the bundle, which cargo permits for the test-target graph —
 # same precedent as aether-kit).
-aether-fleet-bench = { path = "../aether-fleet-bench" }
+aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The shared `Kind` definitions the fleet tests decode + assert against;
 # also pinned (`use … as _`) so the fixture kinds' `inventory::submit!`
 # descriptor entries land in each test binary.

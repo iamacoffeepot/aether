@@ -90,7 +90,7 @@
 # Testing and verification
 
 - [Tests that earn their place](testing.md)
-  - [SubstrateHarness and FleetBench](testing/substratebench-and-fleetbench.md)
+  - [SubstrateHarness and FleetHarness](testing/substrateharness-and-fleetharness.md)
   - [Performance, load, and fuzzing](testing/performance-and-fuzzing.md)
   - [Offline quality eval](testing/quality-eval.md)
 

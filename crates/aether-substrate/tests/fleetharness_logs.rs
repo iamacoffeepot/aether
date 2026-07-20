@@ -1,4 +1,4 @@
-//! `FleetBench` `actor_logs` proof (issue 1459, Tier-A): load the
+//! `FleetHarness` `actor_logs` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate and tail its per-actor
 //! `ActorLogRing` (ADR-0081) for the one-shot `typed_send_alive` entry
 //! the probe emits on its first tick, assert the substrate-side substring
@@ -8,7 +8,7 @@
 mod tests {
     use aether_kinds::LogTailResult;
 
-    use aether_fleet_bench::{FleetBench, dist_component_available, poll_until};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, poll_until};
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.
@@ -21,18 +21,18 @@ mod tests {
     /// `actor_logs` row: a per-actor ring read plus a `since`-cursor
     /// walk.
     #[test]
-    fn fleetbench_actor_logs_surface_the_probe_first_tick_entry() {
+    fn fleetharness_actor_logs_surface_the_probe_first_tick_entry() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let addr = bench.load(engine, "aether_test_fixtures_bundle");
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let addr = harness.load(engine, "aether_test_fixtures_bundle");
 
         let mut last_reply = None;
         let mut found = None;
         poll_until(|| {
-            let reply = bench.log_tail(engine, &addr, None, Some(MESSAGE_SUBSTRING.to_owned()));
+            let reply = harness.log_tail(engine, &addr, None, Some(MESSAGE_SUBSTRING.to_owned()));
             if let LogTailResult::Ok { entries, .. } = &reply {
                 assert!(
                     entries.iter().all(|entry| entry.message.contains(MESSAGE_SUBSTRING)),
@@ -62,7 +62,7 @@ mod tests {
 
         // Walk the cursor: a re-query past `next_since` must not
         // re-yield the entry we already consumed.
-        match bench.log_tail(engine, &addr, Some(next_since), Some(MESSAGE_SUBSTRING.to_owned())) {
+        match harness.log_tail(engine, &addr, Some(next_since), Some(MESSAGE_SUBSTRING.to_owned())) {
             LogTailResult::Ok { entries, .. } => assert!(
                 entries.iter().all(|e| e.sequence != entry.sequence),
                 "the `since` cursor should not re-yield the already-seen entry (seq {}): {entries:?}",

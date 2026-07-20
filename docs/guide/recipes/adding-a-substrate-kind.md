@@ -125,7 +125,7 @@ kind public; the helper is ergonomics, not a second protocol.
    `describe_handlers` to the owner.
 6. **End-to-end mail:** SubstrateHarness `send_and_await` and decode the typed result.
 
-Use FleetBench only if the contract itself crosses RPC/process boundaries.
+Use FleetHarness only if the contract itself crosses RPC/process boundaries.
 
 ## 7. Treat schema edits as compatibility changes
 

@@ -220,17 +220,17 @@ serde_json = { workspace = true }
 # test_helpers}` directly (post-issue-821, formerly via
 # `aether-scenario`).
 # Length-prefix frame helpers (`aether_codec::frame::{read_frame,
-# write_frame}`) used by the RPC engine-routing + FleetBench integration
+# write_frame}`) used by the RPC engine-routing + FleetHarness integration
 # tests; no `src/` consumer, so it rides dev-dependencies only.
 aether-codec = { path = "../aether-codec" }
-# iamacoffeepot/aether#3767: the `FleetBench` harness the fleet scenario
-# suites (`tests/fleetbench_*.rs`, `replace_drop_reply_routing.rs`) boot —
-# extracted from `tests/fleetbench/mod.rs` into its own test-support crate.
+# iamacoffeepot/aether#3767: the `FleetHarness` harness the fleet scenario
+# suites (`tests/fleetharness_*.rs`, `replace_drop_reply_routing.rs`) boot —
+# extracted from `tests/fleetharness/mod.rs` into its own test-support crate.
 # It locates the forked headless chassis through `dist/manifest.json`
 # (`cargo xtask dist` first), no longer via `CARGO_BIN_EXE_*`.
-aether-fleet-bench = { path = "../aether-fleet-bench" }
+aether-harness-fleet = { path = "../aether-harness-fleet" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
-# iamacoffeepot/aether#2517: the RPC engine-routing / engines-cap / FleetBench
+# iamacoffeepot/aether#2517: the RPC engine-routing / engines-cap / FleetHarness
 # integration tests boot a passive chassis through the canonical
 # `aether_substrate::testing::TestChassis`, enabled by the substrate
 # `test-support` feature. The normal dep keeps `render`; this dev entry unions
@@ -241,7 +241,7 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # API, which needs `wasmtime::{Engine, Linker, Module}` in scope to build the
 # host engine + linker. Same workspace pin `aether-substrate` links against.
 wasmtime = { workspace = true }
-# iamacoffeepot/aether#1472: the FleetBench Transform-DAG test builds a
+# iamacoffeepot/aether#1472: the FleetHarness Transform-DAG test builds a
 # descriptor with `output_kind_id == Vec4::ID` and casts the observer's
 # surfaced 16 bytes back to a `Vec4` for the `M·v` assertion, so it names
 # `aether_math::Vec4` directly.

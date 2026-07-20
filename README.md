@@ -163,7 +163,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Guest SDKs | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-capabilities` | render, text, audio, FS, HTTP, TCP, lifecycle, fleet, providers, and other capabilities |
-| Chassis and harnesses | `aether-substrate-bundle` | desktop/headless/hub/substrate-harness, bundles, FleetBench, performance tools |
+| Chassis and harnesses | `aether-substrate-bundle` | desktop/headless/hub/substrate-harness, bundles, FleetHarness, performance tools |
 | Product actors | `aether-kit`, `aether-mesh` | camera, widgets, workbench, terrain/world, simulation, geometry DSL |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
@@ -178,12 +178,12 @@ Choose the narrowest boundary that proves the change:
 
 - unit tests for codecs, parsers, validation, and state machines;
 - **SubstrateHarness** for the real in-process scheduler/capability/wasm/frame boundary;
-- **FleetBench** for real hub RPC, artifact stores, and forked child engines;
+- **FleetHarness** for real hub RPC, artifact stores, and forked child engines;
 - performance trials for paired latency/throughput/keep-up evidence;
 - the isolated nightly `fuzz/` crate for untrusted parsers and wire boundaries.
 
 See [Tests that earn their place](docs/guide/testing.md) and
-[SubstrateHarness and FleetBench](docs/guide/testing/substratebench-and-fleetbench.md).
+[SubstrateHarness and FleetHarness](docs/guide/testing/substrateharness-and-fleetharness.md).
 
 Packaging commands have distinct outputs:
 

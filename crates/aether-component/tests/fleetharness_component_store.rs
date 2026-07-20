@@ -1,4 +1,4 @@
-//! `FleetBench` hub component-store proof (ADR-0116, issue 1956): drive the
+//! `FleetHarness` hub component-store proof (ADR-0116, issue 1956): drive the
 //! real hub → RPC → engines-cap stack to upload a component wasm
 //! content-addressed, read its manifest straight from the wasm, resolve it
 //! by name / hash / handled-kind attribute, dedup an identical re-upload,
@@ -21,8 +21,8 @@ mod tests {
     };
     use aether_test_fixtures_kinds::ProbeConfig;
 
-    use aether_fleet_bench::{
-        FleetBench, allocate_store_root_for_test, component_wasm_path, dist_component_available, poll_until,
+    use aether_harness_fleet::{
+        FleetHarness, allocate_store_root_for_test, component_wasm_path, dist_component_available, poll_until,
     };
 
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
@@ -36,8 +36,8 @@ mod tests {
 
     /// Resolve `selector` hub-local and return the matched content hash,
     /// panicking on an `Err` (no match / ambiguity).
-    fn resolve_hash(bench: &mut FleetBench, selector: ComponentSelector) -> String {
-        match bench.resolve_component(selector) {
+    fn resolve_hash(harness: &mut FleetHarness, selector: ComponentSelector) -> String {
+        match harness.resolve_component(selector) {
             ResolveComponentResult::Ok { hash, .. } => hash,
             ResolveComponentResult::Err { error } => panic!("resolve failed: {error}"),
         }
@@ -47,8 +47,8 @@ mod tests {
     /// content-addressed with a manifest read from the wasm (no execution
     /// step): the probe's namespace + handled `Tick`, deduping an
     /// identical re-upload. Returns the content hash.
-    fn upload_and_assert_manifest(bench: &mut FleetBench, probe_path: &str) -> String {
-        let hash = match bench.upload_component(probe_path, Some("probe")) {
+    fn upload_and_assert_manifest(harness: &mut FleetHarness, probe_path: &str) -> String {
+        let hash = match harness.upload_component(probe_path, Some("probe")) {
             UploadComponentResult::Ok { hash, name } => {
                 assert_eq!(name.as_deref(), Some("probe"), "the upload's name is echoed");
                 assert!(!hash.is_empty(), "the content hash is non-empty");
@@ -57,7 +57,7 @@ mod tests {
             UploadComponentResult::Err { error } => panic!("upload_component failed: {error}"),
         };
 
-        let listed = bench.list_component_binaries(&ListComponentBinaries::default());
+        let listed = harness.list_component_binaries(&ListComponentBinaries::default());
         assert_eq!(listed.total_matched, 1);
         let entry = listed
             .components
@@ -74,7 +74,7 @@ mod tests {
 
         // Attribute filters: namespace + handled-kind keep it, a miss drops it.
         assert!(
-            bench
+            harness
                 .list_component_binaries(&ListComponentBinaries {
                     namespace: Some(PROBE_NAMESPACE.to_owned()),
                     handled_kind: None,
@@ -87,7 +87,7 @@ mod tests {
             "a matching namespace filter keeps the entry",
         );
         assert!(
-            bench
+            harness
                 .list_component_binaries(&ListComponentBinaries {
                     namespace: None,
                     handled_kind: Some(Tick::ID),
@@ -100,7 +100,7 @@ mod tests {
             "a matching handled-kind filter keeps the entry",
         );
         assert!(
-            !bench
+            !harness
                 .list_component_binaries(&ListComponentBinaries {
                     namespace: Some("not_a_namespace".to_owned()),
                     handled_kind: None,
@@ -114,7 +114,7 @@ mod tests {
         );
 
         // A second identical upload dedups to the same content hash.
-        let again = match bench.upload_component(probe_path, None) {
+        let again = match harness.upload_component(probe_path, None) {
             UploadComponentResult::Ok { hash, .. } => hash,
             UploadComponentResult::Err { error } => panic!("re-upload failed: {error}"),
         };
@@ -127,7 +127,7 @@ mod tests {
         reason = "infra test spawns same-process allocator threads to force contention"
     )]
     #[test]
-    fn fleetbench_store_roots_are_unique_and_created_before_use() {
+    fn fleetharness_store_roots_are_unique_and_created_before_use() {
         const THREADS: usize = 8;
 
         let mut handles = Vec::with_capacity(THREADS);
@@ -151,13 +151,13 @@ mod tests {
     }
 
     #[test]
-    fn fleetbench_component_listing_controls_cross_the_hub_boundary() {
+    fn fleetharness_component_listing_controls_cross_the_hub_boundary() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let probe_path = component_wasm_path("aether_test_fixtures_bundle");
-        let mut bench = FleetBench::start();
-        let named_hash = match bench.upload_component(probe_path.to_string_lossy().as_ref(), Some("probe")) {
+        let mut harness = FleetHarness::start();
+        let named_hash = match harness.upload_component(probe_path.to_string_lossy().as_ref(), Some("probe")) {
             UploadComponentResult::Ok { hash, .. } => hash,
             UploadComponentResult::Err { error } => panic!("upload_component failed: {error}"),
         };
@@ -169,7 +169,7 @@ mod tests {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
         let historical_path = env::temp_dir().join(format!("aether-fb-history-{}-{nanos}.wasm", process::id()));
         fs::write(&historical_path, historical_wasm).expect("write historical wasm fixture");
-        let unnamed_hash = match bench.upload_component(historical_path.to_string_lossy().as_ref(), None) {
+        let unnamed_hash = match harness.upload_component(historical_path.to_string_lossy().as_ref(), None) {
             UploadComponentResult::Ok { hash, name } => {
                 assert!(name.is_none());
                 hash
@@ -177,20 +177,20 @@ mod tests {
             UploadComponentResult::Err { error } => panic!("uploading unnamed component history failed: {error}"),
         };
 
-        let live = bench.list_component_binaries(&ListComponentBinaries::default());
+        let live = harness.list_component_binaries(&ListComponentBinaries::default());
         assert_eq!(live.total_matched, 1, "the default page contains only name-pointed registry rows");
         assert_eq!(live.components.len(), 1);
         assert_eq!(live.components[0].hash, named_hash);
         assert!(!live.components.iter().any(|entry| entry.hash == unnamed_hash));
 
-        let history = bench.list_component_binaries(&ListComponentBinaries {
+        let history = harness.list_component_binaries(&ListComponentBinaries {
             include_history: true,
             ..ListComponentBinaries::default()
         });
         assert_eq!(history.total_matched, 2, "history opt-in includes the unnamed hash across RPC");
         assert!(history.components.iter().any(|entry| entry.hash == unnamed_hash));
 
-        let zero = bench.list_component_binaries(&ListComponentBinaries {
+        let zero = harness.list_component_binaries(&ListComponentBinaries {
             limit: Some(0),
             include_history: true,
             ..ListComponentBinaries::default()
@@ -205,14 +205,14 @@ mod tests {
     /// resolves + loads it by name / hash / handled-kind, dedups an
     /// identical re-upload, and replaces by hash.
     #[test]
-    fn fleetbench_uploads_resolves_loads_and_replaces_a_component() {
+    fn fleetharness_uploads_resolves_loads_and_replaces_a_component() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let probe_path = component_wasm_path("aether_test_fixtures_bundle").to_string_lossy().into_owned();
-        let mut bench = FleetBench::start();
+        let mut harness = FleetHarness::start();
 
-        let hash = upload_and_assert_manifest(&mut bench, &probe_path);
+        let hash = upload_and_assert_manifest(&mut harness, &probe_path);
 
         // Resolve the same component three ways — by name, by hash, and
         // by a handled-kind attribute — each lands on the probe hash. (A
@@ -221,7 +221,7 @@ mod tests {
         // the one load below proves resolve-and-forward end to end.)
         assert_eq!(
             resolve_hash(
-                &mut bench,
+                &mut harness,
                 ComponentSelector { query: Some("probe".to_owned()), namespace: None, handled_kind: None }
             ),
             hash,
@@ -229,19 +229,22 @@ mod tests {
         );
         assert_eq!(
             resolve_hash(
-                &mut bench,
+                &mut harness,
                 ComponentSelector { query: Some(hash.clone()), namespace: None, handled_kind: None }
             ),
             hash,
             "the hash selector resolves to the probe hash",
         );
         assert_eq!(
-            resolve_hash(&mut bench, ComponentSelector { query: None, namespace: None, handled_kind: Some(Tick::ID) }),
+            resolve_hash(
+                &mut harness,
+                ComponentSelector { query: None, namespace: None, handled_kind: Some(Tick::ID) }
+            ),
             hash,
             "the handled-kind attribute selector resolves to the probe hash",
         );
 
-        let default_resolve = bench.resolve_component(ComponentSelector {
+        let default_resolve = harness.resolve_component(ComponentSelector {
             query: Some("probe".to_owned()),
             namespace: None,
             handled_kind: None,
@@ -253,7 +256,7 @@ mod tests {
             ResolveComponentResult::Err { error } => panic!("resolve failed: {error}"),
         }
 
-        let typed_resolve = bench.resolve_component(ComponentSelector {
+        let typed_resolve = harness.resolve_component(ComponentSelector {
             query: Some("probe@test.probe_with_config".to_owned()),
             namespace: None,
             handled_kind: None,
@@ -273,11 +276,11 @@ mod tests {
         // Fork a headless engine, load by selector (resolve-and-forward),
         // and assert it registers at the lineage address and answers
         // LogTail (it's live).
-        let engine = bench.spawn_headless();
+        let engine = harness.spawn_headless();
         let expected = probe_lineage_addr();
-        let loaded = bench.load_by_selector(engine, "probe");
+        let loaded = harness.load_by_selector(engine, "probe");
         assert_eq!(loaded.addr, expected, "load by selector registers at the lineage addr");
-        match bench.log_tail(engine, &expected, None, None) {
+        match harness.log_tail(engine, &expected, None, None) {
             LogTailResult::Ok { .. } => {}
             LogTailResult::Err { error } => {
                 panic!("the loaded probe should answer LogTail, got Err: {error}")
@@ -286,25 +289,25 @@ mod tests {
 
         // Replace the loaded component by hash (ADR-0022 in-place swap,
         // ADR-0116 selector). The trampoline keeps its lineage address.
-        let caps = bench.replace_by_selector(engine, loaded.mailbox_id, &hash);
+        let caps = harness.replace_by_selector(engine, loaded.mailbox_id, &hash);
         assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler");
     }
 
     /// A `spawn_substrate` boot manifest written in component selectors
     /// brings the component set up reproducibly: aether-mcp pre-resolves
     /// each selector to bytes and stages a path-based manifest the
-    /// substrate reads at boot (ADR-0116). `FleetBench` mirrors that
+    /// substrate reads at boot (ADR-0116). `FleetHarness` mirrors that
     /// pre-resolution (it speaks raw frames, not aether-mcp): upload,
     /// resolve hub-local, stage the bytes, and spawn with the manifest.
     #[test]
-    fn fleetbench_boots_a_component_set_from_a_selector_manifest() {
+    fn fleetharness_boots_a_component_set_from_a_selector_manifest() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
         let probe_path = component_wasm_path("aether_test_fixtures_bundle").to_string_lossy().into_owned();
-        let mut bench = FleetBench::start();
+        let mut harness = FleetHarness::start();
 
-        let hash = match bench.upload_component(&probe_path, Some("probe")) {
+        let hash = match harness.upload_component(&probe_path, Some("probe")) {
             UploadComponentResult::Ok { hash, .. } => hash,
             UploadComponentResult::Err { error } => panic!("upload_component failed: {error}"),
         };
@@ -313,14 +316,16 @@ mod tests {
         // aether-mcp boot-manifest pre-resolution hop), stage them to a
         // temp wasm file, and write a path-based boot manifest pointing at
         // it — the same shape aether-mcp's `stage_boot_manifest` produces.
-        let wasm =
-            match bench.resolve_component(ComponentSelector { query: Some(hash), namespace: None, handled_kind: None })
-            {
-                ResolveComponentResult::Ok { wasm, .. } => wasm,
-                ResolveComponentResult::Err { error } => {
-                    panic!("resolve for boot manifest failed: {error}")
-                }
-            };
+        let wasm = match harness.resolve_component(ComponentSelector {
+            query: Some(hash),
+            namespace: None,
+            handled_kind: None,
+        }) {
+            ResolveComponentResult::Ok { wasm, .. } => wasm,
+            ResolveComponentResult::Err { error } => {
+                panic!("resolve for boot manifest failed: {error}")
+            }
+        };
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let staged_wasm = env::temp_dir().join(format!("aether-fb-boot-{}-{nanos}.wasm", process::id()));
         fs::write(&staged_wasm, &wasm).expect("stage the resolved boot wasm");
@@ -335,7 +340,7 @@ mod tests {
             .expect("write boot manifest");
 
         // Spawn with the boot manifest; the substrate reads it at boot.
-        let engine = bench.spawn_headless_with_boot_manifest(&manifest_path);
+        let engine = harness.spawn_headless_with_boot_manifest(&manifest_path);
 
         // The boot autoload is async, so poll the engine's loaded-components
         // query (issue 2020) until the probe's lineage address appears. This
@@ -344,7 +349,7 @@ mod tests {
         // exactly when it is loaded and registered — no log-ring side channel
         // and no racing a fixed liveness budget.
         let expected = probe_lineage_addr();
-        let registered = poll_until(|| bench.list_components(engine).iter().any(|n| n == &expected));
+        let registered = poll_until(|| harness.list_components(engine).iter().any(|n| n == &expected));
         assert!(registered, "the boot-manifest probe should come up and register at {expected}");
 
         // Best-effort: clean up the staged temp files.

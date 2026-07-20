@@ -1,4 +1,4 @@
-//! `FleetBench` mail + reply proofs (issue 1460, Tier-A): the rows that
+//! `FleetHarness` mail + reply proofs (issue 1460, Tier-A): the rows that
 //! share the settlement-aware reply-collection machinery over the real
 //! hub → RPC → forked-headless stack. Three rows land as a unit —
 //!
@@ -15,7 +15,7 @@ mod tests {
     use aether_kinds::trace::DispatchTraced;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
-    use aether_fleet_bench::{FleetBench, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Ping-pong (verify-first, the #1451 deferral): load
     /// `ProbeWithConfig` from the `probe` bundle with a seeded `ProbeConfig`, send it a
@@ -31,17 +31,17 @@ mod tests {
     /// round-trip, keeping the benchmark-ready trace exercised by the
     /// mail rows.
     #[test]
-    fn fleetbench_pingpong_echoes_typed_config() {
+    fn fleetharness_pingpong_echoes_typed_config() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let config = ProbeConfig { seed: 0x00C0_FFEE, label: "fleetbench".to_owned() };
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let config = ProbeConfig { seed: 0x00C0_FFEE, label: "fleetharness".to_owned() };
         let addr =
-            bench.load_with_config_export(engine, "aether_test_fixtures_bundle", &config, "test.probe_with_config");
+            harness.load_with_config_export(engine, "aether_test_fixtures_bundle", &config, "test.probe_with_config");
 
-        let replies = bench.send(engine, &addr, &ConfigQuery);
+        let replies = harness.send(engine, &addr, &ConfigQuery);
         let reply = match replies.as_slice() {
             [one] => one,
             other => panic!("ping-pong expected exactly one reply event, got {}", other.len()),
@@ -54,7 +54,7 @@ mod tests {
             "the echoed config should match the seeded ProbeConfig",
         );
 
-        let query_record = bench
+        let query_record = harness
             .calls()
             .iter()
             .find(|record| record.request_kind == ConfigQuery::ID)
@@ -71,11 +71,11 @@ mod tests {
     /// forked-engine native cap → reply decode + correlate (the
     /// non-component reply case; the component case is ping-pong).
     #[test]
-    fn fleetbench_send_mail_decodes_fs_reply() {
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+    fn fleetharness_send_mail_decodes_fs_reply() {
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
 
-        let replies = bench.send(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
+        let replies = harness.send(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
         let reply = match replies.as_slice() {
             [one] => one,
             other => panic!("send_mail expected exactly one reply event, got {}", other.len()),
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(reply.kind, ListResult::ID, "the fs reply should be a ListResult");
         assert_eq!(fs_reply_namespace(&reply.payload), "save", "the ListResult should echo the requested namespace");
 
-        let list_record = bench
+        let list_record = harness
             .calls()
             .iter()
             .find(|record| record.request_kind == List::ID)
@@ -100,12 +100,12 @@ mod tests {
     /// holds the `Call` open via its `SettlementHold`), so no new
     /// wire read loop is needed.
     #[test]
-    fn fleetbench_send_traced_settles_and_collects_reply() {
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+    fn fleetharness_send_traced_settles_and_collects_reply() {
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
 
         let (root, replies) =
-            bench.send_traced(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
+            harness.send_traced(engine, "aether.fs", &List { namespace: "save".to_owned(), prefix: String::new() });
         assert_ne!(root, MailId::NONE, "the traced batch ack carries a non-sentinel chassis root");
 
         let echoed = replies
@@ -118,7 +118,7 @@ mod tests {
             "the traced ListResult should echo the requested namespace",
         );
 
-        let traced_record = bench
+        let traced_record = harness
             .calls()
             .iter()
             .find(|record| record.request_kind == DispatchTraced::ID)

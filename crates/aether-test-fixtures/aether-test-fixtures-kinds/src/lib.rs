@@ -181,7 +181,7 @@ pub struct UiWidgetConfig {
 /// ADR-0114 inline-child fixture driver. A unit query sent to either the
 /// parent's own address or its inline child's first-class lineage
 /// address; the recipient replies an [`InlineEcho`] tagged with `who`
-/// handled it, so the `FleetBench` scenario proves the membrane demuxed
+/// handled it, so the `FleetHarness` scenario proves the membrane demuxed
 /// the mail to the child (not the parent) and a control to the parent's
 /// own address is unaffected. Structured-shaped unit struct.
 #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
@@ -233,7 +233,7 @@ pub struct InlineConfiguredChildConfig {
 /// `InlineConfiguredChildConfig::default()`'s `0`, so a reload that
 /// silently re-inited from a default/empty config is distinguishable
 /// from one that decoded the real config bytes. Shared here (not just
-/// hardcoded in the fixture) so the `FleetBench` reload scenario asserts
+/// hardcoded in the fixture) so the `FleetHarness` reload scenario asserts
 /// against the same constant rather than a magic number.
 pub const CONFIGURED_CHILD_INITIAL: u32 = 100;
 

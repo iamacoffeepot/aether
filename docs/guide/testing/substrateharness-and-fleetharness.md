@@ -1,4 +1,4 @@
-# SubstrateHarness and FleetBench
+# SubstrateHarness and FleetHarness
 
 Aether has two integration harnesses because “use the real actor runtime” and
 “use the real process boundary” answer different questions.
@@ -7,7 +7,7 @@ Aether has two integration harnesses because “use the real actor runtime” an
 |---|---|---|
 | Unit/pure test | function/module only | codecs, parsers, state machines, validation |
 | `SubstrateHarness` | real substrate, scheduler, capabilities; in process | actor chains, settlement, frames, filesystem, component behavior |
-| `FleetBench` | real hub RPC plus forked child process | stores/selectors, spawn/terminate, proxy routing, cross-process load/replace |
+| `FleetHarness` | real hub RPC plus forked child process | stores/selectors, spawn/terminate, proxy routing, cross-process load/replace |
 
 Choose the narrowest harness that can falsify the contract. Process tests are
 valuable, but they are slower and produce less-local failures.
@@ -95,14 +95,14 @@ reference relation) rather than only golden-byte equality. GPU/render changes
 can be semantically correct without byte-identical PNG compression or edge
 rasterization.
 
-## FleetBench topology
+## FleetHarness topology
 
-`FleetBench` is the `aether-fleet-bench` test-support crate, taken as a
+`FleetHarness` is the `aether-harness-fleet` test-support crate, taken as a
 dev-dependency by the fleet scenario suites. It
 starts a real hub, connects over the production RPC framing, and can fork actual
 child substrate binaries — the headless chassis resolves through
 `dist/manifest.json` (run `cargo xtask dist` first, or set
-`AETHER_FLEET_BENCH_HEADLESS_BIN`). It exercises the same boundary an MCP
+`AETHER_HARNESS_FLEET_HEADLESS_BIN`). It exercises the same boundary an MCP
 coordinator uses without requiring an interactive MCP session.
 
 Use it for:
@@ -114,7 +114,7 @@ Use it for:
 - inline-child addressing over the wire;
 - TCP/load and handler-cost behavior at a process boundary.
 
-`FleetBench` owns its processes and store roots and cleans them on drop. A test
+`FleetHarness` owns its processes and store roots and cleans them on drop. A test
 should never discover unrelated processes by set difference and terminate them.
 
 ## Artifact preconditions and fixtures
@@ -143,15 +143,15 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 | In-process settlement timeout | actor lineage, hold, or scheduler contract |
 | SubstrateHarness unknown mailbox | load/wire/lineage name |
 | Capture mismatch with correct mail | render/frame ordering |
-| FleetBench cannot spawn | dist manifest, binary selector, process boot |
-| FleetBench mail fails after spawn | RPC proxy, engine id, child registry |
+| FleetHarness cannot spawn | dist manifest, binary selector, process boot |
+| FleetHarness mail fails after spawn | RPC proxy, engine id, child registry |
 | Only parallel CI fails | shared env/files, port allocation, timing assumption |
 
 ## Source routes
 
 - Public SubstrateHarness API: `crates/aether-harness-substrate/src/`
 - Scenario examples: `crates/aether-substrate-bundle/tests/substrate_harness_scenario/`
-- FleetBench harness: `crates/aether-fleet-bench/src/lib.rs`
-- Fleet scenarios: `crates/aether-substrate-bundle/tests/fleetbench_*.rs`
+- FleetHarness harness: `crates/aether-harness-fleet/src/lib.rs`
+- Fleet scenarios: `crates/aether-substrate-bundle/tests/fleetharness_*.rs`
 - Fixtures: `crates/aether-test-fixtures/`
 - Decisions: ADR-0067 and the subsystem ADR for the behavior under test

@@ -135,9 +135,9 @@ Once a test clears the bar, the harness follows from what it checks. Engine-inte
 and visual correctness goes to **SubstrateHarness** (`aether-harness-substrate`)
 with a concrete assertion (`captured`, `reply`, `count_observed`); behavior over the
 wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
-**FleetBench** (the `aether-fleet-bench` crate). FleetBench is
+**FleetHarness** (the `aether-harness-fleet` crate). FleetHarness is
 headless, so any rendered-output assertion has to be SubstrateHarness, and any
-externally-addressable-over-the-wire assertion has to be FleetBench.
+externally-addressable-over-the-wire assertion has to be FleetHarness.
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection

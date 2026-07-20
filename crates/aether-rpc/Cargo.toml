@@ -53,19 +53,19 @@ aether-window = { path = "../aether-window" }
 # feature. Dev-dependency feature unification applies to test builds only, so
 # this never enters the production graph.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The rpc fleet suites (iamacoffeepot/aether#3778): `fleetbench_mail` boots the
-# `FleetBench` harness over the real hub → RPC → forked-headless stack, and
+# The rpc fleet suites (iamacoffeepot/aether#3778): `fleetharness_mail` boots the
+# `FleetHarness` harness over the real hub → RPC → forked-headless stack, and
 # `rpc_engine_routing` boots the hub-shaped chassis by hand (`EngineServer` +
 # forwarding `RpcServerCapability`), resolving the forked headless chassis
 # through the harness's `dist/manifest.json` helper (`cargo xtask dist` first).
 aether-engine = { path = "../aether-engine" }
-aether-fleet-bench = { path = "../aether-fleet-bench" }
+aether-harness-fleet = { path = "../aether-harness-fleet" }
 # Both suites route an `aether.fs` `List` as the reply payload under test.
 aether-fs = { path = "../aether-fs" }
 # The ping-pong row's typed-config kinds (`ProbeConfig` / `ConfigQuery` /
 # `ConfigEcho`) the test encodes + decodes against the probe fixture.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
-# The probe wasm `fleetbench_mail` loads by stem
+# The probe wasm `fleetharness_mail` loads by stem
 # (`aether_test_fixtures_bundle.wasm`, issue #3766): declared so the wasm
 # coupling is cargo-visible even though nothing links the host rlib.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }

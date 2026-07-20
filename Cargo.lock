@@ -39,7 +39,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor-derive",
  "aether-data",
- "aether-fleet-bench",
+ "aether-harness-fleet",
  "aether-input",
  "aether-kinds",
  "aether-lifecycle",
@@ -220,7 +220,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
- "aether-fleet-bench",
+ "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-kinds",
  "aether-kit",
@@ -310,7 +310,7 @@ dependencies = [
  "aether-actor",
  "aether-codec",
  "aether-data",
- "aether-fleet-bench",
+ "aether-harness-fleet",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
@@ -323,21 +323,6 @@ dependencies = [
  "serde_json",
  "tracing",
  "wat",
-]
-
-[[package]]
-name = "aether-fleet-bench"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-codec",
- "aether-data",
- "aether-engine",
- "aether-kinds",
- "aether-rpc",
- "aether-substrate",
- "aether-trace",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -391,6 +376,21 @@ dependencies = [
  "serde_json",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "aether-harness-fleet"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-codec",
+ "aether-data",
+ "aether-engine",
+ "aether-kinds",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-trace",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -642,8 +642,8 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-engine",
- "aether-fleet-bench",
  "aether-fs",
+ "aether-harness-fleet",
  "aether-kinds",
  "aether-substrate",
  "aether-test-fixtures-bundle",
@@ -663,8 +663,8 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-derive",
- "aether-fleet-bench",
  "aether-fs",
+ "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-kinds",
  "aether-kit",
@@ -702,10 +702,10 @@ dependencies = [
  "aether-contentgen",
  "aether-data",
  "aether-engine",
- "aether-fleet-bench",
  "aether-fs",
  "aether-game",
  "aether-gemini",
+ "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-http",
@@ -748,7 +748,7 @@ dependencies = [
  "aether-actor",
  "aether-codec",
  "aether-data",
- "aether-fleet-bench",
+ "aether-harness-fleet",
  "aether-kinds",
  "aether-substrate",
  "aether-test-fixtures-bundle",

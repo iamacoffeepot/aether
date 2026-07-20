@@ -18,7 +18,7 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 # local timing isn't a usable headroom baseline here. Every wait in the
 # test is bounded (`wait_for_idle` panics after 16 frames), so this is
 # slow-but-completing rather than a hang; widen generously, matching the
-# `fleetbench_replace` precedent below, and keep the package-wide cap
+# `fleetharness_replace` precedent below, and keep the package-wide cap
 # intact for the crate's other ten integration binaries.
 #
 # Ordering constraint: this override must precede the package-wide
@@ -61,7 +61,7 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 # the scenario tests (iamacoffeepot/aether#3769) cold-load and compile
 # fixture wasm into a `SubstrateHarness`, and the fleet tests
 # (iamacoffeepot/aether#3776) fork real debug `aether-substrate-headless`
-# processes through `FleetBench` and wait for them to bind. The fork class
+# processes through `FleetHarness` and wait for them to bind. The fork class
 # stretches well past 60s under contention with the sibling fleet suites,
 # so the whole package rides the same 180s deadlock-guard backstop as the
 # bundle / rpc / engine overrides below — a wall-clock guard a healthy run
@@ -76,7 +76,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # substrate_harness_logs, iamacoffeepot/aether#3770) cold-load fixture wasm
 # — cap_registry's replace test additionally cold-compiles
 # `aether_kit.wasm`, the exact load that pushed the aether-kit binaries
-# past 60s (#2805) — and the fleet log-tail test (`fleetbench_logs`,
+# past 60s (#2805) — and the fleet log-tail test (`fleetharness_logs`,
 # iamacoffeepot/aether#3781) forks a real debug
 # `aether-substrate-headless` process and waits for it to bind. The fork
 # class stretches well past 60s under contention with the sibling fleet
@@ -89,7 +89,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-substrate) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The `aether-substrate-bundle` integration tests (FleetBench + the engines /
+# The `aether-substrate-bundle` integration tests (FleetHarness + the engines /
 # routing fleet suites) fork real debug `aether-substrate` processes and wait
 # for them to bind. Run concurrently they make timely progress but stretch
 # well past the 60s steady-state cap under fork contention, so they carry a
@@ -101,8 +101,8 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-substrate-bundle) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The rehomed tcp fleet-load test (`fleetbench_tcp_load`, #3780) forks a
-# real debug `aether-substrate-headless` process through `FleetBench` and
+# The rehomed tcp fleet-load test (`fleetharness_tcp_load`, #3780) forks a
+# real debug `aether-substrate-headless` process through `FleetHarness` and
 # then churns real loopback listeners/sessions on top — the same
 # fork-contention class as the bundle's fleet suites above, so it carries
 # the same 180s wall-clock backstop. `kind(test)` scopes the cap to the
@@ -112,8 +112,8 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-tcp) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The `aether-actor` addressing fleet tests (`fleetbench_inline_child`,
-# `fleetbench_matrix_sweep`, rehomed from the bundle by
+# The `aether-actor` addressing fleet tests (`fleetharness_inline_child`,
+# `fleetharness_matrix_sweep`, rehomed from the bundle by
 # iamacoffeepot/aether#3777) are the same slow class: they fork real debug
 # `aether-substrate-headless` processes and wait for them to bind, which
 # stretches well past the 60s steady-state cap under fork contention with
@@ -139,7 +139,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-http) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The `aether-rpc` integration tests (`fleetbench_mail`, `rpc_engine_routing`,
+# The `aether-rpc` integration tests (`fleetharness_mail`, `rpc_engine_routing`,
 # rehomed from the bundle by iamacoffeepot/aether#3778) are the same slow
 # class: they fork real debug `aether-substrate-headless` processes and wait
 # for them to bind, which stretches well past the 60s steady-state cap under
@@ -167,8 +167,8 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-render) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The `aether-engine` integration tests (`fleetbench_spawn`,
-# `fleetbench_terminate`, `engines_cap`, rehomed from the bundle by
+# The `aether-engine` integration tests (`fleetharness_spawn`,
+# `fleetharness_terminate`, `engines_cap`, rehomed from the bundle by
 # iamacoffeepot/aether#3779) are the same slow class: they fork real debug
 # `aether-substrate-headless` processes and wait for them to bind, which
 # stretches well past the 60s steady-state cap under fork contention with the
@@ -180,11 +180,11 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-engine) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The fleetbench replace binary also cold-loads `aether_kit.wasm` and was
+# The fleetharness replace binary also cold-loads `aether_kit.wasm` and was
 # measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary.
 [[profile.ci.overrides]]
-filter = "package(=aether-substrate-bundle) & binary(fleetbench_replace)"
+filter = "package(=aether-substrate-bundle) & binary(fleetharness_replace)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The `aether-text` text scenario binary (rehomed from the bundle's

@@ -3,7 +3,7 @@
 //! This is the single source of truth for "what does `dist/` contain":
 //! the component wasm set (discovered from `cargo metadata`) plus the
 //! static chassis-binary list. It is written as a standalone module so a
-//! future harness (`FleetBench`) and the hardcoded `--bin` lists in
+//! future harness (`FleetHarness`) and the hardcoded `--bin` lists in
 //! `scripts/ensure-tunnel.sh` / `scripts/perf-compare.sh` can be derived
 //! from the same inventory instead of re-deriving it per call site.
 

@@ -1,4 +1,4 @@
-//! `FleetBench` `describe_component` proof (issue 2421): load a real wasm
+//! `FleetHarness` `describe_component` proof (issue 2421): load a real wasm
 //! component into a forked substrate and introspect its ADR-0033
 //! receive-side capabilities over the wire, addressed by its ADR-0099
 //! lineage name — the externally-addressable surface that makes a
@@ -9,7 +9,7 @@ mod tests {
     use aether_data::Kind;
     use aether_kinds::{DescribeComponent, DescribeComponentResult, Key, Tick};
 
-    use aether_fleet_bench::{FleetBench, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load the `probe` component, then send `aether.component.describe`
     /// addressed by the lineage name `load` hands back and assert the reply
@@ -18,15 +18,15 @@ mod tests {
     /// resolves the name to its mailbox id and serves the full
     /// `ComponentCapabilities` it retained at load, not the lossy projection.
     #[test]
-    fn fleetbench_describe_resolves_caps_by_lineage_name() {
+    fn fleetharness_describe_resolves_caps_by_lineage_name() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let addr = bench.load(engine, "aether_test_fixtures_bundle");
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let addr = harness.load(engine, "aether_test_fixtures_bundle");
 
-        let replies = bench.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
+        let replies = harness.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
         let reply = match replies.as_slice() {
             [one] => one,
             other => panic!("describe expected exactly one reply event, got {}", other.len()),
@@ -59,14 +59,14 @@ mod tests {
     /// `DescribeComponentResult::Err`, not a hang or a panic — the
     /// fail-fast negative path.
     #[test]
-    fn fleetbench_describe_unknown_name_errs() {
+    fn fleetharness_describe_unknown_name_errs() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
 
-        let replies = bench.send(
+        let replies = harness.send(
             engine,
             "aether.component",
             &DescribeComponent { name: "aether.component/aether.embedded:nonexistent".to_owned() },
