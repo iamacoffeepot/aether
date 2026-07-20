@@ -16,11 +16,12 @@
 // Integration-test diagnostics intentionally surface alongside a failing test.
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
+use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
@@ -252,7 +253,13 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .with_render()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .build()
+        .expect("boot");
     let world = component_address("world");
     let mover_address = component_address("mover");
     let _world_mailbox = load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
@@ -329,7 +336,13 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .with_render()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .build()
+        .expect("boot");
 
     let world = component_address("world");
     let mover = component_address("mover");

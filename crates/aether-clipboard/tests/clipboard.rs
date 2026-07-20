@@ -1,16 +1,23 @@
-use super::*;
+//! `aether.clipboard` request/reply round trips over a
+//! [`SubstrateBench`]: the in-memory backend's set-then-get and the
+//! fail-fast unavailable path (`HeadlessClipboardCapability`).
+//!
+//! Minimal composition (issue #3764): each test composes exactly the
+//! clipboard cap variant it exercises on the bench basics — no render,
+//! no wgpu gate.
 
-use aether_clipboard::HeadlessClipboardCapability;
-use aether_substrate_bundle::FullBenchExt;
+use aether_clipboard::{
+    ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability,
+    SetClipboardText, SetClipboardTextResult,
+};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
 
 const CLIPBOARD_MAILBOX: &str = "aether.clipboard";
 
 #[test]
 fn clipboard_set_then_get_round_trips_in_memory() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let mut bench = SubstrateBench::builder().full().size(64, 48).build().expect("boot");
+    let mut bench =
+        SubstrateBench::builder().with_actor::<ClipboardCapability>(ClipboardConfig::InMemory).build().expect("boot");
 
     let result = bench
         .execute(vec![
@@ -34,11 +41,9 @@ fn clipboard_set_then_get_round_trips_in_memory() {
 
 #[test]
 fn unavailable_clipboard_err_replies_to_get_and_set() {
-    // Issue #3765: minimal composition — the unavailable-mode round
-    // trip needs only the fail-fast clipboard on the bench basics, so
-    // no render (and no wgpu gate) is composed at all.
-    let mut bench =
-        SubstrateBench::builder().size(64, 48).with_actor::<HeadlessClipboardCapability>(()).build().expect("boot");
+    // Issue #3765: the unavailable-mode round trip needs only the
+    // fail-fast clipboard on the bench basics.
+    let mut bench = SubstrateBench::builder().with_actor::<HeadlessClipboardCapability>(()).build().expect("boot");
 
     let result = bench
         .execute(vec![

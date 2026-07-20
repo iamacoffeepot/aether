@@ -45,6 +45,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # The fail-fast companion test boots the `aether_substrate::testing`
 # mailer fixture, enabled by the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The clipboard round-trip / unavailable-path integration test boots the
+# in-process bench harness and composes each clipboard variant on it.
+aether-substrate-bench = { path = "../aether-substrate-bench" }
 
 [lints]
 workspace = true

@@ -23,7 +23,7 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::fs;
 
 use aether_actor::Addressable;
@@ -146,7 +146,14 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).full().build().expect("boot");
+    // Composition: GPU captures + kit wasm loads; every Key / WindowSize is
+    // mailed straight to a component mailbox, so no input fan-out cap.
+    let mut bench = SubstrateBench::builder()
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .with_render()
+        .with_component_host()
+        .build()
+        .expect("boot");
 
     let world = component_address("world");
     // The controller resolves its target camera by the camera export's default

@@ -82,6 +82,12 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_substrate::testing` fixture, enabled by the substrate `test-support`
 # feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The text scenario tests (`tests/text_scenario.rs`, rehomed from
+# `aether-substrate-bundle` per issue #3772) drive an in-process
+# `SubstrateBench` composed with the render + text + fs caps and score the
+# captured frames through the capture crate's visual reductions.
+aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
 
 [lints]
 workspace = true
