@@ -26,7 +26,7 @@
 //! on stderr. Run it with:
 //!
 //! ```text
-//! cargo test -p aether-substrate-bundle --release --test widget_actor_cost \
+//! cargo test -p aether-kit --release --test widget_actor_cost \
 //!     -- --ignored --nocapture
 //! ```
 //!
@@ -64,7 +64,7 @@
 // knobs, not cap config.
 #![allow(clippy::disallowed_methods)]
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::env;
 use std::fs;
 use std::time::Instant;
@@ -218,7 +218,8 @@ fn widget_actor_per_frame_cost() {
             "cached"
         };
         for &count in &counts {
-            let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+            let mut bench =
+                SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
             let ids = load_widgets(&mut bench, &wasm, count, redraw_each_tick, quad_count);
             let start = Instant::now();
             bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
@@ -271,7 +272,8 @@ fn widget_cost_vs_draw_weight() {
     let mut samples: Vec<(u32, u64)> = Vec::with_capacity(weights.len());
     for &weight in &weights {
         let quads = u32::try_from(weight).unwrap_or(u32::MAX);
-        let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+        let mut bench =
+            SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
         let ids = load_widgets(&mut bench, &wasm, FIT_WIDGET_COUNT, true, quads);
         bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
         let per_widget = widget_mean_nanos(&bench, &ids);
@@ -298,7 +300,7 @@ fn widget_cost_vs_draw_weight() {
 /// outside the timed region, so the wall-clock is steady-state per-frame cost.
 #[allow(clippy::cast_precision_loss)] // elapsed nanos → f64 for a per-frame average; exactness is not load-bearing.
 fn measure_cell(wasm: &[u8], count: usize, redraw_each_tick: bool, quad_count: u32, ticks: u32) -> (f64, u64) {
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     let ids = load_widgets(&mut bench, wasm, count, redraw_each_tick, quad_count);
     let start = Instant::now();
     bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");

@@ -8,8 +8,7 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bench_capture::RenderBenchExt;
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::{RenderBenchBuilderExt, RenderBenchExt};
 use std::fs;
 
 use aether_actor::Addressable;
@@ -148,7 +147,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(48, 40).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(48, 40).with_render().with_component_host().build().expect("boot");
     let first_texture_id = create_texture(&mut bench, "first_texture", first_texture_pixels());
     let second_texture_id = create_texture(&mut bench, "second_texture", second_texture_pixels());
     let tint = Rgba::WHITE;

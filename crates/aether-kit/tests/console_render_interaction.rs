@@ -14,13 +14,14 @@
 // "skipping: ..." alongside `test ... ok`.
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
 use aether_fs::NamespaceRoots;
+use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
@@ -32,6 +33,7 @@ use aether_kit::{
 use aether_render::RenderCapability;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, require_runtime};
+use aether_text::TextCapability;
 
 const WINDOW_WIDTH: u32 = 320;
 const WINDOW_HEIGHT: u32 = 200;
@@ -57,10 +59,22 @@ fn build_bench_without_assets_root() -> SubstrateBench {
     build_bench_with_assets(assets, "console-render-interaction-no-assets")
 }
 
+/// Composition: GPU captures + kit wasm loads; the console rasterizes its
+/// overlay text through `aether.text` (fonts fetched via `aether.fs`, which
+/// composes from the namespace roots); one scenario drives the toggle key
+/// through the real `aether.input` fan-out.
 fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateBench {
     let sandbox = init_save_sandbox(sandbox_name);
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets, config: sandbox.to_path_buf() };
-    SubstrateBench::builder().full().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
+    SubstrateBench::builder()
+        .with_render()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .with_actor::<TextCapability>(())
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .namespace_roots(roots)
+        .build()
+        .expect("boot")
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {

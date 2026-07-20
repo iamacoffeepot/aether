@@ -24,9 +24,9 @@ use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
 use aether_render::ViewProjection;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_substrate_bench_capture::visual::{decode_png, not_all_black};
-use aether_substrate_bundle::FullBenchExt;
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
@@ -89,7 +89,7 @@ fn camera_component_lifecycle() {
         return;
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     // A few ticks lets the component finish init, run on_tick, and
@@ -114,7 +114,7 @@ fn camera_default_static_publishes_view_proj() {
         return;
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     // Five ticks: enough for init + a handful of publishes to surface
@@ -144,7 +144,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
         return;
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     bench.execute(vec![("pre", BenchOp::advance(2))]).expect("pre-destroy advance");

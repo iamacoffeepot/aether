@@ -1,6 +1,6 @@
 //! Real-TCP player client scenarios through the shipped `aether-kit` wasm.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -14,16 +14,18 @@ use aether_component::ComponentHostCapability;
 use aether_component::component::resolve_embedded;
 use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+use aether_input::{InputCapability, InputConfig};
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
 use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
     StateSummary, TickBundle,
 };
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_substrate_bench_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
-use aether_tcp::{ListListeners, ListListenersResult};
+use aether_tcp::{ListListeners, ListListenersResult, TcpCapability};
 
 const CAMERA_NAME: &str = "client-camera";
 const CLIENT_NAME: &str = "player-client";
@@ -245,7 +247,10 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     let (event_rx, command_tx, peer) = spawn_controlled_peer(listener, session_identity);
     let mut bench = SubstrateBench::builder()
         .size(FRAME_WIDTH, FRAME_HEIGHT)
-        .full()
+        .with_render()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .with_actor::<TcpCapability>(())
         .build()
         .expect("boot controlled client SubstrateBench");
 
@@ -335,13 +340,15 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
 
 #[test]
 fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
     let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
     let sim_mailbox = resolve_embedded(SIM_NAME);
     let mut bench = SubstrateBench::builder()
-        .full_sans_game()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .with_actor::<TcpCapability>(())
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .with_actor::<GameGatewayCapability>(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),
