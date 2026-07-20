@@ -53,7 +53,7 @@ impl Ctx<'_, NativeCtx<'_, Manual>> {
     /// caller's own carry, which is correct for a native root singleton but
     /// resolves an **embedded** component to the wrong mailbox — an embedded
     /// id folds the *component-host's* carry
-    /// ([`resolve_embedded`](crate::component::resolve_embedded)), not the
+    /// ([`resolve_embedded`](aether_component::resolve_embedded)), not the
     /// caller's. `peer` resolves against the host carry, so a native root cap
     /// (whose [`One`](aether_actor::One) resolver ignores the carry) and an
     /// embedded component (whose [`Embedded`](aether_actor::Embedded) resolver
