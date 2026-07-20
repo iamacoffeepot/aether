@@ -103,6 +103,20 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-tcp) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The `aether-actor` addressing fleet tests (`fleetbench_inline_child`,
+# `fleetbench_matrix_sweep`, rehomed from the bundle by
+# iamacoffeepot/aether#3777) are the same slow class: they fork real debug
+# `aether-substrate-headless` processes and wait for them to bind, which
+# stretches well past the 60s steady-state cap under fork contention with
+# the sibling fleet suites. Same generous deadlock-guard stance as the
+# bundle override above; `kind(test)` keeps the crate's unit tests on the
+# 60s default (the crate's other integration binaries are light and never
+# approach the backstop). No binary-specific override exists for this
+# package, so first-match-wins ordering is unconstrained here.
+[[profile.ci.overrides]]
+filter = "package(=aether-actor) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The `aether-rpc` integration tests (`fleetbench_mail`, `rpc_engine_routing`,
 # rehomed from the bundle by iamacoffeepot/aether#3778) are the same slow
 # class: they fork real debug `aether-substrate-headless` processes and wait
