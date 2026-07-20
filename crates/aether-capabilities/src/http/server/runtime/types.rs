@@ -276,10 +276,9 @@ pub struct PendingRequest {
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
-/// [`HttpShardState::streams`] by `stream_id` (== the request's
-/// dispatch correlation id `C`). The dispatcher owns all of this
-/// single-threaded, exactly like [`PendingRequest`]; the writer thread owns
-/// only the socket write.
+/// [`HttpShardState::streams`] by the cap-minted `stream_id` the stream was
+/// opened with. The dispatcher owns all of this single-threaded, exactly like
+/// [`PendingRequest`]; the writer thread owns only the socket write.
 pub struct StreamState {
     /// The connection this stream writes to. Teardown paths locate a stream
     /// by connection through this field.

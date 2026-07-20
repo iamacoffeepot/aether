@@ -19,8 +19,8 @@ use test_handlers::{
     ApiRouteHandler, ApiV2Handler, BookRouteHandler, DeferRouteHandler, EchoHttpHandler, EchoPeer,
     ExclusiveMacroPoolHandler, ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler,
     MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler,
-    SilentHttpHandler, SilentPeer, StreamHttpHandler, StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler,
-    stream_chunk_body,
+    SilentHttpHandler, SilentPeer, StreamHttpHandler, StreamIdEchoHandler, StreamingUploadHandler, TmpRouteHandler,
+    WiredRouteHandler, stream_chunk_body,
 };
 
 mod test_handlers {
@@ -732,6 +732,59 @@ mod test_handlers {
                 stream.end(ctx);
                 state.ended = true;
             }
+        }
+    }
+
+    /// A response-streaming handler whose entire body is the `stream_id` the
+    /// cap minted for that stream and handed over in the first
+    /// `HttpStreamCredit`. It exists so a test can read the id off the wire
+    /// without reaching into handler state.
+    pub struct StreamIdEchoHandler;
+
+    /// Guards [`StreamIdEchoHandler`] against re-emitting on replenishment
+    /// credit; reset per request, so each request emits exactly one body.
+    pub struct StreamIdEchoHandlerState {
+        emitted: bool,
+    }
+
+    #[actor(singleton)]
+    impl NativeActor for StreamIdEchoHandler {
+        type State = StreamIdEchoHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_stream_id_echo_handler";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<StreamIdEchoHandlerState, BootError> {
+            Ok(StreamIdEchoHandlerState { emitted: false })
+        }
+
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            bind_catch_all(ctx);
+        }
+
+        #[handler::single]
+        fn on_request(
+            state: &mut Self::State,
+            _ctx: &mut NativeCtx<'_>,
+            _request: HttpServerRequest,
+        ) -> HttpResponseStreamOpen {
+            state.emitted = false;
+            HttpResponseStreamOpen {
+                status: 200,
+                headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
+            }
+        }
+
+        #[handler::manual]
+        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, credit: HttpStreamCredit) {
+            let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
+                return;
+            };
+            if state.emitted {
+                return;
+            }
+            stream.chunk(ctx, credit.stream_id.to_string().into_bytes());
+            stream.end(ctx);
+            state.emitted = true;
         }
     }
 
@@ -2180,6 +2233,36 @@ fn keep_alive_reuses_socket_after_streamed_response() {
     assert!(second.starts_with("HTTP/1.1 200 OK\r\n"), "{second:?}");
     assert!(second.contains("Connection: keep-alive\r\n"), "second streamed response keeps alive too: {second:?}");
     assert_eq!(dechunk(body_of(&second)).into_bytes(), expected, "second stream reassembles in order");
+}
+
+/// Tripwire: two consecutive response streams must carry distinct
+/// `stream_id`s. The id is the key of the cap's stream table and of the
+/// credit accounting that guards it, so a repeated id lets one stream's
+/// credit grants and teardown act on another's state — with the id constant,
+/// a stale grant is byte-indistinguishable from a fresh one and drives a
+/// correct handler past its window into the over-window teardown (issue
+/// 3730). Response streams once reused the dispatch correlation id, which is
+/// minted per sender and so repeated across requests; ADR-0128 §2 was amended
+/// on 2026-07-20 to mint them from the cap's monotonic counter instead. The
+/// handler echoes its own granted `stream_id` as the body, so this reads the
+/// two ids off the wire and only asserts they differ — never their values,
+/// which would pin the counter's start point.
+#[test]
+fn consecutive_response_streams_get_distinct_stream_ids() {
+    let chassis = boot_response_stream::<StreamIdEchoHandler>(8);
+    let port = port_of(&chassis);
+
+    // Poll the async `/` catch-all live before the measured requests.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    let first = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let second = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let first_id = dechunk(body_of(&first));
+    let second_id = dechunk(body_of(&second));
+
+    assert!(!first_id.is_empty(), "first stream reported no id: {first:?}");
+    assert!(!second_id.is_empty(), "second stream reported no id: {second:?}");
+    assert_ne!(first_id, second_id, "consecutive response streams reused stream_id {first_id}");
 }
 
 /// Pins the negative alongside the reuse tripwire above: a streamed request

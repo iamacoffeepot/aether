@@ -100,10 +100,11 @@ pub struct HttpShardState {
     /// chunks a stream may hold; also the bounded hand-off channel's
     /// capacity and the initial credit grant.
     pub response_stream_window: u32,
-    /// Active response streams (ADR-0128), keyed by `stream_id` (== the
-    /// request's dispatch correlation id). Promoted from `in_flight` on
+    /// Active response streams (ADR-0128), keyed by a cap-minted `stream_id`
+    /// from [`HttpShardState::next_stream_id`]. Promoted from `in_flight` on
     /// `HttpResponseStreamOpen`; torn down on stream end, flood, timeout, or
-    /// connection close.
+    /// connection close. Websocket streams share this map and draw from the
+    /// same counter, so one key names exactly one stream of either kind.
     pub streams: HashMap<u64, StreamState>,
     /// Inbound request-stream credit-window depth (ADR-0128): the initial
     /// count of `HttpRequestChunk` mails the cap delivers to a streaming
@@ -115,13 +116,15 @@ pub struct HttpShardState {
     /// `HttpRequestStreamEnd` dispatch through `in_flight`) or on connection
     /// close.
     pub request_streams: HashMap<u64, RequestStreamState>,
-    /// Monotonic source of cap-minted stream ids (inbound request streams
-    /// and websocket outbound streams), shared across every shard
-    /// (ADR-0135): a handler identifies a connection by its `stream_id`
-    /// alone (ADR-0132), so ids must stay unique across the whole cap, not
-    /// per shard. Distinct from response stream ids (those reuse the
-    /// request's dispatch correlation, unique substrate-wide already), so
-    /// the tables never collide.
+    /// Monotonic source of every cap-minted stream id — inbound request
+    /// streams, websocket outbound streams, and response streams alike —
+    /// shared across every shard (ADR-0135): a handler identifies a stream by
+    /// its `stream_id` alone (ADR-0132), so ids must stay unique across the
+    /// whole cap, not per shard. Response streams draw from this counter too
+    /// (ADR-0128 §2 as amended 2026-07-20; issue 3730): they previously reused
+    /// the request's dispatch correlation id, which is minted per sender and
+    /// so identifies a stream only by accident — consecutive requests to one
+    /// handler collided on it.
     pub next_stream_id: Arc<AtomicU64>,
     /// Read deadline between frames on an upgraded websocket connection
     /// (ADR-0129), from `websocket_idle_timeout_millis` — longer than
