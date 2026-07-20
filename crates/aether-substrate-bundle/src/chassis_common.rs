@@ -794,7 +794,6 @@ mod tests {
     use super::ChassisBootConfigLayer;
     use super::DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS;
     use super::SchedulerTuningConfigLayer;
-    use super::SettlementConfig;
     use super::chassis_known_keys;
     use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
@@ -809,7 +808,6 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::PoisonError;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     /// Process-wide guard around the `AETHER_ACTOR_*` ring env mutation,
     /// so ring tests serialise their set/remove pairs.

@@ -12,8 +12,8 @@ use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 
-/// Compose the full pre-#3764 cap set: render + component host + input
-/// + tcp + text + in-memory clipboard + inert game gateway (fs still
+/// Compose the full pre-#3764 cap set: render, component host, input,
+/// tcp, text, in-memory clipboard, and the inert game gateway (fs still
 /// rides `namespace_roots`).
 pub trait FullBenchExt {
     #[must_use]

@@ -28,7 +28,7 @@ const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
 pub struct SettlementConfig {
     /// `AETHER_SETTLEMENT_CAP_SECS=<seconds>` cumulative settlement
     /// patience before a gate is declared wedged (default
-    /// [`DEFAULT_SETTLEMENT_CAP_SECS`]). `0` is the sentinel for "no cap —
+    /// `DEFAULT_SETTLEMENT_CAP_SECS`). `0` is the sentinel for "no cap —
     /// wait forever," for attaching a debugger to a suspected deadlock; in
     /// that mode the per-round warn log stays the live signal.
     #[config(env = "AETHER_SETTLEMENT_CAP_SECS", default = 300)]

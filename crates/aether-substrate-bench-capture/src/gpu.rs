@@ -127,7 +127,7 @@ impl Gpu {
 
     /// Variant of `render` that also copies the offscreen texture
     /// into a readback buffer, maps it, and returns an encoded PNG
-    /// plus an optional [`FrameVerdict`] scored on the same raw RGBA
+    /// plus an optional [`aether_kinds::FrameVerdict`] scored on the same raw RGBA
     /// (present iff `checks` is non-empty; iamacoffeepot/aether#1777).
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
