@@ -1,7 +1,25 @@
-use super::*;
+//! `aether.fs` save-namespace round trips (ADR-0041) over a
+//! [`SubstrateBench`]: write/read, delete, list, and the `NotFound`
+//! negative — each driven through `SubstrateBench::execute` against the
+//! chassis-wired `FsCapability`.
+//!
+//! Minimal composition (issue #3764): the fs cap rides
+//! `namespace_roots` on the bench basics — no render, no wgpu, no
+//! component host. The sandbox flows in via
+//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
+//! mutation (issue 464).
+
+use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
+use aether_substrate_bench::test_helpers::{init_save_sandbox, test_namespace_roots};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
 
 const FS_MAILBOX: &str = "aether.fs";
 const FS_NAMESPACE_SAVE: &str = "save";
+
+fn boot_bench() -> SubstrateBench {
+    let sandbox = init_save_sandbox("fs-save-namespace");
+    SubstrateBench::builder().namespace_roots(test_namespace_roots(sandbox)).build().expect("boot")
+}
 
 /// `aether.fs.write` followed by `aether.fs.read` round-trips the
 /// bytes through the local-file adapter (ADR-0041). Both replies
@@ -9,16 +27,7 @@ const FS_NAMESPACE_SAVE: &str = "save";
 /// reply also carries the bytes verbatim.
 #[test]
 fn fs_write_then_read_round_trips_in_save_namespace() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench = SubstrateBench::builder()
-        .full()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench = boot_bench();
 
     let path = "fs-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -64,16 +73,7 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
 /// `Err { NotFound }`.
 #[test]
 fn fs_delete_removes_written_file() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench = SubstrateBench::builder()
-        .full()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench = boot_bench();
 
     let path = "fs-delete.bin".to_owned();
     // A failed write would abort the sequence with `OpFailed`, so
@@ -114,16 +114,7 @@ fn fs_delete_removes_written_file() {
 /// in `save` returns an entry list containing the bare filename.
 #[test]
 fn fs_list_returns_written_path() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench = SubstrateBench::builder()
-        .full()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench = boot_bench();
 
     let path = "probe-list.bin".to_owned();
     let result = bench
@@ -157,16 +148,7 @@ fn fs_list_returns_written_path() {
 /// `Err { NotFound }`. Negative companion to the round-trip test.
 #[test]
 fn fs_read_unknown_path_returns_not_found() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench = SubstrateBench::builder()
-        .full()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench = boot_bench();
 
     let result = bench
         .execute(vec![(

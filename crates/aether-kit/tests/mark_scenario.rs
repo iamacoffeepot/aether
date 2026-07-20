@@ -5,7 +5,7 @@
 //! with the same wasm. The final allocation proves both live marks and the
 //! deleted-id watermark crossed the lifecycle boundary.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench::test_helpers::require_wasm;
 use std::fs;
 use std::path::Path;
 
@@ -17,7 +17,6 @@ use aether_kit::mark::{
 };
 use aether_kit::world::WorldPoint;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 // Retain all of the kit's native inventory submissions in this integration
 // test binary, matching the other component scenarios.
@@ -57,10 +56,10 @@ fn load_mark_book(bench: &mut SubstrateBench, wasm_path: &Path) -> aether_data::
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive CRUD → replace → allocation-watermark proof
 fn mark_crud_and_allocation_survive_component_replace() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let mailbox_id = load_mark_book(&mut bench, &wasm_path);
     let address = component_address();
 

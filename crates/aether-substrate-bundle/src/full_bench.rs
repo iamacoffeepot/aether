@@ -1,8 +1,8 @@
 //! Transitional full-composition bridge for the bundle-resident bench
 //! tests (issue #3765). Composes the pre-#3764 cap set in one call so
-//! the ~40 scenario tests still living in this crate (and aether-kit's,
-//! until #3768) keep their historical composition; a test rehoming to
-//! its cap crate states its minimal composition instead and drops this.
+//! the scenario tests still living in this crate keep their historical
+//! composition; a test rehoming to its cap crate (as the kit suite did
+//! in #3768) states its minimal composition instead and drops this.
 
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
 use aether_game::{GameGatewayCapability, GameGatewayConfig};

@@ -37,7 +37,7 @@
 // a pixel region.
 #![allow(clippy::suboptimal_flops)]
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -52,7 +52,7 @@ use aether_kit::{PanelConfig, Theme};
 use aether_render::RenderCapability;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, require_runtime};
-use aether_text::{LoadFont, LoadFontResult};
+use aether_text::{LoadFont, LoadFontResult, TextCapability};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point). Chosen so the whole stack fits the capture surface with margin.
@@ -86,7 +86,7 @@ fn panel_address() -> String {
     format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-/// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved
+/// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved
 /// relative to this crate at build time.
 fn assets_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
@@ -230,11 +230,21 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
 
-    // `assets://` points at the bundle assets dir (where the TTF lives);
+    // `assets://` points at the kit assets dir (where the TTF lives);
     // `save://` / `config://` sink into a per-process sandbox tempdir.
+    // Composition: GPU captures + kit wasm loads + `aether.text` glyph
+    // rasterization (its font fetch rides `aether.fs`, composed from the
+    // namespace roots). All mail is addressed directly, so no input fan-out.
     let sandbox = init_save_sandbox("widget-text-alignment");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    let mut bench = SubstrateBench::builder().full().size(240, 220).namespace_roots(roots).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .with_render()
+        .with_component_host()
+        .with_actor::<TextCapability>(())
+        .size(240, 220)
+        .namespace_roots(roots)
+        .build()
+        .expect("boot");
     let font_id = load_font(&mut bench);
     load_panel(&mut bench, &wasm, font_id);
 

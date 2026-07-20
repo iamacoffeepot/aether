@@ -30,6 +30,20 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 filter = "package(=aether-kit) & binary(terrain_workbench_scenario)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The two heaviest binaries iamacoffeepot/aether#3768 rehomed from
+# `aether-substrate-bundle` (whose package cap is 180s) into aether-kit:
+# `widget_render_interaction`'s scenarios each cold-load the kit wasm plus a
+# font and run multi-capture verdicts, and `world_case_atlas` renders and
+# scores a whole contact sheet per test. Both were sized against the bundle's
+# 180s cap, so the kit-wide 120s class cap below would be a silent tightening
+# under CI's software-rasterizer contention; widen them to the same 300s
+# backstop as `terrain_workbench_scenario` above. Same ordering constraint:
+# these must precede the package-wide `kind(test)` class cap — nextest applies
+# the first matching override per setting.
+[[profile.ci.overrides]]
+filter = "package(=aether-kit) & (binary(widget_render_interaction) | binary(world_case_atlas))"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 # Every binary under `crates/aether-kit/tests/` cold-loads and compiles
 # `aether_kit.wasm` and boots a wgpu `SubstrateBench`, so they are one slow
 # class rather than a fixed allowlist: #2805 measured the camera scenario
@@ -53,6 +67,22 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 # binaries; the package's unit tests keep the 60s cap.
 [[profile.ci.overrides]]
 filter = "package(=aether-substrate-bundle) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+# The `aether-render` render scenario binary (rehomed from the bundle's
+# `substrate_bench_scenario` dispatcher, issue #3771) boots a wgpu
+# `SubstrateBench` per test and runs ~18 GPU captures; on CI's shared
+# 2-core runner the frames rasterize in software under full-suite
+# contention, so the binary stretches well past the 60s steady-state cap
+# while still making timely progress. It ran under the bundle's 180s
+# `kind(test)` cap above before the move; carry the same wall-clock
+# backstop — a deadlock guard a healthy run never reaches. `kind(test)`
+# scopes it to the integration binary; the crate's unit tests keep the
+# 60s default. Ordering: nextest applies the first matching override per
+# setting, so any narrower `aether-render` binary override must be
+# listed before this one.
+[[profile.ci.overrides]]
+filter = "package(=aether-render) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The fleetbench replace binary also cold-loads `aether_kit.wasm` and was

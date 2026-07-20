@@ -83,11 +83,32 @@ inventory = { workspace = true }
 # artifact, and assert mail-flow + render properties via direct
 # `SubstrateBench` calls. Tests run host-side; the wasm is built separately
 # for `wasm32-unknown-unknown` and discovered at runtime under
-# `target/wasm32-unknown-unknown/{debug,release}/`.
+# `target/wasm32-unknown-unknown/{debug,release}/`. Each scenario states its
+# minimal cap composition on the `SubstrateBenchBuilder` (issue #3764), so the
+# cap crates a composition names appear here with their default `runtime`
+# feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
+aether-clipboard = { path = "../aether-clipboard" }
+aether-game = { path = "../aether-game" }
+aether-input = { path = "../aether-input" }
+aether-render = { path = "../aether-render" }
 aether-substrate-bench = { path = "../aether-substrate-bench" }
 aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
-aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+aether-tcp = { path = "../aether-tcp" }
+aether-text = { path = "../aether-text" }
+# The widget/editor scenarios load the `test.editor_region_probe` /
+# `test.ui_widget` fixture actors: the typed request/reply kinds come from the
+# fixtures kinds rlib, and the wasm-body dependency below keeps `xtask
+# affected` selecting these tests (kit executes that wasm at test time) when
+# the fixture bundle changes — cargo's graph cannot see a runtime wasm load.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+
+# `aether-test-fixtures-bundle` is a runtime wasm coupling (loaded by stem at
+# test time), never a source-level import, so the source-only scan cannot see
+# it.
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true

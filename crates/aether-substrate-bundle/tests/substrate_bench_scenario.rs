@@ -1,28 +1,20 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
-//! a `SubstrateBench` and exercises one substrate primitive — input
-//! subscription, drop, `capture_frame` round-trip, `replace_component`
-//! (all via `aether-test-fixtures`'s `probe` cdylib), or the chassis `aether.fs`
-//! adapter's read/write/delete/list round trips — driving every step
-//! through `SubstrateBench::execute` (issue 868). The text scenarios
-//! moved to `aether-text`'s own `text_scenario` target (issue #3772).
+//! a `SubstrateBench` and exercises one substrate primitive — boot
+//! lifecycle, component listing/exports, or inline-child state (via
+//! `aether-test-fixtures`'s `probe` cdylib) — driving every step
+//! through `SubstrateBench::execute` (issue 868). The render scenarios
+//! moved to `aether-render`'s own `render_scenario` target (issue #3771)
+//! and the text scenarios to `aether-text`'s `text_scenario` (issue #3772).
 //!
-//! Skipped when:
-//! - No wgpu adapter is available (driverless Linux runners without
-//!   `mesa-vulkan-drivers`).
-//! - The fixture's wasm hasn't been built — fixture-loading tests
-//!   read `target/wasm32-unknown-unknown/{debug,release}/examples/probe.wasm`
-//!   and skip with an `eprintln!` when it's absent. fs scenarios
-//!   don't load the fixture, so they only need wgpu. CI builds the
-//!   fixture wasm before invoking `cargo test`; setting
-//!   `AETHER_REQUIRE_RUNTIME=1` (CI does) flips both skip points
-//!   into hard panics so a missing pre-build is loud.
+//! Skipped when the fixture's wasm hasn't been built — fixture-loading
+//! tests read `target/wasm32-unknown-unknown/{debug,release}/examples/probe.wasm`
+//! and skip with an `eprintln!` when it's absent. CI builds the
+//! fixture wasm before invoking `cargo test`; setting
+//! `AETHER_REQUIRE_RUNTIME=1` (CI does) flips the skip point
+//! into a hard panic so a missing pre-build is loud.
 //!
-//! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate, `save://` sandbox) live in
-//! `aether_substrate_bench_capture::test_helpers` (issues 460 +
-//! 821). Per issue 464, the sandbox flows in via
-//! `SubstrateBench::builder().full().namespace_roots(...)` rather than env-var
-//! mutation.
+//! The wasm locator + skip-or-panic gate live in
+//! `aether_substrate_bench_capture::test_helpers` (issues 460 + 821).
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test`
 // surfaces "skipping: ..." alongside `test ... ok` (issue 891).
@@ -31,37 +23,18 @@
 // not cap config.
 #![allow(clippy::disallowed_methods)]
 
-use aether_substrate_bundle::FullBenchExt;
-use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
-use aether_data::{Kind, MailboxId};
-use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
+use aether_data::MailboxId;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult, FrameCheck, FrameCheckResult, FrameRect,
-    FrameReduction, ListComponents, ListComponentsResult, LoadComponent, LoadResult, NamedMail, Ping, QuadScale,
-    QuadSpace, ReplaceComponent, ReplaceResult, SimilarityCheck,
+    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, Ping, ReplaceComponent,
+    ReplaceResult,
 };
-use aether_math::{Rgb, Rgba};
-use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
-    TextureFormat, TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
-};
-use aether_substrate::render as substrate_render;
-use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::visual::{
-    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
-};
-use aether_substrate_bench_capture::{
-    ArtifactGuard, RenderBenchExt,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
-};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
-    SetRender, TagSpawnQuery, TagSpawnReport,
+    TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -70,7 +43,6 @@ use aether_test_fixtures_kinds::{
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
-use std::env;
 use std::fs;
 
 /// Caller-supplied component name passed to `LoadComponent`.
@@ -92,46 +64,6 @@ const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 /// them via `count_observed`.
 const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
 const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
-
-/// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
-/// the kind's wire encoding (`encode_into_bytes`) so any K — cast
-/// or structured — packs correctly.
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
-}
-
-/// Mirrors `ArtifactGuard`'s private root resolution (`CARGO_MANIFEST_DIR`
-/// two levels up to the workspace root, `CARGO_TARGET_DIR` override if
-/// set) so the artifact-guard scenario below can locate the directory a
-/// real [`ArtifactGuard::arm`] call just wrote to. `id` must already be
-/// filesystem-safe (alphanumeric/`-`/`_` only) — the scenario below only
-/// ever passes ids it controls, so no sanitization is needed here.
-fn artifact_dir(id: &str) -> PathBuf {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
-    target_root.join("substrate-bench-artifacts").join(id)
-}
-
-fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
-    let start = ((y * img.width + x) * 4) as usize;
-    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
-}
-
-fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
-    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
-}
-
-fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
-    !rgb_close(rgba_at(img, x, y), bg, tolerance)
-}
 
 /// Load the probe into the bench via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
@@ -160,60 +92,12 @@ fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
     }
 }
 
-/// Load the `cube` fixture into the bench, blocking on `LoadResult`
-/// so the subsequent advance sees a tick-subscribed component. Mirrors
-/// `load_probe`; the cube scenario only needs the load to succeed (it
-/// captures rather than mailing the component), so the returned
-/// `MailboxId` is discarded.
-fn load_cube(bench: &mut SubstrateBench, wasm_path: &Path) {
-    let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
-        .execute(vec![(
-            "load",
-            BenchOp::send_and_await(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some("test.cube".to_owned()),
-                    config: Vec::new(),
-                    // `Cube` is a non-entry actor in the bundle.
-                    export: Some("test.cube".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component(cube): {error}"),
-    }
-}
-
-/// fs scenarios need wgpu (the bench unconditionally builds a
-/// `Gpu` at boot) but not the fixture wasm. Skips on wgpu-less
-/// runners and panics under `AETHER_REQUIRE_RUNTIME` so a
-/// CI-side regression is loud.
-fn require_wgpu_only() -> bool {
-    if has_wgpu_adapter() {
-        return true;
-    }
-    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
-    eprintln!("skipping: no wgpu adapter available");
-    false
-}
-
 #[path = "substrate_bench_scenario/boot.rs"]
 mod boot;
-#[path = "substrate_bench_scenario/clipboard.rs"]
-mod clipboard;
 #[path = "substrate_bench_scenario/component.rs"]
 mod component;
-#[path = "substrate_bench_scenario/fs.rs"]
-mod filesystem;
 #[path = "substrate_bench_scenario/inline_child.rs"]
 mod inline_child;
-#[path = "substrate_bench_scenario/render.rs"]
-mod render;
 
 // Pre-#775 the bench emitted `aether.observation.frame_stats` every
 // 120 frames and a test verified one broadcast arrived after

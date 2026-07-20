@@ -18,17 +18,17 @@
 //! gate, `save://` sandbox) live in
 //! `aether_substrate_bench_capture::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox is plumbed via
-//! `SubstrateBench::builder().full().namespace_roots(...)` rather than env-var
+//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
 use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
 use aether_kit::mesh::LoadMesh;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use aether_substrate_bench_capture::test_helpers::{
     init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
 use aether_substrate_bench_capture::visual::{decode_png, differs_from_background};
-use aether_substrate_bundle::FullBenchExt;
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
@@ -119,7 +119,8 @@ fn dsl_box_loads_and_renders() {
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -157,7 +158,8 @@ fn obj_quad_loads_and_renders() {
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -195,7 +197,8 @@ fn parse_failure_keeps_prior_mesh() {
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -249,7 +252,8 @@ fn good_dsl_load_replies_ok() {
     let path = write_fixture("reply_good.dsl", BOX_DSL);
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -287,7 +291,8 @@ fn bad_dsl_load_replies_err() {
     let path = write_fixture("reply_bad.dsl", BAD_DSL);
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -324,7 +329,8 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     let obj_path = write_fixture("overlap_second.obj", QUAD_OBJ);
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
