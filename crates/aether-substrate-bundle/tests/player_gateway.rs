@@ -14,7 +14,9 @@ use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::{RenderBenchBuilderExt, test_helpers::require_runtime};
+use aether_tcp::TcpCapability;
 use aether_tcp::{ListListeners, ListListenersResult};
 
 const SIM_NAME: &str = "player-turn-sim";
@@ -121,10 +123,16 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
         return;
     };
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
+    // Issue #3765: explicit composition — the three-crate integration
+    // needs the component host (TurnSim wasm), tcp (real loopback
+    // sessions), the active gateway, and render for the wasm's frame
+    // output; the rest of the old full() set goes uncomposed.
     let mut bench = SubstrateBench::builder()
-        .full()
         .size(96, 96)
-        .game_gateway(GameGatewayConfig {
+        .with_render()
+        .with_component_host()
+        .with_actor::<TcpCapability>(())
+        .with_actor::<GameGatewayCapability>(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(turn_sim_mailbox),

@@ -8,6 +8,8 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
+use aether_substrate_bench_capture::RenderBenchExt;
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 
 use aether_actor::Addressable;
@@ -21,8 +23,9 @@ use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat,
     TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{Image, Rect, decode_png, target_color_stats};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{Image, Rect, decode_png, target_color_stats};
 
 const PANEL_X: f32 = 8.0;
 const PANEL_Y: f32 = 9.0;

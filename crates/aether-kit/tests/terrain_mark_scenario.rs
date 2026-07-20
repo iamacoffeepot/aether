@@ -1,5 +1,6 @@
 //! Terrain picking and MarkBook-projected overlays through the real kit wasm.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::f32::consts::FRAC_PI_3;
 use std::fs;
 use std::path::Path;
@@ -21,11 +22,12 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bundle::substrate_bench::{
-    ArtifactGuard, BenchOp, SubstrateBench,
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::visual::{Rect, decode_png, run_checks, target_color_stats};
+use aether_substrate_bench_capture::{
+    ArtifactGuard,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
 };
-use aether_substrate_bundle::visual::{Rect, decode_png, run_checks, target_color_stats};
 
 #[allow(unused_imports)]
 use aether_kit as _;

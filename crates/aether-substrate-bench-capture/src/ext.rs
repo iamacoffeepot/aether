@@ -1,0 +1,138 @@
+//! Seam implementations plugging the wgpu pipeline into the core bench
+//! (issue #3765): [`GpuRenderExt`] chains the render cap into the
+//! chassis builder from the boot wiring, [`GpuFrameHook`] drives the
+//! per-frame draw + capture readback in the pump, and the two extension
+//! traits give the builder and the bench their render-typed surface
+//! back (`with_render`, `committed_overlay_snapshot`).
+
+use std::any::Any;
+use std::sync::Arc;
+
+use aether_actor::Addressable;
+use aether_kinds::FrameCheck;
+use aether_render::{CaptureBackend, DrawTexturedQuads, RenderCapability, RenderConfig, RenderHandles};
+use aether_substrate::capture::ReferenceCapture;
+use aether_substrate::chassis::builder::Builder;
+use aether_substrate::mail::MailboxId;
+use aether_substrate::render::VERTEX_BUFFER_BYTES;
+use aether_substrate_bench::{
+    BenchWiring, CaptureOutcome, FrameHook, RenderExt, SubstrateBench, SubstrateBenchBuilder, SubstrateBenchChassis,
+};
+
+use crate::gpu::Gpu;
+
+/// [`RenderExt`] implementation: builds the render cap's config from
+/// the boot wiring — the same shape the chassis assembled before the
+/// split — and chains `RenderCapability` into the builder.
+pub struct GpuRenderExt;
+
+impl RenderExt for GpuRenderExt {
+    fn compose(&self, wiring: &BenchWiring, builder: Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis> {
+        builder.with_actor::<RenderCapability>(RenderConfig {
+            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+            observed_kinds: wiring.observed_kinds.clone(),
+            assets_dir: wiring.assets_dir.clone(),
+            capture_backend: Some(CaptureBackend {
+                queue: wiring.capture_queue.clone(),
+                wake: Arc::clone(&wiring.capture_wake),
+                outbound: Arc::clone(&wiring.outbound),
+            }),
+        })
+    }
+}
+
+/// [`FrameHook`] implementation wrapping the offscreen [`Gpu`]: the
+/// advance path's per-frame draw, the capture readback, and the render
+/// mailbox capture requests route to.
+pub struct GpuFrameHook {
+    gpu: Gpu,
+}
+
+impl GpuFrameHook {
+    /// Snapshot the committed overlay batches from the latest rendered
+    /// frame — the concrete accessor `RenderBenchExt` reaches through
+    /// [`FrameHook::as_any`].
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.gpu.committed_overlay_snapshot()
+    }
+}
+
+impl FrameHook for GpuFrameHook {
+    fn render_frame(&mut self) {
+        self.gpu.render();
+    }
+
+    fn render_and_capture(&mut self, checks: &[FrameCheck], reference: Option<&ReferenceCapture>) -> CaptureOutcome {
+        self.gpu.render_and_capture(checks, reference)
+    }
+
+    fn capture_mailbox(&self) -> MailboxId {
+        // Harness route to the render cap's own id (its NAMESPACE) —
+        // ctx-less driver-side push, no resolver in scope.
+        #[allow(clippy::disallowed_methods)]
+        aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Builder extension composing render support: the cap (via
+/// [`GpuRenderExt`]) plus the frame hook built against the booted
+/// chassis's published [`RenderHandles`] at the builder's offscreen
+/// size.
+pub trait RenderBenchBuilderExt {
+    #[must_use]
+    fn with_render(self) -> Self;
+}
+
+impl RenderBenchBuilderExt for SubstrateBenchBuilder {
+    fn with_render(self) -> Self {
+        self.render_ext(
+            Box::new(GpuRenderExt),
+            Box::new(|passive, width, height| {
+                // Issue 629 / Phase A: render publishes its handles on the
+                // chassis's `ExportedHandles` map during `init`; no
+                // `Arc<RenderCapability>` ever escapes the dispatcher.
+                let handles: RenderHandles = passive.handle::<RenderHandles>().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "RenderHandles not published — RenderCapability must boot via the render ext before the hook builds",
+                    )
+                })?;
+                Ok(Box::new(GpuFrameHook { gpu: Gpu::new(width, height, handles) }))
+            }),
+        )
+    }
+}
+
+/// Bench extension restoring the render-typed overlay accessor the
+/// core no longer owns.
+pub trait RenderBenchExt {
+    /// Snapshot the ordered, typed overlay submissions from the latest
+    /// frame committed by an `advance` or `capture` op. Solid
+    /// submissions appear normalized as [`DrawTexturedQuads`] over the
+    /// renderer's reserved white texture; batches rejected while
+    /// recording (missing texture, invalid/empty clip, past the vertex
+    /// budget) are absent. Capture uses replay-cache semantics: with no
+    /// new overlay mail the snapshot remains the latest committed
+    /// frame, and an advance committing an empty overlay frame clears
+    /// it. Returned values own their data.
+    ///
+    /// # Panics
+    /// Panics if the bench was built without
+    /// [`RenderBenchBuilderExt::with_render`] — there is no overlay
+    /// pipeline to snapshot.
+    #[must_use]
+    fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads>;
+}
+
+impl RenderBenchExt for SubstrateBench {
+    fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.frame_hook()
+            .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
+            .expect("committed_overlay_snapshot requires a bench built with .with_render() (issue #3764)")
+            .committed_overlay_snapshot()
+    }
+}

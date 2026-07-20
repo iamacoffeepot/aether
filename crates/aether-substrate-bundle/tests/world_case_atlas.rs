@@ -17,6 +17,7 @@
 // Integration-test skip diagnostics intentionally surface beside test output.
 #![allow(clippy::print_stderr)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -35,7 +36,9 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::{RenderCapability, ViewProjection};
-use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::ArtifactGuard;
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 const WINDOW_WIDTH: u32 = 320;
 const WINDOW_HEIGHT: u32 = 320;

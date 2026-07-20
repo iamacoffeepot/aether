@@ -22,7 +22,7 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::process::ExitCode;
 
-use aether_substrate_bundle::perf::harness::{
+use aether_substrate_bench::perf::harness::{
     CellSamples, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep_samples,
 };
 use plotters::prelude::*;

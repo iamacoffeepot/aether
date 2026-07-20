@@ -78,6 +78,11 @@ runtime = []
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
+# The substrate-bench harness + its GPU capture half (issue #3765): the
+# `aether-substrate-bench` binary composes through them, and the
+# transitional `FullBenchExt` bridge + resident scenario tests link both.
+aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
 # iamacoffeepot/aether#3758: the http caps were extracted to `aether-http`;
 # every chassis installs `HttpCapability` + `HttpServerCapability` and the
 # CLI re-exports their clap overlays, so the bundle takes the runtime face.
@@ -157,7 +162,6 @@ confique = { workspace = true }
 # bridge BootError / wasmtime / io faults purely to bubble up.
 # Same crate as `wasmtime::Result` re-exports (issue #571).
 anyhow = { workspace = true }
-bytemuck = { workspace = true, features = ["derive"] }
 png = { workspace = true }
 pollster = "0.4.0"
 # iamacoffeepot/aether#1155: distribution-plot rendering for the
@@ -178,11 +182,6 @@ plotters = { version = "0.3", default-features = false, features = [
 serde = { workspace = true, features = ["derive", "std"] }
 # Trial reports + comparison output are JSON (perf tooling, #1077).
 serde_json = { workspace = true }
-# `visual::ImageError` derives `thiserror::Error` (moved from
-# `aether-scenario` per issue 821, promoted to crate root per issue 1781).
-# New runtime dep here because `aether-substrate-bundle` had no prior
-# thiserror consumer.
-thiserror = "2"
 tracing = { workspace = true, features = ["std", "attributes"] }
 toml = { workspace = true }
 wgpu = { workspace = true }

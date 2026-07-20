@@ -18,14 +18,14 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use aether_substrate_bundle::substrate_bench::{
+//! use aether_substrate_bench::{
 //!     SubstrateBench,
-//!     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
+//!     test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots},
 //! };
 //!
 //! #[test]
 //! fn smoke() {
-//!     let Some(wasm_path) = require_runtime("aether_my_component") else {
+//!     let Some(wasm_path) = require_wasm("aether_my_component") else {
 //!         return;
 //!     };
 //!     let sandbox = init_save_sandbox("my-component");
@@ -37,6 +37,10 @@
 //!     // … drive bench directly …
 //! }
 //! ```
+//!
+//! Visual scenarios that need the wgpu adapter probe use
+//! `aether_substrate_bench_capture::test_helpers::require_runtime`
+//! instead — the probe belongs with the GPU crate (issue #3765).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -55,20 +59,6 @@ use std::process;
 /// via env-var mutation. The `OnceLock` no longer linearises a
 /// `set_var` call — it just memoises the path.
 static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// Probe for any usable wgpu adapter. Used by `require_runtime` and
-/// by tests that need wgpu but not a wasm component (e.g. IO sink
-/// scenarios in `aether-substrate-bundle`'s own substrate-bench tests).
-#[must_use]
-pub fn has_wgpu_adapter() -> bool {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
 
 /// Locate `<crate_name>.wasm` under the workspace target dir. Tries
 /// `release` first, then `debug` so either build profile works. Also
@@ -119,19 +109,21 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Skip-or-panic gate: probes wgpu + locates the wasm. Returns the
-/// wasm path on success; `None` when the test should skip.
+/// Skip-or-panic gate over the wasm artifact alone: locates the wasm
+/// with no GPU involvement, for scenarios whose bench composition needs
+/// no render cap (issue #3765). Returns the wasm path on success; `None`
+/// when the test should skip. Visual scenarios use the capture crate's
+/// `require_runtime`, which adds the wgpu adapter probe in front of
+/// this.
 ///
-/// `AETHER_REQUIRE_RUNTIME=1` flips both skip points into a panic so
-/// CI catches a forgotten pre-build entry instead of passing a 30 ms
-/// vacuous test. CI sets this; local devs leave it unset and keep the
-/// existing skip behavior.
+/// `AETHER_REQUIRE_RUNTIME=1` flips the skip into a panic so CI catches
+/// a forgotten pre-build entry instead of passing a 30 ms vacuous test.
+/// CI sets this; local devs leave it unset and keep the skip behavior.
 ///
 /// # Panics
-/// Panics in strict (`AETHER_REQUIRE_RUNTIME=1`) mode if either no
-/// wgpu adapter is available or the named crate's wasm artifact is
-/// not pre-built — fail-fast per ADR-0063: CI relies on the strict
-/// mode to catch missing pre-build entries.
+/// Panics in strict (`AETHER_REQUIRE_RUNTIME=1`) mode if the named
+/// crate's wasm artifact is not pre-built — fail-fast per ADR-0063: CI
+/// relies on the strict mode to catch missing pre-build entries.
 #[must_use]
 // Test-only skip diagnostic — emitted from `cargo test` runners so a
 // skipped test is visible alongside `test ... ok` lines. Not routed
@@ -139,16 +131,11 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 // and surfaces it on failure (issue 891).
 #[allow(clippy::print_stderr)]
 // Test-only: AETHER_REQUIRE_RUNTIME is the CI strict-mode toggle that turns a
-// missing wgpu adapter / wasm pre-build from a skip into a hard failure — a test
-// harness knob, not cap config.
+// missing wasm pre-build from a skip into a hard failure — a test harness
+// knob, not cap config.
 #[allow(clippy::disallowed_methods)]
-pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
+pub fn require_wasm(crate_name: &str) -> Option<PathBuf> {
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    if !has_wgpu_adapter() {
-        assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
-        eprintln!("skipping: no wgpu adapter available");
-        return None;
-    }
     // The else arm runs side effects (assert + eprintln); `map_or_else`
     // would bury that under closures with no clarity win.
     #[allow(clippy::option_if_let_else)]

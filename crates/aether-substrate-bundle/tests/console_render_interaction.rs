@@ -14,6 +14,7 @@
 // "skipping: ..." alongside `test ... ok`.
 #![allow(clippy::print_stderr)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,10 +30,8 @@ use aether_kit::{
     ConsoleCommandOutput, ConsoleConfig, EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec,
 };
 use aether_render::RenderCapability;
-use aether_substrate_bundle::substrate_bench::{
-    BenchOp, SubstrateBench,
-    test_helpers::{init_save_sandbox, require_runtime},
-};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, require_runtime};
 
 const WINDOW_WIDTH: u32 = 320;
 const WINDOW_HEIGHT: u32 = 200;

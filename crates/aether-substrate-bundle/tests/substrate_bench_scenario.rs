@@ -18,7 +18,7 @@
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
 //! gate, `save://` sandbox) live in
-//! `aether_substrate_bundle::substrate_bench::test_helpers` (issues 460 +
+//! `aether_substrate_bench_capture::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox flows in via
 //! `SubstrateBench::builder().full().namespace_roots(...)` rather than env-var
 //! mutation.
@@ -30,6 +30,7 @@
 // not cap config.
 #![allow(clippy::disallowed_methods)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
@@ -49,12 +50,13 @@ use aether_render::{
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
-use aether_substrate_bundle::substrate_bench::{
-    ArtifactGuard, BenchOp, SubstrateBench,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
-};
-use aether_substrate_bundle::visual::{
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
+};
+use aether_substrate_bench_capture::{
+    ArtifactGuard, RenderBenchExt,
+    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,

@@ -39,6 +39,8 @@
 // paths — the recipient-name resolution surface the interaction drives.
 #![allow(clippy::disallowed_methods)]
 
+use aether_substrate_bench_capture::RenderBenchExt;
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,11 +67,12 @@ use aether_kit::{
 use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
-use aether_substrate_bundle::substrate_bench::{
-    ArtifactGuard, BenchOp, SubstrateBench,
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::{
+    ArtifactGuard,
     test_helpers::{init_save_sandbox, require_runtime},
+    visual::{Image, decode_png},
 };
-use aether_substrate_bundle::visual::{Image, decode_png};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 

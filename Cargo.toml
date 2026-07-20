@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/aether-substrate",
+    "crates/aether-substrate-bench",
+    "crates/aether-substrate-bench-capture",
     "crates/aether-substrate-bundle",
     "crates/aether-codec",
     "crates/aether-data",

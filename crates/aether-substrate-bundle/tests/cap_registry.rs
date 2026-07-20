@@ -23,6 +23,7 @@
 // config.
 #![allow(clippy::disallowed_methods)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
 use aether_actor::Addressable;
@@ -31,9 +32,9 @@ use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_fs::{FsCapability, Write};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult, Tick};
 use aether_kit::camera::CameraCreate;
-use aether_substrate_bundle::substrate_bench::{
-    BenchOp, SubstrateBench,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::{
+    has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots,
 };
 use aether_test_fixtures_kinds::SetRender;
 use std::env;

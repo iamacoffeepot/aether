@@ -32,6 +32,8 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
+use aether_substrate_bench_capture::RenderBenchExt;
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 
 use aether_data::Kind;
@@ -44,8 +46,9 @@ use aether_math::Rgba;
 use aether_render::{
     CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
 /// single dominant channel — the compositing order is then read off the

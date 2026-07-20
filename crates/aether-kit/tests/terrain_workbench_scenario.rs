@@ -1,5 +1,6 @@
 //! Full terrain annotation workbench flow through the real kit wasm.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::f32::consts::FRAC_PI_3;
 use std::fs;
 use std::path::Path;
@@ -25,8 +26,10 @@ use aether_kit::world::{
     AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, ProposalError, SUBCELLS_PER_CELL,
     SetCellHeights, SetChunk, WorldPositionMeters,
 };
-use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{Rect, decode_png, run_checks, target_color_stats};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::ArtifactGuard;
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{Rect, decode_png, run_checks, target_color_stats};
 use aether_text::{LoadFontBytes, LoadFontResult};
 
 #[allow(unused_imports)]

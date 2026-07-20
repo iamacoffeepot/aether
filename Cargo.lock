@@ -440,6 +440,8 @@ dependencies = [
  "aether-math",
  "aether-mesh",
  "aether-render",
+ "aether-substrate-bench",
+ "aether-substrate-bench-capture",
  "aether-substrate-bundle",
  "aether-tcp",
  "aether-text",
@@ -576,6 +578,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-substrate-bench"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-data",
+ "aether-fs",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-substrate",
+ "aether-trace",
+ "aether-window",
+ "anyhow",
+ "bytemuck",
+ "clap",
+ "confique",
+ "crossbeam-channel",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "aether-substrate-bench-capture"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-render",
+ "aether-substrate",
+ "aether-substrate-bench",
+ "anyhow",
+ "png",
+ "pollster",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wgpu",
+]
+
+[[package]]
 name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
@@ -601,13 +646,14 @@ dependencies = [
  "aether-render",
  "aether-rpc",
  "aether-substrate",
+ "aether-substrate-bench",
+ "aether-substrate-bench-capture",
  "aether-tcp",
  "aether-test-fixtures-kinds",
  "aether-text",
  "aether-trace",
  "aether-window",
  "anyhow",
- "bytemuck",
  "clap",
  "confique",
  "crossbeam-channel",
@@ -619,7 +665,6 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook 0.4.4",
- "thiserror 2.0.18",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "wasmtime",

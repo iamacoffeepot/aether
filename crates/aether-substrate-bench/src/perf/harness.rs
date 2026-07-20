@@ -36,8 +36,8 @@ use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 use aether_trace::walk::fold_nodes;
 
+use crate::SubstrateBench;
 use crate::perf::report::LatencySection;
-use crate::substrate_bench::SubstrateBench;
 
 /// Fire-and-forward payload the relay actors pass along. The `seq`
 /// field is carried for legibility when eyeballing a trace; the relay

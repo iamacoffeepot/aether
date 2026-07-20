@@ -168,7 +168,7 @@ quads. The minimal hub chassis does not compose `aether.text` or
 
 The current composition is defined in
 [`chassis_common.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs),
-[`substrate_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/substrate_bench/chassis.rs),
+[`substrate_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bench/src/chassis.rs),
 and
 [`render/headless_runtime.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/headless_runtime.rs).
 

@@ -257,7 +257,7 @@ Where that line goes depends on which chassis should carry the cap:
   *membership* has to track the chain by hand.
 - **The substrate-bench chassis** — the in-process harness does not call
   `with_common_caps`; it has a separate, reduced builder chain in
-  [`crates/aether-substrate-bundle/src/substrate_bench/chassis.rs`][substratebench];
+  [`crates/aether-substrate-bench/src/chassis.rs`][substratebench];
   add the capability there too when scenarios should drive it, and thread any
   required config through `SubstrateBenchEnv`. `TextCapability` is registered in both
   compositions for this reason.
@@ -283,7 +283,7 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 [adr70]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md
 [adr71]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md
 [common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs
-[substratebench]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/substrate_bench/chassis.rs
+[substratebench]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bench/src/chassis.rs
 
 ## 5. Passive cap or driver?
 

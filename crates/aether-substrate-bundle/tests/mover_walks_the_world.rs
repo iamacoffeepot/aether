@@ -16,6 +16,7 @@
 // Integration-test diagnostics intentionally surface alongside a failing test.
 #![allow(clippy::print_stderr)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 
 use aether_actor::Addressable;
@@ -29,8 +30,12 @@ use aether_kit::world::{Material, SetChunk, SetRegion};
 use aether_kit::{
     EditorConfig, EditorKeyChord, EditorRegionRect, MoverConfig, MoverTeleport, RegionInputLanes, RegionSpec,
 };
-use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::ArtifactGuard;
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{
+    ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats,
+};
 
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;

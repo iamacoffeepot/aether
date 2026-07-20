@@ -7,21 +7,14 @@
 
 use std::sync::Arc;
 
-use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_kinds::FrameCheck;
 use aether_render::{DrawTexturedQuads, RenderGpu, RenderHandles};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{RenderError, encode_png};
+use aether_substrate_bench::CaptureOutcome;
 
 use crate::visual;
-pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
 use std::iter;
-
-/// PNG bytes, optional [`FrameVerdict`], optional similarity score, and
-/// optional similarity pass that `render_and_capture` produces. The
-/// verdict is `Some` iff the request carried `checks`
-/// (iamacoffeepot/aether#1777); the similarity score / pass are `Some`
-/// iff the request carried a `reference` (iamacoffeepot/aether#1780).
-type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-

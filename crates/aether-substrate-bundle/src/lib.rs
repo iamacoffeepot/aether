@@ -3,17 +3,20 @@
 //! Standard Cargo layout:
 //!
 //! - `src/<chassis>/` — chassis-specific source (chassis impl,
-//!   driver capability, render plumbing, etc.) for the four chassis:
-//!   `desktop`, `headless`, `hub`, `substrate_bench`.
+//!   driver capability, render plumbing, etc.) for the desktop,
+//!   headless, and hub chassis.
 //! - `src/hub/` — the hub chassis (the `aether-substrate-hub` binary's
 //!   thin Chassis impl post-issue-763 P5f).
-//! - `src/substrate_bench/` — the substrate-bench chassis plus the in-process
-//!   `SubstrateBench` library API consumers reach via
-//!   `aether_substrate_bundle::substrate_bench::SubstrateBench`.
 //! - `src/bin/<chassis>.rs` — minimal entry point per binary
 //!   (`aether-substrate`, `aether-substrate-headless`,
 //!   `aether-substrate-hub`, `aether-substrate-bench` —
 //!   output names preserved across the rename).
+//!
+//! The substrate-bench chassis machinery and the in-process
+//! `SubstrateBench` harness live in the `aether-substrate-bench` crate
+//! (GPU capture support in `aether-substrate-bench-capture`); this
+//! crate keeps the `aether-substrate-bench` binary entry point and the
+//! transitional [`FullBenchExt`] composition bridge (issue #3765).
 //!
 //! The lib root re-exports a convenience surface (the most-used
 //! `aether-substrate` runtime types) so external consumers —
@@ -28,16 +31,16 @@ pub mod autoload;
 pub mod bundle_pack;
 mod chassis_common;
 pub use chassis_common::{
-    binary_manifest, chassis_config_dump, common_cap_namespaces, hub_config_dump, hub_known_keys, resolve_teardown_cap,
+    RenderSizeConfig, binary_manifest, chassis_config_dump, common_cap_namespaces, hub_config_dump, hub_known_keys,
+    resolve_teardown_cap,
 };
 pub mod chassis_root;
 pub mod cli;
 pub mod desktop;
+mod full_bench;
+pub use full_bench::FullBenchExt;
 pub mod headless;
 pub mod hub;
-pub mod perf;
-pub mod substrate_bench;
-pub mod visual;
 
 pub use aether_component::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{

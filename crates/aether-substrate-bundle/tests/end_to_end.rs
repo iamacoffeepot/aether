@@ -15,13 +15,15 @@
 //! `NativeActor` trampoline, so the equivalent coverage runs through a
 //! real load + advance against a wasm component. Tracked under issue 648.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::TickObserved;
 use std::fs;
 

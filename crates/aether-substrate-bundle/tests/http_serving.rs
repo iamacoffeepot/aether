@@ -38,12 +38,10 @@ use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
+use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
-use aether_substrate_bundle::substrate_bench::test_helpers::{
-    init_save_sandbox, locate_component_wasm, test_namespace_roots,
-};
 
 /// The `http_handler` fixture's `NAMESPACE` const — the subname under
 /// which `WasmTrampoline` registers it, and the last segment of its

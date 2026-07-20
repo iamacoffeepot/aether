@@ -46,10 +46,10 @@
 use std::env;
 use std::process::{Command, ExitCode};
 
-use aether_substrate_bundle::perf::harness::{
+use aether_substrate_bench::perf::harness::{
     Drive, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep,
 };
-use aether_substrate_bundle::perf::report::TrialReport;
+use aether_substrate_bench::perf::report::TrialReport;
 
 // Dev/bench tooling: optional CI-provided git-sha override for the perf-trial
 // binary — not a capability, no config layer in scope.
