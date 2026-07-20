@@ -29,7 +29,7 @@ use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 
 use super::kinds::HttpServerResponse;
 use super::typed::{Ctx, Outcome};
-use crate::component::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 
 /// The requester's reply target, carried from a deferred route's request
 /// handler to its reply route through the ADR-0139 request-context table (a
@@ -53,7 +53,7 @@ impl Ctx<'_, NativeCtx<'_, Manual>> {
     /// caller's own carry, which is correct for a native root singleton but
     /// resolves an **embedded** component to the wrong mailbox — an embedded
     /// id folds the *component-host's* carry
-    /// ([`resolve_embedded`](crate::component::resolve_embedded)), not the
+    /// ([`resolve_embedded`](aether_component::resolve_embedded)), not the
     /// caller's. `peer` resolves against the host carry, so a native root cap
     /// (whose [`One`](aether_actor::One) resolver ignores the carry) and an
     /// embedded component (whose [`Embedded`](aether_actor::Embedded) resolver

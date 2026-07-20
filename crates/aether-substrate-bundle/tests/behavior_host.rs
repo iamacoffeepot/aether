@@ -71,14 +71,14 @@ const EPS: f32 = 0.5;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// The host's registered inline-child lineage address: the panel's address,
 /// then the trampoline scope and the slot subname (the `host_fns` `alias_name`
 /// fold). Sending `SetScript` here swaps the script and gets the reply.
 fn host_address() -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, SLOT)
+    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, SLOT)
 }
 
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider

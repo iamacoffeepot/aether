@@ -26,12 +26,12 @@ use std::thread;
 use std::time::Duration;
 
 use aether_anthropic::AnthropicConfig;
+use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::boot_manifest_autoload;
 use aether_substrate_bundle::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
-use aether_substrate_bundle::capabilities::WasmTrampoline;
 use aether_substrate_bundle::capabilities::http::HttpConfig;
 use aether_substrate_bundle::headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{

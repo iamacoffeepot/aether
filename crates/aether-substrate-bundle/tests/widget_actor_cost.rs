@@ -69,7 +69,7 @@ use std::fs;
 use std::time::Instant;
 
 use aether_actor::Addressable;
-use aether_capabilities::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};

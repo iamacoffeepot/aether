@@ -23,7 +23,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
     // The child's first-class lineage address: the parent's rendered name
     // plus the inline-child node (ADR-0114). The parent spawns it under
     // the `Named("widget")` subname in `wire`.
@@ -128,7 +128,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
     // The tag-spawned child's first-class lineage address — the parent spawns
     // it under the `Named("tagged")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:tagged");
@@ -235,7 +235,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
     // The child's first-class lineage address: the parent's rendered name
     // plus the inline-child node (ADR-0114). The parent spawns it under the
     // `Named("widget")` subname in `wire`.

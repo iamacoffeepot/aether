@@ -259,7 +259,7 @@ impl PartialEq<Topic> for String {
 /// the loaded component from the exact const the actor registers under
 /// (#3668). The lineage math (`aether.component/aether.embedded:<this>`) is
 /// the component host's, never re-spelled here: the host resolves the mailbox
-/// through `aether_capabilities::resolve_embedded(CONTROL_CORE_NAMESPACE)`.
+/// through `aether_component::resolve_embedded(CONTROL_CORE_NAMESPACE)`.
 pub const CONTROL_CORE_NAMESPACE: &str = "aether.bloomery.control";
 
 /// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,

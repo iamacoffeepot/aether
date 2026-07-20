@@ -45,7 +45,7 @@ const PATH_REGION: Rect = Rect { min_x: 88, min_y: 50, max_x: 123, max_y: 67 };
 const AREA_REGION: Rect = Rect { min_x: 126, min_y: 69, max_x: 163, max_y: 104 };
 
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {

@@ -30,7 +30,13 @@ aether-actor = { path = "../aether-actor" }
 # marker face is off (`default-features = false`); the `host` feature the kit
 # forwards to turns on exactly the host surface, not the guest `runtime` SDK.
 aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
-aether-capabilities = { path = "../aether-capabilities", default-features = false }
+# iamacoffeepot/aether#3756: the component cap was extracted to
+# `aether-component`. kit is a wasm guest, so it takes the marker-only
+# identity face — it addresses `ComponentHostCapability`, resolves loaded
+# peers through `ComponentHostWasmExt`, and reads `WasmTrampoline::NAMESPACE`
+# to build trampoline addresses. This replaced the crate's last
+# `aether-capabilities` use, so that dependency is gone.
+aether-component = { path = "../aether-component", default-features = false }
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
 # `aether-lifecycle`. kit is a wasm guest, so it takes the marker-only
 # identity face.

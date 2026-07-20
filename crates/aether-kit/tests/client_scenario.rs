@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_capabilities::ComponentHostCapability;
-use aether_capabilities::component::resolve_embedded;
 use aether_codec::frame::{read_frame, write_frame};
+use aether_component::ComponentHostCapability;
+use aether_component::component::resolve_embedded;
 use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
@@ -48,7 +48,7 @@ enum ControlledCommand {
 }
 
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn load_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) -> MailboxId {

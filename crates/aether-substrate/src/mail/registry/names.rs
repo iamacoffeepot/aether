@@ -11,7 +11,7 @@ pub(super) fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
         // [`Registry::list_mailbox_descriptors`] uses the same
         // categorisation so re-registration would be redundant.
         Some(MailboxCategory::ChassisSentinel)
-    // Literal kept in sync with `aether_capabilities::trampoline::WasmTrampoline::NAMESPACE`
+    // Literal kept in sync with `aether_component::trampoline::WasmTrampoline::NAMESPACE`
     // (issue 654 made that the single source of truth). Substrate can't
     // import from capabilities (wrong dep direction), so this routing
     // categorisation duplicates the prefix; if it drifts, every

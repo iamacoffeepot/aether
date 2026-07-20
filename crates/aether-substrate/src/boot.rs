@@ -11,7 +11,7 @@
 //!
 //! Issue 603 retired the substrate-side construction of the
 //! `ControlPlane` sink. The wasm-component supervisor is now
-//! `aether-capabilities::ComponentHostCapability`, booted by chassis
+//! `aether-component::ComponentHostCapability`, booted by chassis
 //! mains via `Builder::with_actor::<ComponentHostCapability>(...)`. The
 //! shared boot still wires every dependency the cap needs (engine,
 //! linker, hub outbound, input subscribers) and exposes them as fields
@@ -102,7 +102,7 @@ impl SubstrateBootBuilder<'_> {
     /// (engine, registry, mailer, linker, outbound, input subscribers)
     /// for chassis-level cap composition. Does NOT install the
     /// wasm-component supervisor — that's
-    /// `aether-capabilities::ComponentHostCapability`, booted through
+    /// `aether-component::ComponentHostCapability`, booted through
     /// `Builder::with_actor::<ComponentHostCapability>(...)` by the
     /// chassis main using the fields exposed on [`SubstrateBoot`].
     /// Does NOT dial the hub — chassis mains compose

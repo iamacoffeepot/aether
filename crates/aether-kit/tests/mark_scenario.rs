@@ -25,7 +25,7 @@ use aether_kit as _;
 const COMPONENT_NAME: &str = "marks";
 
 fn component_address() -> String {
-    format!("aether.component/{}:{COMPONENT_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::MailboxId {

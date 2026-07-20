@@ -161,6 +161,7 @@ dependencies = [
  "aether-bloomery-github",
  "aether-capabilities",
  "aether-codec",
+ "aether-component",
  "aether-data",
  "aether-kinds",
  "aether-rpc",
@@ -187,6 +188,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities-derive",
+ "aether-component",
  "aether-data",
  "aether-fs",
  "aether-kinds",
@@ -199,13 +201,10 @@ dependencies = [
  "httparse",
  "inventory",
  "serde",
- "sha2",
  "syn",
  "tracing",
  "ureq",
  "url",
- "wasmtime",
- "wat",
 ]
 
 [[package]]
@@ -238,6 +237,20 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "aether-component"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
+ "sha2",
+ "tracing",
+ "wasmtime",
 ]
 
 [[package]]
@@ -417,9 +430,9 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-behavior",
- "aether-capabilities",
  "aether-clipboard",
  "aether-codec",
+ "aether-component",
  "aether-data",
  "aether-fs",
  "aether-game",
@@ -574,6 +587,7 @@ dependencies = [
  "aether-capabilities",
  "aether-clipboard",
  "aether-codec",
+ "aether-component",
  "aether-contentgen",
  "aether-data",
  "aether-engine",
@@ -655,6 +669,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities",
+ "aether-component",
  "aether-data",
  "aether-fs",
  "aether-input",

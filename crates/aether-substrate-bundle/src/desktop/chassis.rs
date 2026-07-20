@@ -22,10 +22,9 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
-use aether_capabilities::{
-    ComponentHostConfig, HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
-};
+use aether_capabilities::{HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
+use aether_component::ComponentHostConfig;
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;

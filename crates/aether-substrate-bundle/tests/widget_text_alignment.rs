@@ -84,7 +84,7 @@ const ACCENT_SRGB: [u8; 3] = [0xa8, 0xc9, 0x7a];
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved

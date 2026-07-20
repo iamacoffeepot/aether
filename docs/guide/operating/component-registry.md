@@ -217,11 +217,11 @@ it. This does not delete the hub's stored component artifacts.
   `crates/aether-mcp/src/tools/state.rs`
 - Hub artifact store: `crates/aether-engine/src/store/`
 - Component host load/list/describe/drop/replace:
-  `crates/aether-capabilities/src/component/`
+  `crates/aether-component/src/component/`
 - Empty-slot drop behavior:
-  `crates/aether-capabilities/src/trampoline/runtime/mod.rs`
+  `crates/aether-component/src/trampoline/runtime/mod.rs`
 - Trampoline replace behavior:
-  `crates/aether-capabilities/src/trampoline/runtime/replace.rs`
+  `crates/aether-component/src/trampoline/runtime/replace.rs`
 - Live kinds: `crates/aether-capabilities/src/inventory/`
 
 For failure branches, continue with [Recovery](recovery.md).

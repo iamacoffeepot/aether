@@ -65,7 +65,7 @@ pub struct ComponentCtx {
     /// Trampoline binding the reply / outbound-mail host fns route
     /// through (the binding owns the actor's inbox + reply machinery +
     /// correlation counter). `Some` for ctx instances built by
-    /// `WasmTrampoline::init` (in `aether-capabilities`; issue 634
+    /// `WasmTrampoline::init` (in `aether-component`; issue 634
     /// Phase 4 PR 3); `None` for the test paths that build
     /// `ComponentCtx` without a real trampoline.
     pub binding: Option<Arc<NativeBinding>>,
@@ -184,12 +184,12 @@ impl ComponentCtx {
     /// reply / outbound-mail host fns (in
     /// [`crate::actor::wasm::host_fns`]) can route through it. Called
     /// by `WasmTrampoline::init` (in
-    /// `aether-capabilities`) right after constructing the ctx and before
+    /// `aether-component`) right after constructing the ctx and before
     /// `Component::instantiate` — the host-fn closure captures the ctx
     /// via the wasmtime `Store` data pointer at instantiation time,
     /// not at host-fn call time, so installing later than that is
     /// fine. Promoted from `pub(crate)` to `pub` by issue 654 when the
-    /// trampoline moved to `aether-capabilities` next to its only
+    /// trampoline moved to `aether-component` next to its only
     /// consumer; no other call site exists today and none is intended.
     pub fn install_binding(&mut self, binding: Arc<NativeBinding>) {
         self.binding = Some(binding);

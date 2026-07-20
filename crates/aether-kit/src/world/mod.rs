@@ -65,8 +65,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use aether_actor::{
     ActorInitError, Manual, OutboundReply, ReplyMode, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_capabilities::ComponentHostCapability;
-use aether_capabilities::component::ComponentHostWasmExt;
+use aether_component::ComponentHostCapability;
+use aether_component::component::ComponentHostWasmExt;
 use aether_data::Source;
 use aether_fs::{FsCapability, Read, ReadResult};
 use aether_kinds::Render;

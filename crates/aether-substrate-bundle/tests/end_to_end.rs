@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};

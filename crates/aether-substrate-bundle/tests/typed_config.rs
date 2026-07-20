@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -51,7 +51,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
             (
                 "echo",
                 BenchOp::send_and_await(
-                    format!("aether.component/{}:probe_with_config", aether_capabilities::WasmTrampoline::NAMESPACE),
+                    format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),
             ),
@@ -113,7 +113,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
             (
                 "echo",
                 BenchOp::send_and_await(
-                    format!("aether.component/{}:probe_with_config", aether_capabilities::WasmTrampoline::NAMESPACE),
+                    format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),
             ),

@@ -51,7 +51,7 @@ const COMPONENT_NAME: &str = "cam";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
+    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
 }
 
 /// Load `aether-kit`'s pre-built wasm into the bench, selecting the

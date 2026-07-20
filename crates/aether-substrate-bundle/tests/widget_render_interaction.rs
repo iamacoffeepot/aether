@@ -127,11 +127,11 @@ const DARKEN_TOLERANCE: u8 = 6;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname)
+    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, subname)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative

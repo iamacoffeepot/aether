@@ -20,10 +20,9 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
-use aether_capabilities::{
-    ComponentHostConfig, HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
-};
+use aether_capabilities::{HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf};
 use aether_clipboard::HeadlessClipboardCapability;
+use aether_component::ComponentHostConfig;
 use aether_contentgen::ContentGenConfig;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;

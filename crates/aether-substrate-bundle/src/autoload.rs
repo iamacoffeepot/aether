@@ -13,7 +13,7 @@ use std::io;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind as _, mailbox_id_from_name};
 use aether_kinds::LoadComponent;
 use aether_substrate::Mail;

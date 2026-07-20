@@ -161,4 +161,4 @@ When prose and behavior disagree, inspect these routes in order:
 - Stored artifacts: `crates/aether-engine/src/store/`
 - Live kind inventory: `crates/aether-capabilities/src/inventory/`
 - Loaded component registry and lifecycle:
-  `crates/aether-capabilities/src/component/`
+  `crates/aether-component/src/component/`

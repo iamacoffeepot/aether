@@ -121,5 +121,5 @@ stop. Do not improvise trust from content addressing.
 - Native spawn realization:
   `crates/aether-engine/src/server/runtime.rs`
 - Component load and replacement:
-  `crates/aether-capabilities/src/component/` and
-  `crates/aether-capabilities/src/trampoline/runtime/replace.rs`
+  `crates/aether-component/src/component/` and
+  `crates/aether-component/src/trampoline/runtime/replace.rs`

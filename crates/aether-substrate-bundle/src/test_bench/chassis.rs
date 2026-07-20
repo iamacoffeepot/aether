@@ -11,8 +11,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
+use aether_component::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};

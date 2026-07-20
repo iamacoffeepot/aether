@@ -58,7 +58,7 @@ fn unsafe_extent_rejection(source: MarkRef, operator: &str) -> OperatorResult {
 }
 
 fn component_address() -> String {
-    format!("aether.component/{}:{COMPONENT_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {

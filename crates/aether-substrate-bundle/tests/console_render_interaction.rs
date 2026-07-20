@@ -40,7 +40,7 @@ const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
 const PARTITION_TOLERANCE: u8 = 8;
 
 fn console_address() -> String {
-    format!("aether.component/{}:console", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:console", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn assets_dir() -> PathBuf {

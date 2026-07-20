@@ -14,7 +14,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_actor::{Addressable, Embedded};
-use aether_capabilities::resolve_embedded;
+use aether_component::resolve_embedded;
 use aether_data::{mailbox_id_from_name, mailbox_id_from_path};
 
 /// A fixture embeddable — stands in for a loaded wasm component, selecting the

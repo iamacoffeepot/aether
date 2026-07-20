@@ -94,9 +94,9 @@ Even after `ReplaceResult::Ok`:
 ## Source routes
 
 - Phase transitions and capability registration:
-  `crates/aether-capabilities/src/trampoline/runtime/replace.rs`
+  `crates/aether-component/src/trampoline/runtime/replace.rs`
 - Substrate live component description:
-  `crates/aether-capabilities/src/component/runtime/mod.rs`
+  `crates/aether-component/src/component/runtime/mod.rs`
 - MCP replace result and cache update:
   `crates/aether-mcp/src/tools/components.rs`
 - MCP description cache and live fallback:
