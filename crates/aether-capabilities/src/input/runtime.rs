@@ -13,6 +13,9 @@ use aether_actor::runtime;
 #[cfg(not(target_family = "wasm"))]
 use super::SubscribeInputResult;
 
+use aether_kinds::MonitorNotice;
+use aether_substrate::actor::monitor::MonitorHandle;
+
 pub use aether_data::{Kind, KindId};
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -32,9 +35,30 @@ pub use crate::input::config::InputConfig;
 pub struct InputCapabilityState {
     pub registry: Arc<Registry>,
     pub subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
+    /// One monitor per subscribing mailbox (ADR-0079 §8 amended),
+    /// registered on its first subscription and released when its
+    /// [`MonitorNotice`] purges the mailbox. The handle's `Drop`
+    /// deregisters, so the map is both the dedup guard and the RAII
+    /// anchor.
+    pub monitors: HashMap<MailboxId, MonitorHandle>,
 }
 
 impl InputCapabilityState {
+    /// Monitor `mailbox` on its first subscription so the cap purges
+    /// the mailbox's rows itself when the occupant departs — vacate or
+    /// close, whichever comes first (ADR-0079 §8 amended). An `Err`
+    /// (an actor outside the registry, or a spawner-less test binding)
+    /// means "not monitorable": the rows then live until substrate
+    /// teardown, exactly as they would for a mailbox that never goes
+    /// away.
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
+        if !self.monitors.contains_key(&mailbox)
+            && let Ok(handle) = ctx.monitor(mailbox)
+        {
+            self.monitors.insert(mailbox, handle);
+        }
+    }
+
     /// Push one mail per subscriber for `K`. Routes through
     /// [`NativeCtx::fanout`] so each subscriber-bound copy carries
     /// the inbound `(mail_id, root)` as `parent_mail` +
@@ -77,7 +101,7 @@ impl NativeActor for InputCapability {
 
     fn init(_config: InputConfig, ctx: &mut NativeInitCtx<'_>) -> Result<InputCapabilityState, BootError> {
         let registry = Arc::clone(ctx.mailer().registry());
-        Ok(InputCapabilityState { registry, subscribers: HashMap::new() })
+        Ok(InputCapabilityState { registry, subscribers: HashMap::new(), monitors: HashMap::new() })
     }
 
     /// Subscribe a mailbox to an input stream (ADR-0021).
@@ -86,14 +110,11 @@ impl NativeActor for InputCapability {
     /// `SubscribeInput { kind, mailbox }`. Component mailboxes only —
     /// sinks and dropped mailboxes are rejected.
     #[handler::single]
-    fn on_subscribe(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        payload: SubscribeInput,
-    ) -> SubscribeInputResult {
+    fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: SubscribeInput) -> SubscribeInputResult {
         match validate_subscriber_mailbox(&state.registry, payload.mailbox) {
             Ok(()) => {
                 state.subscribers.entry(payload.kind).or_default().insert(payload.mailbox);
+                state.watch(ctx, payload.mailbox);
                 SubscribeInputResult::Ok
             }
             Err(error) => SubscribeInputResult::Err { error },
@@ -123,6 +144,7 @@ impl NativeActor for InputCapability {
         match ctx.source_mailbox() {
             Some(mailbox) => {
                 state.subscribers.entry(payload.kind).or_default().insert(mailbox);
+                state.watch(ctx, mailbox);
                 SubscribeInputResult::Ok
             }
             None => SubscribeInputResult::Err {
@@ -186,12 +208,12 @@ impl NativeActor for InputCapability {
         }
     }
 
-    /// Remove `mailbox` from every input stream's subscriber set.
-    /// Issued by `ComponentHostCapability` on `DropComponent` so a
-    /// dropped trampoline doesn't keep receiving fan-out mail.
-    /// No mailbox-validation: the trampoline's mailbox is already
-    /// torn down by the time this fires; we accept any id and
-    /// purge it from the table.
+    /// Remove `mailbox` from every input stream's subscriber set in
+    /// one shot. The externally sendable bulk form — drop-time cleanup
+    /// happens through [`Self::on_monitor_notice`] instead, so nothing
+    /// mails this on the component path anymore. No
+    /// mailbox-validation: the target may already be torn down; we
+    /// accept any id and purge it from the table.
     ///
     /// # Agent
     /// `UnsubscribeAll { mailbox }`. Idempotent.
@@ -199,6 +221,22 @@ impl NativeActor for InputCapability {
     fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: UnsubscribeAll) {
         for set in state.subscribers.values_mut() {
             set.remove(&payload.mailbox);
+        }
+    }
+
+    /// Purge a departed mailbox (ADR-0079 §8 amended). The substrate
+    /// fires one notice per [`InputCapabilityState::watch`]ed mailbox
+    /// when it vacates (the wasm trampoline on `DropComponent`) or
+    /// closes, so a dropped component's streams stop fanning at its
+    /// mailbox without any drop-time fan-out from the component host.
+    /// Releasing the handle keeps the monitor map bounded by live
+    /// subscribers; a later occupant of the same mailbox re-registers
+    /// through its own subscribe.
+    #[handler::single]
+    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+        state.monitors.remove(&notice.target);
+        for set in state.subscribers.values_mut() {
+            set.remove(&notice.target);
         }
     }
 
@@ -273,7 +311,11 @@ mod tests {
     use aether_substrate::mail::{MailId, Source, SourceAddr};
 
     fn test_state() -> InputCapabilityState {
-        InputCapabilityState { registry: Arc::new(Registry::new()), subscribers: HashMap::new() }
+        InputCapabilityState {
+            registry: Arc::new(Registry::new()),
+            subscribers: HashMap::new(),
+            monitors: HashMap::new(),
+        }
     }
 
     fn test_mailer() -> Arc<Mailer> {
@@ -319,5 +361,30 @@ mod tests {
             state.subscribers.get(&key).is_none_or(BTreeSet::is_empty),
             "a non-Component source subscribes nothing"
         );
+    }
+
+    /// A `MonitorNotice` purges its target from every stream's set
+    /// while co-subscribers survive — the ADR-0079 vacate/close purge
+    /// that replaced the component host's drop-time `UnsubscribeAll`
+    /// fan-out (issue 3741). Regresses if the notice handler forgets a
+    /// stream table or purges more than its target.
+    #[test]
+    fn monitor_notice_purges_target_from_every_stream() {
+        let mut state = test_state();
+        let departed = MailboxId(0xDEAD);
+        let survivor = MailboxId(0xBEEF);
+        let key = <Key as Kind>::ID;
+        let wheel = <MouseWheel as Kind>::ID;
+        state.subscribers.entry(key).or_default().insert(departed);
+        state.subscribers.entry(key).or_default().insert(survivor);
+        state.subscribers.entry(wheel).or_default().insert(departed);
+
+        let transport = Arc::new(NativeBinding::new_for_test(test_mailer(), MailboxId(0)));
+        let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+        InputCapability::on_monitor_notice(&mut state, &mut ctx, MonitorNotice { target: departed });
+
+        assert!(!state.subscribers[&key].contains(&departed), "departed mailbox must leave the Key stream");
+        assert!(!state.subscribers[&wheel].contains(&departed), "departed mailbox must leave the MouseWheel stream");
+        assert!(state.subscribers[&key].contains(&survivor), "co-subscribers must survive the purge");
     }
 }

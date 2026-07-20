@@ -74,9 +74,10 @@ pub enum SubscribeInputResult {
 }
 
 /// `aether.input.unsubscribe_all` — remove `mailbox` from every
-/// input stream's subscriber set. Issued by
-/// `ComponentHostCapability` on `DropComponent` so the cap's
-/// fan-out tables don't keep firing at a dropped trampoline.
+/// input stream's subscriber set in one shot. The externally sendable
+/// bulk form; drop-time cleanup rides the ADR-0079 vacate/close
+/// `MonitorNotice` instead, so the fan-out tables stop firing at a
+/// dropped trampoline without anyone mailing this.
 /// Idempotent: a mailbox with no subscriptions is still a no-op.
 /// Fire-and-forget; no reply. Cast-shape (Pod) — one
 /// `MailboxId`, fixed size.

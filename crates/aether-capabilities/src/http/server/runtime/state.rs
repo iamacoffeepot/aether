@@ -54,6 +54,12 @@ pub struct HttpSupervisorState {
     /// Cap-global stream-id source, cloned into every shard's seed
     /// (ADR-0135) — see [`HttpShardState::next_stream_id`].
     pub next_stream_id: Arc<AtomicU64>,
+    /// One monitor per route-holding mailbox (ADR-0079 §8 amended),
+    /// registered on its first route claim and released when its
+    /// `MonitorNotice` purges the mailbox's routes. The handle's
+    /// `Drop` deregisters, so the map is both the dedup guard and the
+    /// RAII anchor.
+    pub monitors: HashMap<MailboxId, MonitorHandle>,
 }
 
 /// Dispatch-shard state (ADR-0135): today's whole per-connection machine —
@@ -258,6 +264,21 @@ impl HttpSupervisorState {
         shared: bool,
     ) -> RegisterRouteResult {
         register_route(&self.routes, prefix, method, kind, mailbox, shared)
+    }
+
+    /// Monitor `mailbox` on its first route claim so the cap purges
+    /// the mailbox's routes itself when the occupant departs — vacate
+    /// or close, whichever comes first (ADR-0079 §8 amended). An `Err`
+    /// (an actor outside the registry, or a spawner-less test binding)
+    /// means "not monitorable": the routes then live until substrate
+    /// teardown, exactly as they would for a mailbox that never goes
+    /// away.
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
+        if !self.monitors.contains_key(&mailbox)
+            && let Ok(handle) = ctx.monitor(mailbox)
+        {
+            self.monitors.insert(mailbox, handle);
+        }
     }
 
     /// Release `mailbox`'s membership in the `(prefix, method)` route
