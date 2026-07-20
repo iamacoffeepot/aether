@@ -29,6 +29,7 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: test_peer_kind(),
+            route_target: None,
         })
         .build_passive()
         .expect("rpc server boots");
@@ -50,6 +51,7 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: test_peer_kind(),
+            route_target: None,
         })
         .build_passive()
         .expect("caps boot");
@@ -68,6 +70,7 @@ fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: test_peer_kind(),
+            route_target: None,
         })
         .build_passive()
         .expect("caps boot")
@@ -233,6 +236,7 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: test_peer_kind(),
+            route_target: None,
         })
         .build_passive()
         .expect("caps boot");
@@ -474,6 +478,7 @@ fn call_without_cid_is_fire_and_forget() {
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: test_peer_kind(),
+            route_target: None,
         })
         .build_passive()
         .expect("caps boot");

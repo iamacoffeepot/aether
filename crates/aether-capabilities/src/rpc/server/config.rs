@@ -1,4 +1,5 @@
 use crate::rpc::wire::PeerKind;
+use aether_data::MailboxId;
 
 /// Init config for `RpcServerCapability`.
 ///
@@ -10,4 +11,7 @@ use crate::rpc::wire::PeerKind;
 pub struct RpcServerConfig {
     pub bind_addr: String,
     pub peer_kind: PeerKind,
+    /// Mailbox that envelope-requested forwards (`to.engine.is_some()`) route to.
+    /// `None` on chassis that don't forward — the branch drops, as today.
+    pub route_target: Option<MailboxId>,
 }

@@ -41,7 +41,8 @@
 // `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
 // the identity, outside the `feature = "runtime"` gate, so they reference
 // these kinds from here.
-use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
+use crate::engine::kinds::{EngineAlive, EngineDied};
+use crate::rpc::RouteEnvelope;
 use aether_kinds::{
     ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
     UploadBinary, UploadComponent,

@@ -64,6 +64,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
+            route_target: Some(mailbox_id_from_name("aether.engine")),
         })
         .build_passive()
         .expect("hub caps boot");

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 // (issue 2672). Brought into scope (rather than named by absolute path
 // inline) to satisfy the `clippy::absolute_paths` restriction.
 use aether_actor::actor;
-use aether_capabilities::engine::kinds::{CallSettled, RouteEnvelope};
+use aether_capabilities::rpc::{CallSettled, RouteEnvelope};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 /// The canned live vocabulary a [`RouteInventorySink`] replies with, plus
@@ -220,6 +220,8 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
+            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
+            route_target: Some(mailbox_id_from_name("aether.engine")),
         })
         .build_passive()
         .expect("hub caps boot");
@@ -280,6 +282,8 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
+            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
+            route_target: Some(mailbox_id_from_name("aether.engine")),
         })
         .build_passive()
         .expect("hub caps boot");
@@ -317,6 +321,8 @@ pub(super) fn boot_hub_with_route_loopback(
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
+            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
+            route_target: Some(mailbox_id_from_name("aether.engine")),
         })
         .build_passive()
         .expect("hub caps boot");
@@ -347,6 +353,8 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
+            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
+            route_target: Some(mailbox_id_from_name("aether.engine")),
         })
         .build_passive()?;
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
