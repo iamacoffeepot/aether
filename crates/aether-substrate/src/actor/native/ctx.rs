@@ -634,11 +634,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// deregisters the entry, so a handler that wants to unwatch
     /// before the watcher itself dies just drops the handle.
     ///
-    /// On the target's close, the substrate drains its monitor list
-    /// and fires one [`aether_kinds::MonitorNotice`] per watcher
-    /// before the slot transitions `Live` → `Dead`. The watcher
-    /// receives that notice as ordinary mail and reads the `target`
-    /// field to identify the closing actor.
+    /// The substrate drains the target's monitor list and fires one
+    /// [`aether_kinds::MonitorNotice`] per watcher when the target
+    /// goes away — on close (before the slot transitions
+    /// `Live` → `Dead`) or on vacate ([`Self::vacate`]: the occupant
+    /// unloads while the slot stays live), whichever comes first
+    /// (ADR-0079 §8, amended). The watcher receives that notice as
+    /// ordinary mail and reads the `target` field to identify the
+    /// vacated actor; either way the notice means state keyed by
+    /// `target` is stale.
     ///
     /// Validation: `target` must currently be `Live` in the
     /// [`ActorRegistry`](crate::ActorRegistry); tombstoned (closed) and unknown ids
@@ -646,22 +650,50 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// in the actor registry as `Live` entries (their entries live in
     /// the routing [`Registry`](crate::Registry) only); a future lift inserts
     /// them so monitoring a singleton works the same way. Until then,
-    /// monitor only addresses instanced actors.
-    ///
-    /// # Panics
-    /// Panics if the transport was constructed via
-    /// [`NativeBinding::new_for_test`] (no spawner / actor registry
-    /// wired) — fail-fast per ADR-0063: production transports always
-    /// carry both, so handler code never reaches the panic.
+    /// monitor only addresses instanced actors. A transport with no
+    /// spawner wired ([`NativeBinding::new_for_test`]) has no monitor
+    /// index at all and surfaces as [`MonitorError::Unsupported`], so
+    /// handlers that monitor their registrants stay drivable under
+    /// test bindings.
     pub fn monitor(&self, target: MailboxId) -> Result<MonitorHandle, MonitorError> {
-        let spawner = self
-            .binding
-            .spawner()
-            .expect("NativeCtx::monitor requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
+        let spawner = self.binding.spawner().ok_or(MonitorError::Unsupported)?;
         let registry = Arc::clone(spawner.actor_registry());
         let watcher = self.binding.self_mailbox();
         registry.register_monitor(watcher, target)?;
         Ok(MonitorHandle::new(registry, watcher, target))
+    }
+
+    /// ADR-0079 §8 (amended): declare the calling actor's mailbox
+    /// vacated — its occupant is gone while the actor itself stays
+    /// live and addressable. Drains the caller's own watcher list and
+    /// fires one [`aether_kinds::MonitorNotice`] per watcher, exactly
+    /// as the close path does, but without tombstoning: monitors
+    /// registered after the vacate watch the mailbox's next occupant
+    /// (or its eventual close).
+    ///
+    /// The one production caller is the wasm trampoline's
+    /// `DropComponent` handler — a component drop is a wasm unload
+    /// behind a still-addressable, refillable mailbox, which the
+    /// close fan-out never reaches by design. Self-service only: an
+    /// actor can declare its own mailbox vacated, never a peer's.
+    ///
+    /// The notice mail is pushed root-shaped (no parent chain),
+    /// mirroring the close fan-out. A transport with no spawner wired
+    /// ([`NativeBinding::new_for_test`]) has no monitor index to
+    /// drain, so the call is a no-op.
+    pub fn vacate(&self) {
+        let Some(spawner) = self.binding.spawner() else {
+            return;
+        };
+        let target = self.binding.self_mailbox();
+        let watchers = spawner.actor_registry().vacate_actor(target);
+        if watchers.is_empty() {
+            return;
+        }
+        let payload = aether_kinds::MonitorNotice { target }.encode_into_bytes();
+        for watcher in watchers {
+            self.binding.mailer().push(Mail::new(watcher, aether_kinds::MonitorNotice::ID, payload.clone(), 1));
+        }
     }
 
     /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a
