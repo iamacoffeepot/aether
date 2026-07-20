@@ -398,11 +398,17 @@ name = "aether-http"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-anthropic",
  "aether-component",
+ "aether-contentgen",
  "aether-data",
+ "aether-gemini",
  "aether-http-derive",
  "aether-kinds",
  "aether-substrate",
+ "aether-substrate-bench-capture",
+ "aether-substrate-bundle",
+ "aether-test-fixtures-bundle",
  "aether-trace",
  "base64",
  "bytemuck",

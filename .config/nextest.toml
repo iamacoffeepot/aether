@@ -126,6 +126,19 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-actor) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The `aether-http` serving test binary (`http_serving`, rehomed from the
+# bundle by iamacoffeepot/aether#3782) boots a full in-process
+# `HeadlessChassis` with a real wasm guest per test and speaks to it over
+# a real TcpStream. It ran under the bundle's 180s `kind(test)` cap above
+# before the move; carry the same wall-clock backstop — a deadlock guard
+# a healthy run never reaches. `kind(test)` scopes it to the integration
+# binary; the crate's unit tests keep the 60s default. No binary-specific
+# override exists for this package, so first-match-wins ordering is
+# unconstrained here.
+[[profile.ci.overrides]]
+filter = "package(=aether-http) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The `aether-rpc` integration tests (`fleetbench_mail`, `rpc_engine_routing`,
 # rehomed from the bundle by iamacoffeepot/aether#3778) are the same slow
 # class: they fork real debug `aether-substrate-headless` processes and wait

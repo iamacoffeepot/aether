@@ -35,8 +35,12 @@ license.workspace = true
 # features, so `clap` is a false positive — it is used only through the
 # `#[derive(clap::Args)]` the Config derive emits on the `HttpOverlay` /
 # `HttpServerOverlay` structs under the optional `runtime` feature.
+# `aether-test-fixtures-bundle` is the #3766 wasm-coupling dev-dep: the
+# http serving test loads the fixture's built wasm by stem rather than
+# importing the crate, so the cargo edge exists purely for determinator /
+# dist-pre-build visibility.
 [package.metadata.cargo-machete]
-ignored = ["clap"]
+ignored = ["clap", "aether-test-fixtures-bundle"]
 
 [features]
 default = ["runtime"]
@@ -116,6 +120,30 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The server tests address the `aether.trace` cap to assert dispatch
 # settlement across a served request.
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
+# iamacoffeepot/aether#3782: the http serving test (`http_serving`, guest
+# `aether.http.server` handler path over a real TcpStream) rehomed here
+# from aether-substrate-bundle. It boots a full `HeadlessChassis` — which
+# lives bundle-side — so the dev-dep is on the bundle itself: a
+# SubstrateBench composition can't stand in until the loopback harness
+# grows a real-TcpStream ingress path. A permitted test-target dev-dep
+# cycle; whole-graph in `xtask affected` until the by-chassis bundle
+# split.
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+# `locate_component_wasm` / `init_save_sandbox` / `test_namespace_roots`
+# — the shared wasm-discovery + sandbox helpers the test boots with.
+aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
+# The headless env the test assembles threads real cap configs through
+# `HeadlessEnv`, which names each config type directly.
+aether-anthropic = { path = "../aether-anthropic" }
+aether-contentgen = { path = "../aether-contentgen" }
+aether-gemini = { path = "../aether-gemini" }
+# iamacoffeepot/aether#3766: the fixture crate whose wasm the test loads
+# (the `http_handler` / streaming / websocket exports), declared so the
+# source→consumer coupling is cargo-visible — determinator re-runs this
+# test when the fixture changes, and xtask's wasm-consumer rule fires the
+# dist pre-build. The test locates the built wasm by stem, so the code
+# never imports the crate.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
 
 [lints]
 workspace = true
