@@ -29,6 +29,7 @@ members = [
     "crates/aether-window",
     "crates/aether-input",
     "crates/aether-lifecycle",
+    "crates/aether-tcp",
     "crates/aether-trace",
     "crates/aether-render",
     "crates/aether-text",

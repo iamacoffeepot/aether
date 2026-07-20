@@ -19,11 +19,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::TcpCapability;
 use aether_capabilities::game::{
     CellPosition, GridBounds, MoveDirection, MoveIntent, PlayerFrame, Spawn, TickBundle, WIRE_VERSION,
 };
-use aether_capabilities::tcp::{ConnectResult, SessionClosed, SessionData, TcpWasmExt};
 use aether_codec::frame::encode_frame;
 use aether_data::{Kind, MailboxId, wire};
 use aether_input::{InputCapability, InputMailboxExt};
@@ -31,6 +29,7 @@ use aether_kinds::{Key, KeyRelease, Render, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
+use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
 
 use crate::OCTIMETERS_PER_TILE;
 use crate::world::WorldPoint;

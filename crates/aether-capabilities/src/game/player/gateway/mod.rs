@@ -1,8 +1,8 @@
 //! Player gateway identity: one TCP consumer and fact-sink fanout point.
 
 use crate::game::TickBundle;
-use crate::tcp::{BindListenerResult, SessionClosed, SessionData};
 use aether_kinds::MonitorNotice;
+use aether_tcp::{BindListenerResult, SessionClosed, SessionData};
 
 /// `aether.game.gateway` singleton gateway.
 #[actor(singleton)]

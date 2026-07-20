@@ -20,7 +20,7 @@ fallback or omits the runtime.
 | `aether.fs` | namespaced read/write/copy/delete/list/fetch-fold | `aether-capabilities/src/fs` | [File I/O](../systems/file-io.md) |
 | `aether.http` | outbound HTTP fetch | `aether-capabilities/src/http/client` | [HTTP egress](../systems/http.md) |
 | `aether.http.server` | inbound HTTP, routes, streams, websocket | `aether-capabilities/src/http/server` | [HTTP server](../systems/http-server.md) |
-| `aether.tcp` | listener/connect control and session actors | `aether-capabilities/src/tcp` | [TCP](../systems/tcp.md) |
+| `aether.tcp` | listener/connect control and session actors | `aether-tcp/src` | [TCP](../systems/tcp.md) |
 | `aether.rpc.server` | framed internal process RPC | `aether-rpc/src` | [RPC](../systems/rpc.md) |
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-capabilities/src/inventory` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-capabilities/src/trace` | [Tracing](../systems/tracing-and-settlement.md) |

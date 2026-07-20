@@ -28,7 +28,7 @@ use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::{
     ComponentHostCapability, ComponentHostConfig, GameGatewayCapability, GameGatewayConfig, HttpCapability,
-    HttpServerCapability, HttpServerConfig, TcpCapability, http::HttpConfig,
+    HttpServerCapability, HttpServerConfig, http::HttpConfig,
 };
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
@@ -48,6 +48,7 @@ use aether_substrate::config::{
 };
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 use confique::Config as _;

@@ -38,6 +38,27 @@
 //! `unwire` the listener flips a shutdown flag and self-connects
 //! to its bound port to wake the blocked accept; the accept returns,
 //! sees the flag, breaks; the dispatcher thread joins.
+//!
+//! ## Crate shape
+//!
+//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3751) as a
+//! per-cap crate of the arc that dissolves the capabilities monolith.
+//! Owns the whole three-tier lineage — [`TcpCapability`],
+//! [`TcpListenerActor`], [`TcpSessionActor`] — plus the cap's own
+//! `aether.tcp.*` mail kinds ([`kinds`]), the listener / session init
+//! configs (`config`), and the send-side [`TcpWasmExt`] / [`TcpNativeExt`]
+//! facades (`route`).
+//!
+//! `aether-capabilities` keeps a dependency on this crate for the `game`
+//! module's player networking, which names these types directly. That is
+//! a downward husk→leaf dependency, not a facade: the husk consumes the
+//! types and re-exports none of them, so a downstream crate that wants
+//! TCP deps here and never re-enters the capabilities graph.
+
+// `#[handler]` methods take their decoded payload by value per the
+// ADR-0033 dispatch ABI; the macro-generated trampoline owns the
+// decoded bytes so callers can't see references.
+#![allow(clippy::needless_pass_by_value)]
 
 #[cfg(feature = "runtime")]
 mod config;

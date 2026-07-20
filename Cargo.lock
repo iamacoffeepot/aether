@@ -192,6 +192,7 @@ dependencies = [
  "aether-fs",
  "aether-kinds",
  "aether-substrate",
+ "aether-tcp",
  "aether-trace",
  "base64",
  "bytemuck",
@@ -415,6 +416,7 @@ dependencies = [
  "aether-mesh",
  "aether-render",
  "aether-substrate-bundle",
+ "aether-tcp",
  "aether-text",
  "inventory",
  "serde",
@@ -572,6 +574,7 @@ dependencies = [
  "aether-render",
  "aether-rpc",
  "aether-substrate",
+ "aether-tcp",
  "aether-test-fixtures-kinds",
  "aether-text",
  "aether-trace",
@@ -595,6 +598,20 @@ dependencies = [
  "wasmtime",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "aether-tcp"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-codec",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
+ "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -630,6 +647,7 @@ dependencies = [
  "aether-lifecycle",
  "aether-math",
  "aether-render",
+ "aether-tcp",
  "aether-test-fixtures-kinds",
  "serde",
  "tracing",

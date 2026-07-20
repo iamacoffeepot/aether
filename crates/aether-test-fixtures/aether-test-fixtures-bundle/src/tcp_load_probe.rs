@@ -5,7 +5,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
+use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
 use aether_test_fixtures_kinds::{
     CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
     TcpLoadTopology,

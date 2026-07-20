@@ -19,13 +19,13 @@ pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx}
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::{KindId, Mail, Mailer};
 
-pub use crate::tcp::config::{TcpListenerConfig, TcpSessionConfig};
-pub use crate::tcp::session::TcpSessionActor;
+pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
+pub use crate::session::TcpSessionActor;
 
 use aether_actor::runtime;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::tcp::kinds::{Close, ConnectionReady};
+use crate::kinds::{Close, ConnectionReady};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpListenerActor;
 
@@ -114,7 +114,7 @@ impl NativeActor for TcpListenerActor {
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
         tracing::info!(
-            target: "aether_substrate::tcp",
+            target: "aether_tcp",
             addr = %addr,
             port = port,
             "tcp listener bound",
@@ -144,7 +144,7 @@ impl NativeActor for TcpListenerActor {
             let _ = thread.join();
         }
         tracing::info!(
-            target: "aether_substrate::tcp",
+            target: "aether_tcp",
             port = state.local_port,
             "tcp listener closed",
         );
@@ -190,7 +190,7 @@ impl NativeActor for TcpListenerActor {
             {
                 Ok(_) => {
                     tracing::debug!(
-                        target: "aether_substrate::tcp",
+                        target: "aether_tcp",
                         session = %subname,
                         peer = %peer_str,
                         "tcp session spawned",
@@ -198,7 +198,7 @@ impl NativeActor for TcpListenerActor {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        target: "aether_substrate::tcp",
+                        target: "aether_tcp",
                         session = %subname,
                         peer = %peer_str,
                         error = ?e,

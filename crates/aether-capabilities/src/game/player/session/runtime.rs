@@ -14,7 +14,7 @@ use aether_substrate::chassis::error::BootError;
 use super::{PlayerSessionActor, PlayerSessionConfig, PollResult, SessionClosed, SessionData, TickBundle};
 use crate::game::player::{PlayerFrame, WIRE_VERSION};
 use crate::game::{MoveIntent, Poll, Spawn};
-use crate::tcp::{TcpCapability, TcpNativeExt};
+use aether_tcp::{TcpCapability, TcpNativeExt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionPhase {

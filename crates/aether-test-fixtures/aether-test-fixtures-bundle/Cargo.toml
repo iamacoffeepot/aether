@@ -31,6 +31,9 @@ aether-input = { path = "../../aether-input", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
 # these wasm fixtures take its marker-only identity face.
 aether-render = { path = "../../aether-render", default-features = false }
+# iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`; the
+# tcp-load probe fixture dials and echoes through it. Marker face only.
+aether-tcp = { path = "../../aether-tcp", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — the fs-demux fixture
 # addresses `FsCapability` + its kinds. Marker face only.
 aether-fs = { path = "../../aether-fs", default-features = false }

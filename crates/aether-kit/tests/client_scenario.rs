@@ -12,7 +12,6 @@ use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::GameGatewayConfig;
 use aether_capabilities::component::resolve_embedded;
 use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
-use aether_capabilities::tcp::{ListListeners, ListListenersResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
@@ -23,6 +22,7 @@ use aether_kit::{
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{ColorRegionStats, decode_png, target_color_stats};
+use aether_tcp::{ListListeners, ListListenersResult};
 
 const CAMERA_NAME: &str = "client-camera";
 const CLIENT_NAME: &str = "player-client";
