@@ -31,8 +31,9 @@ use aether_actor::runtime;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
     LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeResult, LifecycleSubscribeSelf, LifecycleUnsubscribe,
-    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Quit,
+    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, MonitorNotice, Quit,
 };
+use aether_substrate::actor::monitor::MonitorHandle;
 
 pub use aether_actor::Manual;
 pub use aether_actor::OutboundReply;
@@ -91,12 +92,33 @@ pub struct LifecycleCapabilityState {
     /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
     /// calls inside handlers.
     pub mailer: Arc<Mailer>,
+    /// One monitor per subscribing mailbox (ADR-0079 §8 amended),
+    /// registered on its first stage subscription and released when
+    /// its `MonitorNotice` purges the mailbox. The handle's `Drop`
+    /// deregisters, so the map is both the dedup guard and the RAII
+    /// anchor.
+    pub monitors: BTreeMap<DataMailboxId, MonitorHandle>,
 }
 
 /// Read-only inspect surface on the runtime state (ADR-0122 split).
 /// Production callers observe lifecycle progress via subscribed stage
 /// broadcasts rather than peeking at these.
 impl LifecycleCapabilityState {
+    /// Monitor `mailbox` on its first stage subscription so the cap
+    /// purges the mailbox's rows itself when the occupant departs —
+    /// vacate or close, whichever comes first (ADR-0079 §8 amended).
+    /// An `Err` (an actor outside the registry, or a spawner-less test
+    /// binding) means "not monitorable": the rows then live until
+    /// substrate teardown, exactly as they would for a mailbox that
+    /// never goes away.
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: DataMailboxId) {
+        if !self.monitors.contains_key(&mailbox)
+            && let Ok(handle) = ctx.monitor(mailbox)
+        {
+            self.monitors.insert(mailbox, handle);
+        }
+    }
+
     /// Read-only access to the current state's kind id.
     #[must_use]
     pub fn current_state(&self) -> KindId {
@@ -148,6 +170,7 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
         settlement_latency_ewma: None,
         last_slow_warn: None,
         mailer,
+        monitors: BTreeMap::new(),
     }
 }
 
@@ -178,6 +201,7 @@ fn tick_start_graph_cap() -> LifecycleCapabilityState {
         settlement_latency_ewma: None,
         last_slow_warn: None,
         mailer,
+        monitors: BTreeMap::new(),
     }
 }
 
@@ -235,7 +259,7 @@ impl NativeActor for LifecycleCapability {
     #[handler::single]
     fn on_subscribe(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         payload: LifecycleSubscribe,
     ) -> LifecycleSubscribeResult {
         let stage_kind = KindId(payload.stage);
@@ -243,6 +267,7 @@ impl NativeActor for LifecycleCapability {
         let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
         if known {
             state.subscribers.entry(stage_kind).or_default().insert(mailbox);
+            state.watch(ctx, mailbox);
             LifecycleSubscribeResult::Ok
         } else {
             LifecycleSubscribeResult::Err {
@@ -285,6 +310,7 @@ impl NativeActor for LifecycleCapability {
                 let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
                 if known {
                     state.subscribers.entry(stage_kind).or_default().insert(DataMailboxId(sender.0));
+                    state.watch(ctx, DataMailboxId(sender.0));
                     LifecycleSubscribeResult::Ok
                 } else {
                     LifecycleSubscribeResult::Err {
@@ -370,15 +396,14 @@ impl NativeActor for LifecycleCapability {
         }
     }
 
-    /// Remove `mailbox` from every lifecycle stage's subscriber set.
-    /// Issued by `ComponentHostCapability` on `DropComponent` so a
-    /// dropped trampoline doesn't keep receiving stage-broadcast mail
-    /// — the lifecycle-family counterpart of
-    /// [`InputCapability::on_unsubscribe_all`](crate::input::InputCapability),
-    /// which the same drop path notifies for `aether.input`. No
-    /// mailbox-validation: the trampoline's mailbox is already torn
-    /// down by the time this fires; we accept any id and purge it from
-    /// every stage. No reply.
+    /// Remove `mailbox` from every lifecycle stage's subscriber set in
+    /// one shot — the lifecycle-family counterpart of
+    /// [`InputCapability::on_unsubscribe_all`](crate::input::InputCapability).
+    /// The externally sendable bulk form; drop-time cleanup happens
+    /// through [`Self::on_monitor_notice`] instead, so nothing mails
+    /// this on the component path anymore. No mailbox-validation: the
+    /// target may already be torn down; we accept any id and purge it
+    /// from every stage. No reply.
     ///
     /// # Agent
     /// `LifecycleUnsubscribeAll { mailbox }`. Idempotent.
@@ -386,6 +411,22 @@ impl NativeActor for LifecycleCapability {
     fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: LifecycleUnsubscribeAll) {
         for set in state.subscribers.values_mut() {
             set.remove(&DataMailboxId(payload.mailbox));
+        }
+    }
+
+    /// Purge a departed mailbox (ADR-0079 §8 amended). The substrate
+    /// fires one notice per [`LifecycleCapabilityState::watch`]ed
+    /// mailbox when it vacates (the wasm trampoline on
+    /// `DropComponent`) or closes, so a dropped component's stage
+    /// broadcasts stop landing at its mailbox without any drop-time
+    /// fan-out from the component host. Releasing the handle keeps the
+    /// monitor map bounded by live subscribers; a later occupant of
+    /// the same mailbox re-registers through its own subscribe.
+    #[handler::single]
+    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+        state.monitors.remove(&notice.target);
+        for set in state.subscribers.values_mut() {
+            set.remove(&notice.target);
         }
     }
 

@@ -43,6 +43,10 @@ use crate::http::kinds::HttpInboundReady;
 use crate::http::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
+// `MonitorNotice` rides the handled-kind list like the registration
+// family: the `#[actor]` macro emits its always-on `HandlesKind` marker
+// for the runtime half's ADR-0079 vacate/close route-purge handler.
+use aether_kinds::MonitorNotice;
 
 // Default bind address. Loopback per ADR-0108 §6 — binding a public
 // interface is an explicit operator choice.

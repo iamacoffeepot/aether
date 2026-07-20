@@ -186,9 +186,10 @@ pub struct LifecycleUnsubscribeSelf {
 }
 
 /// `aether.lifecycle.unsubscribe_all` — remove `mailbox` from every
-/// lifecycle stage's subscriber set. Issued by
-/// `ComponentHostCapability` on `DropComponent` so the lifecycle cap's
-/// per-stage broadcast doesn't keep firing at a dropped trampoline —
+/// lifecycle stage's subscriber set in one shot. The externally
+/// sendable bulk form; drop-time cleanup rides the ADR-0079
+/// vacate/close `MonitorNotice` instead, so the per-stage broadcast
+/// stops firing at a dropped trampoline without anyone mailing this —
 /// the lifecycle-family counterpart of `UnsubscribeAll` for
 /// `aether.input`. Idempotent: a mailbox with no stage subscriptions
 /// is still a no-op. Fire-and-forget; no reply. Cast-shape (Pod), one
