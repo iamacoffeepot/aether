@@ -28,8 +28,8 @@
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
 use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, Settled};
-use crate::shared::net::teardown_connect_addr;
 use aether_actor::runtime;
+use aether_substrate::net::teardown_connect_addr;
 
 // Re-export every substrate / std / cross-crate type the top-level
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the

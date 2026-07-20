@@ -54,6 +54,7 @@ pub mod config;
 // Beside `atomic_write` / `pid_lock`, the two primitives it builds on.
 pub mod content_store;
 pub mod mail;
+pub mod net;
 pub mod pid_lock;
 #[cfg(feature = "render")]
 pub mod render;
