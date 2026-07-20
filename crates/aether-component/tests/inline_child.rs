@@ -1,4 +1,28 @@
-use super::*;
+//! ADR-0114 inline-child scenarios (rehomed per issue #3769): a wasm
+//! parent's inline children carry state across `replace_component`
+//! (typed reconstruct + by-tag spawn, issue 2692) and settle orphan mail
+//! through the parent after a mid-life despawn (#1939). The children ride
+//! aether-actor's inline-child machinery, but the component host is what
+//! boots and replaces the hosting module, so the scenarios live here.
+//!
+//! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
+//! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes
+//! a hard panic there.
+
+use std::fs;
+
+use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_substrate_bench::test_helpers::require_wasm;
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_test_fixtures_kinds::{
+    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
+    TagSpawnQuery, TagSpawnReport,
+};
+
+// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
+// entries are present in this test binary.
+#[allow(unused_imports)]
+use aether_test_fixtures_kinds as _;
 
 /// ADR-0114 §5: an inline child carries its `type State` across a
 /// `replace_component` swap. Loads `InlineStatefulParent` from the
@@ -20,7 +44,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_stateful";
 
-    let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
     let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
@@ -29,7 +53,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // the `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
@@ -125,7 +149,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_tag";
 
-    let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
     let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
@@ -133,7 +157,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // it under the `Named("tagged")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:tagged");
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineTagParent`, capturing its mailbox id for the replace. The
@@ -232,7 +256,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_despawn";
 
-    let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
     let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
@@ -241,7 +265,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineDespawnParent` from the `inline_child` bundle, then probe

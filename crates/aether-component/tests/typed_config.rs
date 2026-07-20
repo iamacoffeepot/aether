@@ -7,17 +7,14 @@
 //! config path still proves the load mail's `config` bytes reach
 //! `Component::instantiate` and the guest's init shim.
 
-#![allow(clippy::print_stderr)]
-
-use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -30,10 +27,10 @@ use aether_test_fixtures_kinds as _;
 /// `ProbeConfig::default()` instead of failing decode.
 #[test]
 fn typed_config_guest_without_config_bytes_uses_default() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
     let report = bench
@@ -89,10 +86,10 @@ fn typed_config_guest_without_config_bytes_uses_default() {
 /// hardcoded `&[]`; c2 wires it, so the test runs unconditionally now.
 #[test]
 fn typed_config_guest_with_config_bytes_round_trips() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };

@@ -1,4 +1,130 @@
-use super::*;
+//! Text-cap bench scenarios (rehomed from `aether-substrate-bundle`'s
+//! `substrate_bench_scenario/text.rs`, issue #3772): `aether.text.draw`
+//! screen-space glyphs, per-draw clip bounds, the font-metrics grab, and
+//! world-space labels, each driven through an in-process
+//! `SubstrateBench`.
+//!
+//! Every bench composes exactly the caps its scenario needs (issue
+//! #3764): the render cap via `RenderBenchBuilderExt::with_render` (the
+//! text cap composes render's texture / quad surface by mail and the
+//! assertions read captured frames), the text cap via
+//! `.with_actor::<TextCapability>(())`, and the `aether.fs` cap via
+//! `.namespace_roots(...)` so `aether.text.load_font` can read the TTF
+//! through the `assets` namespace.
+//!
+//! The font is the workspace's vendored Roboto Mono (SIL OFL 1.1) at
+//! `crates/aether-substrate-bundle/assets/fonts/RobotoMono.ttf` — the
+//! `assets` namespace root points straight at that in-repo home (the
+//! same file `aether-text`'s runtime unit tests and the bundle's widget
+//! scenarios read) rather than copying the binary next to this test.
+//!
+//! Skipped when no wgpu adapter is available (driverless Linux runners
+//! without `mesa-vulkan-drivers`); `AETHER_REQUIRE_RUNTIME=1` (CI sets
+//! it) flips the skip into a hard panic so a CI-side regression is loud.
+
+// Integration-test skip diagnostic: emit via stderr so `cargo test`
+// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
+#![allow(clippy::print_stderr)]
+// Test reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness
+// knob, not cap config.
+#![allow(clippy::disallowed_methods)]
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use aether_data::Kind;
+use aether_fs::NamespaceRoots;
+use aether_kinds::{CachedFontMetrics, ClipRect, NamedMail, QuadScale, QuadSpace};
+use aether_math::{Mat4, Rgba, Vec3};
+use aether_render::ViewProjection;
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::visual::{
+    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
+};
+use aether_substrate_bench_capture::{
+    RenderBenchBuilderExt,
+    test_helpers::{has_wgpu_adapter, init_save_sandbox},
+};
+use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
+
+/// Namespace-relative path of the vendored font under the `assets` root.
+const FONT_PATH: &str = "fonts/RobotoMono.ttf";
+
+/// The workspace's shared font-asset home:
+/// `crates/aether-substrate-bundle/assets` (which holds
+/// `fonts/RobotoMono.ttf`). Resolved from this crate's manifest dir the
+/// same way the bench helpers locate the workspace root.
+fn font_assets_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root reachable from CARGO_MANIFEST_DIR")
+        .join("crates")
+        .join("aether-substrate-bundle")
+        .join("assets")
+}
+
+/// `NamespaceRoots` for these scenarios: `assets` points at the in-repo
+/// font home (read-only use), while `save` / `config` land in the
+/// per-process sandbox so nothing writable escapes the test.
+fn font_namespace_roots() -> NamespaceRoots {
+    let sandbox = init_save_sandbox("text-scenario");
+    NamespaceRoots { save: sandbox.to_path_buf(), assets: font_assets_root(), config: sandbox.to_path_buf() }
+}
+
+/// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
+/// the kind's wire encoding (`encode_into_bytes`) so any K — cast
+/// or structured — packs correctly.
+fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
+    NamedMail {
+        recipient_name: recipient.to_owned(),
+        kind_name: K::NAME.to_owned(),
+        payload: mail.encode_into_bytes(),
+        count: 1,
+    }
+}
+
+fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
+    let start = ((y * img.width + x) * 4) as usize;
+    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
+}
+
+fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
+    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
+}
+
+fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
+    !rgb_close(rgba_at(img, x, y), bg, tolerance)
+}
+
+fn lit_fraction_in_rect(img: &Image, x: u32, y: u32, width: u32, height: u32, bg: [u8; 3], tolerance: u8) -> f32 {
+    let mut lit = 0u32;
+    for py in y..y + height {
+        for px in x..x + width {
+            if pixel_is_lit(img, px, py, bg, tolerance) {
+                lit += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        lit as f32 / (width * height) as f32
+    }
+}
+
+/// The scenarios here need wgpu (the composed render cap builds a `Gpu`
+/// at boot) but no wasm. Skips on wgpu-less runners and panics under
+/// `AETHER_REQUIRE_RUNTIME` so a CI-side regression is loud.
+fn require_wgpu_only() -> bool {
+    if has_wgpu_adapter() {
+        return true;
+    }
+    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
+    eprintln!("skipping: no wgpu adapter available");
+    false
+}
 
 /// ADR-0105 text surface end to end: load a real OFL TTF through the
 /// `assets` namespace, draw a `Screen`-space string, and assert the
@@ -13,20 +139,16 @@ use super::*;
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn text_draws_a_screen_space_string() {
-    // The crate's vendored Roboto Mono (SIL OFL 1.1) — copied into the
-    // sandbox so the `assets` namespace can read it.
-    const TTF: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("substrate-bench-text");
-    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let (frame_width, frame_height) = (128u32, 64u32);
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_actor::<TextCapability>(())
         .size(frame_width, frame_height)
-        .namespace_roots(test_namespace_roots(sandbox))
+        .namespace_roots(font_namespace_roots())
         .build()
         .expect("boot");
 
@@ -36,7 +158,7 @@ fn text_draws_a_screen_space_string() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
+                &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
         )])
         .expect("load_font sequence");
@@ -108,17 +230,15 @@ fn text_draws_a_screen_space_string() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn text_draw_clip_bounds_glyph_pixels() {
-    const TTF: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("substrate-bench-text-clip");
-    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_actor::<TextCapability>(())
         .size(128, 64)
-        .namespace_roots(test_namespace_roots(sandbox))
+        .namespace_roots(font_namespace_roots())
         .build()
         .expect("boot");
     let loaded = bench
@@ -126,7 +246,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
+                &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
         )])
         .expect("load_font sequence");
@@ -201,21 +321,19 @@ fn text_draw_clip_bounds_glyph_pixels() {
 /// a consumer measures text without a per-measurement mail round trip and
 /// still matches what the cap would draw.
 ///
-/// CPU-only (no capture), but the bench still boots a full chassis, so it
-/// skips on driverless runners like the other scenarios.
+/// CPU-only (no capture), but the bench still boots a render-composed
+/// chassis, so it skips on driverless runners like the other scenarios.
 #[test]
 fn font_metrics_grab_measures_like_the_draw_path() {
-    const TTF: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("substrate-bench-font-metrics");
-    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_actor::<TextCapability>(())
         .size(64, 32)
-        .namespace_roots(test_namespace_roots(sandbox))
+        .namespace_roots(font_namespace_roots())
         .build()
         .expect("boot");
 
@@ -226,7 +344,7 @@ fn font_metrics_grab_measures_like_the_draw_path() {
             BenchOp::send_and_await(
                 "aether.text",
                 &FontMetricsRequest {
-                    font: FontRef::Path { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
+                    font: FontRef::Path { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
                 },
             ),
         )])
@@ -242,8 +360,10 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     let size = 29.0;
     let local = cache.measure(text, size);
 
-    // Ground truth: fontdue's draw-path pen walk over the same string.
-    let font = fontdue::Font::from_bytes(TTF, fontdue::FontSettings::default()).expect("vendored Roboto Mono parses");
+    // Ground truth: fontdue's draw-path pen walk over the same string,
+    // parsed from the same in-repo TTF the cap loaded.
+    let ttf = fs::read(font_assets_root().join(FONT_PATH)).expect("read vendored Roboto Mono");
+    let font = fontdue::Font::from_bytes(ttf, fontdue::FontSettings::default()).expect("vendored Roboto Mono parses");
     let mut draw_pen = 0.0f32;
     for ch in text.chars() {
         draw_pen += font.metrics(ch, size).advance_width;
@@ -268,18 +388,16 @@ fn font_metrics_grab_measures_like_the_draw_path() {
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn text_screen_origin_shifts_centroid() {
-    const TTF: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("substrate-bench-text-origin");
-    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let (frame_width, frame_height) = (256u32, 128u32);
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_actor::<TextCapability>(())
         .size(frame_width, frame_height)
-        .namespace_roots(test_namespace_roots(sandbox))
+        .namespace_roots(font_namespace_roots())
         .build()
         .expect("boot");
 
@@ -289,7 +407,7 @@ fn text_screen_origin_shifts_centroid() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
+                &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
         )])
         .expect("load_font sequence");
@@ -366,25 +484,22 @@ fn text_screen_origin_shifts_centroid() {
 ///    (bbox width within ±30% of the front-facing width), confirming the
 ///    clip-space approach never skews the label with the camera.
 ///
-/// Skipped when no wgpu adapter is available (driverless CI runner) or
-/// the font asset hasn't been staged.
+/// Skipped when no wgpu adapter is available (driverless CI runner).
 #[test]
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn text_draws_world_space_label() {
     use std::f32::consts::PI;
 
-    const TTF: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("substrate-bench-world-text");
-    fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let (frame_width, frame_height) = (128u32, 96u32);
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_actor::<TextCapability>(())
         .size(frame_width, frame_height)
-        .namespace_roots(test_namespace_roots(sandbox))
+        .namespace_roots(font_namespace_roots())
         .build()
         .expect("boot");
 
@@ -393,7 +508,7 @@ fn text_draws_world_space_label() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
+                &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
         )])
         .expect("load_font sequence");

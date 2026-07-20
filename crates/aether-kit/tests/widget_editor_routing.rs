@@ -1,18 +1,18 @@
 //! Strict acceptance for ADR-0141 editor-wide input routing.
 
-use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
 use aether_data::{Kind, MailboxId};
+use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
     MouseWheel, TextInput,
 };
 use aether_kit::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -79,11 +79,16 @@ fn drain(bench: &mut SubstrateBench, actor: &LoadedActor, label: &'static str) -
 #[test]
 fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     let (Some(kit_wasm), Some(fixtures_wasm)) =
-        (require_runtime("aether_kit"), require_runtime("aether_test_fixtures_bundle"))
+        (require_wasm("aether_kit"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(200, 100).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .size(200, 100)
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .build()
+        .expect("boot");
     let region_a = load_probe(&mut bench, &fixtures_wasm, "region-a");
     let region_b = load_probe(&mut bench, &fixtures_wasm, "region-b");
     let mut b_lanes = RegionInputLanes::ALL;
@@ -149,11 +154,16 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 #[test]
 fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     let (Some(kit_wasm), Some(fixtures_wasm)) =
-        (require_runtime("aether_kit"), require_runtime("aether_test_fixtures_bundle"))
+        (require_wasm("aether_kit"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(200, 100).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .size(200, 100)
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .build()
+        .expect("boot");
     let region_a = load_probe(&mut bench, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut bench, &fixtures_wasm, "focus-b");
     let a = region("focus-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL);

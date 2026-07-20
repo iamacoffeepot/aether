@@ -32,8 +32,7 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
-use aether_substrate_bench_capture::RenderBenchExt;
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::{RenderBenchBuilderExt, RenderBenchExt};
 use std::fs;
 
 use aether_data::Kind;
@@ -239,7 +238,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
 
     // Root chrome fills the middle (8,8)-(56,40); two leaves sit inside it
     // — child a red at (12,12)-(24,24), child b green at (36,20)-(48,32).
@@ -314,7 +313,7 @@ fn nested_tree_draws_in_depth_first_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
 
     // Interior node b: green chrome (0,0,20,20), one white leaf b1 inset at
     // local (2,2), sized 6×6.
@@ -447,7 +446,7 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         }],
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     load_panel(&mut bench, &wasm, &config);
     let captured = bench
         .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
@@ -493,7 +492,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     let texture_id = create_four_color_texture(&mut bench);
 
     let root_texture_clip = WidgetClipRect { x: 6.0, y: 6.0, width: 12.0, height: 12.0 };
@@ -715,7 +714,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         .encode_into_bytes(),
     };
 
-    let mut bench = SubstrateBench::builder().size(80, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(80, 48).with_render().with_component_host().build().expect("boot");
     load_scroll_panel(&mut bench, &wasm, scroll);
     let captured = bench
         .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])

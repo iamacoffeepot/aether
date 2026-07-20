@@ -1,6 +1,7 @@
 //! Full terrain annotation workbench flow through the real kit wasm.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_input::{InputCapability, InputConfig};
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::f32::consts::FRAC_PI_3;
 use std::fs;
 use std::path::Path;
@@ -30,7 +31,7 @@ use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_substrate_bench_capture::ArtifactGuard;
 use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_substrate_bench_capture::visual::{Rect, decode_png, run_checks, target_color_stats};
-use aether_text::{LoadFontBytes, LoadFontResult};
+use aether_text::{LoadFontBytes, LoadFontResult, TextCapability};
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -194,7 +195,14 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(WIDTH, HEIGHT).full().build().expect("boot SubstrateBench");
+    let mut bench = SubstrateBench::builder()
+        .size(WIDTH, HEIGHT)
+        .with_render()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .with_actor::<TextCapability>(())
+        .build()
+        .expect("boot SubstrateBench");
     let mark_book_mailbox = load_export(&mut bench, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME, Vec::new());
     let world_mailbox = load_export(&mut bench, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME, Vec::new());
     let terra_mailbox = load_export(

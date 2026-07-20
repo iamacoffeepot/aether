@@ -16,8 +16,24 @@
 //! `replace` can refill), so a torn-down boot still appears in the loaded-
 //! component list — the marker is the signal that its `unwire` actually ran.
 
-use super::*;
-use aether_substrate_bundle::FullBenchExt;
+use std::fs;
+
+use aether_data::MailboxId;
+use aether_kinds::{DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult};
+use aether_substrate_bench::test_helpers::require_wasm;
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+
+// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
+// entries are present in this test binary.
+#[allow(unused_imports)]
+use aether_test_fixtures_kinds as _;
+
+/// ADR-0147 boot fixture markers (`aether-test-fixtures-boot`): the boot
+/// actor broadcasts `BOOT_OBSERVED` from `wire` (once per instance) and
+/// `BOOT_TORN_DOWN` from `unwire` (once at teardown); the scenarios
+/// count them via `count_observed`.
+const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
+const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
 /// return its trampoline `MailboxId`.
@@ -61,10 +77,10 @@ fn settle(bench: &mut SubstrateBench) {
 /// exactly once in the loaded-component list — not once per load.
 #[test]
 fn module_boot_singleton_spawns_once_across_selector_loads() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_boot") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     load_boot_export(&mut bench, &wasm, "aether.test.boot.widget_a");
@@ -93,10 +109,10 @@ fn module_boot_singleton_spawns_once_across_selector_loads() {
 /// trampoline alongside the singleton.
 #[test]
 fn boot_actor_is_not_selectable_by_export() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_boot") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let loaded = bench
@@ -130,10 +146,10 @@ fn boot_actor_is_not_selectable_by_export() {
 /// the partial unload and reaches one after the final drop.
 #[test]
 fn module_boot_survives_partial_unload_and_tears_down_on_last() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_boot") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let widget_a = load_boot_export(&mut bench, &wasm, "aether.test.boot.widget_a");

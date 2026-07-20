@@ -1,6 +1,6 @@
 //! Terrain proposal lifecycle and pixel identity through the real kit wasm.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::fs;
 use std::path::Path;
 
@@ -138,7 +138,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(32, 32).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(32, 32).with_render().with_component_host().build().expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 
@@ -186,7 +186,8 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(WIDTH, HEIGHT).full().build().expect("boot");
+    let mut bench =
+        SubstrateBench::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
     let mailbox_id = load_world(&mut bench, &wasm_path);
     let world = component_address();
     let baseline_png = capture(&mut bench, &world, "baseline");

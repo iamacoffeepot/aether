@@ -23,13 +23,8 @@
 //! `cargo nextest`; `AETHER_REQUIRE_RUNTIME=1` flips the skip into a hard
 //! panic so a missing pre-build is loud.
 
-// Skip diagnostics emit via stderr so `cargo nextest` surfaces a visible
-// "skipping: ..." line alongside `test ... ok`.
-#![allow(clippy::print_stderr)]
-
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
-use aether_substrate_bundle::FullBenchExt;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
@@ -39,8 +34,8 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::MailboxId;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
@@ -72,16 +67,10 @@ fn load_source_observer(bench: &mut SubstrateBench, wasm: Vec<u8>, name: &str) -
 /// { mailbox_id: 0 }`.
 #[test]
 fn session_source_returns_none() {
-    let Some(wasm_path) = require_runtime(SOURCE_OBSERVER) else {
+    let Some(wasm_path) = require_wasm(SOURCE_OBSERVER) else {
         return;
     };
-    let mut bench = match SubstrateBench::builder().size(64, 48).full().build() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-            return;
-        }
-    };
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
     let (_, reader_addr) = load_source_observer(&mut bench, wasm, "reader");
 
@@ -103,16 +92,10 @@ fn session_source_returns_none() {
 /// checking the value the reader logged via `log_tail`.
 #[test]
 fn component_source_returns_sender_mailbox() {
-    let Some(wasm_path) = require_runtime(SOURCE_OBSERVER) else {
+    let Some(wasm_path) = require_wasm(SOURCE_OBSERVER) else {
         return;
     };
-    let mut bench = match SubstrateBench::builder().size(64, 48).full().build() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-            return;
-        }
-    };
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
 
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
     let (reader_mailbox, reader_addr) = load_source_observer(&mut bench, wasm.clone(), "reader");

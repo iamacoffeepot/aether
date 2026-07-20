@@ -35,8 +35,14 @@ license.workspace = true
 # `*Overlay` / `*Layer` structs, so both crates are real deps (the crate fails
 # to compile without them) even though neither is named in this crate's source.
 # False positives, so ignored here rather than dropped.
+#
+# `aether-test-fixtures-bundle` is a cdylib-only wasm component crate: the
+# render scenario tests load its pre-built wasm at runtime, and the dev-dep
+# edge is what `cargo xtask affected` reads to derive `wasm_needed` (the
+# `cargo xtask dist` pre-build) when this crate's tests are selected — no
+# source-level `use` exists for machete to see.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique"]
+ignored = ["clap", "confique", "aether-test-fixtures-bundle"]
 
 [features]
 default = ["runtime"]
@@ -93,6 +99,24 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_substrate::testing` fixture, enabled by the substrate
 # `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The render scenario tests (`tests/render_scenario.rs`, rehomed from
+# `aether-substrate-bundle` per issue #3771) drive an in-process
+# `SubstrateBench` composed with the render cap and score the captured
+# PNGs through the capture crate's visual reductions + `ArtifactGuard`.
+aether-component = { path = "../aether-component" }
+aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
+# The wasm-loading scenarios mail the probe/cube fixtures with the shared
+# fixture kinds; the rlib pin also keeps their `KindDescriptor` inventory
+# entries linked into the test binary.
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+# Cargo-invisible wasm coupling made visible (issue #3617): the scenario
+# tests execute this crate's pre-built component wasm, and this dev-dep is
+# the edge `cargo xtask affected` derives `wasm_needed` from so the
+# `cargo xtask dist` pre-build runs before these tests in CI.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+# The artifact-guard scenario decodes the persisted `measurements.json`.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
