@@ -10,7 +10,7 @@
 //! `spawn_detached` (no hold) fits.
 //!
 //! This generalises the content-gen `InFlightDispatch` prototype
-//! (`aether_capabilities::contentgen::dispatch`) into a first-class
+//! (`aether_contentgen`'s dispatch prototype) into a first-class
 //! ctx primitive. The pieces:
 //!
 //! - [`DispatchId`] — a `Copy` correlation token minted per dispatch.

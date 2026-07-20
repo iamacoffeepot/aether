@@ -98,10 +98,10 @@ raw connection.
 
 ## Change route
 
-- Public kinds/helpers: `crates/aether-capabilities/src/tcp/{kinds,route}.rs`
-- Control runtime: `crates/aether-capabilities/src/tcp/runtime.rs`
-- Listener actor: `crates/aether-capabilities/src/tcp/listener/`
-- Session actor: `crates/aether-capabilities/src/tcp/session/`
-- Configuration: `crates/aether-capabilities/src/tcp/config.rs`
+- Public kinds/helpers: `crates/aether-tcp/src/{kinds,route}.rs`
+- Control runtime: `crates/aether-tcp/src/runtime.rs`
+- Listener actor: `crates/aether-tcp/src/listener/`
+- Session actor: `crates/aether-tcp/src/session/`
+- Configuration: `crates/aether-tcp/src/config.rs`
 - Decisions: ADR-0079 (instanced actors), ADR-0118 (wire); earlier hub/RPC
   framing context in ADR-0072 is amended by ADR-0118

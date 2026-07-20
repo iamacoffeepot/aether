@@ -31,9 +31,9 @@
 //! substrate-core takes config explicitly and chassis `main()` is
 //! the single edge that reads env vars. Tests pass config in
 //! directly, never touch env. Stage 2e (issue 552) extracted every
-//! cap to `aether-capabilities`; the cap-specific config readers
-//! (e.g. `NamespaceRoots::from_env`) live there now and chassis
-//! mains reach for them when composing the `Builder` chain.
+//! cap out of the substrate; the cap-specific config readers (e.g.
+//! `NamespaceRoots::from_env`) live in the per-cap crates now and
+//! chassis mains reach for them when composing the `Builder` chain.
 
 use std::sync::Arc;
 

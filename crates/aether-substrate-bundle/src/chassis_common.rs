@@ -1060,7 +1060,7 @@ mod tests {
         // graph is `Tick → Render → Present → Tick` (looping) with the
         // `Quit` escape to a `Shutdown` terminal on the `Present` stage.
         // The graph's edge accessors (`next` / `quit` per state) are
-        // `pub(crate)` to `aether-capabilities`, so this crate-boundary
+        // crate-private to `aether-lifecycle`, so this crate-boundary
         // check reads the public `Debug` (start + the non-terminal state
         // kinds + terminals) plus the now-empty `initial_subscribers`
         // set. Quit-edge *placement* (on `Present`, not `Tick`) is
@@ -1166,8 +1166,8 @@ mod tests {
         // Guards the three `ChassisBootConfigLayer::META` keys joining
         // the chassis known-key set. `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
         // relocated here from the scheduler knob list (it was only
-        // registered scheduler-side because `aether-capabilities` couldn't
-        // hold it; the bundle can, so the workaround is gone).
+        // registered scheduler-side because the old capabilities monolith
+        // couldn't hold it; the bundle can, so the workaround is gone).
         let known = chassis_known_keys();
         assert!(known.contains("AETHER_WORKERS"), "AETHER_WORKERS must be a known key");
         assert!(known.contains("AETHER_BOOT_MANIFEST"), "AETHER_BOOT_MANIFEST must be a known key");

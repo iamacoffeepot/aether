@@ -5,7 +5,7 @@
 //! (digest-address bytes plus their derivation-DAG parents) and `get` (by
 //! digest) — each paired 1:1 with an `Ok`/`Err` reply kind carrying a
 //! structured [`ArtifactsError`] on failure. Modeled on the `aether.fs.*`
-//! reply-enum template (`crates/aether-capabilities/src/fs/kinds.rs`),
+//! reply-enum template (`crates/aether-fs/src/kinds.rs`),
 //! including its `_result` reply-name suffix.
 //!
 //! Always-on (no `cfg` gate): a peer that addresses the cap via

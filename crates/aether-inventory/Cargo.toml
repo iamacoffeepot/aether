@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 # `aether.inventory` reverse-lookup / live-registry cap (ADR-0088 §6,
-# widened by ADR-0091 §5, ADR-0109 §5), extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3725) as a zero-dependency leaf per-cap crate of the
-# arc that dissolves the capabilities monolith. Owns the `aether.inventory`
+# widened by ADR-0091 §5, ADR-0109 §5), extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3725) as a zero-dependency leaf
+# per-cap crate. Owns the `aether.inventory`
 # dispatch cap: the `InventoryCapability` identity + its `aether_substrate`-
 # typed runtime that services `Manifest` / `Resolve` / `ListKinds` /
 # `ListHandlers` (the per-build name/template manifest, dynamic-instance
@@ -16,12 +16,11 @@ license.workspace = true
 # `Resolve`, `ResolveResult`, `ListKinds`, `ListKindsResult`, `ListHandlers`,
 # `HandlersResult`, and the `*Wire` projections) live in `aether-kinds` — the
 # ADR-0121 harness must-stay rule, since `aether-mcp` consumes them and is
-# barred from an `aether-capabilities` dependency — so this crate only
-# references them.
+# barred from a cap-crate dependency — so this crate only references them.
 #
-# It is a pure leaf — no other capability depends on it — so
-# `aether-capabilities` keeps no `aether-inventory` dependency (no facade),
-# matching the `aether-clipboard` zero-inbound pattern.
+# It is a pure leaf — no other capability depends on it — so nothing depends
+# back on this crate (no facade), matching the `aether-clipboard` zero-inbound
+# pattern.
 #
 # NAME COLLISION: the CRATE is `aether-inventory`; the `inventory =
 # { workspace = true }` dependency below is the unrelated crates.io `inventory`

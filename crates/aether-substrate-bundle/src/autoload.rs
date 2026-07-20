@@ -78,7 +78,7 @@ pub fn boot_manifest_autoload(path: &Path) -> Result<Vec<AutoloadComponent>, Con
 /// instance suffixed, no bare-name special case for index 0 — where `base`
 /// follows the same precedence the component host itself applies when
 /// resolving a load's name (`caller name > export > wasm-declared entry
-/// namespace`, `aether-capabilities`' `handle_load` step 4), so a
+/// namespace`, `aether-component`'s `handle_load` step 4), so a
 /// replicated load's derived name matches what an unreplicated load of the
 /// same entry would have resolved to.
 ///

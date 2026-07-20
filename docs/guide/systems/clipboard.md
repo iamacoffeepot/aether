@@ -62,9 +62,9 @@ waits on a request that cannot complete.
 
 ## Change route
 
-- Marker and typed helpers: `crates/aether-capabilities/src/clipboard/mod.rs`
-- Kinds: `crates/aether-capabilities/src/clipboard/kinds.rs`
-- System/in-memory runtime: `crates/aether-capabilities/src/clipboard/runtime.rs`
-- Unsupported runtime: `crates/aether-capabilities/src/clipboard/headless_runtime.rs`
-- Backend selection: `crates/aether-capabilities/src/clipboard/config.rs`
+- Marker and typed helpers: `crates/aether-clipboard/src/mod.rs`
+- Kinds: `crates/aether-clipboard/src/kinds.rs`
+- System/in-memory runtime: `crates/aether-clipboard/src/runtime.rs`
+- Unsupported runtime: `crates/aether-clipboard/src/headless_runtime.rs`
+- Backend selection: `crates/aether-clipboard/src/config.rs`
 - Chassis installation: `crates/aether-substrate-bundle/src/{desktop,headless,test_bench}/`

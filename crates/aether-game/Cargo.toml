@@ -4,17 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `aether.game` player-gateway capability (ADR-0144, ADR-0145), extracted
-# from `aether-capabilities` (iamacoffeepot/aether#3754) as a leaf per-cap
-# crate of the arc that dissolves the capabilities monolith. Owns the
+# `aether.game` player-gateway capability (ADR-0144, ADR-0145), extracted by
+# the arc that dissolved the capabilities monolith
+# (iamacoffeepot/aether#3754) as a leaf per-cap crate. Owns the
 # tick-native intent / fact vocabulary a simulation and its clients share
 # (`kinds`) plus the trusted player session tier (`player`) — the
 # `GameGatewayCapability` singleton that binds one `aether.tcp` listener
 # and fans facts out, the per-connection `PlayerSessionActor`, and the
 # recipient-free `PlayerFrame` wire vocabulary.
 #
-# It is a leaf: no other capability depends on it, so `aether-capabilities`
-# keeps no dependency on this crate and re-exports none of its names. It
+# It is a leaf: no other capability depends on it, so nothing depends back on
+# this crate and no crate re-exports its names. It
 # depends downward on `aether-tcp` for the transport its sessions ride —
 # the gateway is a TCP consumer and the session actors write framed bytes
 # through `TcpNativeExt`.

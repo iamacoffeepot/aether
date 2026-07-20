@@ -222,6 +222,6 @@ it. This does not delete the hub's stored component artifacts.
   `crates/aether-component/src/trampoline/runtime/mod.rs`
 - Trampoline replace behavior:
   `crates/aether-component/src/trampoline/runtime/replace.rs`
-- Live kinds: `crates/aether-capabilities/src/inventory/`
+- Live kinds: `crates/aether-inventory/src/`
 
 For failure branches, continue with [Recovery](recovery.md).

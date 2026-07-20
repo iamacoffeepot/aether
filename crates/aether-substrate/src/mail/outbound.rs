@@ -25,8 +25,8 @@ use crate::mail::{Source, SourceAddr};
 
 // Issue 776 retired the substrate-local `LogEntry` + `LogLevel`
 // types alongside the `EgressBackend::egress_log_batch` method. Log
-// entries are owned end-to-end by `aether-capabilities::LogCapability`
-// in its substrate-side ring and served via the `aether.log.read` /
+// entries are owned end-to-end by the log cap in its substrate-side
+// ring and served via the `aether.log.read` /
 // `aether.log.read_result` kinds (the `aether_kinds::LogEntry` wire
 // shape is the only `LogEntry` left in the workspace). The cap reads
 // `ctx.source_mailbox()` directly off the mail envelope, so no substrate-side

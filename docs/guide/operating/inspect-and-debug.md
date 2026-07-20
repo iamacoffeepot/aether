@@ -194,6 +194,6 @@ it up when retention is no longer needed.
   `crates/aether-mcp/src/rpc.rs`
 - Logs and cost projection: `crates/aether-mcp/src/tools/logs_cost.rs`
 - Capture behavior: `crates/aether-mcp/src/tools/capture.rs`
-- Substrate inventory implementation: `crates/aether-capabilities/src/inventory/`
+- Substrate inventory implementation: `crates/aether-inventory/src/`
 
 For a failure already in progress, continue with [Recovery](recovery.md).

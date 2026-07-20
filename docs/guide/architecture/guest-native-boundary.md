@@ -54,9 +54,9 @@ component loader.
 
 ## Native capability surface
 
-`aether-capabilities` represents filesystem, HTTP, render, lifecycle, audio,
-window, engine control, and other host responsibilities as native actors. A
-capability generally has:
+The `aether-<capability>` crates represent filesystem, HTTP, render, lifecycle,
+audio, window, engine control, and other host responsibilities as native
+actors. A capability generally has:
 
 - a marker/identity type and stable namespace;
 - capability-owned kind definitions;
@@ -71,7 +71,7 @@ native state to hold adapters, devices, threads, and resource handles. See
 ## Capability-local kinds
 
 Public messages exchanged with a capability live with that capability, for
-example `aether-capabilities/src/render/kinds.rs`. `aether-kinds` remains for
+example `aether-render/src/kinds.rs`. `aether-kinds` remains for
 genuinely upstream, cross-cutting substrate vocabulary and descriptors. This
 ownership, adopted in ADR-0121, gives guest crates a stable type path without
 turning one central crate into a catalog of unrelated service APIs.
@@ -138,7 +138,7 @@ example.
 - JSON/wire conversion: `crates/aether-codec/src/`
 - Guest SDK and exports: `crates/aether-actor/src/`
 - Wasm host: `crates/aether-substrate/src/actor/wasm/`
-- Capability types/runtimes: `crates/aether-capabilities/src/`
+- Capability types/runtimes: `crates/aether-<capability>/src/`
 - Behavior ABI: `crates/aether-behavior/src/`
 - ADR-0096 and ADR-0099: multi-actor/component hosting
 - ADR-0121 and ADR-0122: kind ownership and marker/runtime split

@@ -66,7 +66,7 @@ host code callable from a guest.
 ## Kind ownership
 
 Put a kind next to the actor/capability that owns the contract. Capability
-kinds belong in `aether-capabilities/src/<capability>/kinds.rs`. Component kinds
+kinds belong in that capability's own crate, `aether-<capability>/src/kinds.rs`. Component kinds
 belong in the component's public `rlib` surface. Promote vocabulary to
 `aether-kinds` only when it is genuinely substrate-wide or is an explicit
 upstream bridge.

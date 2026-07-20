@@ -4,20 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `aether.window` capability, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3717) as a per-cap crate of the arc that dissolves
-# the capabilities monolith. Owns the chassis-without-window companion:
+# `aether.window` capability, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3717) as a per-cap crate. Owns the chassis-without-window companion:
 # the `HeadlessWindowCapability` identity + its fail-fast `Err`-replying
 # runtime (`runtime`). The window request/reply mail kinds themselves
 # (`SetWindowMode` / `SetWindowTitle` / `FocusWindow` + `*Result`) live in
 # `aether-kinds`, so this crate only references them.
 #
-# Unlike the pure-leaf `aether-clipboard`, `aether-capabilities` RETAINS a
-# `default-features = false` dependency on this crate: its `rpc` server
-# test still addresses `HeadlessWindowCapability` to exercise the
-# `Component` local-RPC-server reply path. So capabilities keeps the
-# identity-only dep and forwards `aether-window/runtime` from its own
-# `runtime` feature.
+# Unlike the pure-leaf `aether-clipboard`, this crate has an inbound
+# consumer: `aether-rpc`'s server test addresses `HeadlessWindowCapability` to
+# exercise the `Component` local-RPC-server reply path, so `aether-rpc` holds
+# it as a dev-dependency.
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity + `HandlesKind` markers compile always-on; the

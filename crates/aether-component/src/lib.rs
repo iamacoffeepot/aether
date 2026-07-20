@@ -22,8 +22,8 @@
 //!
 //! ## Crate shape
 //!
-//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3756) as a
-//! per-cap crate of the arc that dissolves the capabilities monolith.
+//! Extracted by the arc that dissolved the capabilities monolith
+//! (iamacoffeepot/aether#3756) as a per-cap crate.
 //! The cap and its trampoline move as one unit because they are one
 //! capability split across two modules: `component` names
 //! `WasmTrampoline` / `WasmTrampolineConfig` for real — it spawns the

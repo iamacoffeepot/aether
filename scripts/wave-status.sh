@@ -189,7 +189,7 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     # Deterministic checks: never flaky. A failure in this set already dooms
     # `CI pass`, so the caller fixes and re-pushes now rather than waiting out
     # the slow jobs — the new push supersedes the run.
-    fast_fail_names='["Format","Clippy","Docs","Marker-only host build"]'
+    fast_fail_names='["Format","Clippy","Docs"]'
     while :; do
         sha=$(pr_head_sha "$WAIT_PR" "$sha")
         runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { sleep 20; continue; }

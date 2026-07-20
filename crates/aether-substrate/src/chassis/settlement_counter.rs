@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// Serial oracle: the exact incumbent fold rules from
-    /// `aether-capabilities::trace` (`Sent` → `in_flight + 1` with
+    /// `aether_trace` (`Sent` → `in_flight + 1` with
     /// insert, `Finished` → `in_flight - 1` + zero-test, `HoldOpen` →
     /// `held_open + 1` with insert, `Release` → `held_open - 1` +
     /// zero-test). Returns the number of settle fires for a single root

@@ -42,7 +42,7 @@
 //! There is no local `kinds.rs` by design (the ADR-0121 harness
 //! must-stay rule): the `Manifest` / `Resolve` / `ListKinds` /
 //! `ListHandlers` kind family is consumed upstream by `aether-mcp`,
-//! which is barred from an `aether-capabilities` dependency, so the
+//! which is barred from a cap-crate dependency, so the
 //! family stays whole in `aether-kinds`.
 //!
 //! The cap holds a clone of the substrate's `Arc<Registry>` (taken in

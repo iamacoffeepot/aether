@@ -997,7 +997,7 @@ mod control_plane {
     // `DrawSolidQuads`) moved to `aether_render::kinds`
     // (ADR-0121). The `QuadScale` / `QuadSpace` projection types stay
     // central: the `aether.text.draw` kind below consumes `QuadSpace`,
-    // and `aether-kinds` has no dependency on `aether-capabilities`, so
+    // and `aether-kinds` has no dependency on `aether-render`, so
     // moving them would close a cycle — they're sibling-kind-consumed and
     // therefore pinned here.
 
@@ -1626,7 +1626,7 @@ mod control_plane {
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
     // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
     // trunk module. The `aether.view_projection` view_proj sink contract stays
-    // in `aether-capabilities` — it's a chassis primitive consumed by the desktop chassis's
+    // in `aether-render` — it's a chassis primitive consumed by the desktop chassis's
     // `aether.render` mailbox (the camera mailbox folded into
     // render per ADR-0074 §Decision 7).
     // The migrated kinds are still wire-compatible (kind names +
@@ -1761,7 +1761,7 @@ mod control_plane {
     // ADR-0050 per-provider content-gen caps. The `aether.anthropic`
     // kinds (Role, Message, AnthropicError, MessagesSend, CliSend,
     // MessagesSendResult, CliSendResult) are owned by the capability and
-    // live in `aether-capabilities::anthropic::kinds` (ADR-0121). `Usage`
+    // live in `aether_anthropic::kinds` (ADR-0121). `Usage`
     // stays central — it is shared with the `aether.gemini` result kinds.
 
     /// Token + wall-clock accounting returned on a successful

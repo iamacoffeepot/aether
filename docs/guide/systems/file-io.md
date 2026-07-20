@@ -162,7 +162,7 @@ fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
 Because the reply echoes `namespace` + `path`, a component with several reads
 outstanding tells them apart by the echoed fields — match them against whatever
 state you were waiting to fill. (The request and reply kinds live in
-`aether-capabilities/src/fs/kinds.rs`; you can also `send` a `Read` / `Write` kind to `aether.fs`
+`aether-fs/src/kinds.rs`; you can also `send` a `Read` / `Write` kind to `aether.fs`
 directly instead of going through the facade.)
 
 **From an agent over MCP.** `send_mail` rides settlement and hands back the

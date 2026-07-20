@@ -15,8 +15,8 @@
 //! 2. **Supervise** the hub and `aether-mcp` children: fork them with the
 //!    right ports injected, restart either on exit (capped backoff), and
 //!    SIGTERM→SIGKILL→reap them on shutdown / `Drop`. This mirrors the
-//!    fork+kill-on-drop precedent in `aether-capabilities`'s engine
-//!    proxy (`engine/server.rs:145` fork, `engine/proxy.rs:320` Drop).
+//!    fork+kill-on-drop precedent in `aether-engine`'s proxy
+//!    (`server.rs` fork, `proxy.rs` Drop).
 //!
 //! A tiny out-of-band `/admin` endpoint (never under `/mcp`) lets Claude
 //! cycle the hub (`POST /admin/restart-hub`) and inspect child liveness

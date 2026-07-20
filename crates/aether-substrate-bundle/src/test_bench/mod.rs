@@ -24,6 +24,7 @@ mod execute;
 mod mail_latency;
 pub mod render;
 pub mod test_helpers;
+pub mod unsupported_cap;
 
 pub use artifacts::ArtifactGuard;
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
@@ -31,3 +32,4 @@ pub use cap::{TestBenchCapConfig, TestBenchCapability};
 pub use chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 pub use config::{RenderSizeConfig, TestBenchClipboardMode};
 pub use execute::{BenchOp, BenchOutput, ExecutionError, ExecutionResult};
+pub use unsupported_cap::UnsupportedTestBenchCapability;

@@ -19,7 +19,7 @@ layout, identity/runtime split, test placement — see
 
 ## The exemplar
 
-Trace [`crates/aether-capabilities/src/text/`][text] while you read.
+Trace [`crates/aether-text/src/`][text] while you read.
 `TextCapability` owns the `aether.text` mailbox: a config-free CPU-only
 cap that keeps a little per-session state — a font registry and a glyph
 atlas — while typed request contexts correlate the work in flight. It
@@ -34,10 +34,10 @@ The identity lives in [`text/mod.rs`][mod]; the state and handler bodies
 in [`text/runtime/mod.rs`][runtime]; the owned kinds in
 [`text/kinds.rs`][kinds].
 
-[text]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text
-[mod]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/mod.rs
-[runtime]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/runtime/mod.rs
-[kinds]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/kinds.rs
+[text]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src
+[mod]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/mod.rs
+[runtime]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/mod.rs
+[kinds]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs
 
 ## 1. Name the mailbox
 
@@ -364,7 +364,7 @@ what the in-process test can't.
 
 This recipe carries file paths and symbol names, so confirm them against
 the current source before following it. The exemplar is
-[`crates/aether-capabilities/src/text/`][text] — if a name here doesn't
+[`crates/aether-text/src/`][text] — if a name here doesn't
 match what's in the tree, fix the recipe as part of your change. The
 pointer is to the real cap, not a frozen copy, exactly so it tracks the
 code.

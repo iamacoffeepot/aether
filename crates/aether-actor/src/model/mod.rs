@@ -85,7 +85,7 @@ pub const EMBEDDED_SCOPE: &str = "aether.embedded";
 /// Resolution is relative (ADR-0099 §5): in the embedding context the caller
 /// is the component host, whose carry is `aether.component`, so the result is
 /// the component's registered mailbox. The carry is supplied by the caller
-/// (`aether-capabilities`'s `resolve_embedded` for by-name lookups), not
+/// (`aether-component`'s `resolve_embedded` for by-name lookups), not
 /// re-derived here. Keyless (`Args<'a> = ()`), so an embedded actor is a
 /// [`Singleton`].
 pub struct Embedded;

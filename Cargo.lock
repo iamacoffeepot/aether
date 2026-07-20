@@ -183,19 +183,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-capabilities"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-component",
- "aether-data",
- "aether-kinds",
- "aether-substrate",
- "inventory",
- "syn",
-]
-
-[[package]]
 name = "aether-clipboard"
 version = "0.3.0-alpha"
 dependencies = [
@@ -595,7 +582,6 @@ dependencies = [
  "aether-actor",
  "aether-anthropic",
  "aether-audio",
- "aether-capabilities",
  "aether-clipboard",
  "aether-codec",
  "aether-component",

@@ -11,24 +11,24 @@ fallback or omits the runtime.
 |---|---|---|---|
 | `aether.component` | load, replace, drop, describe wasm actor instances | `aether-component/src/component` | [Components](../systems/components.md) |
 | `aether.lifecycle` | frame stages, subscriptions, advance, shutdown | `aether-lifecycle/src` | [Frame lifecycle](../systems/lifecycle.md) |
-| `aether.render` | draw queues, textures/materials, view/projection, capture | `aether-capabilities/src/render` | [Rendering](../systems/rendering.md) |
-| `aether.text` | font load, layout, batched text drawing, metrics | `aether-capabilities/src/text` | [Text](../systems/text.md) |
-| `aether.audio` | instruments, notes, tracks, scheduling, gain/reverb | `aether-capabilities/src/audio` | [Audio](../systems/audio.md) |
+| `aether.render` | draw queues, textures/materials, view/projection, capture | `aether-render/src` | [Rendering](../systems/rendering.md) |
+| `aether.text` | font load, layout, batched text drawing, metrics | `aether-text/src` | [Text](../systems/text.md) |
+| `aether.audio` | instruments, notes, tracks, scheduling, gain/reverb | `aether-audio/src` | [Audio](../systems/audio.md) |
 | `aether.input` | subscription ownership for keyboard/mouse/text/IME streams | `aether-input/src` | [Input](../systems/input.md) |
-| `aether.window` | mode, title, focus and headless replies | `aether-capabilities/src/window` | [Window](../systems/window.md) |
-| `aether.clipboard` | text get/set through system or in-memory backend | `aether-capabilities/src/clipboard` | [Clipboard](../systems/clipboard.md) |
-| `aether.fs` | namespaced read/write/copy/delete/list/fetch-fold | `aether-capabilities/src/fs` | [File I/O](../systems/file-io.md) |
+| `aether.window` | mode, title, focus and headless replies | `aether-window/src` | [Window](../systems/window.md) |
+| `aether.clipboard` | text get/set through system or in-memory backend | `aether-clipboard/src` | [Clipboard](../systems/clipboard.md) |
+| `aether.fs` | namespaced read/write/copy/delete/list/fetch-fold | `aether-fs/src` | [File I/O](../systems/file-io.md) |
 | `aether.http` | outbound HTTP fetch | `aether-http/src/client` | [HTTP egress](../systems/http.md) |
 | `aether.http.server` | inbound HTTP, routes, streams, websocket | `aether-http/src/server` | [HTTP server](../systems/http-server.md) |
 | `aether.tcp` | listener/connect control and session actors | `aether-tcp/src` | [TCP](../systems/tcp.md) |
 | `aether.rpc.server` | framed internal process RPC | `aether-rpc/src` | [RPC](../systems/rpc.md) |
-| `aether.inventory` | live names, kinds, handlers, transforms | `aether-capabilities/src/inventory` | [Inventory](../systems/inventory-and-transforms.md) |
-| `aether.trace` | causal-tree and settlement evidence | `aether-capabilities/src/trace` | [Tracing](../systems/tracing-and-settlement.md) |
+| `aether.inventory` | live names, kinds, handlers, transforms | `aether-inventory/src` | [Inventory](../systems/inventory-and-transforms.md) |
+| `aether.trace` | causal-tree and settlement evidence | `aether-trace/src` | [Tracing](../systems/tracing-and-settlement.md) |
 | `aether.engine` | hub fleet and artifact control | `aether-engine/src` | [Engine fleet](../operating/engine-fleet.md) |
-| `aether.anthropic` | Messages API and CLI text generation | `aether-capabilities/src/anthropic` | [Content generation](../systems/content-generation.md) |
-| `aether.gemini` | image and music generation | `aether-capabilities/src/gemini` | [Content generation](../systems/content-generation.md) |
+| `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
+| `aether.gemini` | image and music generation | `aether-gemini/src` | [Content generation](../systems/content-generation.md) |
 | `aether.game.gateway` | trusted player/session-to-sim binding | `aether-game/src` | [Player sessions](../systems/player-sessions.md) |
-| `aether.test_bench` | deterministic test-chassis advance/control | `aether-capabilities/src/test_bench` | [TestBench](../testing/testbench-and-fleetbench.md) |
+| `aether.test_bench` | deterministic test-chassis advance/control | `aether-substrate-bundle/src/test_bench` | [TestBench](../testing/testbench-and-fleetbench.md) |
 
 Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
 `aether.engine.proxy`, `aether.http.server.shard`, and guest trampolines gain
@@ -48,9 +48,9 @@ capability crate boundary or are genuinely cross-cutting:
 | trace/log/cost tails | common evidence projected across processes |
 | utility/diagnostics | ping/pong, unresolved-mail and monitor notices |
 
-Capability-local public kinds belong next to their capability under
-`aether-capabilities/src/<cap>/kinds.rs` (ADR-0121). Check ownership before
-adding to the shared crate.
+Capability-local public kinds belong next to their capability, in that
+capability's own crate under `aether-<cap>/src/kinds.rs` (ADR-0121). Check
+ownership before adding to the shared crate.
 
 ## Guest/product systems
 

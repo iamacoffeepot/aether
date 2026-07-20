@@ -3,8 +3,8 @@
 //! `SQLite` in WAL mode is the durable single-writer home for the ADR-0149
 //! journal: an append-only event log with inbox dedup, a transactional outbox,
 //! and the active-membership table whose uniqueness constraint makes bloom
-//! sealing all-or-nothing. The capability lives in `aether-bloomery-host` (not
-//! the shared `aether-capabilities`) because it is Bloomery-specific and
+//! sealing all-or-nothing. The capability lives in `aether-bloomery-host`
+//! rather than a shared cap crate because it is Bloomery-specific and
 //! carries the `rusqlite` native dependency (ADR-0149 §Packaging).
 //!
 //! Identity/runtime split (ADR-0122): the [`StoreCapability`] ZST + the

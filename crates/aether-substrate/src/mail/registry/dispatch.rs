@@ -330,7 +330,7 @@ impl OwnedDispatch {
     /// pass `MailboxId(0)` when none is meaningful.
     ///
     /// `pub` (not `pub(crate)`) because integration tests and sibling
-    /// crates' (`aether-capabilities`) tests mint dispatches directly to
+    /// crates' (the per-cap crates') tests mint dispatches directly to
     /// poke an `InboxHandler`; they have no settlement obligation, so
     /// they take the disarmed path. The armed constructor stays
     /// crate-internal — only the substrate's own mint sites arm.

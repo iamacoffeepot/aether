@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `aether.trace` capability, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3719) as a per-cap crate of the arc that dissolves
-# the capabilities monolith. Owns the thin `aether.trace` dispatch cap
+# `aether.trace` capability, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3719) as a per-cap crate. Owns the thin `aether.trace` dispatch cap
 # (ADR-0080 §4 / ADR-0086 Phase 3c): the `TraceDispatchCapability`
 # identity + its `aether_substrate`-typed runtime that services
 # `DispatchTraced` (backing the MCP `send_mail_traced` tool), plus the
@@ -15,7 +14,7 @@ license.workspace = true
 # `DispatchTracedAck`, `TraceEvent`, `TraceRingEntry`, …) live in
 # `aether-kinds`, so this crate only references them.
 #
-# A leaf: nothing depends back on it from `aether-capabilities`. Its
+# A leaf: no capability depends back on it. Its
 # consumers hold their own dependency — `aether-engine`'s proxy addresses
 # the trace cap in real code, and the `aether-rpc` / `aether-http` server
 # tests address it through a dev-dependency (no re-export facade).

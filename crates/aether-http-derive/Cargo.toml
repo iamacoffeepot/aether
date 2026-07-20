@@ -13,8 +13,8 @@ license.workspace = true
 # `Ctx`, `Route`, `HttpServerRequest`, `RegisterRouteSelf`) live in
 # `aether-http`; this crate only emits paths at them.
 #
-# Renamed from `aether-capabilities-derive` (iamacoffeepot/aether#3758)
-# when the `http` cap was extracted: the crate was always 100% HTTP, so it
+# Renamed from the old capabilities-wide derive crate
+# (iamacoffeepot/aether#3758) when the `http` cap was extracted: the crate was always 100% HTTP, so it
 # was misnamed rather than mislocated. The new name makes it a leaf under
 # `aether-http`, matching the `aether-actor` / `aether-actor-derive` and
 # `aether-data` / `aether-data-derive` convention.

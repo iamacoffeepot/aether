@@ -19,7 +19,7 @@ fn parse_level_round_trips_documented_strings() {
 
 /// `level_to_str` inverts `parse_level` for in-band bytes and
 /// falls back to `"info"` for out-of-band ones (matches the
-/// pre-issue-776 conversion behaviour in `aether-capabilities`).
+/// pre-issue-776 conversion behaviour of the log cap).
 #[test]
 fn level_to_str_matches_parse_level_and_falls_back_to_info() {
     for level in 0..=4u8 {

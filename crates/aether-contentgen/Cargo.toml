@@ -4,15 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# ADR-0050 shared content-gen layer, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3705) as the shared foundation of the provider-cluster
-# split. Owns the infrastructure both content-gen provider caps
+# ADR-0050 shared content-gen layer, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3705) as the shared foundation of
+# the provider-cluster split. Owns the infrastructure both content-gen provider caps
 # (`aether-anthropic`, `aether-gemini`) embed but which is not itself a cap: the
 # provider-adapter traits + stub impls (`adapter`), the `ContentGenConfig`
 # staging-root config (`config`), the `gen/<uuid>.<ext>` output staging
 # (`staging`), and the shared `ureq` transport plumbing (`transport`). It is a
-# thin foundation — no re-export facade — that the two provider crates depend on;
-# nothing depends back on it from `aether-capabilities` (no back-dep).
+# thin foundation — no re-export facade — that the two provider crates depend
+# on; nothing depends back on it (no back-dep).
 #
 # The dispatch model both caps embed rides `aether_substrate`'s
 # `TaskQueue` (`aether_substrate::actor::native::TaskQueue`), which lives in the

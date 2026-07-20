@@ -23,8 +23,8 @@ mod tools;
 // `inventory::submit!`s only reach `descriptors::all()` — the static vocabulary
 // the per-engine encode cache prefills from (ADR-0091) — when the crate is an
 // actual link edge. The coordinator names no `aether_fs` item itself (it mounts
-// no cap), so the anchor is explicit. It arrived transitively through
-// `aether-capabilities` until the rpc/engine extraction dropped that dep
+// no cap), so the anchor is explicit. It arrived transitively through the
+// old capabilities monolith until the rpc/engine extraction dropped that dep
 // (iamacoffeepot/aether#3735).
 use aether_fs as _;
 

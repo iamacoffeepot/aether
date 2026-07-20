@@ -13,9 +13,9 @@
 //! script on reload (the wrapped child reconstructs through the composite
 //! walk, #2694).
 //!
-//! The `host` feature turns on the optional `aether-actor` / `wasmi` /
-//! `aether-capabilities` deps — none named by the default face — so a behavior
-//! script never links them and never misclassifies as a component.
+//! The `host` feature turns on the optional `aether-actor` / `wasmi` deps —
+//! neither named by the default face — so a behavior script never links them
+//! and never misclassifies as a component.
 
 mod actor;
 pub mod config;

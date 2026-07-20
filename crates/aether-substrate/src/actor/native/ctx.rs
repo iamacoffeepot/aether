@@ -136,7 +136,7 @@ macro_rules! native_sender_methods {
 impl<'a> NativeCtx<'a, Single> {
     /// Internal constructor — the chassis dispatcher trampoline (in
     /// `chassis::builder`) builds these for `wire` / `unwire` / close
-    /// hooks. Cap-side test fixtures in `aether-capabilities` also reach
+    /// hooks. Cap-side test fixtures in the per-cap crates also reach
     /// for it directly so they can drive a handler method without
     /// spinning up a full chassis; that's why it's `pub` rather than
     /// `pub(crate)`.
@@ -392,7 +392,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         // ADR-0093 §1 / ADR-0080 §12: acquire the hold on the current root
         // and capture the reply target from *this* handler, then hand them
         // to the resumed core. The `MailId::NONE` root skips the hold — no
-        // chain to keep open. A bounded `TaskQueue` (aether-capabilities)
+        // chain to keep open. A bounded `TaskQueue`
         // instead captures `(hold, reply_to)` at accept time and replays
         // them via `dispatch_blocking_resumed` when a slot frees, so a
         // deferred request keeps its own chain held and replies to its own

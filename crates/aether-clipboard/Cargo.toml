@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `aether.clipboard` capability, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3715) as a leaf per-cap crate of the arc that
-# dissolves the capabilities monolith. Owns the full clipboard stack: the
+# `aether.clipboard` capability, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3715) as a leaf per-cap
+# crate. Owns the full clipboard stack: the
 # request/reply mail kinds (`kinds`), the `ClipboardConfig` backend
 # selector (`config`), the `ClipboardCapability` identity + system /
 # in-memory runtime (`runtime`), and the fail-fast

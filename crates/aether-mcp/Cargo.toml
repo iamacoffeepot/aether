@@ -44,8 +44,8 @@ aether-codec = { path = "../aether-codec" }
 # Identity-only — the coordinator never mounts the fs cap; it links the crate so
 # those kinds' `Kind`-derived inventory submissions land in the static
 # `descriptors::all()` vocabulary the per-engine encode cache prefills from
-# (ADR-0091). Inherited transitively through `aether-capabilities` until the
-# rpc/engine extraction (#3735) dropped that dependency.
+# (ADR-0091). Inherited transitively through the old capabilities monolith
+# until the rpc/engine extraction (#3735) dropped that dependency.
 aether-fs = { path = "../aether-fs", default-features = false }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::NamedMail;
 
 /// ADR-0080 §3 (slimmed by ADR-0086 Phase 3c): well-known mailbox name
-/// the `TraceDispatchCapability` (in `aether-capabilities`) registers
+/// the `TraceDispatchCapability` (in `aether-trace`) registers
 /// against at boot. It now services only [`DispatchTraced`] — the
 /// central trace drainer that used to ship `BatchedTraceEvents` here
 /// retired with the fold.

@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# ADR-0039 / ADR-0103 / ADR-0127 `aether.audio` capability, extracted from
-# `aether-capabilities` (iamacoffeepot/aether#3723) as a leaf per-cap crate of
-# the arc that dissolves the capabilities monolith. Owns the full audio stack:
+# ADR-0039 / ADR-0103 / ADR-0127 `aether.audio` capability, extracted by the
+# arc that dissolved the capabilities monolith (iamacoffeepot/aether#3723) as a
+# leaf per-cap crate. Owns the full audio stack:
 # the mail kinds (`kinds`), the `AudioConfig` synth config, and the
 # `AudioCapability` identity + cpal worker / hand-rolled synth / built-in +
 # sampled instrument runtime. It is a pure leaf — no other capability depends

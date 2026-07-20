@@ -26,9 +26,8 @@
 //! domain so the chassis-internal component-host cap (`aether.component`,
 //! formerly `aether.control`) only carries component-lifecycle concerns.
 //!
-//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3747) as a
-//! leaf per-cap crate of the arc that dissolves the capabilities
-//! monolith. Owns the full input stack: the subscribe-control mail kinds
+//! Extracted by the arc that dissolved the capabilities monolith
+//! (iamacoffeepot/aether#3747) as a leaf per-cap crate. Owns the full input stack: the subscribe-control mail kinds
 //! ([`kinds`]), the [`InputConfig`] init config, the [`InputCapability`]
 //! identity + its subscriber-table runtime (`runtime`), and the
 //! send-side [`InputMailboxExt`] facade. It is a pure leaf — no other

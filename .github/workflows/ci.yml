@@ -136,26 +136,6 @@ jobs:
             -D rustdoc::private_intra_doc_links
         run: cargo doc --workspace --no-deps
 
-  # Marker-only host build (iamacoffeepot/aether#2583). The transport-only
-  # tier — `aether-capabilities` with `default-features = false`, so the
-  # `runtime` feature is off — must compile on the host triple, the config a
-  # component author's reflexive `cargo build` hits against a marker-only
-  # consumer. The other jobs never exercise it: clippy / docs / test build
-  # `--workspace`, where resolver-3 feature unification turns `runtime` back on
-  # for the crate (ADR-0122 §33), and the wasm cross-build elides the native
-  # half. So this guard is an isolated `-p` build — never `--workspace`, which
-  # would mask the failure vacuously.
-  marker-build:
-    name: Marker-only host build
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo build -p aether-capabilities --no-default-features
-
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,
   # demo components) are pure Rust with no per-OS behavior — a matrix
@@ -385,7 +365,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, dup-check, unused-deps ]
+    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, test, dup-check, unused-deps ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -396,7 +376,6 @@ jobs:
           echo "approval-machinery: ${{ needs.approval-machinery.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
-          echo "marker-build: ${{ needs.marker-build.result }}"
           echo "test:    ${{ needs.test.result }}"
           echo "dup-check: ${{ needs.dup-check.result }}"
           echo "unused-deps: ${{ needs.unused-deps.result }}"
@@ -407,7 +386,6 @@ jobs:
           [[ "${{ needs.approval-machinery.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
-          [[ "${{ needs.marker-build.result }}" == "success" || "${{ needs.marker-build.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.dup-check.result }}" == "success" || "${{ needs.dup-check.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.unused-deps.result }}" == "success" || "${{ needs.unused-deps.result }}" == "skipped" ]] || fail=1
