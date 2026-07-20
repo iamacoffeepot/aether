@@ -68,6 +68,18 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-component) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
+# The `aether-substrate` bench binaries (cap_registry / cost_table /
+# substrate_bench_logs, rehomed from aether-substrate-bundle,
+# iamacoffeepot/aether#3770) cold-load fixture wasm — cap_registry's
+# replace test additionally cold-compiles `aether_kit.wasm`, the exact
+# load that pushed the aether-kit binaries past 60s (#2805) — so the
+# crate rides the same kit-precedent 120s cap. `kind(test)` scopes it to
+# the integration binaries; the crate's `kind(lib)` unit tests keep the
+# 60s default.
+[[profile.ci.overrides]]
+filter = "package(=aether-substrate) & kind(test)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
 # routing fleet suites) fork real debug `aether-substrate` processes and wait
 # for them to bind. Run concurrently they make timely progress but stretch
@@ -91,6 +103,18 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-tcp) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The `aether-rpc` integration tests (`fleetbench_mail`, `rpc_engine_routing`,
+# rehomed from the bundle by iamacoffeepot/aether#3778) are the same slow
+# class: they fork real debug `aether-substrate-headless` processes and wait
+# for them to bind, which stretches well past the 60s steady-state cap under
+# fork contention with the sibling fleet suites. Same generous deadlock-guard
+# stance as the bundle override above; `kind(test)` keeps the crate's unit
+# tests on the 60s default. No binary-specific override exists for this
+# package, so first-match-wins ordering is unconstrained here.
+[[profile.ci.overrides]]
+filter = "package(=aether-rpc) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The `aether-render` render scenario binary (rehomed from the bundle's
 # `substrate_bench_scenario` dispatcher, issue #3771) boots a wgpu
 # `SubstrateBench` per test and runs ~18 GPU captures; on CI's shared
@@ -105,6 +129,19 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # listed before this one.
 [[profile.ci.overrides]]
 filter = "package(=aether-render) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+# The `aether-engine` integration tests (`fleetbench_spawn`,
+# `fleetbench_terminate`, `engines_cap`, rehomed from the bundle by
+# iamacoffeepot/aether#3779) are the same slow class: they fork real debug
+# `aether-substrate-headless` processes and wait for them to bind, which
+# stretches well past the 60s steady-state cap under fork contention with the
+# sibling fleet suites. Same generous deadlock-guard stance as the bundle
+# override above; `kind(test)` keeps the crate's unit tests on the 60s
+# default. No binary-specific override exists for this package, so
+# first-match-wins ordering is unconstrained here.
+[[profile.ci.overrides]]
+filter = "package(=aether-engine) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The fleetbench replace binary also cold-loads `aether_kit.wasm` and was
