@@ -25,6 +25,15 @@
 //! `aether.control`; Phase 2 of the split rehomed them to their real
 //! domain so the chassis-internal component-host cap (`aether.component`,
 //! formerly `aether.control`) only carries component-lifecycle concerns.
+//!
+//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3747) as a
+//! leaf per-cap crate of the arc that dissolves the capabilities
+//! monolith. Owns the full input stack: the subscribe-control mail kinds
+//! ([`kinds`]), the [`InputConfig`] init config, the [`InputCapability`]
+//! identity + its subscriber-table runtime (`runtime`), and the
+//! send-side [`InputMailboxExt`] facade. It is a pure leaf — no other
+//! capability depends on it, so capabilities keeps no `aether-input`
+//! dependency (no facade).
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
@@ -95,8 +104,7 @@ pub struct InputCapability;
 // The runtime half — the `aether_substrate`-typed imports, the state
 // struct + its `fanout` helper, and the `#[runtime] impl` — lives in
 // `runtime.rs`, gated once here. Nothing in this file names a runtime
-// type directly, so there is no `use runtime::*` glob (matching
-// `fs/mod.rs`).
+// type directly, so there is no `use runtime::*` glob.
 #[cfg(feature = "runtime")]
 mod runtime;
 
@@ -108,11 +116,11 @@ mod runtime;
 /// `unsubscribe_all(mailbox)`) one indirection above the raw
 /// `.send(&SubscribeInput { .. })` so component code stops
 /// reconstructing the kind struct at every call site. Same shape and
-/// rationale as [`aether_fs::FsMailboxExt`]
-/// (issue 580) and [`crate::component::ComponentHostWasmExt`] (issue
-/// 654) — the cap module owns receive-side ([`InputCapability`]) AND
-/// send-side ([`InputMailboxExt`]) so future kind additions land both
-/// surfaces in one place.
+/// rationale as `aether_fs::FsMailboxExt` (issue 580) and
+/// `ComponentHostWasmExt` on the component-host cap (issue 654) — the
+/// cap crate owns receive-side ([`InputCapability`]) AND send-side
+/// ([`InputMailboxExt`]) so future kind additions land both surfaces
+/// in one place.
 ///
 /// Impl'd for both transports `ctx.actor::<InputCapability>()` can
 /// return:

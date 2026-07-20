@@ -24,7 +24,7 @@ pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 pub use std::collections::{BTreeSet, HashMap};
 pub use std::sync::Arc;
 
-pub use crate::input::config::InputConfig;
+pub use crate::config::InputConfig;
 
 /// `aether.input` runtime state (ADR-0021). Owns the substrate registry
 /// handle (for subscriber-mailbox validation) plus the subscriber table

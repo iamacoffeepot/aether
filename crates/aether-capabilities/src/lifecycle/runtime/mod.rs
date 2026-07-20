@@ -399,7 +399,7 @@ impl NativeActor for LifecycleCapability {
 
     /// Remove `mailbox` from every lifecycle stage's subscriber set in
     /// one shot — the lifecycle-family counterpart of
-    /// [`InputCapability::on_unsubscribe_all`](crate::input::InputCapability).
+    /// `InputCapability::on_unsubscribe_all`.
     /// The externally sendable bulk form; drop-time cleanup happens
     /// through [`Self::on_monitor_notice`] instead, so nothing mails
     /// this on the component path anymore. No mailbox-validation: the

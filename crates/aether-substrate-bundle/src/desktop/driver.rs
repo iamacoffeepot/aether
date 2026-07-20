@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_capabilities::InputCapability;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
+use aether_input::InputCapability;
 use aether_kinds::{
     CaptureFrameResult, FocusWindow, FocusWindowResult, ImePreedit, Key, KeyRelease, Modifiers, MouseButton,
     MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,

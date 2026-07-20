@@ -22,9 +22,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::InputCapability;
-use aether_capabilities::input::SubscribeInput;
 use aether_data::Kind;
+use aether_input::{InputCapability, SubscribeInput};
 use aether_kinds::{Key, MouseButton, MouseMove};
 
 pub struct InputLogger;

@@ -1,9 +1,8 @@
 //! Input-only editor shell over independently-rooted peer regions (ADR-0141).
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::InputCapability;
-use aether_capabilities::input::InputMailboxExt;
 use aether_data::{Kind, MailboxId};
+use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };

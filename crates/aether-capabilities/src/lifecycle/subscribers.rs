@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// `.send(&LifecycleSubscribe { .. })` so component code stops
 /// reconstructing the kind struct (and the `.0` field unwraps) at every
 /// call site — same shape and rationale as
-/// [`InputMailboxExt`](crate::input::InputMailboxExt).
+/// `InputMailboxExt` on the `aether.input` cap.
 ///
 /// Impl'd for both transports `ctx.actor::<LifecycleCapability>()` can
 /// return:

@@ -29,13 +29,13 @@ use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::{
     ComponentHostCapability, ComponentHostConfig, GameGatewayCapability, GameGatewayConfig, HttpCapability,
-    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, LifecycleConfig, TcpCapability,
-    http::HttpConfig,
+    HttpServerCapability, HttpServerConfig, LifecycleConfig, TcpCapability, http::HttpConfig,
 };
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
 use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
 use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLayer};
+use aether_input::{InputCapability, InputConfig};
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 use aether_render::RenderTuningConfigLayer;
