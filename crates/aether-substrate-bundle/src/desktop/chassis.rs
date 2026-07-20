@@ -24,12 +24,13 @@ use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
-    ComponentHostConfig, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
+    ComponentHostConfig, HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
+use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderTuningConfig};

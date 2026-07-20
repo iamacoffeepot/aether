@@ -9,8 +9,7 @@
 //! `mod subscribers`), and the settlement gating (the
 //! advance state machine in `mod settlement`). Because it
 //! is `#[actor(singleton)]`d like
-//! [`InputCapability`](crate::input::InputCapability) and
-//! `RenderCapability`, its
+//! `InputCapability` and `RenderCapability`, its
 //! `NAMESPACE` is wasm-reachable: a component subscribes a stage via
 //! `ctx.actor::<LifecycleCapability>().subscribe::<Render>()`.
 //!

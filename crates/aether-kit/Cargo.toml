@@ -31,6 +31,9 @@ aether-actor = { path = "../aether-actor" }
 # forwards to turns on exactly the host surface, not the guest `runtime` SDK.
 aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
 aether-capabilities = { path = "../aether-capabilities", default-features = false }
+# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`.
+# kit is a wasm guest, so it takes the marker-only identity face.
+aether-input = { path = "../aether-input", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }

@@ -14,7 +14,7 @@ fallback or omits the runtime.
 | `aether.render` | draw queues, textures/materials, view/projection, capture | `aether-capabilities/src/render` | [Rendering](../systems/rendering.md) |
 | `aether.text` | font load, layout, batched text drawing, metrics | `aether-capabilities/src/text` | [Text](../systems/text.md) |
 | `aether.audio` | instruments, notes, tracks, scheduling, gain/reverb | `aether-capabilities/src/audio` | [Audio](../systems/audio.md) |
-| `aether.input` | subscription ownership for keyboard/mouse/text/IME streams | `aether-capabilities/src/input` | [Input](../systems/input.md) |
+| `aether.input` | subscription ownership for keyboard/mouse/text/IME streams | `aether-input/src` | [Input](../systems/input.md) |
 | `aether.window` | mode, title, focus and headless replies | `aether-capabilities/src/window` | [Window](../systems/window.md) |
 | `aether.clipboard` | text get/set through system or in-memory backend | `aether-capabilities/src/clipboard` | [Clipboard](../systems/clipboard.md) |
 | `aether.fs` | namespaced read/write/copy/delete/list/fetch-fold | `aether-capabilities/src/fs` | [File I/O](../systems/file-io.md) |

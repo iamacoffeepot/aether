@@ -21,6 +21,9 @@ aether-actor = { path = "../../aether-actor" }
 # compile for wasm without dragging the native runtime in. `render` opts
 # into the marker layer for `RenderCapability`; `audio` is unused here.
 aether-capabilities = { path = "../../aether-capabilities", default-features = false }
+# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
+# the probe fixture subscribes input streams through it. Marker face only.
+aether-input = { path = "../../aether-input", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
 # these wasm fixtures take its marker-only identity face.
 aether-render = { path = "../../aether-render", default-features = false }

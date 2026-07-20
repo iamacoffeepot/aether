@@ -40,6 +40,7 @@ dependencies = [
  "aether-actor-derive",
  "aether-capabilities",
  "aether-data",
+ "aether-input",
  "aether-kinds",
  "aether-math",
  "aether-render",
@@ -360,6 +361,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-input"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "bytemuck",
+ "inventory",
+ "serde",
+]
+
+[[package]]
 name = "aether-inventory"
 version = "0.3.0-alpha"
 dependencies = [
@@ -394,6 +408,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-fs",
+ "aether-input",
  "aether-kinds",
  "aether-math",
  "aether-mesh",
@@ -535,6 +550,7 @@ dependencies = [
  "aether-engine",
  "aether-fs",
  "aether-gemini",
+ "aether-input",
  "aether-inventory",
  "aether-kinds",
  "aether-kit",
@@ -595,6 +611,7 @@ dependencies = [
  "aether-capabilities",
  "aether-data",
  "aether-fs",
+ "aether-input",
  "aether-kinds",
  "aether-math",
  "aether-render",

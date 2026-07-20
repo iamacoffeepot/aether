@@ -79,6 +79,9 @@ runtime = []
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities" }
+# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
+# every chassis composes `InputCapability` + `InputConfig`.
+aether-input = { path = "../aether-input" }
 # iamacoffeepot/aether#3735: the rpc transport and the engines cap were
 # extracted to `aether-rpc` / `aether-engine`; every chassis binds the RPC
 # server and the hub additionally boots `EngineServer`.
