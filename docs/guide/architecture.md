@@ -71,7 +71,7 @@ project replies.
 | Guest SDK | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
-| Process profiles | `aether-substrate-bundle` | desktop/headless/hub/test-bench composition, packaging, perf |
+| Process profiles | `aether-substrate-bundle` | desktop/headless/hub/substrate-bench composition, packaging, perf |
 | Product actors | `aether-kit`, `aether-mesh` | camera, UI, world/terrain, sim, geometry authoring |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Build/test tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, bundles, compatibility fixtures, fuzz targets |
@@ -83,7 +83,7 @@ with their own capability crate, not in a universal central kind catalog
 
 ## Chassis composition
 
-Desktop, headless, hub, and test-bench processes reuse the substrate but install
+Desktop, headless, hub, and substrate-bench processes reuse the substrate but install
 different drivers/capabilities. Source presence does not imply every chassis has
 a working actor. Some unsupported surfaces deliberately install a fail-fast
 fallback so requests resolve with errors rather than hang.
@@ -100,7 +100,7 @@ When changing a boundary, trace all owners:
 - native or wasm handler;
 - chassis installation and config;
 - MCP/client projection if task-shaped access exists;
-- unit, TestBench, and process tests at the appropriate boundary;
+- unit, SubstrateBench, and process tests at the appropriate boundary;
 - accepted ADR and any amendments/supersession.
 
 Use [Choose the owning extension point](building/extension-points.md) before

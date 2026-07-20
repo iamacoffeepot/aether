@@ -20,7 +20,7 @@ use super::*;
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
 /// return its trampoline `MailboxId`.
-fn load_boot_export(bench: &mut TestBench, wasm: &[u8], export: &str) -> MailboxId {
+fn load_boot_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str) -> MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -37,7 +37,7 @@ fn load_boot_export(bench: &mut TestBench, wasm: &[u8], export: &str) -> Mailbox
 }
 
 /// Drop one loaded actor, blocking on its `DropResult::Ok`.
-fn drop_actor(bench: &mut TestBench, mailbox_id: MailboxId) {
+fn drop_actor(bench: &mut SubstrateBench, mailbox_id: MailboxId) {
     let dropped = bench
         .execute(vec![("drop", BenchOp::send_and_await("aether.component", &DropComponent { mailbox_id }))])
         .expect("drop sequence");
@@ -51,7 +51,7 @@ fn drop_actor(bench: &mut TestBench, mailbox_id: MailboxId) {
 /// preceding op set in flight (the host's self-directed `DropComponent` to a
 /// zero-refcount boot) is fully processed before the next `count_observed`
 /// read. No actor in the fixture subscribes `Tick`, so the advance only drains.
-fn settle(bench: &mut TestBench) {
+fn settle(bench: &mut SubstrateBench) {
     bench.execute(vec![("settle", BenchOp::advance(1))]).expect("settle advance");
 }
 
@@ -63,7 +63,7 @@ fn module_boot_singleton_spawns_once_across_selector_loads() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_boot") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     load_boot_export(&mut bench, &wasm, "aether.test.boot.widget_a");
@@ -95,7 +95,7 @@ fn boot_actor_is_not_selectable_by_export() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_boot") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let loaded = bench
@@ -132,7 +132,7 @@ fn module_boot_survives_partial_unload_and_tears_down_on_last() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_boot") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let widget_a = load_boot_export(&mut bench, &wasm, "aether.test.boot.widget_a");

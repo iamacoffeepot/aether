@@ -1,9 +1,9 @@
-//! Camera scenario tests. Each test boots a `TestBench`, loads
+//! Camera scenario tests. Each test boots a `SubstrateBench`, loads
 //! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `camera` export
 //! (ADR-0096), drives the `CameraComponent` through its
 //! `aether.kit.camera.*` mail surface, and asserts mail-flow / render
-//! survivability via direct `TestBench` assertions (post-issue-821:
+//! survivability via direct `SubstrateBench` assertions (post-issue-821:
 //! the `aether-scenario` Script/Step vocabulary retired in favour of
 //! calling the bench methods directly).
 //!
@@ -16,14 +16,14 @@
 //!   builds the wasm before invoking `cargo test`.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate) live in `aether_substrate_bundle::test_bench::test_helpers`
+//! gate) live in `aether_substrate_bundle::substrate_bench::test_helpers`
 //! (issues 460 + 821).
 
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
 use aether_render::ViewProjection;
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{decode_png, not_all_black};
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
@@ -59,7 +59,7 @@ fn component_address() -> String {
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
-fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
+fn load_camera(bench: &mut SubstrateBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = bench
         .execute(vec![(
@@ -87,7 +87,7 @@ fn camera_component_lifecycle() {
         return;
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     // A few ticks lets the component finish init, run on_tick, and
@@ -112,7 +112,7 @@ fn camera_default_static_publishes_view_proj() {
         return;
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     // Five ticks: enough for init + a handful of publishes to surface
@@ -142,7 +142,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
         return;
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     load_camera(&mut bench, &wasm_path);
 
     bench.execute(vec![("pre", BenchOp::advance(2))]).expect("pre-destroy advance");

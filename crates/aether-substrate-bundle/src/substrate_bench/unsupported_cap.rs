@@ -1,13 +1,13 @@
-//! `aether.test_bench` cap stub for chassis without test-bench drive
+//! `aether.substrate_bench` cap stub for chassis without substrate-bench drive
 //! (issue 603 Phase 4).
 //!
 //! Desktop and headless run their own frame loops rather than driving
-//! ticks through `aether.test_bench.advance`, so they compose this cap
+//! ticks through `aether.substrate_bench.advance`, so they compose this cap
 //! to fail-fast with `Err`-replies instead of letting the mail
 //! warn-drop and hang the agent's await-reply slot.
 //!
-//! Companion: [`TestBenchCapability`](super::cap::TestBenchCapability)
-//! claims the same mailbox on the test-bench chassis and dispatches
+//! Companion: [`SubstrateBenchCapability`](super::cap::SubstrateBenchCapability)
+//! claims the same mailbox on the substrate-bench chassis and dispatches
 //! `Advance` for real. Both live here so the mailbox's two chassis
 //! profiles read together — the same shape as
 //! `RenderCapability` / `HeadlessRenderCapability`.
@@ -22,14 +22,14 @@
 // identity always-on, outside the `feature = "runtime"` gate.
 use aether_kinds::Advance;
 
-/// `aether.test_bench` cap **identity** on chassis without test-bench
+/// `aether.substrate_bench` cap **identity** on chassis without substrate-bench
 /// drive (ADR-0122 identity/runtime split). A ZST carrying only the
 /// addressing — `Addressable` (`NAMESPACE`, `Resolver`), the per-handler
 /// `HandlesKind` markers, and the name-inventory entry, all emitted
 /// always-on by `#[actor]`. Replies `AdvanceResult::Err` so MCP
-/// `aether.test_bench.advance` mail fails fast instead of hanging on a
+/// `aether.substrate_bench.advance` mail fails fast instead of hanging on a
 /// reply that never comes.
-pub struct UnsupportedTestBenchCapability;
+pub struct UnsupportedSubstrateBenchCapability;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the
 // macro divides what it emits). Everything that names an
@@ -43,23 +43,23 @@ use aether_actor::actor;
 use runtime::*;
 
 #[actor(singleton)]
-impl NativeActor for UnsupportedTestBenchCapability {
-    type State = UnsupportedTestBenchCapabilityState;
+impl NativeActor for UnsupportedSubstrateBenchCapability {
+    type State = UnsupportedSubstrateBenchCapabilityState;
 
     type Config = ();
 
     /// ADR-0074 Phase 4 chassis-owned mailbox.
-    const NAMESPACE: &'static str = "aether.test_bench";
+    const NAMESPACE: &'static str = "aether.substrate_bench";
 
-    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<UnsupportedTestBenchCapabilityState, BootError> {
+    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<UnsupportedSubstrateBenchCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
             BootError::Other(Box::new(io::Error::other(
                 "HubOutbound must be wired on Mailer before \
-                 UnsupportedTestBenchCapability::init (chassis main connects the hub before \
+                 UnsupportedSubstrateBenchCapability::init (chassis main connects the hub before \
                  the Builder chain)",
             )))
         })?;
-        Ok(UnsupportedTestBenchCapabilityState { outbound })
+        Ok(UnsupportedSubstrateBenchCapabilityState { outbound })
     }
 
     /// Reply `Err` so MCP `advance` fails fast on chassis that don't
@@ -69,8 +69,8 @@ impl NativeActor for UnsupportedTestBenchCapability {
         state.outbound.send_reply(
             ctx.reply_target(),
             &AdvanceResult::Err {
-                error: "unsupported on this chassis — aether.test_bench.advance is \
-                    test-bench-only (ADR-0067)"
+                error: "unsupported on this chassis — aether.substrate_bench.advance is \
+                    substrate-bench-only (ADR-0067)"
                     .to_owned(),
             },
         );
@@ -78,7 +78,7 @@ impl NativeActor for UnsupportedTestBenchCapability {
 }
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `UnsupportedTestBenchCapabilityState`) — gated once here. The
+// `UnsupportedSubstrateBenchCapabilityState`) — gated once here. The
 // `#[actor] impl` above reaches it through the `use runtime::*` glob, so
 // the items the impl names are re-exported with `pub use`.
 #[cfg(feature = "runtime")]
@@ -91,12 +91,12 @@ mod runtime {
     pub use aether_substrate::mail::outbound::HubOutbound;
     pub use std::io;
 
-    /// Runtime state for `UnsupportedTestBenchCapability` (ADR-0122
+    /// Runtime state for `UnsupportedSubstrateBenchCapability` (ADR-0122
     /// split). Holds the `HubOutbound` captured at `init`; read in
     /// `on_advance` to send the fail-fast reply. The dispatcher holds
     /// this as the cap's state; the addressing identity is the distinct
-    /// ZST `UnsupportedTestBenchCapability`.
-    pub struct UnsupportedTestBenchCapabilityState {
+    /// ZST `UnsupportedSubstrateBenchCapability`.
+    pub struct UnsupportedSubstrateBenchCapabilityState {
         pub(super) outbound: Arc<HubOutbound>,
     }
 }

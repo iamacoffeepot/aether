@@ -31,7 +31,7 @@ filter = "package(=aether-kit) & binary(terrain_workbench_scenario)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Every binary under `crates/aether-kit/tests/` cold-loads and compiles
-# `aether_kit.wasm` and boots a wgpu `TestBench`, so they are one slow
+# `aether_kit.wasm` and boots a wgpu `SubstrateBench`, so they are one slow
 # class rather than a fixed allowlist: #2805 measured the camera scenario
 # around 56.5s and mesh around 52-53s against the default 60s cap, and
 # iamacoffeepot/aether#3527 saw two more binaries (`mark_scenario`,

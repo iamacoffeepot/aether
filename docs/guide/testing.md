@@ -132,16 +132,16 @@ The contract is real only when the pinned value is computed.
 ## Where the test goes
 
 Once a test clears the bar, the harness follows from what it checks. Engine-internal
-and visual correctness goes to **TestBench** (`aether_substrate_bundle::test_bench`)
+and visual correctness goes to **SubstrateBench** (`aether_substrate_bundle::substrate_bench`)
 with a concrete assertion (`captured`, `reply`, `count_observed`); behavior over the
 wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
 **FleetBench** (`crates/aether-substrate-bundle/tests/fleetbench/`). FleetBench is
-headless, so any rendered-output assertion has to be TestBench, and any
+headless, so any rendered-output assertion has to be SubstrateBench, and any
 externally-addressable-over-the-wire assertion has to be FleetBench.
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
-space, and submission order through `TestBench::committed_overlay_snapshot`; then use
+space, and submission order through `SubstrateBench::committed_overlay_snapshot`; then use
 `CaptureFrame` reductions for the smaller set of outcomes that need end-to-end proof
 through projection, blending, rasterization, and GPU readback. The typed snapshot
 contains only batches accepted into the recorded draw plan, so missing textures,
@@ -156,10 +156,10 @@ is load-bearing to test *in the crate that owns it* (`aether-data`, `aether-math
 Re-running it from a consumer crate, on a consumer's derived type, is the junk case
 above, not a second copy worth keeping.
 
-Within a TestBench visual test, reach for the narrowest oracle first. A concrete typed
+Within a SubstrateBench visual test, reach for the narrowest oracle first. A concrete typed
 observation (`reply::<R>`, `count_observed`) beats a pixel check whenever the mail
 already carries the answer. When the behavior is genuinely visual, the
-`test_bench::visual` frame reductions (`not_all_black`, `differs_from_background`,
+`substrate_bench::visual` frame reductions (`not_all_black`, `differs_from_background`,
 `coverage`, `centroid`, `bounding_box`) turn a captured PNG into a scalar or coordinate
 assertion — pin a band, not an exact pixel, since GPU / anti-aliasing nondeterminism
 makes an exact golden image the wrong primary oracle.
@@ -168,7 +168,7 @@ makes an exact golden image the wrong primary oracle.
 
 A frame reduction that fails leaves only its scalar diagnostic in the test log — the
 captured pixels it was scored against are gone by the time you read it. Arm
-`test_bench::artifacts::ArtifactGuard` around the capture and its checks for a widget-
+`substrate_bench::artifacts::ArtifactGuard` around the capture and its checks for a widget-
 heavy scenario where that scalar isn't enough to see what actually rendered:
 
 ```rust
@@ -183,7 +183,7 @@ let mut guard = ArtifactGuard::arm(
 
 The guard is a plain `Drop` type. A passing test leaves it untouched and it writes
 nothing; an unwinding panic through its scope best-effort writes
-`target/test-bench-artifacts/<id>/actual.png`, `measurements.json`, and one
+`target/substrate-bench-artifacts/<id>/actual.png`, `measurements.json`, and one
 `mask_N.png` per requested check — each mask rendered from the exact
 region/background/tolerance partition that scored it, so the artifact can never show a
 different verdict than the one that failed. A test that detects failure through a
@@ -192,5 +192,5 @@ returning `Err`. Attach an already-loaded same-size reference PNG with
 `.with_reference_png(..)` to also get `reference.png` and a pixel-wise
 `difference.png` — diagnostics on top of the region/mask read, not a second pass/fail
 oracle; the frame reductions above stay what decides pass or fail. CI uploads each
-failed shard's `target/test-bench-artifacts/**` tree for download; a green run uploads
+failed shard's `target/substrate-bench-artifacts/**` tree for download; a green run uploads
 nothing.

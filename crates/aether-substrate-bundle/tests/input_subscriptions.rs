@@ -1,4 +1,4 @@
-//! ADR-0021 publish/subscribe round-trip via [`TestBench`]. Loads
+//! ADR-0021 publish/subscribe round-trip via [`SubstrateBench`]. Loads
 //! `aether-test-fixtures`'s `probe` cdylib into a real chassis and exercises
 //! `aether.input.subscribe` / `aether.input.unsubscribe` and the
 //! `aether.component.drop` lifecycle's effect on the input subscriber
@@ -13,7 +13,7 @@
 //! unsubscribe / drop-clears contract is exercised here against a
 //! genuine input stream. The probe subscribes `Key` in `wire` and
 //! broadcasts a `key_observed` per dispatch; Tick-via-lifecycle delivery
-//! is covered by the `test_bench` frame-loop scenarios.
+//! is covered by the `substrate_bench` frame-loop scenarios.
 
 use std::path::Path;
 
@@ -22,14 +22,14 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_input::{InputCapability, SubscribeInputResult, UnsubscribeInput};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
 
-fn load_probe_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId {
+fn load_probe_named(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -49,7 +49,7 @@ fn load_probe_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> Mail
 /// Inject `count` synthetic `Key` presses to `aether.input`. The input
 /// cap fans each out to every `Key` subscriber; `execute` blocks on
 /// settlement, so the `key_observed` broadcasts have landed by return.
-fn send_keys(bench: &mut TestBench, count: usize) {
+fn send_keys(bench: &mut SubstrateBench, count: usize) {
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
     let steps: Vec<(&str, BenchOp)> = labels
         .iter()
@@ -58,7 +58,7 @@ fn send_keys(bench: &mut TestBench, count: usize) {
     bench.execute(steps).expect("key send sequence");
 }
 
-fn unsubscribe(bench: &mut TestBench, kind: KindId, mailbox: MailboxId) {
+fn unsubscribe(bench: &mut SubstrateBench, kind: KindId, mailbox: MailboxId) {
     let result = bench
         .execute(vec![(
             "unsub",
@@ -71,7 +71,7 @@ fn unsubscribe(bench: &mut TestBench, kind: KindId, mailbox: MailboxId) {
     }
 }
 
-fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
+fn drop_component(bench: &mut SubstrateBench, mailbox_id: MailboxId) {
     let result = bench
         .execute(vec![(
             "drop",
@@ -92,7 +92,7 @@ fn empty_subscribers_means_no_delivery() {
     if require_runtime("aether_test_fixtures_bundle").is_none() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     send_keys(&mut bench, 2);
     assert_eq!(
         bench.count_observed(KeyObserved::NAME),
@@ -113,7 +113,7 @@ fn subscribed_component_receives_published_text_input() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let _mbox = load_probe_named(&mut bench, &wasm_path, "typist");
     let baseline = bench.count_observed(TextInputObserved::NAME);
 
@@ -131,7 +131,7 @@ fn subscribed_component_receives_published_keys() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let _mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(KeyObserved::NAME);
 
@@ -148,7 +148,7 @@ fn two_subscribers_each_receive_every_key() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let _mbox_a = load_probe_named(&mut bench, &wasm_path, "a");
     let _mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
     let baseline = bench.count_observed(KeyObserved::NAME);
@@ -171,7 +171,7 @@ fn unsubscribe_stops_delivery() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(KeyObserved::NAME);
 
@@ -203,7 +203,7 @@ fn drop_clears_subscriptions() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_probe_named(&mut bench, &wasm_path, "victim");
     let baseline = bench.count_observed(KeyObserved::NAME);
 

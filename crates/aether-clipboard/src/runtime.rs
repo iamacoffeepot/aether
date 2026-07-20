@@ -36,7 +36,7 @@ impl ClipboardBackend for SystemClipboard {
     }
 }
 
-/// Deterministic process-local clipboard backend used by `TestBench`.
+/// Deterministic process-local clipboard backend used by `SubstrateBench`.
 #[derive(Default)]
 pub struct InMemoryClipboard {
     text: String,

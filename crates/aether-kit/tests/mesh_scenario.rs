@@ -1,4 +1,4 @@
-//! Mesh-viewer scenario tests. Each test boots a `TestBench`, loads
+//! Mesh-viewer scenario tests. Each test boots a `SubstrateBench`, loads
 //! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `mesh_viewer`
 //! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
@@ -16,15 +16,15 @@
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
 //! gate, `save://` sandbox) live in
-//! `aether_substrate_bundle::test_bench::test_helpers` (issues 460 +
+//! `aether_substrate_bundle::substrate_bench::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox is plumbed via
-//! `TestBench::builder().namespace_roots(...)` rather than env-var
+//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
 use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
 use aether_kit::mesh::LoadMesh;
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    BenchOp, SubstrateBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
 };
 use aether_substrate_bundle::visual::{decode_png, differs_from_background};
@@ -70,7 +70,7 @@ const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
-fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
+fn load_viewer(bench: &mut SubstrateBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = bench
         .execute(vec![(
@@ -95,7 +95,7 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
 /// Assert that `aether.draw_triangle` was observed at least once.
 /// Surfaces the observed-kinds list on failure so a typo or missing
 /// subscription is debuggable.
-fn assert_draw_triangle_observed(bench: &TestBench) {
+fn assert_draw_triangle_observed(bench: &SubstrateBench) {
     let observed = bench.count_observed("aether.draw_triangle");
     assert!(
         observed >= 1,
@@ -118,7 +118,7 @@ fn dsl_box_loads_and_renders() {
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     // Priming tick triggers the load; the read reply lands on a later
@@ -152,7 +152,7 @@ fn obj_quad_loads_and_renders() {
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let result = bench
@@ -186,7 +186,7 @@ fn parse_failure_keeps_prior_mesh() {
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     bench
@@ -236,7 +236,7 @@ fn good_dsl_load_replies_ok() {
     let path = write_fixture("reply_good.dsl", BOX_DSL);
 
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let result = bench
@@ -270,7 +270,7 @@ fn bad_dsl_load_replies_err() {
     let path = write_fixture("reply_bad.dsl", BAD_DSL);
 
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let result = bench
@@ -303,7 +303,7 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     let obj_path = write_fixture("overlap_second.obj", QUAD_OBJ);
 
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let first = bench

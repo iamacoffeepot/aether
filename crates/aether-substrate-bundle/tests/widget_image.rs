@@ -1,6 +1,6 @@
 //! Image-widget end-to-end acceptance (issue 2917).
 //!
-//! The current `TestBench` creates consumer-owned textures, drives one image
+//! The current `SubstrateBench` creates consumer-owned textures, drives one image
 //! child through every fit and control state by its public inline lineage, and
 //! reads exact typed committed-overlay geometry plus a bounded raster probe.
 
@@ -21,7 +21,7 @@ use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat,
     TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, Rect, decode_png, target_color_stats};
 
 const PANEL_X: f32 = 8.0;
@@ -43,7 +43,7 @@ fn second_texture_pixels() -> Vec<u8> {
     ]
 }
 
-fn create_texture(bench: &mut TestBench, label: &'static str, pixels: Vec<u8>) -> u32 {
+fn create_texture(bench: &mut SubstrateBench, label: &'static str, pixels: Vec<u8>) -> u32 {
     let created = bench
         .execute(vec![(
             label,
@@ -75,7 +75,7 @@ fn image_config(texture_id: u32, fit: ImageFit, state: WidgetControlState) -> Im
     }
 }
 
-fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &ImageConfig) -> String {
+fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], config: &ImageConfig) -> String {
     let panel_config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -116,7 +116,7 @@ fn tick_to(panel: &str) -> NamedMail {
     NamedMail { recipient_name: panel.to_owned(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
 }
 
-fn capture(bench: &mut TestBench, panel: &str) -> Image {
+fn capture(bench: &mut SubstrateBench, panel: &str) -> Image {
     let captured = bench
         .execute(vec![("capture", BenchOp::capture_with_mails(vec![tick_to(panel)], Vec::new()))])
         .expect("capture image panel");
@@ -145,7 +145,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(48, 40).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(48, 40).expect("boot");
     let first_texture_id = create_texture(&mut bench, "first_texture", first_texture_pixels());
     let second_texture_id = create_texture(&mut bench, "second_texture", second_texture_pixels());
     let tint = Rgba::WHITE;

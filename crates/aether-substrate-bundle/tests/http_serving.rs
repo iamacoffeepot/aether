@@ -41,7 +41,7 @@ use aether_http::{HttpServerConfig, HttpServerHandle};
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
-use aether_substrate_bundle::test_bench::test_helpers::{
+use aether_substrate_bundle::substrate_bench::test_helpers::{
     init_save_sandbox, locate_component_wasm, test_namespace_roots,
 };
 

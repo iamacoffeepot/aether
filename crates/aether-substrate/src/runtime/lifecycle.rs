@@ -103,7 +103,7 @@ impl FatalAborter for OutboundFatalAborter {
 /// Test [`FatalAborter`] that panics instead of `process::exit`-ing.
 /// Lets a `#[should_panic]` test assert the cross-class guard fires
 /// without taking down the whole test runner. Also the default for
-/// chassis built without an explicit aborter (tests, the `TestBench`
+/// chassis built without an explicit aborter (tests, the `SubstrateBench`
 /// in-process driver) so an abort surfaces as a panic the harness
 /// catches.
 pub struct PanicAborter;

@@ -1,6 +1,6 @@
 //! Console render + activation acceptance tests.
 //!
-//! These tests load the real `aether.kit.console` actor into a `TestBench`,
+//! These tests load the real `aether.kit.console` actor into a `SubstrateBench`,
 //! drive its typed input path, and assert rendered output through frame
 //! reductions. The desktop driver has a unit tripwire for the physical
 //! `Backquote` mapping; this suite proves the engine key code actually opens
@@ -29,8 +29,8 @@ use aether_kit::{
     ConsoleCommandOutput, ConsoleConfig, EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec,
 };
 use aether_render::RenderCapability;
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    BenchOp, SubstrateBench,
     test_helpers::{init_save_sandbox, require_runtime},
 };
 
@@ -47,21 +47,21 @@ fn assets_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
-fn build_bench() -> TestBench {
+fn build_bench() -> SubstrateBench {
     build_bench_with_assets(assets_dir(), "console-render-interaction")
 }
 
-fn build_bench_without_assets_root() -> TestBench {
+fn build_bench_without_assets_root() -> SubstrateBench {
     let sandbox = init_save_sandbox("console-render-interaction-no-assets");
     let assets = sandbox.join("empty-assets");
     fs::create_dir_all(&assets).expect("create empty assets root");
     build_bench_with_assets(assets, "console-render-interaction-no-assets")
 }
 
-fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> TestBench {
+fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateBench {
     let sandbox = init_save_sandbox(sandbox_name);
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets, config: sandbox.to_path_buf() };
-    TestBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
+    SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
@@ -73,11 +73,11 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_console(bench: &mut TestBench, wasm: &[u8]) -> MailboxId {
+fn load_console(bench: &mut SubstrateBench, wasm: &[u8]) -> MailboxId {
     load_console_with_config(bench, wasm, &ConsoleConfig::default())
 }
 
-fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &ConsoleConfig) -> MailboxId {
+fn load_console_with_config(bench: &mut SubstrateBench, wasm: &[u8], config: &ConsoleConfig) -> MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -101,7 +101,7 @@ fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &Console
     }
 }
 
-fn load_editor_shell(bench: &mut TestBench, wasm: &[u8], target: MailboxId) {
+fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], target: MailboxId) {
     let config = EditorConfig {
         regions: vec![RegionSpec {
             name: "console".to_owned(),
@@ -142,7 +142,7 @@ fn top_band() -> FrameRect {
     FrameRect { min_x: 0, min_y: 0, max_x: WINDOW_WIDTH - 1, max_y: 96 }
 }
 
-fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
+fn top_band_coverage(bench: &mut SubstrateBench, label: &'static str) -> f32 {
     coverage_in_region(bench, label, top_band(), CLEAR_SRGB)
 }
 
@@ -150,7 +150,7 @@ fn history_text_band() -> FrameRect {
     FrameRect { min_x: 8, min_y: 20, max_x: WINDOW_WIDTH - 8, max_y: 72 }
 }
 
-fn coverage_in_region(bench: &mut TestBench, label: &'static str, region: FrameRect, background: [u8; 3]) -> f32 {
+fn coverage_in_region(bench: &mut SubstrateBench, label: &'static str, region: FrameRect, background: [u8; 3]) -> f32 {
     let captured = bench
         .execute(vec![(
             label,
@@ -183,7 +183,7 @@ fn coverage_in_region(bench: &mut TestBench, label: &'static str, region: FrameR
     }
 }
 
-fn history_text_differs_from_panel(bench: &mut TestBench, label: &'static str) -> bool {
+fn history_text_differs_from_panel(bench: &mut SubstrateBench, label: &'static str) -> bool {
     let captured = bench
         .execute(vec![(
             label,

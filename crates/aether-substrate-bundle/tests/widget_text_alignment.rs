@@ -49,8 +49,8 @@ use aether_kinds::{
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_render::RenderCapability;
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    BenchOp, SubstrateBench,
     test_helpers::{init_save_sandbox, require_runtime},
 };
 use aether_text::{LoadFont, LoadFontResult};
@@ -97,7 +97,7 @@ fn assets_dir() -> PathBuf {
 /// registry and return its session-scoped `font_id`. Loading it here — rather
 /// than letting the panel's `wire` kick off the load — settles the font before
 /// any draw, so no capture races the async fs-read + parse.
-fn load_font(bench: &mut TestBench) -> u32 {
+fn load_font(bench: &mut SubstrateBench) -> u32 {
     let loaded = bench
         .execute(vec![(
             "font",
@@ -117,7 +117,7 @@ fn load_font(bench: &mut TestBench) -> u32 {
 /// the name `panel`, with its stack at `(PANEL_X, PANEL_Y)` and its theme
 /// pinned to the already-resident `font_id` (empty font path, so the panel
 /// does not kick off its own load) — every widget draws text with that font.
-fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
+fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], font_id: u32) {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -235,7 +235,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // `save://` / `config://` sink into a per-process sandbox tempdir.
     let sandbox = init_save_sandbox("widget-text-alignment");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    let mut bench = TestBench::builder().size(240, 220).namespace_roots(roots).build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(240, 220).namespace_roots(roots).build().expect("boot");
     let font_id = load_font(&mut bench);
     load_panel(&mut bench, &wasm, font_id);
 

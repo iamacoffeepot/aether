@@ -189,7 +189,7 @@ each render stage under the latest view-projection matrix. A chassis without
 `Render`, such as the production headless Tick-only graph, rejects the
 subscription; the actor can load but never submits geometry. The minimal hub
 does not host guest gameplay actors. Use desktop or the render-capable
-TestBench for visual verification. See [Lifecycle](lifecycle.md) and
+SubstrateBench for visual verification. See [Lifecycle](lifecycle.md) and
 [Rendering & camera](rendering.md).
 
 ## Where to change or extend it

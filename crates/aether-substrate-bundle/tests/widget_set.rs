@@ -39,7 +39,7 @@ use aether_kit::{
     ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
     WidgetChildSpec, WidgetControlState, WidgetKind,
 };
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
@@ -54,7 +54,7 @@ fn child_address(subname: &str) -> String {
 /// `aether.kit.widget.panel`) with a config that places its stack at
 /// `(10, 10)` 200px wide, no font (`font_path` empty, so no `aether.text`
 /// dependency), and the default theme.
-fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
+fn load_panel(bench: &mut SubstrateBench, wasm: &[u8]) -> String {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -89,7 +89,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
 }
 
 /// Every log message in the panel's ring, oldest first.
-fn panel_log_messages(bench: &mut TestBench) -> Vec<String> {
+fn panel_log_messages(bench: &mut SubstrateBench) -> Vec<String> {
     match bench.log_tail(&panel_address(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
@@ -120,7 +120,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 220).expect("boot");
     let panel = load_panel(&mut bench, &wasm);
 
     // The first tick spawns the widget stack and assigns each child its frame;
@@ -194,7 +194,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 220).expect("boot");
     let panel = load_panel(&mut bench, &wasm);
     let button = format!("{panel}/{}:button", aether_component::WasmTrampoline::NAMESPACE);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
@@ -282,7 +282,7 @@ fn text_field_spec(subname: &str, initial: &str, state: WidgetControlState) -> W
 /// Load the reference `WidgetPanel` root with an explicit `children` list (so
 /// it stacks exactly those specs rather than its built-in reference stack) at
 /// `(10, 10)` 200px wide, no font, default theme.
-fn load_panel_with(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+fn load_panel_with(bench: &mut SubstrateBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -366,7 +366,7 @@ fn panel_stacks_declared_children_in_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 220).expect("boot");
     load_panel_with(&mut bench, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
 
     let panel = panel_address();
@@ -409,7 +409,7 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 150).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 150).expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     load_panel_with(&mut bench, &wasm, vec![virtual_list_spec("inventory", read_only)]);
 
@@ -455,7 +455,7 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     );
 }
 
-fn drive_state_and_keyboard_session(bench: &mut TestBench) {
+fn drive_state_and_keyboard_session(bench: &mut SubstrateBench) {
     let panel = panel_address();
     let value = child_address("value");
     let run = child_address("run");
@@ -504,7 +504,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 140).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 140).expect("boot");
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
@@ -550,7 +550,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 100).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 100).expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     load_panel_with(&mut bench, &wasm, vec![radio_spec("choice", read_only)]);
 
@@ -587,7 +587,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
 }
 
 /// Arm, disable, and re-enable Button before its decisive stale release.
-fn drive_button_cancellation_session(bench: &mut TestBench) {
+fn drive_button_cancellation_session(bench: &mut SubstrateBench) {
     let run = child_address("run");
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     bench
@@ -604,7 +604,7 @@ fn drive_button_cancellation_session(bench: &mut TestBench) {
         .expect("button state cancellation session");
 }
 
-fn drive_slider_cancellation_session(bench: &mut TestBench) {
+fn drive_slider_cancellation_session(bench: &mut SubstrateBench) {
     let panel = panel_address();
     let value = child_address("value");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
@@ -633,7 +633,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 90).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 90).expect("boot");
     load_panel_with(
         &mut bench,
         &wasm,
@@ -678,7 +678,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(240, 80).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 80).expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     load_panel_with(&mut bench, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
 

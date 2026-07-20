@@ -122,7 +122,7 @@ last live frame drew.
 component mailing them every frame doesn't warn-storm), and
 `aether.render.capture_frame` and `create_texture` reply `Err` so a request
 fails fast instead of hanging. The minimal hub chassis does not install an
-`aether.render` mailbox at all, so render mail cannot resolve there. `TestBench`
+`aether.render` mailbox at all, so render mail cannot resolve there. `SubstrateBench`
 instead composes the real offscreen `RenderCapability` for render/capture tests.
 
 ## How to use it

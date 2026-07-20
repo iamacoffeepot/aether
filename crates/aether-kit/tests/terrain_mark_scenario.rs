@@ -21,8 +21,8 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bundle::test_bench::{
-    ArtifactGuard, BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    ArtifactGuard, BenchOp, SubstrateBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_substrate_bundle::visual::{Rect, decode_png, run_checks, target_color_stats};
@@ -57,7 +57,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_export(bench: &mut TestBench, wasm_path: &Path, export: &str, name: &str) {
+fn load_export(bench: &mut SubstrateBench, wasm_path: &Path, export: &str, name: &str) {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -101,7 +101,7 @@ fn terrain_ray_from_screen_pixel(eye: Vec3, target: Vec3, pixel_x: f32, pixel_y:
     }
 }
 
-fn capture(bench: &mut TestBench, world: &str, label: &str) -> Vec<u8> {
+fn capture(bench: &mut SubstrateBench, world: &str, label: &str) -> Vec<u8> {
     let captured = bench
         .execute(vec![(
             label,
@@ -114,7 +114,7 @@ fn capture(bench: &mut TestBench, world: &str, label: &str) -> Vec<u8> {
     captured.captured(label).expect("capture bytes").to_vec()
 }
 
-fn create_mark(bench: &mut TestBench, marks: &str, label: &str, geometry: MarkGeometry) -> MarkRef {
+fn create_mark(bench: &mut SubstrateBench, marks: &str, label: &str, geometry: MarkGeometry) -> MarkRef {
     let created = bench
         .execute(vec![(label, BenchOp::send_and_await(marks, &MarkCreate { geometry, label: label.to_owned() }))])
         .expect("create mark");
@@ -154,8 +154,11 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     authored_water.insert_chunk(ChunkPos { x: 0, z: 0 }, water_chunk);
     fs::write(sandbox.join(water_world_path), authored_water.to_bytes()).expect("write authored water world fixture");
 
-    let mut bench =
-        TestBench::builder().size(WIDTH, HEIGHT).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .size(WIDTH, HEIGHT)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
     load_export(&mut bench, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME);
     load_export(&mut bench, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME);
     let marks = component_address(MARK_COMPONENT_NAME);

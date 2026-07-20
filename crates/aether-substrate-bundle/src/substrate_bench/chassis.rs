@@ -1,11 +1,11 @@
-//! Test-bench chassis (ADR-0067) — `TestBenchChassis` marker,
-//! `TestBenchEnv` config, and the `TestBenchChassis::build_passive`
+//! Test-bench chassis (ADR-0067) — `SubstrateBenchChassis` marker,
+//! `SubstrateBenchEnv` config, and the `SubstrateBenchChassis::build_passive`
 //! entry point.
 //!
 //! Issue 603 retired the `chassis_handler` closure: capture rides
 //! `RenderCapability` (Phase 2), window-kind mail through
 //! `HeadlessWindowCapability` (Phase 3, fail-fast), advance through
-//! `TestBenchCapability` claiming `aether.test_bench` (Phase 4), and
+//! `SubstrateBenchCapability` claiming `aether.substrate_bench` (Phase 4), and
 //! `aether.control.platform_info` was deleted entirely (Phase 4).
 
 use std::sync::{Arc, Mutex};
@@ -31,8 +31,8 @@ use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
-use super::cap::{TestBenchCapConfig, TestBenchCapability};
-use super::config::TestBenchClipboardMode;
+use super::cap::{SubstrateBenchCapConfig, SubstrateBenchCapability};
+use super::config::SubstrateBenchClipboardMode;
 use super::events::{ChassisEvent, EventSender};
 use crate::chassis_common::frame_lifecycle_config;
 use aether_lifecycle::LifecycleConfig;
@@ -47,16 +47,16 @@ pub const WORKERS: usize = 2;
 /// Test-bench observability mailbox. Scenarios that want to assert
 /// on component-emitted kinds (the probe's
 /// `aether.test_fixture.tick_observed`, for example) target this
-/// name with `ctx.send_to_named`; the test-bench chassis registers
+/// name with `ctx.send_to_named`; the substrate-bench chassis registers
 /// a synchronous-handler closure under this namespace via
 /// `Registry::register_inline` (see `build_passive`) and the
-/// closure records each kind name in `TestBenchEnv::observed_kinds`.
+/// closure records each kind name in `SubstrateBenchEnv::observed_kinds`.
 /// Only registered when `observed_kinds` is `Some` (binaries pass
 /// `None` for zero overhead — mail to this mailbox warn-drops in
 /// that mode).
 ///
 /// Pre-iamacoffeepot/aether#838 this rode a full `NativeActor`
-/// (`TestBenchObserverCapability`) specifically because synchronous
+/// (`SubstrateBenchObserverCapability`) specifically because synchronous
 /// closures leaked `in_flight` and prevented chains from settling
 /// — the bench's Tick settlement gate would otherwise wait the
 /// full 5 s timeout per tick when a probe component routed
@@ -65,49 +65,49 @@ pub const WORKERS: usize = 2;
 /// `Inline` in iamacoffeepot/aether#842) which brackets sync
 /// handlers with `Received`/`Finished`, closing the gap and
 /// letting us retire the actor-shaped workaround — one fewer
-/// thread per `TestBench`.
-pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
+/// thread per `SubstrateBench`.
+pub const SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_bench.observer";
 
-/// ADR-0071 marker type for the test-bench chassis. Carries no
-/// fields — the chassis instance is the [`PassiveChassis<TestBenchChassis>`]
+/// ADR-0071 marker type for the substrate-bench chassis. Carries no
+/// fields — the chassis instance is the [`PassiveChassis<SubstrateBenchChassis>`]
 /// returned by [`Self::build_passive`]. Test-bench is the embedder-
 /// driven (no-driver) chassis: the binary's `main()` and the
-/// in-process [`super::TestBench`] both build through this and drive
+/// in-process [`super::SubstrateBench`] both build through this and drive
 /// their own event loops on top.
-pub struct TestBenchChassis;
+pub struct SubstrateBenchChassis;
 
-impl Chassis for TestBenchChassis {
-    const PROFILE: &'static str = "test-bench";
-    /// Phantom driver — test-bench is passive (the embedder is the
+impl Chassis for SubstrateBenchChassis {
+    const PROFILE: &'static str = "substrate-bench";
+    /// Phantom driver — substrate-bench is passive (the embedder is the
     /// driver). Declaring [`NeverDriver`] satisfies the trait bound;
-    /// the value is never instantiated because `TestBench`'s build
+    /// the value is never instantiated because `SubstrateBench`'s build
     /// path goes through `Builder::<_>::build_passive`.
     type Driver = NeverDriver;
-    type Env = TestBenchEnv;
+    type Env = SubstrateBenchEnv;
 
-    /// Inert by design — test-bench is a passive chassis. Callers
+    /// Inert by design — substrate-bench is a passive chassis. Callers
     /// that try to drive it through the trait method get an error
-    /// pointing at [`TestBenchChassis::build_passive`], which is
+    /// pointing at [`SubstrateBenchChassis::build_passive`], which is
     /// the actual entry point. The trait method exists so
-    /// `Builder<TestBenchChassis, _>` can still parameterise over
+    /// `Builder<SubstrateBenchChassis, _>` can still parameterise over
     /// `Chassis` per ADR-0071.
     fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         Err(BootError::Other(Box::new(io::Error::other(
-            "TestBenchChassis has no driver; use TestBenchChassis::build_passive(env) instead \
-             (the binary main() loops on events_rx; the in-process TestBench dispatches per-call)",
+            "SubstrateBenchChassis has no driver; use SubstrateBenchChassis::build_passive(env) instead \
+             (the binary main() loops on events_rx; the in-process SubstrateBench dispatches per-call)",
         ))))
     }
 }
 
-/// Bag of resolved configs the test-bench chassis takes at build
+/// Bag of resolved configs the substrate-bench chassis takes at build
 /// time. Constructed by the embedder — the binary's `main()` reads
-/// env vars; the in-process [`super::TestBench`] takes builder
-/// args. `events_tx` is captured into the test-bench cap's config;
-/// the matching `events_rx` rides on [`TestBenchBuild`] for the
+/// env vars; the in-process [`super::SubstrateBench`] takes builder
+/// args. `events_tx` is captured into the substrate-bench cap's config;
+/// the matching `events_rx` rides on [`SubstrateBenchBuild`] for the
 /// embedder to drive.
-pub struct TestBenchEnv {
+pub struct SubstrateBenchEnv {
     /// Substrate identity for the hub `Hello` handshake (e.g.
-    /// `"test-bench"`). Used by both binary and in-process API.
+    /// `"substrate-bench"`). Used by both binary and in-process API.
     pub name: String,
     /// Substrate version for the hub `Hello`. Typically
     /// `env!("CARGO_PKG_VERSION")` from the binary; in-process API
@@ -118,7 +118,7 @@ pub struct TestBenchEnv {
     pub workers: usize,
     /// Override for the scheduler worker-pool size (`PoolConfig::workers`).
     /// `None` keeps `PoolConfig::default` (`available_parallelism() - 1`,
-    /// min 1) — the behaviour every `TestBench` had before
+    /// min 1) — the behaviour every `SubstrateBench` had before
     /// iamacoffeepot/aether#1057.
     /// The mail-latency harness sets this to sweep pool size, since the
     /// pool-default dispatch model makes worker count the dominant
@@ -126,7 +126,7 @@ pub struct TestBenchEnv {
     pub pool_workers: Option<usize>,
     /// Issue 1990: per-actor ring capacities (`ActorLogRing` /
     /// `ActorTraceRing`). `RingCapacities::default()` keeps the
-    /// `aether-actor` const caps; a `TestBench` eviction test pins a small
+    /// `aether-actor` const caps; a `SubstrateBench` eviction test pins a small
     /// trace cap to observe `truncated_before`. Per-bench, no process env.
     pub ring_caps: RingCapacities,
     /// Issue 2485: scheduler hot-path tuning. `SchedulerTuning::default()`
@@ -139,8 +139,8 @@ pub struct TestBenchEnv {
     /// binary passes `None` for zero overhead.
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Sender side of the chassis event channel. Cloned into the
-    /// `TestBenchCapability` config + render's capture-wake closure;
-    /// the matching receiver rides on [`TestBenchBuild`].
+    /// `SubstrateBenchCapability` config + render's capture-wake closure;
+    /// the matching receiver rides on [`SubstrateBenchBuild`].
     pub events_tx: EventSender,
     /// Capture-handoff slot the render cap writes into; the
     /// embedder's frame loop drains it on each `RedrawRequested`-
@@ -156,36 +156,36 @@ pub struct TestBenchEnv {
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
     /// Clipboard implementation composed for this bench.
-    pub clipboard_mode: TestBenchClipboardMode,
+    pub clipboard_mode: SubstrateBenchClipboardMode,
     /// Inert-by-default player-listener config. Loopback game scenarios
     /// supply an active listener and exact simulation mailbox id.
     pub game_gateway: GameGatewayConfig,
     /// Issue #2509: cumulative patience for the instanced-actor teardown
-    /// close-done gate. The in-process `TestBench` resolves this from the
+    /// close-done gate. The in-process `SubstrateBench` resolves this from the
     /// same `SettlementConfig` (`AETHER_SETTLEMENT_CAP_SECS`) knob its
     /// settlement-await loops read (honoring a programmatic
-    /// `TestBench::settlement_cap` override), so a scenario's teardown
+    /// `SubstrateBench::settlement_cap` override), so a scenario's teardown
     /// gate uses the same patience as its settlement gates.
     pub teardown_cap: Duration,
 }
 
-/// Output of [`TestBenchChassis::build_passive`]. Bundles the
-/// `PassiveChassis<TestBenchChassis>` (holding the booted Log +
+/// Output of [`SubstrateBenchChassis::build_passive`]. Bundles the
+/// `PassiveChassis<SubstrateBenchChassis>` (holding the booted Log +
 /// Render passives via `chassis_builder` typed lookup) with the
 /// substrate handles the embedder needs to drive its event loop —
 /// queue, outbound, kind ids, render accumulator handles.
 ///
 /// `boot` is exposed so the embedder can attach an egress backend
-/// for reply correlation (the in-process `TestBench` wires a
+/// for reply correlation (the in-process `SubstrateBench` wires a
 /// `RecordingBackend` for this), read substrate-level handles
 /// (`registry`, `queue`, `outbound`), and own the lifetime guard the
 /// scheduler joins against on shutdown.
 ///
 /// The embedder owns the matching `EventReceiver` for whichever
-/// `EventSender` it passed into [`TestBenchEnv`]; the build does
+/// `EventSender` it passed into [`SubstrateBenchEnv`]; the build does
 /// not need to thread it through.
-pub struct TestBenchBuild {
-    pub passive: PassiveChassis<TestBenchChassis>,
+pub struct SubstrateBenchBuild {
+    pub passive: PassiveChassis<SubstrateBenchChassis>,
     pub boot: SubstrateBoot,
     /// Driver-facing accumulator + GPU bundle. Pre-PR-E2 the embedder
     /// also got `Arc<RenderCapability>` via `passive.capability()` to
@@ -196,11 +196,11 @@ pub struct TestBenchBuild {
     pub kind_tick: KindId,
 }
 
-impl TestBenchChassis {
-    /// Build the test-bench chassis: stand up substrate-core
+impl SubstrateBenchChassis {
+    /// Build the substrate-bench chassis: stand up substrate-core
     /// internals via [`SubstrateBoot::builder`], boot the standard
-    /// passives + `TestBenchCapability` via the `chassis_builder`
-    /// [`Builder`], and return a [`TestBenchBuild`] the embedder
+    /// passives + `SubstrateBenchCapability` via the `chassis_builder`
+    /// [`Builder`], and return a [`SubstrateBenchBuild`] the embedder
     /// takes ownership of. The embedder is responsible for any
     /// further capability adds (io with whatever failure semantics
     /// it wants), GPU creation, egress-backend attach, and driving
@@ -213,8 +213,8 @@ impl TestBenchChassis {
     /// `aether_kinds::descriptors::all()`, so a missing entry indicates
     /// a substrate-build bug.
     #[allow(clippy::too_many_lines)] // PR 3b growth from lifecycle graph + relay wiring.
-    pub fn build_passive(env: TestBenchEnv) -> anyhow::Result<TestBenchBuild> {
-        let TestBenchEnv {
+    pub fn build_passive(env: SubstrateBenchEnv) -> anyhow::Result<SubstrateBenchBuild> {
+        let SubstrateBenchEnv {
             name,
             version,
             workers,
@@ -262,17 +262,17 @@ impl TestBenchChassis {
                 wake: Arc::new(move || {
                     events_for_render
                         .send(ChassisEvent::CaptureRequested)
-                        .map_err(|_| "test-bench chassis shutting down — capture aborted")
+                        .map_err(|_| "substrate-bench chassis shutting down — capture aborted")
                 }),
                 outbound: Arc::clone(&boot.outbound),
             }),
         };
 
-        // Phase 4: advance lands on `TestBenchCapability` claiming
-        // `aether.test_bench`. The cap pushes `ChassisEvent::Advance`
+        // Phase 4: advance lands on `SubstrateBenchCapability` claiming
+        // `aether.substrate_bench`. The cap pushes `ChassisEvent::Advance`
         // onto the embedder loop just like the retired
         // `chassis_handler` closure did.
-        let test_bench_cap_config = TestBenchCapConfig { events: events_tx.clone() };
+        let substrate_bench_cap_config = SubstrateBenchCapConfig { events: events_tx.clone() };
 
         let input_config = InputConfig::default();
 
@@ -297,7 +297,7 @@ impl TestBenchChassis {
                     tracing::warn!(
                         target: "aether_substrate::fs",
                         error = %e,
-                        "io cap boot skipped in TestBench (root pre-validation failed; expected on systems without writable default roots)",
+                        "io cap boot skipped in SubstrateBench (root pre-validation failed; expected on systems without writable default roots)",
                     );
                     None
                 }
@@ -307,9 +307,9 @@ impl TestBenchChassis {
 
         // Issue 775: scenarios that want to assert on component-
         // emitted kinds register a synchronous catch-all observer
-        // closure under `aether.test_bench.observer`. The closure
+        // closure under `aether.substrate_bench.observer`. The closure
         // body records each inbound mail's kind name into the shared
-        // `observed_kinds` vec; the binary (`bin/test-bench.rs`)
+        // `observed_kinds` vec; the binary (`bin/substrate-bench.rs`)
         // passes `observed_kinds: None` and skips registration —
         // mail to the observer mailbox warn-drops in that mode.
         //
@@ -320,11 +320,11 @@ impl TestBenchChassis {
         // this rode a full NativeActor specifically because closure
         // arms leaked settlement; now that `Inline` participates in
         // ADR-0080 §6 we get the same correctness with one fewer
-        // thread per TestBench.
+        // thread per SubstrateBench.
         if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
             boot.registry.register_inline(
-                TEST_BENCH_OBSERVER_MAILBOX_NAME,
+                SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME,
                 Arc::new(move |dispatch: MailDispatch<'_>| {
                     if dispatch.kind_name.is_empty() {
                         return;
@@ -337,9 +337,9 @@ impl TestBenchChassis {
             );
         }
 
-        // ADR-0082 §1 / PR 3b: test-bench uses the shared Tick-only
+        // ADR-0082 §1 / PR 3b: substrate-bench uses the shared Tick-only
         // lifecycle graph. The embedder pushes `LifecycleAdvance` via
-        // TestBench's own pumping logic; the driver broadcasts Tick to
+        // SubstrateBench's own pumping logic; the driver broadcasts Tick to
         // `aether.input` via the relay subscriber.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_workers(pool_workers)
@@ -354,11 +354,13 @@ impl TestBenchChassis {
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<TextCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<TestBenchCapability>(test_bench_cap_config)
+            .with_actor::<SubstrateBenchCapability>(substrate_bench_cap_config)
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT));
         builder = match clipboard_mode {
-            TestBenchClipboardMode::InMemory => builder.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory),
-            TestBenchClipboardMode::Unavailable => builder.with_actor::<HeadlessClipboardCapability>(()),
+            SubstrateBenchClipboardMode::InMemory => {
+                builder.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory)
+            }
+            SubstrateBenchClipboardMode::Unavailable => builder.with_actor::<HeadlessClipboardCapability>(()),
         };
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
@@ -372,7 +374,7 @@ impl TestBenchChassis {
         let render_handles: RenderHandles =
             passive.handle::<RenderHandles>().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "TestBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before TestBench builds",
+                    "SubstrateBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before SubstrateBench builds",
                 )
             })?;
 
@@ -381,6 +383,6 @@ impl TestBenchChassis {
         // sender is released.
         drop(events_tx);
 
-        Ok(TestBenchBuild { passive, boot, render_handles, kind_tick })
+        Ok(SubstrateBenchBuild { passive, boot, render_handles, kind_tick })
     }
 }

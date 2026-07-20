@@ -62,7 +62,7 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// leaks and any settlement subscriber hangs. iamacoffeepot/aether#846
 /// is the canonical incident: a synchronous closure that captured
 /// fields off the dispatch but had no downstream owner of the
-/// bracket caused [`TestBench::send_bytes`] to time out at 5s once
+/// bracket caused [`SubstrateBench::send_bytes`] to time out at 5s once
 /// strict settlement propagation landed.
 ///
 /// **ADR-0094 obligation guard.** The type-shape split above is the
@@ -110,7 +110,7 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// hand-rolled `impl InboxHandler for MyType` is supported for caps
 /// that want to bundle the channel sender with handler state.
 ///
-/// [`TestBench::send_bytes`]: ../../../aether_substrate_bundle/test_bench/struct.TestBench.html#method.send_bytes
+/// [`SubstrateBench::send_bytes`]: ../../../aether_substrate_bundle/substrate_bench/struct.SubstrateBench.html#method.send_bytes
 pub trait InboxHandler: Send + Sync + 'static {
     fn enqueue(&self, dispatch: OwnedDispatch);
 }

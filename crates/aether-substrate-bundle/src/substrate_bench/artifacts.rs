@@ -1,7 +1,7 @@
-//! Failure-only diagnostic artifacts for direct `TestBench` visual
+//! Failure-only diagnostic artifacts for direct `SubstrateBench` visual
 //! assertions (issue 2914).
 //!
-//! A widget-heavy `TestBench` scenario scores a captured frame through
+//! A widget-heavy `SubstrateBench` scenario scores a captured frame through
 //! `visual::run_checks` and asserts on the returned `FrameVerdict`, but
 //! a failing `assert!` only leaves a scalar diagnostic in the test
 //! log — the captured pixels are gone by the time a developer reads
@@ -15,7 +15,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use aether_substrate_bundle::test_bench::ArtifactGuard;
+//! use aether_substrate_bundle::substrate_bench::ArtifactGuard;
 //!
 //! let mut guard = ArtifactGuard::arm("widget_panel_layout", png, checks, verdict.results);
 //! // ... assertions on `verdict` that may panic ...
@@ -24,7 +24,7 @@
 //! The guard is a plain `Drop` type: a normal return leaves `guard`
 //! untouched and it writes nothing. An unwinding panic through the
 //! guard's scope best-effort writes under
-//! `target/test-bench-artifacts/<sanitized id>/`. A test that detects
+//! `target/substrate-bench-artifacts/<sanitized id>/`. A test that detects
 //! failure through a `Result` return rather than a panic calls
 //! [`ArtifactGuard::persist`] explicitly before returning `Err`.
 
@@ -39,9 +39,9 @@ use crate::visual::{self, Image, ImageError, decode_png};
 
 /// Directory (under the resolved Cargo target root) every artifact
 /// guard writes under.
-const ARTIFACT_ROOT_DIRNAME: &str = "test-bench-artifacts";
+const ARTIFACT_ROOT_DIRNAME: &str = "substrate-bench-artifacts";
 
-/// Deterministic failure-artifact guard for one direct-Rust `TestBench`
+/// Deterministic failure-artifact guard for one direct-Rust `SubstrateBench`
 /// visual assertion. See the module docs for the write contract.
 #[must_use = "an ArtifactGuard only writes on drop-during-panic or an explicit `persist()` \
               call — bind it to a variable that stays alive across the assertions it guards"]
@@ -85,7 +85,7 @@ struct Measurements<'a> {
 
 impl ArtifactGuard {
     /// Arm a guard for `id` around `actual_png` (the exact captured
-    /// frame bytes a `TestBench` capture returned) and the ordered
+    /// frame bytes a `SubstrateBench` capture returned) and the ordered
     /// `checks` / `results` pair a `visual::run_checks` verdict scored
     /// from it — `results[i]` must be the score of `checks[i]`. A
     /// length mismatch between the two is tolerated at persist time
@@ -216,10 +216,12 @@ impl Drop for ArtifactGuard {
 fn report_persist<W: io::Write + ?Sized>(writer: &mut W, id: &str, result: &Result<PathBuf, ArtifactWriteError>) {
     match result {
         Ok(dir) => {
-            let _ = writeln!(writer, "test-bench artifact guard '{id}': wrote failure artifacts to {}", dir.display());
+            let _ =
+                writeln!(writer, "substrate-bench artifact guard '{id}': wrote failure artifacts to {}", dir.display());
         }
         Err(error) => {
-            let _ = writeln!(writer, "test-bench artifact guard '{id}': failed to write failure artifacts: {error}");
+            let _ =
+                writeln!(writer, "substrate-bench artifact guard '{id}': failed to write failure artifacts: {error}");
         }
     }
 }

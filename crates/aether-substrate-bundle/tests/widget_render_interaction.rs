@@ -1,6 +1,6 @@
 //! Widget render + interaction acceptance suite (issue 2674).
 //!
-//! The widget tier already has two `TestBench` scenarios, and between them they
+//! The widget tier already has two `SubstrateBench` scenarios, and between them they
 //! leave the *rendered placement* of the real widgets — driven by real
 //! synthetic input — untested. `widget_compositing` pixel-asserts abstract
 //! colored quads with no real widget, no font, and no input; `widget_set`
@@ -21,7 +21,7 @@
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure. Rendered
-//! output can only be asserted on the GPU path, so this is correctly `TestBench`
+//! output can only be asserted on the GPU path, so this is correctly `SubstrateBench`
 //! (`FleetBench` is headless).
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
@@ -65,8 +65,8 @@ use aether_kit::{
 use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
-use aether_substrate_bundle::test_bench::{
-    ArtifactGuard, BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    ArtifactGuard, BenchOp, SubstrateBench,
     test_helpers::{init_save_sandbox, require_runtime},
 };
 use aether_substrate_bundle::visual::{Image, decode_png};
@@ -142,17 +142,17 @@ fn assets_dir() -> PathBuf {
 
 /// Boot a chassis whose `assets://` points at the bundle assets dir (the TTF)
 /// and whose `save://` / `config://` sink into a per-process sandbox tempdir.
-fn build_bench() -> TestBench {
+fn build_bench() -> SubstrateBench {
     let sandbox = init_save_sandbox("widget-render-interaction");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    TestBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
+    SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
 }
 
 /// Deterministically load `RobotoMono.ttf` into the shared `aether.text`
 /// registry and return its session-scoped `font_id`. Loading it here — rather
 /// than letting the panel's `wire` kick off the load — settles the font before
 /// any draw, so no capture races the async fs-read + parse.
-fn load_font(bench: &mut TestBench) -> u32 {
+fn load_font(bench: &mut SubstrateBench) -> u32 {
     let loaded = bench
         .execute(vec![(
             "font",
@@ -171,7 +171,7 @@ fn load_font(bench: &mut TestBench) -> u32 {
 /// Grab `RobotoMono`'s resolved metric table (the same one the field measures
 /// against) so the test can compute expected pixel boundaries for pointer
 /// placement and caret geometry.
-fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
+fn load_metrics(bench: &mut SubstrateBench, font_id: u32) -> CachedFontMetrics {
     let got = bench
         .execute(vec![(
             "metrics",
@@ -189,12 +189,12 @@ fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
 /// theme pinned to the already-resident `font_id` (empty font path, so the
 /// panel does not kick off its own load). Every widget draws text with that
 /// font.
-fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) -> MailboxId {
+fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], font_id: u32) -> MailboxId {
     load_panel_with_children(bench, wasm, font_id, Vec::new())
 }
 
 fn load_panel_with_children(
-    bench: &mut TestBench,
+    bench: &mut SubstrateBench,
     wasm: &[u8],
     font_id: u32,
     children: Vec<WidgetChildSpec>,
@@ -203,7 +203,7 @@ fn load_panel_with_children(
 }
 
 fn load_panel_with_children_and_ownership(
-    bench: &mut TestBench,
+    bench: &mut SubstrateBench,
     wasm: &[u8],
     font_id: u32,
     children: Vec<WidgetChildSpec>,
@@ -247,7 +247,7 @@ struct LoadedProbe {
     address: String,
 }
 
-fn load_editor_probe(bench: &mut TestBench, wasm_path: &Path) -> LoadedProbe {
+fn load_editor_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> LoadedProbe {
     let loaded = bench
         .execute(vec![(
             "load-region-probe",
@@ -268,7 +268,7 @@ fn load_editor_probe(bench: &mut TestBench, wasm_path: &Path) -> LoadedProbe {
     }
 }
 
-fn load_editor_shell(bench: &mut TestBench, wasm: &[u8], panel: MailboxId, probe: MailboxId) {
+fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], panel: MailboxId, probe: MailboxId) {
     let probe_lanes = RegionInputLanes {
         pointer_press: true,
         pointer_release: true,
@@ -325,7 +325,7 @@ fn load_editor_shell(bench: &mut TestBench, wasm: &[u8], panel: MailboxId, probe
     }
 }
 
-fn drain_editor_probe(bench: &mut TestBench, probe: &LoadedProbe) -> DrainEditorInputsResult {
+fn drain_editor_probe(bench: &mut SubstrateBench, probe: &LoadedProbe) -> DrainEditorInputsResult {
     bench
         .execute(vec![("drain-editor-probe", BenchOp::send_and_await(probe.address.as_str(), &DrainEditorInputs))])
         .expect("drain editor region probe")
@@ -338,19 +338,19 @@ fn drain_editor_probe(bench: &mut TestBench, probe: &LoadedProbe) -> DrainEditor
 /// creates its atlas texture, whose `create_texture` reply has to round-trip
 /// before glyphs rasterize into it), and the `advance` settles that
 /// round-trip — so the first real capture draws with glyphs resident.
-fn boot_panel(bench: &mut TestBench, wasm: &[u8]) {
+fn boot_panel(bench: &mut SubstrateBench, wasm: &[u8]) {
     let font_id = load_font(bench);
     load_panel(bench, wasm, font_id);
     warm_panel(bench);
 }
 
-fn boot_panel_with_children(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+fn boot_panel_with_children(bench: &mut SubstrateBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
     let font_id = load_font(bench);
     load_panel_with_children(bench, wasm, font_id, children);
     warm_panel(bench);
 }
 
-fn warm_panel(bench: &mut TestBench) {
+fn warm_panel(bench: &mut SubstrateBench) {
     let panel = panel_address();
     bench
         .execute(vec![
@@ -727,7 +727,7 @@ fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32
     );
 }
 
-fn assert_stationary_hover_survives_focus_traversal(bench: &mut TestBench, panel: &str, hover_y: f32) {
+fn assert_stationary_hover_survives_focus_traversal(bench: &mut SubstrateBench, panel: &str, hover_y: f32) {
     // Focus is independent from hover: Tab to the hovered button and away
     // again without moving the pointer. The button must remain hovered because
     // only a root-issued HoverLost may clear that fact.
@@ -759,7 +759,7 @@ fn check(reduction: FrameReduction, region: FrameRect, background: [u8; 3], tole
 
 /// Capture one frame (redrawing the panel via a `Tick` in `mails`) with the
 /// requested region checks and return the settled verdict, in check order.
-fn capture(bench: &mut TestBench, checks: Vec<FrameCheck>) -> FrameVerdict {
+fn capture(bench: &mut SubstrateBench, checks: Vec<FrameCheck>) -> FrameVerdict {
     let captured = bench
         .execute(vec![(
             "snap",
@@ -782,7 +782,7 @@ struct GuardedCapture {
 
 /// Capture a scored frame while keeping its exact PNG and check masks alive
 /// as failure-only diagnostics for every assertion in the caller's scope.
-fn capture_guarded(bench: &mut TestBench, id: &str, expectation: &str, checks: Vec<FrameCheck>) -> GuardedCapture {
+fn capture_guarded(bench: &mut SubstrateBench, id: &str, expectation: &str, checks: Vec<FrameCheck>) -> GuardedCapture {
     let captured = bench
         .execute(vec![(
             "snap",
@@ -827,7 +827,7 @@ fn bounding_box(result: &FrameCheckResult) -> Option<FrameRect> {
 
 /// Every log message in the panel's ring, oldest first — the value-up
 /// observation surface (`widget_set`'s idiom).
-fn panel_log_messages(bench: &mut TestBench) -> Vec<String> {
+fn panel_log_messages(bench: &mut SubstrateBench) -> Vec<String> {
     match bench.log_tail(&panel_address(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
@@ -851,7 +851,7 @@ fn reads_yellow(pixel: [u8; 3]) -> bool {
     pixel[0] > 150 && pixel[1] > 150 && pixel[2] < 150
 }
 
-fn clipboard_text(bench: &mut TestBench) -> String {
+fn clipboard_text(bench: &mut SubstrateBench) -> String {
     let result = bench
         .execute(vec![("clipboard", BenchOp::send_and_await(ClipboardCapability::NAMESPACE, &GetClipboardText))])
         .expect("read deterministic clipboard");
@@ -1894,7 +1894,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     assert_updated_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
 }
 
-fn drive_toggle_and_segmented(bench: &mut TestBench, panel: &str) {
+fn drive_toggle_and_segmented(bench: &mut SubstrateBench, panel: &str) {
     let toggle_y = PANEL_Y + ROW_HEIGHT * 0.5;
     let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
     let segment_y = segment_top + ROW_HEIGHT * 0.5;
@@ -1920,7 +1920,7 @@ fn drive_toggle_and_segmented(bench: &mut TestBench, panel: &str) {
         .expect("segmented pointer and arrow selection");
 }
 
-fn drive_numeric_lifecycle(bench: &mut TestBench, panel: &str) {
+fn drive_numeric_lifecycle(bench: &mut SubstrateBench, panel: &str) {
     let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0 + ROW_HEIGHT * 0.5;
     bench
         .execute(vec![
@@ -1951,7 +1951,7 @@ fn drive_numeric_lifecycle(bench: &mut TestBench, panel: &str) {
         .expect("numeric cut and paste lifecycle");
 }
 
-fn drive_blur_and_blocked_states(bench: &mut TestBench, panel: &str) {
+fn drive_blur_and_blocked_states(bench: &mut SubstrateBench, panel: &str) {
     let segment_width = PANEL_WIDTH / 3.0;
     let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0 + ROW_HEIGHT * 0.5;
     let readonly_y = PANEL_Y + (ROW_HEIGHT + GAP) * 4.0 + ROW_HEIGHT * 0.5;
@@ -2035,7 +2035,7 @@ fn assert_advanced_control_logs(logs: &[String]) {
     );
 }
 
-fn assert_advanced_control_raster(bench: &mut TestBench) {
+fn assert_advanced_control_raster(bench: &mut SubstrateBench) {
     let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
     let segment_width = PANEL_WIDTH / 3.0;
     let numeric_top = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
@@ -2374,7 +2374,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
 
 /// A real panel carrying 200 items must keep the committed overlay bounded to
 /// five fixed rows while paging, tail clamping, shared state overlays, and
-/// hidden absence all remain observable through the current `TestBench` APIs.
+/// hidden absence all remain observable through the current `SubstrateBench` APIs.
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive bounded-window/state/render acceptance run
 fn virtual_list_bounds_realization_and_renders_selection_state() {

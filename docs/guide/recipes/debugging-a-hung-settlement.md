@@ -1,6 +1,6 @@
 # Debugging a hung settlement
 
-**Class:** drive-only for triage; a source/TestBench reproduction is usually
+**Class:** drive-only for triage; a source/SubstrateBench reproduction is usually
 needed for root cause. Read [Tracing and settlement](../systems/tracing-and-settlement.md)
 and [Concurrency and blocking](../systems/concurrency.md) for the model.
 
@@ -121,7 +121,7 @@ after the operation's own timeout and retry semantics are understood.
 
 ## 6. Reproduce where pending state is visible
 
-For a code-level bug, create the smallest focused TestBench case. Its settlement
+For a code-level bug, create the smallest focused SubstrateBench case. Its settlement
 timeout includes a pending-root dump with in-flight/held-open counts, which is
 more actionable than the current MCP timeout response. Pin the settlement cap
 low enough for the test while leaving normal scheduler contention room.
@@ -135,7 +135,7 @@ A good regression test:
 5. fails with the pending-root evidence if the chain wedges.
 
 Use FleetBench only when the suspected cause requires the hub/RPC/process
-boundary. A pure hold or actor queue bug is easier to localize in TestBench.
+boundary. A pure hold or actor queue bug is easier to localize in SubstrateBench.
 
 ## 7. Verify the fix
 
@@ -154,5 +154,5 @@ with a clear root-discovery and ring-truncation contract; do not write prose as
 though it already shipped.
 
 Continue with [Inspection and debugging](../operating/inspect-and-debug.md) for
-the broader symptom tree and [TestBench and FleetBench](../testing/testbench-and-fleetbench.md)
+the broader symptom tree and [SubstrateBench and FleetBench](../testing/substratebench-and-fleetbench.md)
 for reproduction boundaries.

@@ -7,7 +7,7 @@
 
 use aether_actor::{ActorInitError, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, Read, ReadResult};
-use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux, TEST_BENCH_OBSERVER_MAILBOX_NAME};
+use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux, SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME};
 
 #[derive(Default)]
 pub struct FsDemux {
@@ -63,7 +63,7 @@ impl WasmActor for FsDemux {
                 "fs_demux first_matched=true second_matched=true",
             );
             ctx.send_to_named::<FsDemuxReport>(
-                TEST_BENCH_OBSERVER_MAILBOX_NAME,
+                SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME,
                 &FsDemuxReport { first_matched: true, second_matched: true },
             );
         }

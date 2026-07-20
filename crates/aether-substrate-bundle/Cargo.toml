@@ -5,13 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 # Multi-binary chassis crate. Holds the desktop, headless, hub, and
-# test-bench chassis source as submodules (`src/<chassis>/`). Each
+# substrate-bench chassis source as submodules (`src/<chassis>/`). Each
 # chassis produces a binary via `src/bin/<chassis>.rs`. The shared
 # substrate runtime stays in `aether-substrate`; this crate is the
 # per-deployment chassis layer.
 #
-# The in-process `TestBench` API surfaces as
-# `aether_substrate_bundle::test_bench::TestBench` for component +
+# The in-process `SubstrateBench` API surfaces as
+# `aether_substrate_bundle::substrate_bench::SubstrateBench` for component +
 # scenario runner consumers.
 
 [lib]
@@ -30,8 +30,8 @@ name = "aether-substrate-hub"
 path = "src/bin/hub.rs"
 
 [[bin]]
-name = "aether-substrate-test-bench"
-path = "src/bin/test-bench.rs"
+name = "aether-substrate-bench"
+path = "src/bin/substrate-bench.rs"
 
 # Standalone bundle builds (#1529, generalizing #1518): a chassis that
 # auto-loads the component pack embedded at build time, so the binary
@@ -102,7 +102,7 @@ aether-rpc = { path = "../aether-rpc" }
 aether-engine = { path = "../aether-engine" }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
 # the chassis bundle needs its wgpu runtime half (RenderCapability / RenderGpu /
-# RenderHandles / RenderTuningConfigLayer for the desktop + test-bench drivers).
+# RenderHandles / RenderTuningConfigLayer for the desktop + substrate-bench drivers).
 aether-render = { path = "../aether-render", features = ["runtime"] }
 # iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`; every
 # chassis composes `TcpCapability`, so the bundle takes the runtime face.
@@ -130,7 +130,7 @@ aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-window = { path = "../aether-window", features = ["runtime"] }
 # The `aether.trace` cap (extracted from capabilities, #3719): every
-# chassis mounts `TraceDispatchCapability`; the perf/test_bench harnesses
+# chassis mounts `TraceDispatchCapability`; the perf/substrate_bench harnesses
 # stitch trace trees via `walk`. Runtime half.
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — the chassis wires
@@ -211,13 +211,13 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 # Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests
-# boot a `TestBench` and load the fixture component wasm to exercise
+# boot a `SubstrateBench` and load the fixture component wasm to exercise
 # input subscription, drop_component, etc. The shared `Kind`
 # definitions the tests decode + assert against live in the
 # `aether-test-fixtures-kinds` rlib; the wasm bodies are separate
 # component crates discovered structurally and loaded by stem. The
 # bench's own integration tests reach the visual/PNG helpers +
-# `test_helpers` module through `crate::test_bench::{visual,
+# `test_helpers` module through `crate::substrate_bench::{visual,
 # test_helpers}` directly (post-issue-821, formerly via
 # `aether-scenario`).
 # Length-prefix frame helpers (`aether_codec::frame::{read_frame,
@@ -249,7 +249,7 @@ aether-math = { path = "../aether-math" }
 # `export!()` FFI emission is wasm32-only and inert in a host rlib, so
 # a plain host dep pulls in the kind types for their `::ID`s at no cost.
 aether-kit = { path = "../aether-kit" }
-# iamacoffeepot/aether#1057: the mail-latency harness (`test_bench::mail_latency`)
+# iamacoffeepot/aether#1057: the mail-latency harness (`substrate_bench::mail_latency`)
 # subscribes to per-root `Settled` notifications to wait for injected
 # trace trees to drain; naming the settlement `Receiver<()>` returned by
 # `SettlementRegistry::subscribe_settlement` needs crossbeam-channel in

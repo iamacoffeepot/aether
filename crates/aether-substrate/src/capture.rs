@@ -14,7 +14,7 @@
 // Waking the event loop on enqueue is the caller's job — after a
 // successful `request()`, `RenderCapability` pokes the
 // `CaptureBackend.wake` closure (desktop sends `UserEvent::Capture`
-// on the `EventLoopProxy`; test-bench sends `ChassisEvent::CaptureRequested`
+// on the `EventLoopProxy`; substrate-bench sends `ChassisEvent::CaptureRequested`
 // on the embedder channel). Keeping the wake out of `CaptureQueue`
 // means this type has zero chassis-awareness and lives anywhere a
 // chassis cares about captures.

@@ -13,7 +13,7 @@ use aether_kit::terra::{
     TerraCommandResult, TerraConfig, TerraError, TerraQuery, TerraQueryResult, WorldDelta,
 };
 use aether_kit::world::WorldPoint;
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -25,7 +25,7 @@ fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::MailboxId {
+fn load_mark_book(bench: &mut SubstrateBench, wasm_path: &Path) -> aether_data::MailboxId {
     let loaded = bench
         .execute(vec![(
             "load_mark_book",
@@ -49,7 +49,7 @@ fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::Mailb
     }
 }
 
-fn load_terra(bench: &mut TestBench, wasm_path: &Path, mark_book_mailbox: aether_data::MailboxId) {
+fn load_terra(bench: &mut SubstrateBench, wasm_path: &Path, mark_book_mailbox: aether_data::MailboxId) {
     let config = TerraConfig { mark_book_mailbox };
     let loaded = bench
         .execute(vec![(
@@ -73,7 +73,7 @@ fn load_terra(bench: &mut TestBench, wasm_path: &Path, mark_book_mailbox: aether
     }
 }
 
-fn create_mark(bench: &mut TestBench, address: &str, geometry: MarkGeometry, label: &str) -> MarkRef {
+fn create_mark(bench: &mut SubstrateBench, address: &str, geometry: MarkGeometry, label: &str) -> MarkRef {
     let created = bench
         .execute(vec![("create", BenchOp::send_and_await(address, &MarkCreate { geometry, label: label.to_owned() }))])
         .expect("create mark sequence");
@@ -83,7 +83,7 @@ fn create_mark(bench: &mut TestBench, address: &str, geometry: MarkGeometry, lab
     }
 }
 
-fn get_mark(bench: &mut TestBench, address: &str, reference: MarkRef) -> Mark {
+fn get_mark(bench: &mut SubstrateBench, address: &str, reference: MarkRef) -> Mark {
     let fetched = bench
         .execute(vec![("get", BenchOp::send_and_await(address, &MarkGet { id: reference.id }))])
         .expect("get mark sequence");
@@ -109,7 +109,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mark_mailbox = load_mark_book(&mut bench, &wasm_path);
     load_terra(&mut bench, &wasm_path, mark_mailbox);
     let mark_address = component_address(MARK_COMPONENT_NAME);

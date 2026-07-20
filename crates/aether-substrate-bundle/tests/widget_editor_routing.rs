@@ -10,7 +10,7 @@ use aether_kinds::{
     MouseWheel, TextInput,
 };
 use aether_kit::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -20,7 +20,13 @@ struct LoadedActor {
     address: String,
 }
 
-fn load_actor<K: Kind>(bench: &mut TestBench, wasm_path: &Path, export: &str, name: &str, config: &K) -> LoadedActor {
+fn load_actor<K: Kind>(
+    bench: &mut SubstrateBench,
+    wasm_path: &Path,
+    export: &str,
+    name: &str,
+    config: &K,
+) -> LoadedActor {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -52,15 +58,15 @@ fn region(name: &str, target: MailboxId, x_pixels: f32, input_lanes: RegionInput
     }
 }
 
-fn load_probe(bench: &mut TestBench, wasm_path: &Path, name: &str) -> LoadedActor {
+fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> LoadedActor {
     load_actor(bench, wasm_path, "test.editor_region_probe", name, &EditorRegionProbeConfig { name: name.to_owned() })
 }
 
-fn load_shell(bench: &mut TestBench, wasm_path: &Path, regions: Vec<RegionSpec>) {
+fn load_shell(bench: &mut SubstrateBench, wasm_path: &Path, regions: Vec<RegionSpec>) {
     let _shell = load_actor(bench, wasm_path, "aether.kit.widget.editor", "editor", &EditorConfig { regions });
 }
 
-fn drain(bench: &mut TestBench, actor: &LoadedActor, label: &'static str) -> DrainEditorInputsResult {
+fn drain(bench: &mut SubstrateBench, actor: &LoadedActor, label: &'static str) -> DrainEditorInputsResult {
     bench
         .execute(vec![(label, BenchOp::send_and_await(actor.address.as_str(), &DrainEditorInputs))])
         .expect("drain sequence")
@@ -75,7 +81,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     else {
         return;
     };
-    let mut bench = TestBench::start_with_size(200, 100).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(200, 100).expect("boot");
     let region_a = load_probe(&mut bench, &fixtures_wasm, "region-a");
     let region_b = load_probe(&mut bench, &fixtures_wasm, "region-b");
     let mut b_lanes = RegionInputLanes::ALL;
@@ -145,7 +151,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     else {
         return;
     };
-    let mut bench = TestBench::start_with_size(200, 100).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(200, 100).expect("boot");
     let region_a = load_probe(&mut bench, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut bench, &fixtures_wasm, "focus-b");
     let a = region("focus-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL);

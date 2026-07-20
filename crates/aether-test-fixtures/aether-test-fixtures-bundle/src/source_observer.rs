@@ -9,7 +9,7 @@
 //!
 //! - `on_source_query` (manual): handles `SourceQuery`, reads
 //!   `ctx.source_mailbox()`, logs it, broadcasts `SourceReport { mailbox_id }`
-//!   to the test-bench observer mailbox, and replies it directly. `mailbox_id`
+//!   to the substrate-bench observer mailbox, and replies it directly. `mailbox_id`
 //!   is `0` when `source_mailbox()` returns `None` (Session / no-sender origin).
 //!
 //! Integration test pattern:
@@ -29,7 +29,7 @@
 use aether_actor::{
     ActorInitError, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport, TEST_BENCH_OBSERVER_MAILBOX_NAME};
+use aether_test_fixtures_kinds::{SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, SendSourceQuery, SourceQuery, SourceReport};
 
 pub struct SourceObserver;
 
@@ -59,11 +59,11 @@ impl WasmActor for SourceObserver {
     #[handler::manual]
     fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: SourceQuery) {
         let mailbox_id = ctx.source_mailbox().map_or(0, |m| m.0);
-        // Log the raw value so the TestBench integration test can verify it
+        // Log the raw value so the SubstrateBench integration test can verify it
         // with `log_tail` without relying on broadcast payload access.
         tracing::info!(target: "test.source_observer", "source_mailbox={mailbox_id}");
         // Broadcast to the observer for count-based assertions.
-        ctx.send_to_named::<SourceReport>(TEST_BENCH_OBSERVER_MAILBOX_NAME, &SourceReport { mailbox_id });
+        ctx.send_to_named::<SourceReport>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &SourceReport { mailbox_id });
         // Reply to the bench when it sent `SourceQuery` directly (Session case).
         ctx.reply(&SourceReport { mailbox_id });
     }

@@ -14,7 +14,7 @@ use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_tcp::{ListListeners, ListListenersResult};
 
 const SIM_NAME: &str = "player-turn-sim";
@@ -22,7 +22,7 @@ const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn gateway_listener_port(bench: &mut TestBench) -> u16 {
+fn gateway_listener_port(bench: &mut SubstrateBench) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let list = bench
@@ -53,7 +53,7 @@ fn expected_player_session_mailbox(session_name: &str) -> MailboxId {
     PlayerSessionActor::resolve(GameGatewayCapability::resolve(0, ()).0, session_name)
 }
 
-fn load_turn_sim(bench: &mut TestBench, wasm: Vec<u8>) {
+fn load_turn_sim(bench: &mut SubstrateBench, wasm: Vec<u8>) {
     let config = SimConfig {
         fact_sink: Some(GameGatewayCapability::resolve(0, ())),
         ring_depth: 8,
@@ -111,7 +111,7 @@ fn read_bundle_and_beacon(stream: &mut TcpStream) -> TickBundle {
     bundle
 }
 
-fn advance(bench: &mut TestBench) {
+fn advance(bench: &mut SubstrateBench) {
     bench.execute(vec![("advance", BenchOp::advance(1))]).expect("advance TurnSim one tick");
 }
 
@@ -121,7 +121,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
         return;
     };
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
-    let mut bench = TestBench::builder()
+    let mut bench = SubstrateBench::builder()
         .size(96, 96)
         .game_gateway(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),
@@ -132,7 +132,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
             max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         })
         .build()
-        .expect("boot active game gateway TestBench");
+        .expect("boot active game gateway SubstrateBench");
     let listener_port = gateway_listener_port(&mut bench);
     load_turn_sim(&mut bench, fs::read(wasm_path).expect("read aether-kit wasm"));
 

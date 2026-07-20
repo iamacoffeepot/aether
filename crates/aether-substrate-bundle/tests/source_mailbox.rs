@@ -38,12 +38,12 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::MailboxId;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
 
-fn load_source_observer(bench: &mut TestBench, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+fn load_source_observer(bench: &mut SubstrateBench, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -73,10 +73,10 @@ fn session_source_returns_none() {
     let Some(wasm_path) = require_runtime(SOURCE_OBSERVER) else {
         return;
     };
-    let mut bench = match TestBench::start_with_size(64, 48) {
+    let mut bench = match SubstrateBench::start_with_size(64, 48) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+            eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
             return;
         }
     };
@@ -104,10 +104,10 @@ fn component_source_returns_sender_mailbox() {
     let Some(wasm_path) = require_runtime(SOURCE_OBSERVER) else {
         return;
     };
-    let mut bench = match TestBench::start_with_size(64, 48) {
+    let mut bench = match SubstrateBench::start_with_size(64, 48) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+            eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
             return;
         }
     };

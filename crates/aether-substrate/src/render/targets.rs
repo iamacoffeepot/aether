@@ -1,7 +1,7 @@
 //! Offscreen color + depth target pair plus the lazy readback buffer
 //! the capture path uses. Owned per-chassis (the `Gpu` struct holds a
 //! `Targets`); resized by the chassis on surface change (desktop) or
-//! a control mail (test-bench).
+//! a control mail (substrate-bench).
 
 use super::DEPTH_FORMAT;
 
@@ -43,7 +43,7 @@ pub(super) struct Readback {
 impl Targets {
     /// Allocate the offscreen color + depth pair at `width x height`.
     /// `color_format` lets desktop pick whatever the surface negotiated
-    /// (typically RGBA, sometimes BGRA on Vulkan); test-bench passes
+    /// (typically RGBA, sometimes BGRA on Vulkan); substrate-bench passes
     /// `Rgba8UnormSrgb` since there's no surface to query. Width and
     /// height are clamped to a minimum of 1 — wgpu rejects zero
     /// dimensions.
@@ -85,7 +85,7 @@ impl Targets {
 
     /// The `wgpu::TextureView` the main render pass attaches to.
     /// Exposed for chassis-side passes that want to draw into the
-    /// same offscreen (e.g. test-bench's diagnostic clears).
+    /// same offscreen (e.g. substrate-bench's diagnostic clears).
     #[must_use]
     pub fn color_view(&self) -> &wgpu::TextureView {
         &self.offscreen.view

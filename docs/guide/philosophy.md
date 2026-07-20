@@ -62,7 +62,7 @@ uniformly over one that special-cases the target.
 
 The chassis is **composed**, not monolithic — a builder assembles the
 capabilities a given deployment needs ([ADR-0070](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md)/[ADR-0071](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md)), which is why there are
-several chassis (desktop, headless, hub, test-bench) sharing one runtime.
+several chassis (desktop, headless, hub, substrate-bench) sharing one runtime.
 
 ## 4. Design for machine consumers
 

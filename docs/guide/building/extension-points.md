@@ -82,7 +82,7 @@ projection, or evidence that is awkward to express as raw `send_mail`. The tool
 should still route through the same capability and mail contracts used by other
 clients.
 
-Do not put product semantics only in `aether-mcp`. A headless client, test bench,
+Do not put product semantics only in `aether-mcp`. A headless client, substrate bench,
 or future UI should be able to exercise the underlying engine operation without
 pretending to be an MCP client.
 

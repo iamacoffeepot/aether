@@ -6,7 +6,7 @@
 //! `build_inner` drains the list into `aether.component.load` mail
 //! right after `.build()`, so the components come up with no hub. The
 //! mail targets the generic `aether.component` mailbox — the same
-//! address the hub's `load_component` and the test bench load through
+//! address the hub's `load_component` and the substrate bench load through
 //! — which is what makes the mechanism chassis-agnostic.
 
 use std::io;
@@ -136,7 +136,7 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
 
 /// Build the `aether.component.load` mail that auto-loads `component`,
 /// addressed to the `aether.component` mailbox the same way the hub's
-/// `load_component` and the test bench do.
+/// `load_component` and the substrate bench do.
 pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
     let payload = LoadComponent {
         wasm: component.wasm,
@@ -147,7 +147,7 @@ pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
     .encode_into_bytes();
     Mail::new(
         // Boot-time wire mail to the well-known component-host mailbox — a
-        // ctx-less free fn, the same address the hub and test bench load
+        // ctx-less free fn, the same address the hub and substrate bench load
         // through, with no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
         mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE),
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn autoload_mail_addresses_the_component_host() {
         // The autoload mail must target the component host's mailbox with the
-        // load kind — the same address the hub and test bench load through.
+        // load kind — the same address the hub and substrate bench load through.
         let mail = autoload_mail(AutoloadComponent {
             wasm: vec![0, 1, 2, 3],
             config: Vec::new(),

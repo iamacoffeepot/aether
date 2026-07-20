@@ -7,8 +7,8 @@
 //! Issue 603 retired the `chassis_handler` closure: each fail-fast
 //! kind moved onto its own cap. `HeadlessRenderCapability` (Phase 2)
 //! handles `aether.render`; `HeadlessWindowCapability` (Phase 3)
-//! handles `aether.window`; `UnsupportedTestBenchCapability` (Phase 4)
-//! handles `aether.test_bench`. `aether.control.platform_info` (now
+//! handles `aether.window`; `UnsupportedSubstrateBenchCapability` (Phase 4)
+//! handles `aether.substrate_bench`. `aether.control.platform_info` (now
 //! a deleted kind name from a retired namespace) was
 //! deleted as a kind in Phase 4 — no replacement, no MCP path until
 //! issue 603 §F2 revives the per-domain shape.
@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::test_bench::UnsupportedTestBenchCapability;
+use crate::substrate_bench::UnsupportedSubstrateBenchCapability;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
@@ -74,7 +74,7 @@ impl HeadlessChassis {
     /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
     /// profile, the mailbox namespaces this binary links, and the
     /// `build.rs` provenance. The headless chassis layers the renderer /
-    /// window / test-bench / lifecycle caps plus the RPC server onto the
+    /// window / substrate-bench / lifecycle caps plus the RPC server onto the
     /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
     /// base — a hub-forked fleet engine always boots its RPC server, so it
     /// is part of the headless capability surface.
@@ -85,7 +85,7 @@ impl HeadlessChassis {
             <HeadlessRenderCapability as Addressable>::NAMESPACE,
             <HeadlessClipboardCapability as Addressable>::NAMESPACE,
             <HeadlessWindowCapability as Addressable>::NAMESPACE,
-            <UnsupportedTestBenchCapability as Addressable>::NAMESPACE,
+            <UnsupportedSubstrateBenchCapability as Addressable>::NAMESPACE,
             <LifecycleCapability as Addressable>::NAMESPACE,
             <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
@@ -263,7 +263,7 @@ impl HeadlessChassis {
     /// Build the headless chassis: stand up substrate-core internals,
     /// register the audio fail-fast sink, connect the hub, compose
     /// the native passives (broadcast/handle/log/control/io/http plus
-    /// the headless render / window / test-bench fail-fast caps)
+    /// the headless render / window / substrate-bench fail-fast caps)
     /// through the `chassis_builder` `.with()` chain, then wrap the
     /// timer in a [`HeadlessTimerDriverCapability`] and hand it to the
     /// builder.
@@ -376,7 +376,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessClipboardCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<UnsupportedTestBenchCapability>(())
+            .with_actor::<UnsupportedSubstrateBenchCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         let builder = maybe_with_http_server(builder, http_server);

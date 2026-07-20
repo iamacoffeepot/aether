@@ -20,15 +20,15 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    BenchOp, SubstrateBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
 };
 use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
-fn load_fs_demux(bench: &mut TestBench, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+fn load_fs_demux(bench: &mut SubstrateBench, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -57,10 +57,11 @@ fn same_payload_fs_replies_demux_by_request_id() {
     };
 
     let sandbox = init_save_sandbox("reply-correlation");
-    let mut bench = match TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build() {
+    let mut bench = match SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build()
+    {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+            eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
             return;
         }
     };

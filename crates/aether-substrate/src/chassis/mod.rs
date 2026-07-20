@@ -3,7 +3,7 @@
 //! Each chassis binary impls it over whatever peripheral layer it has
 //! — winit + wgpu for desktop, a std timer + stdio for headless, a
 //! TCP listener + MCP surface for hub, an embedder-driven manual
-//! loop for test-bench. The trait carries identity (`PROFILE`) and
+//! loop for substrate-bench. The trait carries identity (`PROFILE`) and
 //! the build entry point (`type Driver`, `type Env`, `fn build`)
 //! that produces a [`BuiltChassis`]; the chassis instance you `run()`
 //! is the [`BuiltChassis<Self>`], not a value of `Self` itself.
@@ -41,7 +41,7 @@ use crate::chassis::error::BootError;
 /// `'static` lets `BuiltChassis<Self>` / `PassiveChassis<Self>` be
 /// stored in long-lived owners without lifetime gymnastics.
 ///
-/// **Passive chassis** (test-bench: no driver, embedder drives the
+/// **Passive chassis** (substrate-bench: no driver, embedder drives the
 /// loop) still impl this trait so [`BuiltChassis<Self>`] /
 /// `PassiveChassis<Self>` can be parameterised by the chassis kind;
 /// they declare a phantom [`DriverCapability`] for `type Driver`
@@ -52,7 +52,7 @@ use crate::chassis::error::BootError;
 pub trait Chassis: Sized + 'static {
     /// Stable identifier for this chassis. Used in boot logs and
     /// wherever the chassis needs to identify itself to an observer.
-    /// `"desktop"`, `"headless"`, `"hub"`, `"test-bench"`.
+    /// `"desktop"`, `"headless"`, `"hub"`, `"substrate-bench"`.
     ///
     /// Renamed from the ADR-0035 `KIND` const by ADR-0071 to avoid
     /// clobbering the data layer's `Kind` vocabulary.
@@ -60,7 +60,7 @@ pub trait Chassis: Sized + 'static {
 
     /// The driver capability that owns this chassis's main thread.
     /// Desktop's winit driver, headless's std-timer driver, hub's
-    /// listener-and-MCP driver. Passive chassis (test-bench)
+    /// listener-and-MCP driver. Passive chassis (substrate-bench)
     /// declare [`builder::NeverDriver`] here.
     type Driver: DriverCapability;
 

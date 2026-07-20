@@ -5,7 +5,7 @@
 //! chassis main thread (winit / macOS), and the driver is already
 //! there. The driver-as-actor path lives in the desktop chassis
 //! driver; this crate hosts the chassis-without-window
-//! companion that headless and test-bench compose to fail-fast with
+//! companion that headless and substrate-bench compose to fail-fast with
 //! `Err`-replies on `set_mode` / `set_title`.
 
 // Handler-signature kinds must be importable at module root because
@@ -28,7 +28,7 @@ use aether_actor::actor;
 /// `HeadlessRenderCapability`: same mailbox the desktop
 /// owner claims, `Err`-replying handlers so MCP `set_window_mode`
 /// / `set_window_title` fail fast on chassis without a window
-/// (headless and test-bench).
+/// (headless and substrate-bench).
 ///
 /// Each chassis composes one of {desktop driver, this cap}, never
 /// both — the chassis builder rejects double-claiming a mailbox.

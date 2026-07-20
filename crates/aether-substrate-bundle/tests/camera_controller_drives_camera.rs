@@ -13,7 +13,7 @@
 //! the released frame matches the pan frame (the zero-mail-idle invariant, end
 //! to end). The controller's per-tick integration math is pinned by its own
 //! unit tests; this is the composition-and-motion proof the harness split
-//! routes to `TestBench`.
+//! routes to `SubstrateBench`.
 //!
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
@@ -32,7 +32,7 @@ use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render
 use aether_kit::SetChunk;
 use aether_kit::camera::controller::ControllerConfig;
 use aether_kit::world::Material;
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 
 /// Capture surface — a 4:3 frame the camera's aspect matches once the
@@ -64,7 +64,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
 /// Load one `aether_kit` export under `name` with optional init-config bytes,
 /// blocking on `LoadResult` so the component is instantiated and subscribed
 /// before the next op.
-fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) {
+fn load_kit_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -122,7 +122,7 @@ fn split_chunk() -> SetChunk {
 /// projection: the camera's `Render` publishes its (controller-driven)
 /// `view_proj`, the world-view's `Render` replays the painted ground under it,
 /// both into the accumulator right before the GPU readback.
-fn capture_scene(bench: &mut TestBench, camera: &str, world: &str, label: &'static str) -> Vec<u8> {
+fn capture_scene(bench: &mut SubstrateBench, camera: &str, world: &str, label: &'static str) -> Vec<u8> {
     let pre = vec![envelope(camera, &Render), envelope(world, &Render)];
     let captured =
         bench.execute(vec![(label, BenchOp::capture_with_mails(pre, Vec::new()))]).expect("capture-with-mails");
@@ -144,7 +144,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
 
     let world = component_address("world");
     // The controller resolves its target camera by the camera export's default

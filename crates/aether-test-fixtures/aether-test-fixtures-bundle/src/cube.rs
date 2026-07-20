@@ -1,5 +1,5 @@
 //! Test-fixture component that renders a solid unit cube through a
-//! fixed camera, so a `TestBench` capture scenario can assert the
+//! fixed camera, so a `SubstrateBench` capture scenario can assert the
 //! full render pipeline end-to-end: camera + `view_proj` + world-space
 //! geometry + depth test + GPU readback (issue 1454).
 //!

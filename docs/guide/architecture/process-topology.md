@@ -38,10 +38,10 @@ table as intent rather than a hardcoded manifest.
 | Desktop | `aether-substrate` | window, GPU/input/audio integration and interactive frames |
 | Headless | `aether-substrate-headless` | timer-driven engine without a desktop event loop |
 | Hub | `aether-substrate-hub` | supervise child engines, store artifacts, and route RPC |
-| Test bench | `aether-substrate-test-bench` | deterministic in-process operations and test evidence |
+| Substrate bench | `aether-substrate-bench` | deterministic in-process operations and test evidence |
 
 Their builders live under
-`crates/aether-substrate-bundle/src/{desktop,headless,hub,test_bench}`. Shared
+`crates/aether-substrate-bundle/src/{desktop,headless,hub,substrate_bench}`. Shared
 runtime mechanism remains in `aether-substrate`; each shared native actor
 remains in its own `aether-<capability>` crate.
 

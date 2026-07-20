@@ -18,10 +18,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bytemuck::{Pod, Zeroable};
 
-/// Mirror of `aether_substrate_bundle::test_bench::TEST_BENCH_OBSERVER_MAILBOX_NAME`.
+/// Mirror of `aether_substrate_bundle::substrate_bench::SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME`.
 /// Inlined here so wasm guests don't pull the bundle (`std`-bound)
 /// into the FFI build.
-pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
+pub const SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_bench.observer";
 
 /// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the bench's
@@ -34,7 +34,7 @@ pub struct TickObserved {
 }
 
 /// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
-/// its `wire` hook, once per boot instance. A `TestBench` scenario counts
+/// its `wire` hook, once per boot instance. A `SubstrateBench` scenario counts
 /// it via `count_observed` to prove the module-boot singleton is
 /// instantiated exactly once no matter how many selector loads of the
 /// module happened (cardinality). Structured-shaped like [`TickObserved`]
@@ -269,7 +269,7 @@ pub struct SendSourceQuery {
 
 /// Issue 1958: unit query sent to a `source_observer` fixture. Its
 /// `Manual`-class handler reads `ctx.source_mailbox()` and broadcasts a
-/// `SourceReport` to the test-bench observer mailbox.
+/// `SourceReport` to the substrate-bench observer mailbox.
 #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.source_query")]
 pub struct SourceQuery;

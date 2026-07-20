@@ -1,6 +1,6 @@
 use super::*;
 
-use aether_substrate_bundle::test_bench::TestBenchClipboardMode;
+use aether_substrate_bundle::substrate_bench::SubstrateBenchClipboardMode;
 
 const CLIPBOARD_MAILBOX: &str = "aether.clipboard";
 
@@ -9,7 +9,7 @@ fn clipboard_set_then_get_round_trips_in_memory() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::builder().size(64, 48).build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).build().expect("boot");
 
     let result = bench
         .execute(vec![
@@ -36,8 +36,11 @@ fn unavailable_clipboard_err_replies_to_get_and_set() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench =
-        TestBench::builder().size(64, 48).clipboard_mode(TestBenchClipboardMode::Unavailable).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .size(64, 48)
+        .clipboard_mode(SubstrateBenchClipboardMode::Unavailable)
+        .build()
+        .expect("boot");
 
     let result = bench
         .execute(vec![

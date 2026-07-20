@@ -7,8 +7,8 @@
 //! pulls the shared scaffolding out so each chassis declares only
 //! the parts that genuinely differ.
 //!
-//! The hub and test-bench chassis don't share this base (hub is a
-//! minimal RPC-only chassis, test-bench drives a loopback), so the
+//! The hub and substrate-bench chassis don't share this base (hub is a
+//! minimal RPC-only chassis, substrate-bench drives a loopback), so the
 //! helper module stays scoped to the two full-stack chassis.
 
 use std::env;
@@ -607,13 +607,13 @@ pub fn hub_config_dump() -> String {
 /// (ADR-0082 PR 3b): a `Tick` self-loop with a `Quit` escape to a
 /// `Shutdown` terminal. Components subscribe the `Tick` stage directly
 /// on `aether.lifecycle` (ADR-0082 §7/§11), so the config wires no
-/// initial subscribers. Desktop and `test_bench` run the three-stage
+/// initial subscribers. Desktop and `substrate_bench` run the three-stage
 /// `Tick → Render → Present` graph from `frame_lifecycle_config()`
 /// below instead.
 ///
 /// `advance_timeout_millis` is the resolved value from
 /// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
-/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the test-bench).
+/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the substrate-bench).
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
@@ -654,13 +654,13 @@ pub fn tick_only_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfi
 /// Like [`tick_only_lifecycle_config`], components subscribe the `Tick`
 /// (and `Render`) stage directly on `aether.lifecycle` (ADR-0082
 /// §7/§11), so the config wires no initial subscribers. Desktop and
-/// `test_bench` adopt this graph; headless stays
+/// `substrate_bench` adopt this graph; headless stays
 /// [`tick_only_lifecycle_config`] (its render cap is a no-op, so a
 /// `Render` / `Present` stage would settle to no GPU work).
 ///
 /// `advance_timeout_millis` is the resolved value from
 /// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
-/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the test-bench).
+/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the substrate-bench).
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
@@ -1066,7 +1066,7 @@ mod tests {
         // set. Quit-edge *placement* (on `Present`, not `Tick`) is
         // verified at the cap-unit layer (`lifecycle.rs` `resolve_edge`
         // tests, which can read `state().quit`) and end-to-end by the
-        // `test_bench` quit-drain scenario.
+        // `substrate_bench` quit-drain scenario.
         use aether_data::Kind;
         use aether_kinds::{Present, Render, Shutdown, Tick};
 
