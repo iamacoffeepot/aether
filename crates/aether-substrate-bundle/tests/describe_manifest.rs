@@ -3,7 +3,7 @@
 //! prints, and assert the chassis kind plus a non-empty linked-cap list.
 //! This is the same `--describe` mode the hub's binary store forks once at
 //! upload time to capture what a stored binary is — the cap test (the
-//! `FleetBench` scenario) exercises that fork path end to end; this one
+//! `FleetHarness` scenario) exercises that fork path end to end; this one
 //! pins the binary's own contract.
 
 use std::process::Command;

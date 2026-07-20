@@ -584,7 +584,7 @@ impl SubstrateHarness {
     }
 
     /// Tail `mailbox_name`'s per-actor log ring (ADR-0081). Mirrors
-    /// `FleetBench::log_tail` over the existing `send_bytes_and_await`,
+    /// `FleetHarness::log_tail` over the existing `send_bytes_and_await`,
     /// so in-process scenario tests can assert guest-emitted
     /// `tracing::warn!` / `tracing::info!` entries without an RPC session.
     ///

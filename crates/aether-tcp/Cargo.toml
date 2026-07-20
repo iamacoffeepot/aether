@@ -60,10 +60,10 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_substrate::testing` fixture, enabled by the substrate
 # `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The tcp fleet-load test (`tests/fleetbench_tcp_load.rs`) boots the
-# real-process hub → RPC → forked-headless stack through `FleetBench`,
+# The tcp fleet-load test (`tests/fleetharness_tcp_load.rs`) boots the
+# real-process hub → RPC → forked-headless stack through `FleetHarness`,
 # resolved via `dist/manifest.json` (`cargo xtask dist` first).
-aether-fleet-bench = { path = "../aether-fleet-bench" }
+aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The load probe's driver/snapshot kinds (`ConfigureTcpLoadProbe`,
 # `TcpLoadSnapshot`, …) the test sends and decodes.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
@@ -75,7 +75,7 @@ aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixt
 # against the active `AETHER_MAX_FRAME_SIZE` cap.
 aether-codec = { path = "../aether-codec" }
 # The load test serializes its diagnostic metrics report
-# (`target/fleetbench-metrics/tcp-load.json`).
+# (`target/fleetharness-metrics/tcp-load.json`).
 serde_json = { workspace = true }
 
 # The probe wasm coupling above is load-by-stem only — no source import —

@@ -4,7 +4,7 @@
 //! misses (#3422), a changed workpiece tree does NOT miss (#3341), a resumed
 //! `release` chains the receipt, and a mismatched key misses.
 //!
-//! This dials the bin over raw `WireFrame::Call` frames, the `FleetBench`
+//! This dials the bin over raw `WireFrame::Call` frames, the `FleetHarness`
 //! pattern (a real process, a real socket) — the process-boundary complement to
 //! the in-process backend contracts in `src/session/tests.rs`. The bin runs with
 //! `AETHER_SESSION_LEASE_TTL_MINS=0` so a lease expires immediately: that makes

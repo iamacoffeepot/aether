@@ -26,7 +26,7 @@ members = [
     "crates/aether-kit",
     "crates/aether-rpc",
     "crates/aether-engine",
-    "crates/aether-fleet-bench",
+    "crates/aether-harness-fleet",
     "crates/aether-clipboard",
     "crates/aether-window",
     "crates/aether-input",

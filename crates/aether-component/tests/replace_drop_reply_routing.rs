@@ -1,4 +1,4 @@
-//! `FleetBench` reply-routing regression for the two **forwarded**
+//! `FleetHarness` reply-routing regression for the two **forwarded**
 //! component-lifecycle ops (issue 1466). Over the real hub → RPC →
 //! forked-substrate wire, `ReplaceComponent` and `DropComponent` are
 //! forwarded by the component cap to the trampoline, whose deferred
@@ -14,7 +14,7 @@ mod tests {
     use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
     use aether_rpc::MailEnvelope;
 
-    use aether_fleet_bench::{FleetBench, dist_component_available, read_component_wasm};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// Load the `probe` component, then drive a `ReplaceComponent`
     /// and a `DropComponent` to its cap over the real wire and assert
@@ -28,14 +28,14 @@ mod tests {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
         let wasm = read_component_wasm("aether_test_fixtures_bundle");
 
         // Load the probe and read its mailbox id off the LoadResult —
         // the harness `load` helper returns only the registered name,
         // and the forwarded ops address the trampoline by id.
-        let load_replies = bench.send::<LoadComponent>(
+        let load_replies = harness.send::<LoadComponent>(
             engine,
             "aether.component",
             &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
@@ -47,7 +47,7 @@ mod tests {
 
         // Replace probe-with-probe. The reply set is empty before the
         // fix (`ReplyEnd` with zero events); populated after.
-        let replace_replies = bench.send::<ReplaceComponent>(
+        let replace_replies = harness.send::<ReplaceComponent>(
             engine,
             "aether.component",
             &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
@@ -63,7 +63,7 @@ mod tests {
 
         // Drop shares the forwarded path — assert it routes its reply
         // too. The mailbox id is stable across the replace (ADR-0022).
-        let drop_replies = bench.send::<DropComponent>(engine, "aether.component", &DropComponent { mailbox_id });
+        let drop_replies = harness.send::<DropComponent>(engine, "aether.component", &DropComponent { mailbox_id });
         assert!(
             !drop_replies.is_empty(),
             "DropComponent drew zero reply events — the forwarded reply settled before the trampoline replied (issue 1466)",

@@ -1,4 +1,4 @@
-//! `FleetBench` `replace_component` proof (issue 1459, Tier-A): load the
+//! `FleetHarness` `replace_component` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate, then atomically swap it for
 //! `aether-kit`'s `aether.kit.camera` export (selector `aether_kit@aether.kit.camera`) at the
 //! same trampoline mailbox id (ADR-0022) and assert the returned
@@ -13,7 +13,7 @@ mod tests {
     use aether_kit::camera::CameraCreate;
     use aether_test_fixtures_kinds::SetRender;
 
-    use aether_fleet_bench::{FleetBench, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
     /// it with `aether-kit`'s non-entry `aether.camera` export (selector
@@ -27,13 +27,13 @@ mod tests {
     /// the trampoline keeps its load-time name — must still route to
     /// the live mailbox afterward.
     #[test]
-    fn fleetbench_replaces_probe_with_camera_at_a_stable_address() {
+    fn fleetharness_replaces_probe_with_camera_at_a_stable_address() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let loaded = bench.load_full(engine, "aether_test_fixtures_bundle");
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let loaded = harness.load_full(engine, "aether_test_fixtures_bundle");
 
         let has = |caps: &ComponentCapabilities, id| caps.handlers.iter().any(|h| h.id == id);
 
@@ -53,7 +53,7 @@ mod tests {
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
         assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
 
-        let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
+        let caps = harness.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
 
         // Post-replace: the camera handler set is active, the probe's
         // is gone, and Tick (declared by both) survives the swap.
@@ -77,7 +77,7 @@ mod tests {
         // LogTail routed to the rendered path is answered Ok, proving
         // the same mailbox was swapped in place.
         assert!(
-            matches!(bench.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
+            matches!(harness.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after replace",
         );
     }
@@ -92,20 +92,20 @@ mod tests {
     /// survived the real `Call` wire and drove the trampoline's
     /// effective-tag selection to a non-entry actor (which a bare
     /// replace, reusing the hosted entry tag, could never reach).
-    /// `FleetBench` is the right harness: the field must round-trip the
+    /// `FleetHarness` is the right harness: the field must round-trip the
     /// wire, not just the in-process path.
     #[test]
-    fn fleetbench_replace_targets_a_non_entry_export() {
+    fn fleetharness_replace_targets_a_non_entry_export() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
 
         // Load the `RootManager` actor (a strict receiver) from the
         // bundle by its `test.ui.root` export. It is a non-entry actor in the
         // bundle (the entry is `Probe`), so it is selected explicitly.
-        let loaded = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.ui.root");
+        let loaded = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.ui.root");
 
         // Pre-replace: the entry is a strict receiver — it declares a
         // Ping handler and no fallback.
@@ -122,7 +122,7 @@ mod tests {
 
         // Replace into the non-entry export `test.ui.panel`, at the same
         // mailbox id, carrying the export over the wire.
-        let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_test_fixtures_bundle", "test.ui.panel");
+        let caps = harness.replace_export(engine, loaded.mailbox_id, "aether_test_fixtures_bundle", "test.ui.panel");
 
         // Post-replace: Panel's capability group is active — still a
         // Ping handler, but now with a fallback, the observable
@@ -142,7 +142,7 @@ mod tests {
         // The lineage address still routes to the live mailbox: the
         // same trampoline was swapped in place, now hosting Panel.
         assert!(
-            matches!(bench.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
+            matches!(harness.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after an \
                  export-targeted replace",
         );

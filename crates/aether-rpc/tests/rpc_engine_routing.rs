@@ -196,7 +196,7 @@ mod tests {
         // (`cargo xtask dist` first) — `CARGO_BIN_EXE_*` only resolves inside
         // the package that defines the binary, and this suite lives in
         // `aether-rpc`, not the bundle.
-        let headless = aether_fleet_bench::headless_bin_path().to_string_lossy().into_owned();
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
         // Bootstrap an isolated binary store so the hub resolves a
         // `default` selector to the headless bin (ADR-0115, #1954) —
         // threaded onto the engines-cap config below.

@@ -1,4 +1,4 @@
-//! `FleetBench` cluster-addressing matrix sweep (issue 1977, ADR-0114
+//! `FleetHarness` cluster-addressing matrix sweep (issue 1977, ADR-0114
 //! amendment): load the `matrix_sweep` cluster fixture + a cross-cluster
 //! `source_observer`, drive the sweep over the real `WireFrame::Call` wire,
 //! read back the structured `MatrixReport`, and assert every cell — delivery
@@ -19,7 +19,7 @@
 //! identity to the member it dispatches (validated host-side to the cluster),
 //! so a member's own cross-cluster send carries the member as origin.
 //!
-//! What this layer proves vs. the unit tests: `FleetBench` proves to-and-from
+//! What this layer proves vs. the unit tests: `FleetHarness` proves to-and-from
 //! delivery and the source the recipient reads, end-to-end over the real RPC
 //! stack. The in-place *mechanism* (whether a send ran in place vs. via the
 //! scheduler) is not externally observable over the wire — that is covered by
@@ -32,29 +32,29 @@ mod tests {
     use aether_kinds::{LogEntry, LogTailResult};
     use aether_test_fixtures_kinds::{CollectMatrix, MatrixReport, RunMatrix};
 
-    use aether_fleet_bench::{FleetBench, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Drive the full cluster-addressing matrix over the wire and assert
     /// every cell: in-cluster delivery + the source each recipient read,
     /// plus the cross-cluster boundary cell observed via the observer's
     /// log.
     #[test]
-    fn fleetbench_matrix_sweep_covers_every_addressing_cell() {
+    fn fleetharness_matrix_sweep_covers_every_addressing_cell() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
 
         // The cluster (parent + two inline children) and a separate
         // cross-cluster observer component.
-        let parent_addr = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
-        let observer = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
+        let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
+        let observer = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
 
         // Drive the sweep: the parent fans out every in-cluster direction
         // in place, plus a cross-cluster send to the observer during the
         // drain. The whole cascade settles before this `send` returns.
-        let run_replies = bench.send(engine, &parent_addr, &RunMatrix { observer_mailbox: observer.mailbox_id.0 });
+        let run_replies = harness.send(engine, &parent_addr, &RunMatrix { observer_mailbox: observer.mailbox_id.0 });
         assert!(
             run_replies.is_empty(),
             "RunMatrix is fire-and-settle (no reply), got {} reply events",
@@ -62,7 +62,7 @@ mod tests {
         );
 
         // Read the cluster's recorded observations.
-        let report_replies = bench.send(engine, &parent_addr, &CollectMatrix);
+        let report_replies = harness.send(engine, &parent_addr, &CollectMatrix);
         let report_env = match report_replies.as_slice() {
             [one] => one,
             other => panic!("CollectMatrix should reply exactly one MatrixReport, got {}", other.len()),
@@ -114,7 +114,7 @@ mod tests {
         // that member's own sends fire, so the host stamps child[a] (not
         // the cluster's inbound parent) as the origin of this send.
         let expected = format!("source_mailbox={child_a_id}");
-        let entries = match bench.log_tail(engine, &observer.addr, None, None) {
+        let entries = match harness.log_tail(engine, &observer.addr, None, None) {
             LogTailResult::Ok { entries, .. } => entries,
             LogTailResult::Err { error } => panic!("log_tail on observer failed: {error}"),
         };

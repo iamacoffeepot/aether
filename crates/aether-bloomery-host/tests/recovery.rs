@@ -4,7 +4,7 @@
 //! database file, and prove journal replay + outbox republish converge to the
 //! sealed state — and that a second overlapping seal loses cleanly.
 //!
-//! This dials the bin over raw `WireFrame::Call` frames, the `FleetBench` pattern
+//! This dials the bin over raw `WireFrame::Call` frames, the `FleetHarness` pattern
 //! (a real process, a real socket, a real SIGKILL) — the process-boundary
 //! complement to the in-process reopen test in `src/store/tests.rs`.
 

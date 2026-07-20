@@ -1,7 +1,7 @@
-//! `FleetBench` — a real-process E2E test-support harness over the
+//! `FleetHarness` — a real-process E2E test-support harness over the
 //! hub/RPC path (issue 1451). Where `SubstrateHarness`
 //! (`aether-harness-substrate`'s in-process harness) drives the substrate
-//! over a loopback channel, `FleetBench`
+//! over a loopback channel, `FleetHarness`
 //! drives the *actual* hub → RPC → forked-headless-substrate stack: it
 //! boots a hub-shaped passive chassis (`RpcServerCapability` +
 //! `EngineServer` + `TraceDispatchCapability`), connects a raw-frame
@@ -12,7 +12,7 @@
 //! MCP-JSON front and carry the regressions an agent hits when driving
 //! a live engine.
 //!
-//! `FleetBench` is sync and raw-frame — the same wire protocol
+//! `FleetHarness` is sync and raw-frame — the same wire protocol
 //! `aether-mcp` speaks, with the async/JSON front stripped — so the
 //! harness pulls no tokio into any consumer's dev graph. Scenario suites
 //! take it as a dev-dependency; the forked headless chassis binary and
@@ -30,7 +30,7 @@
 // its heartbeat the same way.
 #![allow(clippy::print_stderr)]
 // The harness reads its process-level test knobs (AETHER_REQUIRE_RUNTIME,
-// the AETHER_FLEETBENCH_* budgets, AETHER_FLEET_BENCH_HEADLESS_BIN)
+// the AETHER_HARNESS_FLEET_* budgets, AETHER_HARNESS_FLEET_HEADLESS_BIN)
 // straight from the environment — test-harness tuning, not cap config —
 // and hand-hashes wire mailbox paths (`mailbox_id_from_path`), the
 // sanctioned wire-`Call`-forwarding use.
@@ -90,14 +90,14 @@ const READ_REARM: Duration = Duration::from_secs(2);
 /// port-readiness signal. Kept comfortably above the hub's connect budget
 /// so the hub returns a clean `Err` first rather than the client tripping
 /// this backstop. Generous over a debug-build cold start under CPU
-/// pressure; overridable via `AETHER_FLEETBENCH_SPAWN_CAP_SECS`.
+/// pressure; overridable via `AETHER_HARNESS_FLEET_SPAWN_CAP_SECS`.
 const DEFAULT_SPAWN_CAP_SECS: u64 = 60;
 
 /// Default reply backstop (seconds): the deadlock/livelock cap a settled
 /// mail chain never reaches, so a slow-but-healthy reply under a saturated
 /// `nextest --workspace` run isn't called dead (issue 2064, mirroring
 /// #2062's 300 s settlement default). Overridable via
-/// `AETHER_FLEETBENCH_REPLY_CAP_SECS`.
+/// `AETHER_HARNESS_FLEET_REPLY_CAP_SECS`.
 const DEFAULT_REPLY_CAP_SECS: u64 = 300;
 
 /// Lower a seconds budget to a `Duration`, mapping `0` to the
@@ -115,16 +115,16 @@ pub fn cap_from_secs(secs: u64) -> Duration {
 }
 
 /// Resolve the steady-state reply backstop from
-/// `AETHER_FLEETBENCH_REPLY_CAP_SECS` (default [`DEFAULT_REPLY_CAP_SECS`];
+/// `AETHER_HARNESS_FLEET_REPLY_CAP_SECS` (default [`DEFAULT_REPLY_CAP_SECS`];
 /// `0` → wait forever).
 fn reply_cap() -> Duration {
-    cap_from_secs(env_secs("AETHER_FLEETBENCH_REPLY_CAP_SECS", DEFAULT_REPLY_CAP_SECS))
+    cap_from_secs(env_secs("AETHER_HARNESS_FLEET_REPLY_CAP_SECS", DEFAULT_REPLY_CAP_SECS))
 }
 
-/// Resolve the cold-start backstop from `AETHER_FLEETBENCH_SPAWN_CAP_SECS`
+/// Resolve the cold-start backstop from `AETHER_HARNESS_FLEET_SPAWN_CAP_SECS`
 /// (default [`DEFAULT_SPAWN_CAP_SECS`]; `0` → wait forever).
 fn spawn_cap() -> Duration {
-    cap_from_secs(env_secs("AETHER_FLEETBENCH_SPAWN_CAP_SECS", DEFAULT_SPAWN_CAP_SECS))
+    cap_from_secs(env_secs("AETHER_HARNESS_FLEET_SPAWN_CAP_SECS", DEFAULT_SPAWN_CAP_SECS))
 }
 
 /// Interval between [`poll_until`] attempts — short enough to settle
@@ -138,19 +138,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// cold start under a saturated `nextest --workspace` run, the same
 /// CPU-pressure regime [`DEFAULT_SPAWN_CAP_SECS`] covers, so a
 /// slow-but-healthy fork that registers late is not called dead.
-/// Overridable via `AETHER_FLEETBENCH_POLL_SECS`.
+/// Overridable via `AETHER_HARNESS_FLEET_POLL_SECS`.
 const DEFAULT_POLL_SECS: u64 = 30;
 
 static STORE_ROOT_NONCE: AtomicU64 = AtomicU64::new(0);
 
-/// Resolve the in-test poll budget from `AETHER_FLEETBENCH_POLL_SECS`
+/// Resolve the in-test poll budget from `AETHER_HARNESS_FLEET_POLL_SECS`
 /// (default [`DEFAULT_POLL_SECS`]; `0` → wait forever).
 fn poll_budget() -> Duration {
-    cap_from_secs(env_secs("AETHER_FLEETBENCH_POLL_SECS", DEFAULT_POLL_SECS))
+    cap_from_secs(env_secs("AETHER_HARNESS_FLEET_POLL_SECS", DEFAULT_POLL_SECS))
 }
 
 /// Poll `predicate` every `POLL_INTERVAL` until it returns `true` or
-/// the `AETHER_FLEETBENCH_POLL_SECS` budget elapses; returns whether it became true. Replaces
+/// the `AETHER_HARNESS_FLEET_POLL_SECS` budget elapses; returns whether it became true. Replaces
 /// the per-test `for _ in 0..N { … sleep }` loops whose fixed iteration
 /// counts flake under CI contention: the budget is wall-clock and
 /// generous, so a starved fork that registers late still passes, while a
@@ -192,7 +192,7 @@ pub fn is_rearm_timeout(err: &FrameError) -> bool {
 
 /// One driven wire `Call` and the kinds that came back, recorded in
 /// order. This is the first-class object the deferred agent-benchmark
-/// slots into: an agent emits a sequence of calls, `FleetBench` records
+/// slots into: an agent emits a sequence of calls, `FleetHarness` records
 /// them here, and the benchmark scores the recorded trace against the
 /// expected one.
 #[derive(Debug, Clone)]
@@ -210,7 +210,7 @@ pub struct CallRecord {
     pub reply_kinds: Vec<KindId>,
 }
 
-/// The `dist/manifest.json` slice `FleetBench` reads: the wasm component
+/// The `dist/manifest.json` slice `FleetHarness` reads: the wasm component
 /// map (`stem → components/<stem>.wasm`) and the chassis bin map
 /// (`name → bin/<name>`), both relative to `dist/`. A `Deserialize` view
 /// rather than a mirror of xtask's `Serialize` `Manifest` — serde
@@ -246,11 +246,11 @@ enum DistComponentRequirement {
 }
 
 /// The three `LoadResult::Ok` fields a loaded component exposes:
-/// the assigned trampoline `mailbox_id` (the [`replace`](FleetBench::replace)
+/// the assigned trampoline `mailbox_id` (the [`replace`](FleetHarness::replace)
 /// target), the rendered ADR-0099 lineage `addr`, and the advertised
 /// receive-side `capabilities`. Returned by
-/// [`load_full`](FleetBench::load_full) for the lifecycle rows that need
-/// the mailbox id the thin [`load`](FleetBench::load) delegate discards.
+/// [`load_full`](FleetHarness::load_full) for the lifecycle rows that need
+/// the mailbox id the thin [`load`](FleetHarness::load) delegate discards.
 pub struct Loaded {
     pub mailbox_id: MailboxId,
     pub addr: String,
@@ -260,7 +260,7 @@ pub struct Loaded {
 /// A booted hub chassis plus a connected, handshaken raw-frame client.
 /// Forked engines are tracked so [`Drop`] terminates each one — a
 /// scenario leaves no orphaned substrate behind.
-pub struct FleetBench {
+pub struct FleetHarness {
     /// Kept alive for the lifetime of the harness; dropping it tears the
     /// hub caps down.
     _chassis: PassiveChassis<TestChassis>,
@@ -275,7 +275,7 @@ pub struct FleetBench {
     store_root: PathBuf,
 }
 
-impl FleetBench {
+impl FleetHarness {
     /// Boot the hub-shaped passive chassis, connect a client
     /// `TcpStream`, and complete the `Hello`/`HelloAck` handshake.
     pub fn start() -> Self {
@@ -771,11 +771,11 @@ impl FleetBench {
                     let waited = start.elapsed();
                     assert!(
                         waited < budget,
-                        "fleetbench {gate} gate wedged: call {cid} to {mailbox:?} did not settle \
+                        "fleetharness {gate} gate wedged: call {cid} to {mailbox:?} did not settle \
                          within the {budget:?} backstop — a healthy chain never reaches this cap, \
                          so this is a genuine deadlock/livelock",
                     );
-                    eprintln!("fleetbench: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending");
+                    eprintln!("fleetharness: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending");
                 }
                 // Any other read error is a real failure (connection closed,
                 // decode), not a slow chain.
@@ -789,7 +789,7 @@ impl FleetBench {
             &mut self.stream,
             &WireFrame::Hello(Hello {
                 wire_version: WIRE_VERSION,
-                peer: PeerKind::Client { client_name: "fleetbench".into(), client_version: "0.0.1".into() },
+                peer: PeerKind::Client { client_name: "fleetharness".into(), client_version: "0.0.1".into() },
             }),
         )
         .expect("test setup: writing the client Hello succeeds");
@@ -938,7 +938,7 @@ impl FleetBench {
     }
 }
 
-impl Drop for FleetBench {
+impl Drop for FleetHarness {
     fn drop(&mut self) {
         let engines = mem::take(&mut self.spawned);
         for engine in engines {
@@ -959,7 +959,7 @@ fn isolate_store_root() -> PathBuf {
     let temp_dir = env::temp_dir();
     loop {
         let nonce = STORE_ROOT_NONCE.fetch_add(1, Ordering::Relaxed);
-        // Each `FleetBench` in a process gets a fresh nonce-tagged root,
+        // Each `FleetHarness` in a process gets a fresh nonce-tagged root,
         // and `create_dir` claims it before `boot_hub` opens
         // `root/binaries`, so a concurrent same-process harness can't race on
         // the path.
@@ -967,7 +967,7 @@ fn isolate_store_root() -> PathBuf {
         // The hub's binary store (ADR-0115) is isolated under
         // `root/binaries` too, but that dir rides
         // `EngineConfig::binary_store_dir` (ADR-0090).
-        let root = temp_dir.join(format!("aether-fleetbench-{}-{nonce}", process::id()));
+        let root = temp_dir.join(format!("aether-fleetharness-{}-{nonce}", process::id()));
         match fs::create_dir(&root) {
             Ok(()) => return root,
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
@@ -1008,7 +1008,7 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: PeerKind::Substrate {
-                engine_name: "fleetbench-hub".into(),
+                engine_name: "fleetharness-hub".into(),
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
@@ -1030,13 +1030,13 @@ fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
 }
 
 /// Workspace `dist/` directory: `CARGO_MANIFEST_DIR`
-/// (`crates/aether-fleet-bench`) up two levels to the workspace
+/// (`crates/aether-harness-fleet`) up two levels to the workspace
 /// root, then `dist/`.
 fn dist_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
 }
 
-/// The chassis bin `FleetBench` forks — the `dist/manifest.json` chassis
+/// The chassis bin `FleetHarness` forks — the `dist/manifest.json` chassis
 /// key and the `dist/bin/` filename `cargo xtask dist` packages.
 const HEADLESS_BIN: &str = "aether-substrate-headless";
 
@@ -1044,7 +1044,7 @@ const HEADLESS_BIN: &str = "aether-substrate-headless";
 /// prebuilt headless chassis binary, bypassing the dist manifest — for
 /// pointing the harness at a fresh `target/` build without re-running
 /// `cargo xtask dist`.
-pub const HEADLESS_BIN_ENV: &str = "AETHER_FLEET_BENCH_HEADLESS_BIN";
+pub const HEADLESS_BIN_ENV: &str = "AETHER_HARNESS_FLEET_HEADLESS_BIN";
 
 /// Classify a raw `dist/manifest.json` for the presence of chassis bin
 /// `bin` — the chassis-map twin of [`classify_dist_manifest`], reusing
@@ -1060,7 +1060,7 @@ pub fn classify_dist_chassis(raw: &str, bin: &str) -> DistManifestClassification
     })
 }
 
-/// The `aether-substrate-headless` binary [`FleetBench::spawn_headless`]
+/// The `aether-substrate-headless` binary [`FleetHarness::spawn_headless`]
 /// forks: the [`HEADLESS_BIN_ENV`] override when set, else the chassis
 /// entry in `dist/manifest.json` resolved under `dist/` — the tree
 /// `cargo xtask dist` packages. `CARGO_BIN_EXE_*` is not an option here:
@@ -1204,7 +1204,7 @@ fn component_wasm_path_result(stem: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Stem-aware dist precondition guard for `FleetBench` tests that load
+/// Stem-aware dist precondition guard for `FleetHarness` tests that load
 /// component wasm. Returns `true` when the manifest exists, parses, and
 /// contains `stem`; returns `false` after printing a `skipping:` line
 /// locally when the precondition is not met. Under
@@ -1252,7 +1252,7 @@ pub fn component_wasm_path(stem: &str) -> PathBuf {
 /// decisions the re-arm read loop owns (issue 2064) and the dist
 /// manifest classification / skip-or-panic guard. The wire round-trip
 /// and the cold-start/reply backstops themselves are exercised by the
-/// booted `FleetBench` scenarios (`fleetbench_spawn`, `fleetbench_mail`,
+/// booted `FleetHarness` scenarios (`fleetharness_spawn`, `fleetharness_mail`,
 /// … in `aether-substrate-bundle`).
 #[cfg(test)]
 mod tests {

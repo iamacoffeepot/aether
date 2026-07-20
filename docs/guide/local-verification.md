@@ -105,7 +105,7 @@ Choose the smallest command that crosses the changed boundary:
 | Lints | `cargo clippy --all-targets -- -D warnings` |
 | Wasm/component boundary | the owning fixture/build command from CI |
 | SubstrateHarness behavior | focused integration test target |
-| Hub/process boundary | focused FleetBench test with required dist artifacts |
+| Hub/process boundary | focused FleetHarness test with required dist artifacts |
 
 Do not run the full expensive matrix merely to appear thorough. Do not skip a
 focused boundary test when it is the only proof of the changed contract.
@@ -124,7 +124,7 @@ multiple worktrees at one shared `CARGO_TARGET_DIR`: incremental metadata can
 surface a dependency compiled from another branch and produce phantom errors.
 
 Tests must also isolate namespace roots, ports, artifact stores, and other host
-resources. Prefer SubstrateHarness/FleetBench builders and allocated temp roots over
+resources. Prefer SubstrateHarness/FleetHarness builders and allocated temp roots over
 process-global environment mutation.
 
 ## Hooks are guardrails

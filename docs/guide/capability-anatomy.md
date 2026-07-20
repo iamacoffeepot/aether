@@ -187,7 +187,7 @@ pretend capability.
 | actor mail/reply/settlement | focused SubstrateHarness test |
 | marker/runtime feature split | `cargo build -p <cap> --no-default-features` |
 | chassis composition/resource | chassis/SubstrateHarness integration test |
-| hub/process routing | FleetBench |
+| hub/process routing | FleetHarness |
 
 Shared RPC test echo code currently lives under
 `aether-rpc/src/server/test_echo.rs`; engine/proxy tests reuse it.

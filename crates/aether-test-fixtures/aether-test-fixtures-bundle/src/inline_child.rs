@@ -13,7 +13,7 @@
 //! addressed to that alias to the child.
 //!
 //! Both actors answer the same `InlineProbe` query with an `InlineEcho`
-//! tagged by `who` handled it, so a `FleetBench` scenario can send to the
+//! tagged by `who` handled it, so a `FleetHarness` scenario can send to the
 //! child's address over the real wire and assert the *child* (not the
 //! parent) replied. `InlineChild` is `Instanced` (the `spawn_inline_child`
 //! bound); it is not in the `export!` list because an inline child is
@@ -123,7 +123,7 @@ impl WasmActor for InlineParent {
 
     /// ADR-0114: co-locate an `InlineChild` under the `Named` subname
     /// `widget`. The returned alias `MailboxId` is fire-and-forget here —
-    /// the `FleetBench` addresses the child by its rendered lineage name.
+    /// the `FleetHarness` addresses the child by its rendered lineage name.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let _ = ctx.spawn_inline_child::<InlineChild>(Subname::Named("widget"), &());
     }

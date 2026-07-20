@@ -119,7 +119,7 @@ inventory = { workspace = true }
 # the journal (`aether_bloomery` value types encoded with `aether_data::wire`)
 # and use temp-file databases for the reopen tests. The cross-process recovery
 # test dials the `bloomery` bin over raw wire frames (`aether_codec::frame`,
-# the FleetBench pattern).
+# the FleetHarness pattern).
 aether-codec = { path = "../aether-codec" }
 # The mirror demo (#3459 step 7) drives the projection against the adapter's
 # in-process `FakeGithub` double, so it needs no token or network.

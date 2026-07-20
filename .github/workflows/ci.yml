@@ -149,7 +149,7 @@ jobs:
     # rationale on the clippy job.
     # volume=150gb: the default ~40 GB root volume ENOSPCs under the
     # full runner image + the --all-features workspace test build +
-    # fleetbench's per-test substrate copies; the volume lives only
+    # fleetharness's per-test substrate copies; the volume lives only
     # for the job so the size is effectively free. (The GitHub-hosted
     # side survives on the free-disk-space reclaim step instead.)
     runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
@@ -312,12 +312,12 @@ jobs:
           path: target/substrate-harness-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
-      - name: Upload FleetBench TCP load metrics
+      - name: Upload FleetHarness TCP load metrics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fleetbench-tcp-load-metrics
-          path: target/fleetbench-metrics/tcp-load.json
+          name: fleetharness-tcp-load-metrics
+          path: target/fleetharness-metrics/tcp-load.json
           if-no-files-found: ignore
           retention-days: 7
       # Hit-rate visibility while the S3 backend beds in; harmless to

@@ -1,4 +1,4 @@
-//! `FleetBench` inline-child proof (issue 1916, ADR-0114 step 5): load a
+//! `FleetHarness` inline-child proof (issue 1916, ADR-0114 step 5): load a
 //! component that spawns a co-located `InlineChild` in `wire`, then send
 //! to the child's first-class lineage address **by name over the real
 //! `WireFrame::Call` wire** (the same path MCP `send_mail` uses) and
@@ -8,7 +8,7 @@
 //! no-ops to the parent).
 //!
 //! This is the headline contract: the inline child is a first-class
-//! address reached directly over the wire. `FleetBench` exercises that
+//! address reached directly over the wire. `FleetHarness` exercises that
 //! `Call` path end-to-end; the in-engine mechanism (alias routing,
 //! recipient-as-identity, the guest membrane) is covered by the unit
 //! tests in `aether-actor` / `aether-substrate`.
@@ -20,7 +20,7 @@ mod tests {
         InlineProbe,
     };
 
-    use aether_fleet_bench::{FleetBench, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load `inline_child`, address its inline child by the rendered
     /// lineage name over the wire, and assert the child replied
@@ -30,13 +30,13 @@ mod tests {
     /// purely on the routed recipient, and that both replies settle
     /// home over the real RPC stack.
     #[test]
-    fn fleetbench_inline_child_handles_mail_to_its_lineage_address() {
+    fn fleetharness_inline_child_handles_mail_to_its_lineage_address() {
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let parent_addr = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent").addr;
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent").addr;
 
         // The child's first-class lineage address: the parent's
         // rendered name plus the inline-child node (ADR-0114).
@@ -44,7 +44,7 @@ mod tests {
 
         // Mail to the child's address: the membrane demuxes it to the
         // co-located child, which replies with the CHILD marker.
-        let child_replies = bench.send(engine, &child_addr, &InlineProbe);
+        let child_replies = harness.send(engine, &child_addr, &InlineProbe);
         let child_reply = match child_replies.as_slice() {
             [one] => one,
             other => panic!("the inline child should reply exactly once, got {}", other.len()),
@@ -59,7 +59,7 @@ mod tests {
         // Control: the same kind to the parent's own address is
         // unaffected — the membrane no-ops to the parent, which
         // replies with the PARENT marker.
-        let parent_replies = bench.send(engine, &parent_addr, &InlineProbe);
+        let parent_replies = harness.send(engine, &parent_addr, &InlineProbe);
         let parent_reply = match parent_replies.as_slice() {
             [one] => one,
             other => panic!("the parent should reply exactly once, got {}", other.len()),
@@ -74,7 +74,7 @@ mod tests {
 
         // The child query round-trip is recorded as a CallRecord with
         // the InlineEcho reply, routed to the forked engine.
-        let child_record = bench
+        let child_record = harness
             .calls()
             .iter()
             .find(|record| record.request_kind == InlineProbe::ID && record.reply_kinds == vec![InlineEcho::ID])
@@ -95,21 +95,21 @@ mod tests {
     /// merely reset) and the post-replace query would have gone
     /// unanswered by the child at all.
     #[test]
-    fn fleetbench_inline_configured_child_state_survives_replace() {
+    fn fleetharness_inline_configured_child_state_survives_replace() {
         const BUMPS: u32 = 3;
         if !dist_component_available("aether_test_fixtures_bundle") {
             return;
         }
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let parent = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
         let child_addr = format!("{}/aether.embedded:widget", parent.addr);
 
         // Baseline: the child's durable counter starts from the spawn
         // config's `initial`, not `0` — proving the spawn-time config path
         // (not yet the reconstruct path this issue fixes) decoded the real
         // bytes.
-        let baseline = count(&mut bench, engine, &child_addr);
+        let baseline = count(&mut harness, engine, &child_addr);
         assert_eq!(
             baseline, CONFIGURED_CHILD_INITIAL,
             "the child's counter starts from the spawn config's initial value",
@@ -118,9 +118,9 @@ mod tests {
         // Move the state off both the config default (0) and the spawn
         // config's initial value.
         for _ in 0..BUMPS {
-            bench.send(engine, &child_addr, &Bump);
+            harness.send(engine, &child_addr, &Bump);
         }
-        let moved = count(&mut bench, engine, &child_addr);
+        let moved = count(&mut harness, engine, &child_addr);
         let expected_moved = CONFIGURED_CHILD_INITIAL + BUMPS;
         assert_eq!(
             moved, expected_moved,
@@ -130,20 +130,25 @@ mod tests {
         // Same-stem in-place replace (ADR-0022): the common in-place
         // rebuild where both sides are the same SDK build (per issue
         // 2690's design notes on the composite bundle's transience).
-        bench.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.configured_parent");
+        harness.replace_export(
+            engine,
+            parent.mailbox_id,
+            "aether_test_fixtures_bundle",
+            "test.inline.configured_parent",
+        );
 
         // The moved state — not the config default, not the spawn
         // config's initial value, not silently dropped — survives the
         // swap: the fix this issue makes.
-        let after_replace = count(&mut bench, engine, &child_addr);
+        let after_replace = count(&mut harness, engine, &child_addr);
         assert_eq!(after_replace, expected_moved, "the typed-config child's moved state survives replace_component");
     }
 
     /// Send a `CountQuery` to `recipient` and decode the single
     /// `CountReport` reply's `count`. Shared by the reload gate's
     /// baseline / post-bump / post-replace reads.
-    fn count(bench: &mut FleetBench, engine: aether_data::EngineId, recipient: &str) -> u32 {
-        let replies = bench.send(engine, recipient, &CountQuery);
+    fn count(harness: &mut FleetHarness, engine: aether_data::EngineId, recipient: &str) -> u32 {
+        let replies = harness.send(engine, recipient, &CountQuery);
         let reply = match replies.as_slice() {
             [one] => one,
             other => panic!("CountQuery should get exactly one reply, got {}", other.len()),

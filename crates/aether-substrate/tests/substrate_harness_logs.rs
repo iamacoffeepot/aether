@@ -38,7 +38,7 @@ mod tests {
     /// `SubstrateHarness::log_tail` until the `typed_send_alive` info entry appears,
     /// then re-query past the returned cursor and assert it is not
     /// re-yielded — the in-process counterpart to
-    /// `fleetbench_actor_logs_surface_the_probe_first_tick_entry`.
+    /// `fleetharness_actor_logs_surface_the_probe_first_tick_entry`.
     #[test]
     fn substrate_harness_actor_logs_surface_the_probe_first_tick_entry() {
         let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {

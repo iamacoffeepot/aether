@@ -124,11 +124,11 @@ proptest.workspace = true
 # the standing precedent.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # iamacoffeepot/aether#3781: the fleet actor-log tail test
-# (`fleetbench_logs`, ActorLogRing tail + since cursor over RPC) rehomed
+# (`fleetharness_logs`, ActorLogRing tail + since cursor over RPC) rehomed
 # here next to the SubstrateHarness-side log test — same ring, both
 # transports. Drives the real hub → RPC → forked-headless stack; another
 # permitted test-target dev-dep cycle back through the bundle.
-aether-fleet-bench = { path = "../aether-fleet-bench" }
+aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The tests address the component host and probe the fs cap's registry
 # rows by its namespace/kinds.
 aether-actor = { path = "../aether-actor" }

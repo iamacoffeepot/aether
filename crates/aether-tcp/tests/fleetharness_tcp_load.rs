@@ -1,6 +1,6 @@
 //! Real-process load and churn coverage for both `aether.tcp` session
 //! lineages. Correctness is exact; timing and handler-cost values are emitted
-//! only as diagnostics in `target/fleetbench-metrics/tcp-load.json`.
+//! only as diagnostics in `target/fleetharness-metrics/tcp-load.json`.
 
 mod tests {
     use std::collections::BTreeSet;
@@ -27,11 +27,11 @@ mod tests {
     };
     use serde::Serialize;
 
-    use aether_fleet_bench::{FleetBench, dist_component_available, poll_until};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, poll_until};
 
     const FIXTURE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_EXPORT: &str = "test.tcp_load_probe";
-    const LISTENER_NAME: &str = "fleetbench-tcp-load";
+    const LISTENER_NAME: &str = "fleetharness-tcp-load";
 
     const DEFAULT_CONNECTIONS: usize = 3;
     const DEFAULT_FRAMES_PER_CONNECTION: usize = 8;
@@ -418,8 +418,8 @@ mod tests {
         phases: Vec<TcpLoadPhaseMetrics>,
     }
 
-    fn snapshot(bench: &mut FleetBench, engine: EngineId, probe_addr: &str) -> TcpLoadSnapshot {
-        let replies = bench.send(engine, probe_addr, &CollectTcpLoadSnapshot);
+    fn snapshot(harness: &mut FleetHarness, engine: EngineId, probe_addr: &str) -> TcpLoadSnapshot {
+        let replies = harness.send(engine, probe_addr, &CollectTcpLoadSnapshot);
         let reply = match replies.as_slice() {
             [reply] => reply,
             other => panic!("CollectTcpLoadSnapshot expected one reply, got {}", other.len()),
@@ -430,7 +430,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments, reason = "phase assertion keeps its independent exact dimensions explicit")]
     fn wait_for_sessions(
-        bench: &mut FleetBench,
+        harness: &mut FleetHarness,
         engine: EngineId,
         probe_addr: &str,
         topology: TcpLoadTopology,
@@ -446,7 +446,7 @@ mod tests {
         let mut matched = None;
         assert!(
             poll_until(|| {
-                let current = snapshot(bench, engine, probe_addr);
+                let current = snapshot(harness, engine, probe_addr);
                 assert!(
                     current.connect_failures.is_empty(),
                     "outbound connect failures: {:?}",
@@ -495,7 +495,7 @@ mod tests {
     }
 
     fn wait_for_live_accepted_paths(
-        bench: &mut FleetBench,
+        harness: &mut FleetHarness,
         engine: EngineId,
         first_index: u64,
         connection_count: usize,
@@ -505,7 +505,7 @@ mod tests {
                 (0..connection_count).all(|offset| {
                     let offset = u64::try_from(offset).expect("connection offset fits u64");
                     let path = accepted_path(&format!("conn-{}", first_index + offset));
-                    let replies = bench.send(engine, &path, &CostTail { kind: None });
+                    let replies = harness.send(engine, &path, &CostTail { kind: None });
                     matches!(replies.as_slice(), [reply] if reply.kind == CostTailResult::ID)
                 })
             }),
@@ -521,8 +521,8 @@ mod tests {
         format!("aether.tcp/aether.tcp.session:{session_name}")
     }
 
-    fn sample_live_session(bench: &mut FleetBench, engine: EngineId, path: &str) -> Vec<TcpHandlerCostMetrics> {
-        let replies = bench.send(engine, path, &CostTail { kind: None });
+    fn sample_live_session(harness: &mut FleetHarness, engine: EngineId, path: &str) -> Vec<TcpHandlerCostMetrics> {
+        let replies = harness.send(engine, path, &CostTail { kind: None });
         let reply = match replies.as_slice() {
             [reply] => reply,
             other => panic!("live CostTail at {path:?} expected one reply, got {}", other.len()),
@@ -551,7 +551,7 @@ mod tests {
     }
 
     fn assert_sessions_closed(
-        bench: &mut FleetBench,
+        harness: &mut FleetHarness,
         engine: EngineId,
         probe_addr: &str,
         sessions: &[TcpLoadSessionSnapshot],
@@ -559,7 +559,7 @@ mod tests {
         let names = sessions.iter().map(|session| session.session_name.clone()).collect::<BTreeSet<_>>();
         assert!(
             poll_until(|| {
-                snapshot(bench, engine, probe_addr)
+                snapshot(harness, engine, probe_addr)
                     .sessions
                     .iter()
                     .filter(|session| names.contains(&session.session_name))
@@ -569,8 +569,8 @@ mod tests {
         );
     }
 
-    fn assert_tombstoned(bench: &mut FleetBench, engine: EngineId, path: &str) {
-        let replies = bench.send(engine, path, &CostTail { kind: None });
+    fn assert_tombstoned(harness: &mut FleetHarness, engine: EngineId, path: &str) {
+        let replies = harness.send(engine, path, &CostTail { kind: None });
         assert!(
             replies.is_empty(),
             "CostTail at formerly-live tombstoned path {path:?} must settle with zero replies, got {}",
@@ -589,8 +589,8 @@ mod tests {
         );
     }
 
-    fn bind_listener(bench: &mut FleetBench, engine: EngineId, consumer: aether_data::MailboxId) -> u16 {
-        let replies = bench.send(
+    fn bind_listener(harness: &mut FleetHarness, engine: EngineId, consumer: aether_data::MailboxId) -> u16 {
+        let replies = harness.send(
             engine,
             "aether.tcp",
             &BindListener {
@@ -612,8 +612,8 @@ mod tests {
         }
     }
 
-    fn list_listeners(bench: &mut FleetBench, engine: EngineId) -> ListListenersResult {
-        let replies = bench.send(engine, "aether.tcp", &ListListeners::default());
+    fn list_listeners(harness: &mut FleetHarness, engine: EngineId) -> ListListenersResult {
+        let replies = harness.send(engine, "aether.tcp", &ListListeners::default());
         let reply = match replies.as_slice() {
             [reply] => reply,
             other => panic!("ListListeners expected one reply, got {}", other.len()),
@@ -621,8 +621,8 @@ mod tests {
         ListListenersResult::decode_from_bytes(&reply.payload).expect("decode ListListenersResult")
     }
 
-    fn unbind_listener(bench: &mut FleetBench, engine: EngineId) {
-        let replies = bench.send(engine, "aether.tcp", &UnbindListener { listener_name: LISTENER_NAME.to_owned() });
+    fn unbind_listener(harness: &mut FleetHarness, engine: EngineId) {
+        let replies = harness.send(engine, "aether.tcp", &UnbindListener { listener_name: LISTENER_NAME.to_owned() });
         let reply = match replies.as_slice() {
             [reply] => reply,
             other => panic!("UnbindListener expected one reply, got {}", other.len()),
@@ -647,36 +647,36 @@ mod tests {
     fn write_report(report: &TcpLoadReport) {
         let json = serde_json::to_string_pretty(report).expect("serialize tcp load metrics");
         println!("{json}");
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fleetbench-metrics/tcp-load.json");
-        fs::create_dir_all(path.parent().expect("metrics path has parent")).expect("create fleetbench metrics dir");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fleetharness-metrics/tcp-load.json");
+        fs::create_dir_all(path.parent().expect("metrics path has parent")).expect("create fleetharness metrics dir");
         fs::write(&path, format!("{json}\n")).expect("write tcp load metrics artifact");
     }
 
     #[test]
     #[allow(clippy::too_many_lines, reason = "one scenario preserves the accepted/outbound/churn lifecycle ordering")]
-    fn fleetbench_tcp_load_covers_accepted_outbound_and_churn() {
+    fn fleetharness_tcp_load_covers_accepted_outbound_and_churn() {
         if !dist_component_available(FIXTURE_STEM) {
             return;
         }
         let profile = TcpLoadProfile::resolve();
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
-        let probe = bench.load_full_export(engine, FIXTURE_STEM, FIXTURE_EXPORT);
-        assert!(list_listeners(&mut bench, engine).listeners.is_empty(), "listener baseline is empty");
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let probe = harness.load_full_export(engine, FIXTURE_STEM, FIXTURE_EXPORT);
+        assert!(list_listeners(&mut harness, engine).listeners.is_empty(), "listener baseline is empty");
         assert!(
-            bench
+            harness
                 .send(engine, &probe.addr, &ConfigureTcpLoadProbe { listener_name: LISTENER_NAME.to_owned() },)
                 .is_empty(),
             "probe configuration is fire-and-settle",
         );
-        let local_port = bind_listener(&mut bench, engine, probe.mailbox_id);
+        let local_port = bind_listener(&mut harness, engine, probe.mailbox_id);
 
-        let accepted_baseline = snapshot(&mut bench, engine, &probe.addr);
+        let accepted_baseline = snapshot(&mut harness, engine, &probe.addr);
         let accepted_before = session_names(&accepted_baseline, TcpLoadTopology::Accepted);
         let accepted_first_index = next_accepted_index(&accepted_baseline);
         let accepted_started = Instant::now();
         let accepted_streams = connect_accepted_streams(local_port, profile.connections);
-        wait_for_live_accepted_paths(&mut bench, engine, accepted_first_index, profile.connections);
+        wait_for_live_accepted_paths(&mut harness, engine, accepted_first_index, profile.connections);
         let accepted_workers = start_workers(
             accepted_streams.into_iter(),
             SocketWorkerTopology::Accepted,
@@ -687,7 +687,7 @@ mod tests {
         let accepted_traffic = accepted_workers.await_traffic(profile.connections, profile.timeout());
         let accepted_elapsed = accepted_started.elapsed();
         let accepted_sessions = wait_for_sessions(
-            &mut bench,
+            &mut harness,
             engine,
             &probe.addr,
             TcpLoadTopology::Accepted,
@@ -698,7 +698,7 @@ mod tests {
         );
         let accepted_costs = accepted_sessions
             .iter()
-            .flat_map(|session| sample_live_session(&mut bench, engine, &accepted_path(&session.session_name)))
+            .flat_map(|session| sample_live_session(&mut harness, engine, &accepted_path(&session.session_name)))
             .collect();
         let accepted_results = accepted_workers.close_and_join();
         assert_worker_close(
@@ -706,17 +706,17 @@ mod tests {
             profile.frames_per_connection,
             profile.frames_per_connection * profile.frame_bytes,
         );
-        assert_sessions_closed(&mut bench, engine, &probe.addr, &accepted_sessions);
+        assert_sessions_closed(&mut harness, engine, &probe.addr, &accepted_sessions);
         for session in &accepted_sessions {
-            assert_tombstoned(&mut bench, engine, &accepted_path(&session.session_name));
+            assert_tombstoned(&mut harness, engine, &accepted_path(&session.session_name));
         }
 
         let outbound_listener = TcpListener::bind("127.0.0.1:0").expect("bind outbound load listener");
         let outbound_addr = outbound_listener.local_addr().expect("read outbound listener addr");
-        let outbound_before = session_names(&snapshot(&mut bench, engine, &probe.addr), TcpLoadTopology::Outbound);
+        let outbound_before = session_names(&snapshot(&mut harness, engine, &probe.addr), TcpLoadTopology::Outbound);
         let outbound_started = Instant::now();
         assert!(
-            bench
+            harness
                 .send(
                     engine,
                     &probe.addr,
@@ -739,7 +739,7 @@ mod tests {
         let outbound_traffic = outbound_workers.await_traffic(profile.connections, profile.timeout());
         let outbound_elapsed = outbound_started.elapsed();
         let outbound_sessions = wait_for_sessions(
-            &mut bench,
+            &mut harness,
             engine,
             &probe.addr,
             TcpLoadTopology::Outbound,
@@ -750,7 +750,7 @@ mod tests {
         );
         let outbound_costs = outbound_sessions
             .iter()
-            .flat_map(|session| sample_live_session(&mut bench, engine, &outbound_path(&session.session_name)))
+            .flat_map(|session| sample_live_session(&mut harness, engine, &outbound_path(&session.session_name)))
             .collect();
         let outbound_results = outbound_workers.close_and_join();
         assert_worker_close(
@@ -758,20 +758,20 @@ mod tests {
             profile.frames_per_connection,
             profile.frames_per_connection * profile.frame_bytes,
         );
-        assert_sessions_closed(&mut bench, engine, &probe.addr, &outbound_sessions);
+        assert_sessions_closed(&mut harness, engine, &probe.addr, &outbound_sessions);
         for session in &outbound_sessions {
-            assert_tombstoned(&mut bench, engine, &outbound_path(&session.session_name));
+            assert_tombstoned(&mut harness, engine, &outbound_path(&session.session_name));
         }
 
         let churn_started = Instant::now();
         let mut churn_traffic = Vec::new();
         let mut churn_costs = Vec::new();
         for round in 0..profile.churn_rounds {
-            let baseline = snapshot(&mut bench, engine, &probe.addr);
+            let baseline = snapshot(&mut harness, engine, &probe.addr);
             let before = session_names(&baseline, TcpLoadTopology::Accepted);
             let first_index = next_accepted_index(&baseline);
             let streams = connect_accepted_streams(local_port, profile.connections);
-            wait_for_live_accepted_paths(&mut bench, engine, first_index, profile.connections);
+            wait_for_live_accepted_paths(&mut harness, engine, first_index, profile.connections);
             let workers = start_workers(
                 streams.into_iter(),
                 SocketWorkerTopology::Accepted,
@@ -781,7 +781,7 @@ mod tests {
             );
             churn_traffic.extend(workers.await_traffic(profile.connections, profile.timeout()));
             let sessions = wait_for_sessions(
-                &mut bench,
+                &mut harness,
                 engine,
                 &probe.addr,
                 TcpLoadTopology::Accepted,
@@ -791,21 +791,21 @@ mod tests {
                 profile.frame_bytes,
             );
             for session in &sessions {
-                churn_costs.extend(sample_live_session(&mut bench, engine, &accepted_path(&session.session_name)));
+                churn_costs.extend(sample_live_session(&mut harness, engine, &accepted_path(&session.session_name)));
             }
             let results = workers.close_and_join();
             assert_worker_close(&results, 1, profile.frame_bytes);
-            assert_sessions_closed(&mut bench, engine, &probe.addr, &sessions);
+            assert_sessions_closed(&mut harness, engine, &probe.addr, &sessions);
             for session in &sessions {
-                assert_tombstoned(&mut bench, engine, &accepted_path(&session.session_name));
+                assert_tombstoned(&mut harness, engine, &accepted_path(&session.session_name));
             }
 
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind outbound churn listener");
             let addr = listener.local_addr().expect("read outbound churn addr");
-            let before = session_names(&snapshot(&mut bench, engine, &probe.addr), TcpLoadTopology::Outbound);
+            let before = session_names(&snapshot(&mut harness, engine, &probe.addr), TcpLoadTopology::Outbound);
             let prefix = format!("churn-outbound-{round}");
             assert!(
-                bench
+                harness
                     .send(
                         engine,
                         &probe.addr,
@@ -822,7 +822,7 @@ mod tests {
                 start_outbound_workers(&listener, profile.connections, 1, profile.frame_bytes, profile.timeout());
             churn_traffic.extend(workers.await_traffic(profile.connections, profile.timeout()));
             let sessions = wait_for_sessions(
-                &mut bench,
+                &mut harness,
                 engine,
                 &probe.addr,
                 TcpLoadTopology::Outbound,
@@ -832,19 +832,19 @@ mod tests {
                 profile.frame_bytes,
             );
             for session in &sessions {
-                churn_costs.extend(sample_live_session(&mut bench, engine, &outbound_path(&session.session_name)));
+                churn_costs.extend(sample_live_session(&mut harness, engine, &outbound_path(&session.session_name)));
             }
             let results = workers.close_and_join();
             assert_worker_close(&results, 1, profile.frame_bytes);
-            assert_sessions_closed(&mut bench, engine, &probe.addr, &sessions);
+            assert_sessions_closed(&mut harness, engine, &probe.addr, &sessions);
             for session in &sessions {
-                assert_tombstoned(&mut bench, engine, &outbound_path(&session.session_name));
+                assert_tombstoned(&mut harness, engine, &outbound_path(&session.session_name));
             }
         }
         let churn_elapsed = churn_started.elapsed();
 
-        unbind_listener(&mut bench, engine);
-        assert!(list_listeners(&mut bench, engine).listeners.is_empty(), "listener map returns to its baseline");
+        unbind_listener(&mut harness, engine);
+        assert!(list_listeners(&mut harness, engine).listeners.is_empty(), "listener map returns to its baseline");
 
         write_report(&TcpLoadReport {
             build_revision: build_revision(),

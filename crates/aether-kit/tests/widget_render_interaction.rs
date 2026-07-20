@@ -22,7 +22,7 @@
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure. Rendered
 //! output can only be asserted on the GPU path, so this is correctly `SubstrateHarness`
-//! (`FleetBench` is headless).
+//! (`FleetHarness` is headless).
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
 // "skipping: ..." alongside `test ... ok` (issue 891).

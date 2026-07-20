@@ -1,21 +1,21 @@
-//! `FleetBench` `spawn_substrate` proof (issue 1451, Tier-A): fork+exec a
+//! `FleetHarness` `spawn_substrate` proof (issue 1451, Tier-A): fork+exec a
 //! real `aether-substrate-headless` through the hub's engines cap, then
 //! confirm the hub registered it in the supervised fleet.
 
 mod tests {
-    use aether_fleet_bench::FleetBench;
+    use aether_harness_fleet::FleetHarness;
 
     /// Spawn a headless substrate and assert it shows up in
     /// `ListEngines` with a fresh heartbeat — the real-process
     /// analog of the `spawn_substrate` → `list_engines` agent
     /// workflow.
     #[test]
-    fn fleetbench_spawns_and_lists_a_real_headless_substrate() {
-        let mut bench = FleetBench::start();
-        let engine = bench.spawn_headless();
+    fn fleetharness_spawns_and_lists_a_real_headless_substrate() {
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
         let engine_id = engine.0.to_string();
 
-        let engines = bench.list_engines();
+        let engines = harness.list_engines();
         let descriptor = engines
             .iter()
             .find(|e| e.engine_id == engine_id)

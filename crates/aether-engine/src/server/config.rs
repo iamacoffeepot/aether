@@ -14,9 +14,9 @@ use std::time::Duration;
 /// retrying its startup dial before giving up (issue 2072). A debug
 /// cold start fork+exec+bind can stretch well past a healthy
 /// localhost dial when many substrates come up at once and
-/// oversubscribe the cores (e.g. a concurrent `FleetBench` fleet), so
+/// oversubscribe the cores (e.g. a concurrent `FleetHarness` fleet), so
 /// the budget is generous — far longer than a single cold start
-/// needs, comfortably under the `FleetBench` client's own spawn cap so
+/// needs, comfortably under the `FleetHarness` client's own spawn cap so
 /// the hub returns a clean `Err` first rather than the client
 /// tripping its backstop. `0` is the wait-forever sentinel.
 const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;

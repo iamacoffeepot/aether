@@ -197,7 +197,7 @@ mod tests {
         // (`cargo xtask dist` first) — `CARGO_BIN_EXE_*` only resolves inside
         // the package that defines the binary, and this suite lives in
         // `aether-engine`, not the bundle.
-        let headless = aether_fleet_bench::headless_bin_path().to_string_lossy().into_owned();
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
         // Bootstrap the binary store with the headless bin so the cap
         // resolves a `default` selector to it (ADR-0115, #1954). Before
         // `boot()` — init reads the bootstrap env. Cleaned on success.

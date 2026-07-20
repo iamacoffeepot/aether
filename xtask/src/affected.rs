@@ -35,7 +35,7 @@ use crate::inventory::{CHASSIS_PACKAGE, discover_behaviors, discover_components}
 /// time, so its tests need the `cargo xtask dist` pre-build even when
 /// they load no wasm at all (the aether-engine fleet tests are the
 /// canonical case).
-const FLEET_BENCH_PACKAGE: &str = "aether-fleet-bench";
+const HARNESS_FLEET_PACKAGE: &str = "aether-harness-fleet";
 
 /// Paths whose change invalidates the selection premise: they shape the
 /// dependency graph, the toolchain, the test configuration, or the
@@ -130,7 +130,7 @@ pub fn run(args: &AffectedArgs) -> Result<()> {
         // A dist consumer needs the `cargo xtask dist` pre-build for either
         // artifact class it packages: component/behavior wasm (a dep on a
         // wasm source — the tests execute that crate's wasm), or the chassis
-        // binaries (a dep on aether-fleet-bench, whose harness forks the
+        // binaries (a dep on aether-harness-fleet, whose harness forks the
         // dist-resolved `aether-substrate-headless`; issue #3766).
         let wasm_consumers: BTreeSet<String> = metadata
             .packages
@@ -198,10 +198,10 @@ fn select(
 
 /// Whether a package's dependency list makes its tests need the
 /// `cargo xtask dist` pre-build: a dep on a wasm source means the tests
-/// execute that crate's wasm; a dep on [`FLEET_BENCH_PACKAGE`] means the
+/// execute that crate's wasm; a dep on [`HARNESS_FLEET_PACKAGE`] means the
 /// tests fork the dist-resolved headless chassis binary (issue #3766).
 fn is_dist_consumer<'a>(mut dependency_names: impl Iterator<Item = &'a str>, wasm_sources: &BTreeSet<String>) -> bool {
-    dependency_names.any(|name| wasm_sources.contains(name) || name == FLEET_BENCH_PACKAGE)
+    dependency_names.any(|name| wasm_sources.contains(name) || name == HARNESS_FLEET_PACKAGE)
 }
 
 /// Whether the `cargo xtask dist` wasm pre-build must run before the
@@ -357,16 +357,16 @@ mod tests {
     }
 
     #[test]
-    fn fleet_bench_dependents_are_dist_consumers() {
+    fn harness_fleet_dependents_are_dist_consumers() {
         // Issue #3766: a fleet-test host (aether-engine is the canonical
         // case) loads no wasm, but its tests fork the dist-resolved
-        // headless chassis binary through aether-fleet-bench — the
+        // headless chassis binary through aether-harness-fleet — the
         // consumer predicate must catch the harness dep on its own,
         // else the tests hard-fail in CI with no `dist/bin` to fork.
         let wasm_sources = string_set(&["aether-test-fixtures-bundle"]);
         assert!(
-            is_dist_consumer(["aether-fleet-bench"].into_iter(), &wasm_sources),
-            "a fleet-bench dependent needs the dist pre-build without any wasm dep"
+            is_dist_consumer(["aether-harness-fleet"].into_iter(), &wasm_sources),
+            "a harness-fleet dependent needs the dist pre-build without any wasm dep"
         );
         assert!(
             is_dist_consumer(["aether-test-fixtures-bundle"].into_iter(), &wasm_sources),

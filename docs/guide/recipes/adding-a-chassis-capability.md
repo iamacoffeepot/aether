@@ -257,7 +257,7 @@ Where that line goes depends on which chassis should carry the cap:
   *membership* has to track the chain by hand.
 - **The substrate-harness chassis** — the in-process harness does not call
   `with_common_caps`; it has a separate, reduced builder chain in
-  [`crates/aether-harness-substrate/src/chassis.rs`][substratebench];
+  [`crates/aether-harness-substrate/src/chassis.rs`][substrateharness];
   add the capability there too when scenarios should drive it, and thread any
   required config through `SubstrateHarnessEnv`. `TextCapability` is registered in both
   compositions for this reason.
@@ -283,7 +283,7 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 [adr70]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md
 [adr71]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md
 [common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs
-[substratebench]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs
+[substrateharness]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs
 
 ## 5. Passive cap or driver?
 
@@ -346,7 +346,7 @@ for the same path still reply to their respective sessions.
 
 For an end-to-end check across the real in-process boundaries — rendering, the
 frame loop, and the capabilities explicitly installed by its reduced builder —
-drive [SubstrateHarness](../testing/substratebench-and-fleetbench.md) instead. It boots that
+drive [SubstrateHarness](../testing/substrateharness-and-fleetharness.md) instead. It boots that
 chassis from a Rust thread and sends mail through the same encode path the MCP
 tool uses. Supply namespace roots when the scenario needs `aether.fs`.
 

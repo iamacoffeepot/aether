@@ -134,7 +134,7 @@ A good regression test:
 4. asserts the result/side effect, not elapsed sleep;
 5. fails with the pending-root evidence if the chain wedges.
 
-Use FleetBench only when the suspected cause requires the hub/RPC/process
+Use FleetHarness only when the suspected cause requires the hub/RPC/process
 boundary. A pure hold or actor queue bug is easier to localize in SubstrateHarness.
 
 ## 7. Verify the fix
@@ -154,5 +154,5 @@ with a clear root-discovery and ring-truncation contract; do not write prose as
 though it already shipped.
 
 Continue with [Inspection and debugging](../operating/inspect-and-debug.md) for
-the broader symptom tree and [SubstrateHarness and FleetBench](../testing/substratebench-and-fleetbench.md)
+the broader symptom tree and [SubstrateHarness and FleetHarness](../testing/substrateharness-and-fleetharness.md)
 for reproduction boundaries.
