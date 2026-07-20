@@ -63,6 +63,25 @@ bytemuck = { workspace = true, features = ["derive"] }
 # on native targets; the macro path needs `::inventory` reachable.
 # Tests run native, so an unconditional dev-dep is fine.
 inventory = { workspace = true }
+# iamacoffeepot/aether#3777: the addressing fleet tests
+# (`fleetbench_inline_child`, `fleetbench_matrix_sweep`) rehomed here
+# from aether-substrate-bundle — their subject is the lineage addressing
+# this crate's SDK defines. They drive the real hub → RPC →
+# forked-headless stack through `FleetBench` (a dev-dep cycle back
+# through the bundle, which cargo permits for the test-target graph —
+# same precedent as aether-kit).
+aether-fleet-bench = { path = "../aether-fleet-bench" }
+# The shared `Kind` definitions the fleet tests decode + assert against;
+# also pinned (`use … as _`) so the fixture kinds' `inventory::submit!`
+# descriptor entries land in each test binary.
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+# iamacoffeepot/aether#3766: the fixture crate whose wasm the fleet tests
+# load (`test.inline.*` / `test.matrix.*` / `test.source_observer`
+# exports), declared so the source→consumer coupling is cargo-visible —
+# determinator re-runs these tests when the fixture changes, and xtask's
+# wasm-consumer rule fires the dist pre-build. The tests locate the built
+# wasm by stem, so the code never imports the crate.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
 
 # ADR-0021 input subscriptions smoke. Resolves all four substrate input
 # kinds and broadcasts a `demo.input_observed` per event so
@@ -79,6 +98,13 @@ crate-type = ["cdylib"]
 [[example]]
 name = "hello"
 crate-type = ["cdylib"]
+
+# cargo-machete's source-only scan cannot see the wasm-coupling dev-dep:
+# the fleet tests load the fixture's built wasm by stem rather than
+# importing the crate, so the cargo edge exists purely for determinator /
+# dist-pre-build visibility (iamacoffeepot/aether#3766).
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true
