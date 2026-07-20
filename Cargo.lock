@@ -107,8 +107,13 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-behavior-derive",
+ "aether-component",
  "aether-data",
  "aether-fs",
+ "aether-kinds",
+ "aether-kit",
+ "aether-substrate-bench",
+ "aether-test-fixtures-behavior",
  "serde",
  "tracing",
  "wasmi",
