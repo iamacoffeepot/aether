@@ -80,6 +80,9 @@ aether-rpc = { path = "../aether-rpc" }
 # the dep is both a real import and the #3766 source→consumer coupling
 # that keeps determinator and the dist pre-build honest.
 aether-kit = { path = "../aether-kit" }
+# `fleetbench_component_store` assembles a boot-manifest JSON file for
+# the spawn-with-manifest path (called fully-qualified, no `use`).
+serde_json = { workspace = true }
 # Integration tests see only the lib + dev-deps, so the SDK / data /
 # kind-vocabulary crates the tests import need their own dev entries even
 # though the lib already depends on them.
