@@ -98,6 +98,10 @@ aether-render = { path = "../aether-render", features = ["runtime"] }
 # iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`; every
 # chassis composes `TcpCapability`, so the bundle takes the runtime face.
 aether-tcp = { path = "../aether-tcp" }
+# iamacoffeepot/aether#3754: the game player-gateway cap was extracted to
+# `aether-game`; every chassis registers the `GameGatewayCapability` identity
+# and boots it from `GameGatewayConfig`, so the bundle takes the runtime face.
+aether-game = { path = "../aether-game" }
 # iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`;
 # the chassis bundle wires `TextCapability`, so it needs the runtime half
 # (fontdue TTF parse / rasterize + the substrate-side runtime).

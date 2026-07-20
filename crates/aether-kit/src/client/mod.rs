@@ -19,11 +19,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::game::{
-    CellPosition, GridBounds, MoveDirection, MoveIntent, PlayerFrame, Spawn, TickBundle, WIRE_VERSION,
-};
 use aether_codec::frame::encode_frame;
 use aether_data::{Kind, MailboxId, wire};
+use aether_game::{CellPosition, GridBounds, MoveDirection, MoveIntent, PlayerFrame, Spawn, TickBundle, WIRE_VERSION};
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, Render, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
@@ -508,7 +506,7 @@ fn push_quad(out: &mut Vec<DrawTriangle>, rect: RenderRect, y: f32, color: Rgb) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_capabilities::game::{EntityState, StateSummary};
+    use aether_game::{EntityState, StateSummary};
 
     fn bundle(tick: u64, superseded_through: u64, entities: Vec<EntityState>) -> TickBundle {
         TickBundle { tick, superseded_through, trajectory: Vec::new(), summary: StateSummary { tick, entities } }

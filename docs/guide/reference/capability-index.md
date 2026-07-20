@@ -27,7 +27,7 @@ fallback or omits the runtime.
 | `aether.engine` | hub fleet and artifact control | `aether-engine/src` | [Engine fleet](../operating/engine-fleet.md) |
 | `aether.anthropic` | Messages API and CLI text generation | `aether-capabilities/src/anthropic` | [Content generation](../systems/content-generation.md) |
 | `aether.gemini` | image and music generation | `aether-capabilities/src/gemini` | [Content generation](../systems/content-generation.md) |
-| `aether.game.gateway` | trusted player/session-to-sim binding | `aether-capabilities/src/game` | [Player sessions](../systems/player-sessions.md) |
+| `aether.game.gateway` | trusted player/session-to-sim binding | `aether-game/src` | [Player sessions](../systems/player-sessions.md) |
 | `aether.test_bench` | deterministic test-chassis advance/control | `aether-capabilities/src/test_bench` | [TestBench](../testing/testbench-and-fleetbench.md) |
 
 Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,

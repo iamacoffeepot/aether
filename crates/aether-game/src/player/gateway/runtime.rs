@@ -12,8 +12,8 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{BindListenerResult, GameGatewayCapability, MonitorNotice, SessionClosed, SessionData, TickBundle};
-use crate::game::player::PlayerSessionActor;
-use crate::game::player::session::PlayerSessionConfig;
+use crate::player::PlayerSessionActor;
+use crate::player::session::PlayerSessionConfig;
 use aether_tcp::{TcpCapability, TcpNativeExt, TcpSessionActor};
 
 const DEFAULT_LISTENER_NAME: &str = "players";
@@ -115,7 +115,7 @@ impl NativeActor for GameGatewayCapability {
                 if listener_name == state.listener_name =>
             {
                 tracing::info!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     listener = %listener_name,
                     listener_mailbox = %listener_id,
                     local_port,
@@ -124,7 +124,7 @@ impl NativeActor for GameGatewayCapability {
             }
             BindListenerResult::Ok { listener_name, .. } => {
                 tracing::warn!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     expected = %state.listener_name,
                     actual = %listener_name,
                     "game gateway ignored a bind result for another listener",
@@ -132,7 +132,7 @@ impl NativeActor for GameGatewayCapability {
             }
             BindListenerResult::Err { addr, reason } => {
                 tracing::warn!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     %addr,
                     %reason,
                     "game gateway listener bind failed",
@@ -145,7 +145,7 @@ impl NativeActor for GameGatewayCapability {
     fn on_session_data(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SessionData) {
         if !state.is_trusted_tcp_session(ctx, &mail.session_name) {
             tracing::warn!(
-                target: "aether_substrate::game",
+                target: "aether_game",
                 session = %mail.session_name,
                 "game gateway dropped session data outside its configured tcp lineage",
             );
@@ -159,7 +159,7 @@ impl NativeActor for GameGatewayCapability {
 
         if state.sessions.len() >= state.max_active_sessions {
             tracing::warn!(
-                target: "aether_substrate::game",
+                target: "aether_game",
                 session = %mail.session_name,
                 max_active_sessions = state.max_active_sessions,
                 "game gateway refused a tcp session at capacity",
@@ -197,7 +197,7 @@ impl NativeActor for GameGatewayCapability {
             Ok(child) => child,
             Err(error) => {
                 tracing::warn!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     session = %session_name,
                     error = ?error,
                     "player session spawn failed",
@@ -210,7 +210,7 @@ impl NativeActor for GameGatewayCapability {
             Ok(monitor) => monitor,
             Err(error) => {
                 tracing::warn!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     session = %session_name,
                     error = ?error,
                     "player session monitor failed",
@@ -239,7 +239,7 @@ impl NativeActor for GameGatewayCapability {
     #[handler::single]
     fn on_tick_bundle(state: &mut Self::State, ctx: &mut NativeCtx<'_>, bundle: TickBundle) {
         if ctx.source_mailbox() != state.turn_sim_mailbox {
-            tracing::warn!(target: "aether_substrate::game", "game gateway dropped facts from an unconfigured sender");
+            tracing::warn!(target: "aether_game", "game gateway dropped facts from an unconfigured sender");
             return;
         }
 

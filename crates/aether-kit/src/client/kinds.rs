@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 
-use aether_capabilities::game::{CellPosition, GridBounds};
+use aether_game::{CellPosition, GridBounds};
 use serde::{Deserialize, Serialize};
 
 /// `aether.kit.client.config` — outbound server and toy-world presentation

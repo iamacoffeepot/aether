@@ -500,7 +500,7 @@ impl DesktopChassis {
             anthropic,
             gemini,
             contentgen,
-            game_gateway: aether_capabilities::GameGatewayConfig::default(),
+            game_gateway: aether_game::GameGatewayConfig::default(),
         };
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`

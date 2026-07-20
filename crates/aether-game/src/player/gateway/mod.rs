@@ -1,6 +1,6 @@
 //! Player gateway identity: one TCP consumer and fact-sink fanout point.
 
-use crate::game::TickBundle;
+use crate::TickBundle;
 use aether_kinds::MonitorNotice;
 use aether_tcp::{BindListenerResult, SessionClosed, SessionData};
 

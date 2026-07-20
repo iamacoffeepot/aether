@@ -27,12 +27,13 @@ use aether_audio::AudioConfigLayer;
 use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::{
-    ComponentHostCapability, ComponentHostConfig, GameGatewayCapability, GameGatewayConfig, HttpCapability,
-    HttpServerCapability, HttpServerConfig, http::HttpConfig,
+    ComponentHostCapability, ComponentHostConfig, HttpCapability, HttpServerCapability, HttpServerConfig,
+    http::HttpConfig,
 };
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
 use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
+use aether_game::{GameGatewayCapability, GameGatewayConfig};
 use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLayer};
 use aether_input::{InputCapability, InputConfig};
 use aether_inventory::InventoryCapability;
@@ -1108,7 +1109,7 @@ mod tests {
     #[test]
     fn common_manifest_includes_the_inert_game_gateway() {
         use aether_actor::Addressable;
-        use aether_capabilities::GameGatewayCapability;
+        use aether_game::GameGatewayCapability;
 
         assert!(
             super::common_cap_namespaces().contains(&GameGatewayCapability::NAMESPACE),

@@ -1,6 +1,6 @@
 //! Per-connection player-session identity.
 
-use crate::game::{PollResult, TickBundle};
+use crate::{PollResult, TickBundle};
 use aether_tcp::{SessionClosed, SessionData};
 #[cfg(feature = "runtime")]
 use alloc::string::String;

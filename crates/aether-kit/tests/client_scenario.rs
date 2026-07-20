@@ -9,11 +9,10 @@ use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_capabilities::ComponentHostCapability;
-use aether_capabilities::GameGatewayConfig;
 use aether_capabilities::component::resolve_embedded;
-use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, MailboxId};
+use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
 use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit::{

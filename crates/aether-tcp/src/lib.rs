@@ -49,11 +49,12 @@
 //! configs (`config`), and the send-side [`TcpWasmExt`] / [`TcpNativeExt`]
 //! facades (`route`).
 //!
-//! `aether-capabilities` keeps a dependency on this crate for the `game`
-//! module's player networking, which names these types directly. That is
-//! a downward husk→leaf dependency, not a facade: the husk consumes the
-//! types and re-exports none of them, so a downstream crate that wants
-//! TCP deps here and never re-enters the capabilities graph.
+//! The `aether-game` player tier is the in-repo consumer that names these
+//! types directly (its gateway is a listener consumer and its sessions
+//! write framed bytes through [`TcpNativeExt`]). That is a downward
+//! leaf→leaf dependency, not a facade: `aether-capabilities` holds no
+//! dependency on this crate, so a downstream crate that wants TCP deps
+//! here and never enters the capabilities graph.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the

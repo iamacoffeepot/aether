@@ -41,6 +41,11 @@ aether-input = { path = "../aether-input", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
+# iamacoffeepot/aether#3754: the game player-gateway cap was extracted to
+# `aether-game`. The kit's sim and client actors share its tick-native intent /
+# fact vocabulary; kit is a wasm guest, so it takes the marker-only identity
+# face.
+aether-game = { path = "../aether-game", default-features = false }
 # iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`. The
 # client actor dials and streams over it; kit is a wasm guest, so it takes the
 # marker-only identity face.
