@@ -1,0 +1,72 @@
+[package]
+name = "aether-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.game` player-gateway capability (ADR-0144, ADR-0145), extracted
+# from `aether-capabilities` (iamacoffeepot/aether#3754) as a leaf per-cap
+# crate of the arc that dissolves the capabilities monolith. Owns the
+# tick-native intent / fact vocabulary a simulation and its clients share
+# (`kinds`) plus the trusted player session tier (`player`) — the
+# `GameGatewayCapability` singleton that binds one `aether.tcp` listener
+# and fans facts out, the per-connection `PlayerSessionActor`, and the
+# recipient-free `PlayerFrame` wire vocabulary.
+#
+# It is a leaf: no other capability depends on it, so `aether-capabilities`
+# keeps no dependency on this crate and re-exports none of its names. It
+# depends downward on `aether-tcp` for the transport its sessions ride —
+# the gateway is a TCP consumer and the session actors write framed bytes
+# through `TcpNativeExt`.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the mail
+# kinds, the `PlayerFrame` vocabulary, and the wasm-safe actor identities
+# with their `HandlesKind` markers compile always-on; the
+# `aether_substrate`-typed runtime half (the gateway's session map and
+# supervision, the per-session frame codec and intent allowlist) is gated
+# so a marker-only wasm guest can address
+# `ctx.actor::<GameGatewayCapability>()` without dragging the substrate
+# through.
+
+[features]
+default = ["runtime"]
+runtime = ["aether-tcp/runtime", "dep:aether-substrate", "dep:aether-codec", "dep:tracing"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# The transport the player sessions ride: the gateway is an `aether.tcp`
+# listener consumer and the session runtime writes framed bytes back
+# through `TcpNativeExt`. The always-on half supplies the session /
+# listener kinds the `#[actor]` `HandlesKind` markers name.
+aether-tcp = { path = "../aether-tcp", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# ADR-0072 length-prefix stream framing — the session runtime encodes each
+# outbound `PlayerFrame` with `aether_codec::frame::encode_frame`. Rides the
+# `runtime` feature; the framing lives on the native I/O half.
+aether-codec = { path = "../aether-codec", optional = true }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime.
+aether-substrate = { path = "../aether-substrate", optional = true }
+# The gateway and session runtimes log session admit/close transitions and
+# warn on a rejected lineage, a disallowed intent, or a decode failure.
+# Rides the `runtime` feature — those log sites are native-only.
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+
+# The `Kind`/`Schema` derives and the `#[actor]` macro each emit a
+# `cfg(not(target_family = "wasm"))`-gated `inventory::submit!`, so native
+# builds need `inventory` reachable; wasm guests don't (the gate skips
+# emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The player-tier unit tests boot a chassis through the canonical
+# `aether_substrate::testing` fixture, enabled by the substrate
+# `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+[lints]
+workspace = true

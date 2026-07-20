@@ -33,7 +33,6 @@ extern crate alloc;
 extern crate self as aether_capabilities;
 
 pub mod component;
-pub mod game;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
 // the `aether.http` egress client and the `aether.http.server` inbound
 // server (a native singleton modeled on `RpcServerCapability` — binds a
@@ -65,9 +64,6 @@ pub use http::HttpServerHandle;
 pub use http::HttpServerOverlay;
 pub use http::{HttpServerCapability, HttpServerConfig};
 
-#[cfg(feature = "runtime")]
-pub use game::GameGatewayConfig;
-pub use game::{GameGatewayCapability, PlayerSessionActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]

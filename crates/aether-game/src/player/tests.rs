@@ -25,9 +25,7 @@ use aether_substrate::testing::{TestChassis, fresh_substrate_and_rx};
 use serde::{Deserialize, Serialize};
 
 use super::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
-use crate::game::{
-    GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary, TickBundle,
-};
+use crate::{GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary, TickBundle};
 use aether_tcp::{BindListener, ListListeners, ListListenersResult, TcpCapability, TcpListenerActor, TcpSessionActor};
 
 const LISTENER_NAME: &str = "players";

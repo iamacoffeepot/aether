@@ -187,12 +187,10 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities-derive",
- "aether-codec",
  "aether-data",
  "aether-fs",
  "aether-kinds",
  "aether-substrate",
- "aether-tcp",
  "aether-trace",
  "base64",
  "bytemuck",
@@ -343,6 +341,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-game"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-codec",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "aether-tcp",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "aether-gemini"
 version = "0.3.0-alpha"
 dependencies = [
@@ -409,6 +422,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-fs",
+ "aether-game",
  "aether-input",
  "aether-kinds",
  "aether-lifecycle",
@@ -564,6 +578,7 @@ dependencies = [
  "aether-data",
  "aether-engine",
  "aether-fs",
+ "aether-game",
  "aether-gemini",
  "aether-input",
  "aether-inventory",

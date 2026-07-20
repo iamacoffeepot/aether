@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         capture_queue: capture_queue.clone(),
         namespace_roots: Some(namespace_roots),
         clipboard_mode: TestBenchClipboardMode::InMemory,
-        game_gateway: aether_capabilities::GameGatewayConfig::default(),
+        game_gateway: aether_game::GameGatewayConfig::default(),
         // Issue #2509: the standalone binary is an env-reading edge, so
         // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including
         // the `0 → wait forever` sentinel) — the same knob the settlement

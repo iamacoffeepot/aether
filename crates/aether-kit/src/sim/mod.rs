@@ -10,7 +10,7 @@
 //! [`Tick`] applies the bin in stable entity-id order. Every completed turn
 //! emits one atomic [`TickBundle`] and retains it in a bounded catch-up ring.
 
-pub use aether_capabilities::game::{
+pub use aether_game::{
     CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary,
     TickBundle, TrajectoryEvent, TrajectoryKind,
 };

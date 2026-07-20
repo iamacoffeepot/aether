@@ -84,10 +84,10 @@ plus the gateway/session policy.
 
 ## Change route
 
-- Simulation kinds: `crates/aether-capabilities/src/game/kinds.rs`
+- Simulation kinds: `crates/aether-game/src/kinds.rs`
 - Reference sim: `crates/aether-kit/src/sim/`
-- Gateway/session: `crates/aether-capabilities/src/game/player/`
-- Player frame: `crates/aether-capabilities/src/game/player/frame.rs`
+- Gateway/session: `crates/aether-game/src/player/`
+- Player frame: `crates/aether-game/src/player/frame.rs`
 - Reference client: `crates/aether-kit/src/client/`
 - Integration tests: `crates/aether-substrate-bundle/tests/player_gateway.rs`
 - Decisions: accepted ADR-0144; proposed ADR-0145

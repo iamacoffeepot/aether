@@ -12,8 +12,8 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{PlayerSessionActor, PlayerSessionConfig, PollResult, SessionClosed, SessionData, TickBundle};
-use crate::game::player::{PlayerFrame, WIRE_VERSION};
-use crate::game::{MoveIntent, Poll, Spawn};
+use crate::player::{PlayerFrame, WIRE_VERSION};
+use crate::{MoveIntent, Poll, Spawn};
 use aether_tcp::{TcpCapability, TcpNativeExt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,7 +169,7 @@ impl PlayerSessionState {
             PlayerFrame::Intent { kind, payload } if kind == Spawn::ID => {
                 let Some(mut spawn) = Spawn::decode_from_bytes(&payload) else {
                     tracing::warn!(
-                        target: "aether_substrate::game",
+                        target: "aether_game",
                         session = %self.session_name,
                         peer = %self.peer,
                         "player session dropped malformed spawn intent",
@@ -182,7 +182,7 @@ impl PlayerSessionState {
             PlayerFrame::Intent { kind, payload } if kind == MoveIntent::ID => {
                 let Some(mut intent) = MoveIntent::decode_from_bytes(&payload) else {
                     tracing::warn!(
-                        target: "aether_substrate::game",
+                        target: "aether_game",
                         session = %self.session_name,
                         peer = %self.peer,
                         "player session dropped malformed move intent",
@@ -194,7 +194,7 @@ impl PlayerSessionState {
             }
             PlayerFrame::Intent { kind, .. } => {
                 tracing::warn!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     session = %self.session_name,
                     peer = %self.peer,
                     kind = %kind,
@@ -239,7 +239,7 @@ impl PlayerSessionState {
             }
             Err(error) => {
                 tracing::warn!(
-                    target: "aether_substrate::game",
+                    target: "aether_game",
                     session = %self.session_name,
                     peer = %self.peer,
                     error = %error,

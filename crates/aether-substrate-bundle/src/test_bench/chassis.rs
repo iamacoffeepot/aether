@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
-use aether_capabilities::{GameGatewayCapability, GameGatewayConfig};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
+use aether_game::{GameGatewayCapability, GameGatewayConfig};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;

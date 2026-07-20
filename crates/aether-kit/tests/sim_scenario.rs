@@ -21,7 +21,7 @@ const ENTITY_ID: u64 = 41;
 
 #[test]
 fn sim_vocabulary_is_the_exact_lower_crate_wire_contract() {
-    use aether_capabilities::game::Spawn as CapabilitySpawn;
+    use aether_game::Spawn as CapabilitySpawn;
     use aether_kit::Spawn as RootSpawn;
 
     let lower = CapabilitySpawn { entity_id: 9, cell_x: -2, cell_z: 4 };

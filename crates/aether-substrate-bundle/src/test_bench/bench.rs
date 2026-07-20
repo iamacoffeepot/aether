@@ -41,8 +41,8 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Addressable;
-use aether_capabilities::GameGatewayConfig;
 use aether_fs::NamespaceRoots;
+use aether_game::GameGatewayConfig;
 use aether_render::{DrawTexturedQuads, RenderCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{

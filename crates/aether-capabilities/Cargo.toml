@@ -61,7 +61,6 @@ default = ["runtime"]
 runtime = [
     "dep:aether-substrate",
     "aether-fs/runtime",
-    "aether-tcp/runtime",
     "dep:base64",
     "dep:clap",
     "dep:confique",
@@ -86,7 +85,6 @@ runtime = [
 # compile fine for `wasm32-unknown-unknown` and carry the markers
 # wasm components rely on.
 aether-actor = { path = "../aether-actor" }
-aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 # The `aether.fs` cap lives in its own crate (iamacoffeepot/aether#3706).
 # Retained here identity-only for the rustdoc intra-doc links several cap
@@ -102,15 +100,6 @@ aether-fs = { path = "../aether-fs", default-features = false }
 # an unconditional dep leaves the wasm-header-only build unaffected.
 aether-capabilities-derive = { path = "../aether-capabilities-derive" }
 aether-kinds = { path = "../aether-kinds" }
-# iamacoffeepot/aether#3751: the `aether.tcp` cap was extracted to its own
-# `aether-tcp` crate. This is a downward husk→leaf dependency, not a facade:
-# the `game` player gateway / session actors name `TcpCapability`,
-# `TcpSessionActor`, and the session mail kinds directly, and this crate
-# re-exports none of them — a downstream crate that wants TCP deps on
-# `aether-tcp` and never re-enters the capabilities graph. It leaves with
-# `game`. `default-features = false` keeps the marker-only wasm build off the
-# tcp runtime; the `runtime` feature below forwards `aether-tcp/runtime`.
-aether-tcp = { path = "../aether-tcp", default-features = false }
 # `alloc` rides along for the wire-shaped kind types whose owned-`String` /
 # `Vec` fields need serde's alloc impls even in the marker-only isolated
 # build.
