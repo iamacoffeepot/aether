@@ -64,6 +64,12 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # ADR-0138: the store's component-manifest reader tests assemble minimal wasm
 # fixtures (custom sections only) with `wat`.
 wat = "1"
+# The fleet lifecycle suites (iamacoffeepot/aether#3779): `fleetbench_spawn` /
+# `fleetbench_terminate` boot the `FleetBench` harness over the real
+# hub → RPC → forked-headless stack, and `engines_cap` boots the cap by hand,
+# resolving the forked headless chassis through the harness's
+# `dist/manifest.json` helper (`cargo xtask dist` first).
+aether-fleet-bench = { path = "../aether-fleet-bench" }
 
 [lints]
 workspace = true
