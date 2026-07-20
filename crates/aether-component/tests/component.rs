@@ -1,4 +1,72 @@
-use super::*;
+//! Component-lifecycle scenarios (issue 430, rehomed per issue #3769):
+//! load + list, multi-actor export selection (ADR-0096 / ADR-0138),
+//! runtime sibling spawn (ADR-0097), drop, and `replace_component` with
+//! its dehydrate / rehydrate state carry (ADR-0022 / ADR-0101 /
+//! ADR-0113), each driven through a [`SubstrateBench`] composed with
+//! just the component host.
+//!
+//! Skipped when the fixture's wasm hasn't been built — `require_wasm`
+//! locates `target/wasm32-unknown-unknown/{release,debug}/<crate>.wasm`
+//! and skips with an `eprintln!` when it's absent. CI pre-builds the
+//! fixture wasm and sets `AETHER_REQUIRE_RUNTIME=1`, flipping the skip
+//! into a hard panic so a missing pre-build is loud.
+
+use std::fs;
+use std::path::Path;
+
+use aether_data::MailboxId;
+use aether_kinds::{
+    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, Ping, ReplaceComponent,
+    ReplaceResult,
+};
+use aether_substrate_bench::test_helpers::require_wasm;
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
+
+// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
+// entries are present in this test binary. Without the reference, the
+// host-target rlib's descriptor symbols can be stripped by the linker
+// and `aether_kinds::descriptors::all()` won't see fixture kinds.
+#[allow(unused_imports)]
+use aether_test_fixtures_kinds as _;
+
+/// Caller-supplied component name passed to `LoadComponent`.
+const PROBE_NAME: &str = "probe";
+
+/// Full trampoline address the substrate registers the loaded probe
+/// under: the component host `aether.component` `/`-joined to the
+/// trampoline node (ADR-0099 §4) — exactly what `LoadResult.name`
+/// reports. Mail destined for the probe goes here, not to the bare
+/// `PROBE_NAME` (which isn't a registered mailbox).
+fn probe_address() -> String {
+    use aether_actor::Addressable;
+    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
+}
+
+/// The kind the probe broadcasts to the bench observer once per tick.
+const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
+
+/// Load the probe into the bench via `execute`, blocking on the
+/// `LoadResult` reply so subsequent `advance` ops see a
+/// fully-instantiated and tick-subscribed component. Returns the
+/// loaded component's `MailboxId` (the trampoline address), which
+/// the drop / replace scenarios target.
+fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("load_component: {error}"),
+    }
+}
 
 /// The engine-local loaded-components query (issue 2020) lists a
 /// loaded component by its ADR-0099 lineage address. After loading the
@@ -8,10 +76,10 @@ use super::*;
 /// liveness from a log-ring side channel.
 #[test]
 fn list_components_reports_loaded_probe_lineage() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     load_probe(&mut bench, &wasm_path);
 
     let listed = bench
@@ -31,10 +99,10 @@ fn list_components_reports_loaded_probe_lineage() {
 /// `subscribe_input` → tick fanout path end-to-end.
 #[test]
 fn input_subscription_yields_one_tick_observed_per_advance() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     load_probe(&mut bench, &wasm_path);
 
     bench.execute(vec![("advance", BenchOp::advance(5))]).expect("advance 5");
@@ -57,10 +125,10 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
 /// emission end-to-end; selecting a non-entry export is the follow-on.
 #[test]
 fn multi_actor_module_loads_entry_export() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -104,10 +172,10 @@ fn multi_actor_module_loads_entry_export() {
 /// the right group was selected.
 #[test]
 fn multi_actor_module_loads_selected_export() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -145,10 +213,10 @@ fn multi_actor_module_loads_selected_export() {
 /// type. The error names the requested export.
 #[test]
 fn multi_actor_unknown_export_errors() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -180,10 +248,10 @@ fn multi_actor_unknown_export_errors() {
 /// resolves `Ok` through the unchanged ADR-0096 typed-init path.
 #[test]
 fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_defaultless") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_defaultless") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Bare load (no selector): a defaultless module rejects it, naming its
@@ -249,10 +317,10 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
 /// registered before the second send routes.
 #[test]
 fn multi_actor_sibling_spawn() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -311,10 +379,10 @@ fn multi_actor_sibling_spawn() {
 /// of `2`.
 #[test]
 fn multi_actor_sibling_spawn_twice_in_one_receive() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -360,10 +428,10 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
 /// reach it (ADR-0021 + ADR-0038 actor lifecycle).
 #[test]
 fn drop_component_silences_tick_echoes() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let probe_mbox = load_probe(&mut bench, &wasm_path);
 
     bench.execute(vec![("warm", BenchOp::advance(3))]).expect("pre-drop advance");
@@ -406,10 +474,10 @@ fn drop_component_silences_tick_echoes() {
 /// mailbox.
 #[test]
 fn replace_component_preserves_mailbox_identity() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let probe_mbox = load_probe(&mut bench, &wasm_path);
 
     bench.execute(vec![("warm", BenchOp::advance(3))]).expect("pre-replace advance");
@@ -472,12 +540,12 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 
     const FIXTURE_NAME: &str = "stateful_replace";
 
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
     let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load the `Counter` actor (a non-entry actor in the bundle) under the
@@ -560,12 +628,12 @@ fn replace_preserves_state_via_typed_state_kind() {
 
     const FIXTURE_NAME: &str = "stateful_replace_typed";
 
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
     let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let loaded = bench
@@ -641,15 +709,15 @@ fn typed_state_decode_miss_boots_fresh() {
 
     const TYPED_NAME: &str = "stateful_replace_typed";
 
-    let Some(typed_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
+    let Some(typed_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let Some(reshaped_path) = require_runtime("aether_test_fixtures_stateful_reshaped") else {
+    let Some(reshaped_path) = require_wasm("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
     let addr = format!("aether.component/{}:{TYPED_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
 
     let loaded = bench
@@ -733,12 +801,12 @@ fn childless_component_hot_reloads_unchanged() {
 
     const FIXTURE_NAME: &str = "stateful_replace";
 
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
     let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let loaded = bench

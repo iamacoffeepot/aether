@@ -57,6 +57,17 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = "package(=aether-kit) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
+# The `aether-component` integration binaries (rehomed from
+# aether-substrate-bundle, iamacoffeepot/aether#3769) each cold-load and
+# compile fixture wasm into a `SubstrateBench`, the same slow class as the
+# aether-kit override above — no GPU and no forked processes, so they stay
+# under the kit-style 120s cap rather than the bundle's 180s fork backstop.
+# `kind(test)` scopes the cap to the integration binaries; the crate's
+# `kind(lib)` unit tests keep the 60s default.
+[[profile.ci.overrides]]
+filter = "package(=aether-component) & kind(test)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
 # routing fleet suites) fork real debug `aether-substrate` processes and wait
 # for them to bind. Run concurrently they make timely progress but stretch

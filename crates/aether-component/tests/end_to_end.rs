@@ -15,15 +15,14 @@
 //! `NativeActor` trampoline, so the equivalent coverage runs through a
 //! real load + advance against a wasm component. Tracked under issue 648.
 
-use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::TickObserved;
 use std::fs;
 
@@ -54,10 +53,10 @@ fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
 /// outbound mail routing.
 #[test]
 fn tick_roundtrip_component_to_sink() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
@@ -82,10 +81,10 @@ fn tick_roundtrip_component_to_sink() {
 fn batched_ticks_preserve_per_mailbox_count() {
     const N: u32 = 200;
 
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
