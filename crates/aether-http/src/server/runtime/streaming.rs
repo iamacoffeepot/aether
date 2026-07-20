@@ -169,6 +169,7 @@ impl HttpShardState {
                 tx,
                 writer_thread: Some(writer_thread),
                 credit_outstanding: window,
+                ended: false,
                 pending_end: false,
                 keep_alive,
             },
@@ -221,17 +222,23 @@ impl HttpShardState {
     /// always follows the body in order.
     pub fn end_stream(&mut self, stream_id: u64) {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.ended = true;
             stream.pending_end = true;
         }
         self.try_flush_end(stream_id);
     }
 
     /// A writer slot freed (ADR-0128): grant one more credit to the handler
-    /// (unless the stream is ending, when no more chunks are expected) and
-    /// try to flush a deferred terminator.
+    /// (unless the stream has ended, when no more chunks are expected) and
+    /// try to flush a deferred terminator. The gate is `ended`, not
+    /// `pending_end`: the latter clears once the terminator is handed to the
+    /// writer, and a grant minted for a slot the still-draining body frees
+    /// after that hand-off would arrive at a handler that has moved on —
+    /// under a back-to-back request it hijacks or overruns the *next*
+    /// stream's window (issue 3797).
     pub fn replenish_credit(&mut self, ctx: &mut NativeCtx<'_>, stream_id: u64) {
         let grant = match self.streams.get_mut(&stream_id) {
-            Some(stream) if !stream.pending_end => {
+            Some(stream) if !stream.ended => {
                 stream.credit_outstanding += 1;
                 true
             }
