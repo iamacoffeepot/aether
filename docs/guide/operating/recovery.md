@@ -224,7 +224,7 @@ invalidating the successful engine capture, so inspect both results. See
 - Mail timeout projections: `crates/aether-mcp/src/tools/mail.rs`
 - Live kind/component lookup: `crates/aether-mcp/src/tools/state.rs` and
   `describe.rs`
-- Component lifecycle: `crates/aether-capabilities/src/component/` and
-  `crates/aether-capabilities/src/trampoline/runtime/replace.rs`
+- Component lifecycle: `crates/aether-component/src/component/` and
+  `crates/aether-component/src/trampoline/runtime/replace.rs`
 
 Return to the [Operating overview](index.md) for the normal loop.

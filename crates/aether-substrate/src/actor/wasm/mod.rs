@@ -22,7 +22,7 @@
 //!   guest's [`aether_actor::export!`] macro emits.
 //!
 //! The `WasmTrampoline` actor itself lives in
-//! `aether_capabilities::trampoline` (issue 654) — next to the
+//! `aether_component::trampoline` (issue 654) — next to the
 //! `ComponentHostCapability` that spawns it, so the trampoline's
 //! `Addressable::NAMESPACE` is the single cap-owned declaration of the
 //! `aether.embedded` prefix. The substrate still owns the

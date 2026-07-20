@@ -326,7 +326,7 @@ fn offset_cell(anchor: CellPos, offset: CellPos) -> CellPos {
 }
 
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {

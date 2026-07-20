@@ -32,7 +32,6 @@
 extern crate alloc;
 extern crate self as aether_capabilities;
 
-pub mod component;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
 // the `aether.http` egress client and the `aether.http.server` inbound
 // server (a native singleton modeled on `RpcServerCapability` — binds a
@@ -41,17 +40,7 @@ pub mod component;
 // shared wire kinds in `http/kinds.rs`.
 pub mod http;
 pub mod test_bench;
-pub mod trampoline;
 
-pub use component::{ComponentHostCapability, resolve_embedded};
-// `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
-// `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
-// the `feature = "runtime"` gate (only the runtime half names it), so it
-// re-exports only when that feature is on — a transport-only build sees the
-// cap stub via `ComponentHostCapability` for typed `ctx.actor::<...>()`
-// addressing without dragging the wasmtime stack in.
-#[cfg(feature = "runtime")]
-pub use component::ComponentHostConfig;
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /
@@ -65,6 +54,3 @@ pub use http::HttpServerOverlay;
 pub use http::{HttpServerCapability, HttpServerConfig};
 
 pub use test_bench::UnsupportedTestBenchCapability;
-pub use trampoline::WasmTrampoline;
-#[cfg(feature = "runtime")]
-pub use trampoline::WasmTrampolineConfig;

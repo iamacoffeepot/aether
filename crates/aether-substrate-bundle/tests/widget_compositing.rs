@@ -65,7 +65,7 @@ const TEXTURE_YELLOW: [u8; 3] = [255, 255, 0];
 /// `panel`, matching what `LoadResult.name` reports.
 fn panel_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// A flat-colored quad draw item in the widget's own local coordinates.

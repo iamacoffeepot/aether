@@ -52,7 +52,7 @@ const COMPONENT_NAME: &str = "mv";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
+    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
 }
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";

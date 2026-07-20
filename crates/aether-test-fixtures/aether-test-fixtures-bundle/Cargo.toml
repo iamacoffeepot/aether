@@ -21,6 +21,10 @@ aether-actor = { path = "../../aether-actor" }
 # compile for wasm without dragging the native runtime in. `render` opts
 # into the marker layer for `RenderCapability`; `audio` is unused here.
 aether-capabilities = { path = "../../aether-capabilities", default-features = false }
+# iamacoffeepot/aether#3756: the component cap was extracted to
+# `aether-component`; the http_handler fixture addresses
+# `ComponentHostCapability`. Marker face only.
+aether-component = { path = "../../aether-component", default-features = false }
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
 # `aether-lifecycle`; the cube / probe / ui_widget fixtures subscribe stage
 # signals through it. Marker face only.

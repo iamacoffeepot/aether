@@ -1161,6 +1161,6 @@ mod tests {
     #[test]
     fn selector_and_peer_component_name_are_exact() {
         assert_eq!(<TerrainWorkbench as aether_actor::Addressable>::NAMESPACE, "aether.kit.workbench");
-        assert_eq!(<aether_capabilities::WasmTrampoline as aether_actor::Addressable>::NAMESPACE, "aether.embedded");
+        assert_eq!(<aether_component::WasmTrampoline as aether_actor::Addressable>::NAMESPACE, "aether.embedded");
     }
 }

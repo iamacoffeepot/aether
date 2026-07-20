@@ -60,16 +60,15 @@ default = ["runtime"]
 # macro arm references. Always on for chassis.
 runtime = [
     "dep:aether-substrate",
+    "aether-component/runtime",
     "aether-fs/runtime",
     "dep:base64",
     "dep:clap",
     "dep:confique",
     "dep:httparse",
-    "dep:sha2",
     "dep:tracing",
     "dep:ureq",
     "dep:url",
-    "dep:wasmtime",
     # The retained `aether-trace` dep (below) is identity-only by default;
     # forward its runtime half so chassis / test builds of this crate boot
     # the `TraceDispatchCapability` runtime the `http` server tests exercise.
@@ -99,6 +98,15 @@ aether-fs = { path = "../aether-fs", default-features = false }
 # through the wasm-safe `http` module. Proc-macro crates are host-compiled, so
 # an unconditional dep leaves the wasm-header-only build unaffected.
 aether-capabilities-derive = { path = "../aether-capabilities-derive" }
+# The `aether.component` cap lives in its own crate
+# (iamacoffeepot/aether#3756). This is a genuine downward dependency, not a
+# facade: the remaining `http` cap names `ComponentHostCapability` when it
+# defers a request to a handler component (`http/defer.rs`), so this crate
+# re-exports none of those names. The edge disappears when `http` is
+# extracted in turn. `default-features = false` keeps the marker-only wasm
+# build from dragging wasmtime through; the `runtime` feature below forwards
+# `aether-component/runtime`.
+aether-component = { path = "../aether-component", default-features = false }
 aether-kinds = { path = "../aether-kinds" }
 # `alloc` rides along for the wire-shaped kind types whose owned-`String` /
 # `Vec` fields need serde's alloc impls even in the marker-only isolated
@@ -136,20 +144,9 @@ confique = { workspace = true, optional = true }
 # `aether.http.server` cap. Pure-Rust, no_std-capable, already a transitive
 # dependency; rides the `runtime` feature so wasm / marker-only builds skip it.
 httparse = { version = "1", optional = true }
-# sha256 content addressing for the component-load path
-# (`component/runtime`). Rides the `runtime` feature — that path is
-# native-only. The workspace entry is `default-features = false` (for the
-# no_std `aether-bloomery` consumer); this consumer re-adds `std`.
-sha2 = { workspace = true, optional = true, features = ["std"] }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
-# wasmtime is reached for by ComponentHostCapability (issue 603 +
-# issue 638 phase 3 rename) — the cap holds the Engine/Linker/Module
-# the substrate previously held in its `ControlPlane` struct. Same
-# version aether-substrate uses; chassis builds get a single wasmtime
-# in the dep tree.
-wasmtime = { workspace = true, optional = true }
 
 # ADR-0121: the `Kind` derive (used by caps that own their kinds, e.g.
 # `http/kinds.rs`) emits a `cfg(not(target_family = "wasm"))`-gated
@@ -173,10 +170,6 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # `syn` is already deep in the transitive graph
 # (every derive macro pulls it), so this dev-dep is near-free.
 syn = { workspace = true, features = ["full", "visit", "parsing"] }
-# ADR-0138: the `component_manifest` no-entry unit test assembles minimal
-# wasm fixtures (custom sections only) with `wat`, mirroring the
-# substrate's own `kind_manifest` section-reader tests.
-wat = "1"
 
 [lints]
 workspace = true

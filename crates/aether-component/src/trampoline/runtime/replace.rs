@@ -53,7 +53,7 @@ impl WasmTrampolineState {
         };
         if let Err(e) = ctx.spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config).finish() {
             tracing::warn!(
-                target: "aether_capabilities::trampoline",
+                target: "aether_component",
                 parent = %self.mailbox,
                 subname = %pending.subname,
                 "sibling spawn failed: {e:?}",

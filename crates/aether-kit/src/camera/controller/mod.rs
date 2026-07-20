@@ -49,8 +49,8 @@ pub use kinds::*;
 use core::f32::consts::FRAC_PI_3;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::ComponentHostCapability;
-use aether_capabilities::component::ComponentHostWasmExt;
+use aether_component::ComponentHostCapability;
+use aether_component::component::ComponentHostWasmExt;
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};

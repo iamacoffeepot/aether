@@ -151,7 +151,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     let tint = Rgba::WHITE;
     let panel =
         load_panel(&mut bench, &wasm, &image_config(first_texture_id, ImageFit::Fill, WidgetControlState::default()));
-    let image = format!("{panel}/{}:image", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let image = format!("{panel}/{}:image", aether_component::WasmTrampoline::NAMESPACE);
 
     let fill_pixels = capture(&mut bench, &panel);
     assert_image_batch(

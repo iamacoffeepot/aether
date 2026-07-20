@@ -9,7 +9,7 @@ fallback or omits the runtime.
 
 | Mailbox / family | Responsibility | Public source | Guide |
 |---|---|---|---|
-| `aether.component` | load, replace, drop, describe wasm actor instances | `aether-capabilities/src/component` | [Components](../systems/components.md) |
+| `aether.component` | load, replace, drop, describe wasm actor instances | `aether-component/src/component` | [Components](../systems/components.md) |
 | `aether.lifecycle` | frame stages, subscriptions, advance, shutdown | `aether-lifecycle/src` | [Frame lifecycle](../systems/lifecycle.md) |
 | `aether.render` | draw queues, textures/materials, view/projection, capture | `aether-capabilities/src/render` | [Rendering](../systems/rendering.md) |
 | `aether.text` | font load, layout, batched text drawing, metrics | `aether-capabilities/src/text` | [Text](../systems/text.md) |

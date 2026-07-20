@@ -24,7 +24,6 @@
 use std::collections::BTreeMap;
 
 use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http;
 use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
@@ -32,6 +31,7 @@ use aether_capabilities::http::kinds::{
     WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_capabilities::http::{ResponseStream, WebSocketStream};
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::DropComponent;
 

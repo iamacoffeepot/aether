@@ -26,6 +26,7 @@ default = ["runtime"]
 runtime = [
     "dep:aether-substrate",
     "dep:aether-capabilities",
+    "dep:aether-component",
     "dep:aether-rpc",
     "dep:aether-trace",
     "dep:aether-kinds",
@@ -59,6 +60,11 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # Runtime-only (native).
 aether-substrate = { path = "../aether-substrate", optional = true }
 aether-capabilities = { path = "../aether-capabilities", optional = true }
+# iamacoffeepot/aether#3756: the component cap was extracted to
+# `aether-component`. The bloomery chassis installs
+# `ComponentHostCapability` with its wasmtime-typed `ComponentHostConfig`,
+# so it takes the runtime face (default features).
+aether-component = { path = "../aether-component", optional = true }
 # The generic TCP RPC transport (extracted from capabilities, #3735) the
 # bloomery chassis binds (`RpcServerCapability`).
 aether-rpc = { path = "../aether-rpc", optional = true }

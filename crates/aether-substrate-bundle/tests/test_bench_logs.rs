@@ -24,7 +24,7 @@ mod tests {
     const PROBE_NAME: &str = "probe";
 
     fn probe_address() -> String {
-        format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME)
+        format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
     }
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across

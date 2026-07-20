@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::WasmTrampoline;
+use aether_component::WasmTrampoline;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::{KEY_A, KEY_ENTER, KEY_UP};
 use aether_kinds::{

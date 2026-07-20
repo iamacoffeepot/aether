@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_capabilities::component::resolve_embedded;
 use aether_codec::frame::{read_frame, write_frame};
+use aether_component::component::resolve_embedded;
 use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_kinds::{LoadComponent, LoadResult};

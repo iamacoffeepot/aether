@@ -43,11 +43,11 @@ use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::requ
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname)
+    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, subname)
 }
 
 /// Load the `WidgetPanel` root under the name `panel` (export
@@ -196,7 +196,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 220).expect("boot");
     let panel = load_panel(&mut bench, &wasm);
-    let button = format!("{panel}/{}:button", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let button = format!("{panel}/{}:button", aether_component::WasmTrampoline::NAMESPACE);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
     bench

@@ -129,7 +129,7 @@ impl NativeActor for WasmTrampoline {
             && let Err(e) = component.wire()
         {
             tracing::error!(
-                target: "aether_capabilities::trampoline",
+                target: "aether_component",
                 error = %e,
                 "wasm guest `wire` hook returned error",
             );
@@ -212,7 +212,7 @@ impl NativeActor for WasmTrampoline {
         let pendings = {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
-                    target: "aether_capabilities::trampoline",
+                    target: "aether_component",
                     mailbox = %state.mailbox,
                     kind = %env.kind_name,
                     "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",

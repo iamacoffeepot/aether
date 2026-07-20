@@ -22,7 +22,7 @@ const MARK_COMPONENT_NAME: &str = "terrain-marks";
 const TERRA_COMPONENT_NAME: &str = "terra";
 
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::MailboxId {

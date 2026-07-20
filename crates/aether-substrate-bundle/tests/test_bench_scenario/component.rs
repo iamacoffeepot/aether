@@ -475,7 +475,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -563,7 +563,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -647,7 +647,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let Some(reshaped_path) = require_runtime("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
-    let addr = format!("aether.component/{}:{TYPED_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{TYPED_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
@@ -736,7 +736,7 @@ fn childless_component_hot_reloads_unchanged() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");

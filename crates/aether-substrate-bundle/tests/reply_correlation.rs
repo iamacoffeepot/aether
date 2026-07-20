@@ -17,7 +17,7 @@ use aether_test_fixtures_kinds as _;
 use std::fs;
 
 use aether_actor::Addressable;
-use aether_capabilities::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_substrate_bundle::test_bench::{

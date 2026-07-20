@@ -79,6 +79,12 @@ runtime = []
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities" }
+# iamacoffeepot/aether#3756: the component cap was extracted to
+# `aether-component`. Every chassis installs `ComponentHostCapability` with
+# its wasmtime-typed `ComponentHostConfig` and the scenario tests build
+# trampoline addresses off `WasmTrampoline::NAMESPACE`, so the bundle takes
+# the runtime face.
+aether-component = { path = "../aether-component" }
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
 # `aether-lifecycle`; every chassis composes `LifecycleCapability` and
 # builds its `LifecycleConfig` graph, so the bundle takes the runtime face.

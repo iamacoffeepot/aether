@@ -5,13 +5,13 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! Each loaded wasm component runs as an `aether_capabilities::trampoline::WasmTrampoline`
+//! Each loaded wasm component runs as an `aether_component::trampoline::WasmTrampoline`
 //! — a `NativeActor` instanced under `aether.embedded:NAME`
 //! that delegates incoming mail to the wasm guest via `#[fallback]`
 //! (issue 634 Phase 4; trampoline moved to capabilities by issue 654
 //! so its `Addressable::NAMESPACE` is the single cap-owned declaration of
 //! the prefix). The chassis-side `ComponentHostCapability`
-//! (in `aether-capabilities`) shrinks to a `LoadComponent` handler
+//! (in `aether-component`) shrinks to a `LoadComponent` handler
 //! that spawns the trampoline (and forwarders for `DropComponent` /
 //! `ReplaceComponent`). Phase 4 PR 2 retired the per-frame drain
 //! barrier and the `DrainSummary` / `DrainDeath` / `DrainOutcome`

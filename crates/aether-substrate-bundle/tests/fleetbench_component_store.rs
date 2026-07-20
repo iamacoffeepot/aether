@@ -16,7 +16,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use aether_actor::Addressable;
-    use aether_capabilities::WasmTrampoline;
+    use aether_component::WasmTrampoline;
     use aether_data::{Kind, Schema, SchemaType, wire};
     use aether_kinds::{
         ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, Tick, UploadComponentResult,

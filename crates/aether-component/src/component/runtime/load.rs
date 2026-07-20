@@ -499,7 +499,7 @@ impl ComponentHostCapabilityState {
             && let Err(error) = self.rebind_boot_ref(ctx, pending.actor_mailbox, &pending.new_wasm)
         {
             tracing::warn!(
-                target: "aether_capabilities::component",
+                target: "aether_component",
                 actor = %pending.actor_mailbox,
                 %error,
                 "ADR-0147: replace succeeded but the new module's boot singleton failed to spawn",

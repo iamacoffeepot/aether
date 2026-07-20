@@ -29,7 +29,7 @@ use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 
 use super::kinds::HttpServerResponse;
 use super::typed::{Ctx, Outcome};
-use crate::component::ComponentHostCapability;
+use aether_component::ComponentHostCapability;
 
 /// The requester's reply target, carried from a deferred route's request
 /// handler to its reply route through the ADR-0139 request-context table (a

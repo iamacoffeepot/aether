@@ -47,7 +47,7 @@ const CHUNK_EDGE: usize = 16;
 /// The full trampoline address a loaded component registers at (ADR-0099 §4):
 /// the component host `/`-joined to the trampoline node under `name`.
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// A `NamedMail` carrying `mail`'s wire encoding to `recipient` — the capture

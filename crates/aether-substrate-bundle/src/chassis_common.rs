@@ -26,10 +26,8 @@ use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLaye
 use aether_audio::AudioConfigLayer;
 use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
-use aether_capabilities::{
-    ComponentHostCapability, ComponentHostConfig, HttpCapability, HttpServerCapability, HttpServerConfig,
-    http::HttpConfig,
-};
+use aether_capabilities::{HttpCapability, HttpServerCapability, HttpServerConfig, http::HttpConfig};
+use aether_component::{ComponentHostCapability, ComponentHostConfig};
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
 use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};

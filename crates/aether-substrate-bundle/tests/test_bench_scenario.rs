@@ -81,7 +81,7 @@ const PROBE_NAME: &str = "probe";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn probe_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME)
+    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
 }
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 /// ADR-0147 boot fixture markers (`crate::aether-test-fixtures-boot`): the boot

@@ -34,7 +34,7 @@ fn sim_vocabulary_is_the_exact_lower_crate_wire_contract() {
 }
 
 fn component_address(name: &str) -> String {
-    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn load_sim(bench: &mut TestBench, wasm_path: &Path, name: &str) -> String {

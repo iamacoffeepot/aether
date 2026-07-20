@@ -33,7 +33,7 @@ const MATERIAL_COLOR_TOLERANCE: u8 = 20;
 const AUTHORED_REGION: Rect = Rect { min_x: 16, min_y: 16, max_x: 111, max_y: 111 };
 
 fn component_address() -> String {
-    format!("aether.component/{}:{COMPONENT_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE)
+    format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {

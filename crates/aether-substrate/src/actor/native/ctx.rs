@@ -945,7 +945,7 @@ impl<'a> NativeInitCtx<'a> {
     /// [`crate::actor::wasm::component::ComponentCtx`] so the
     /// reply / outbound-mail host fns can route through this binding.
     /// Promoted from `pub(crate)` to `pub` by issue 654 when the
-    /// trampoline moved to `aether-capabilities` next to its consumer;
+    /// trampoline moved to `aether-component` next to its consumer;
     /// no other external caller is intended.
     #[must_use]
     pub fn binding(&self) -> &Arc<NativeBinding> {
