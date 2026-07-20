@@ -130,8 +130,8 @@ autoload or packaging behavior.
 
 - Shared chassis traits and frame loop: `crates/aether-substrate/src/chassis/`
 - Process composition: `crates/aether-substrate-bundle/src/`
-- Fleet, proxy, and stores: `crates/aether-capabilities/src/engine/`
-- Framed RPC: `crates/aether-capabilities/src/rpc/`
+- Fleet, proxy, and stores: `crates/aether-engine/src/`
+- Framed RPC: `crates/aether-rpc/src/`
 - MCP translation: `crates/aether-mcp/src/`
 - ADR-0034 and ADR-0073: chassis and bundle structure
 - ADR-0074: MCP/RPC control path

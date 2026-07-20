@@ -7,17 +7,21 @@
 //!   / `terminate`) that supervises a fleet of proxies, fork+execing
 //!   substrates and connecting a proxy to each.
 //!
+//! Native-only — the cap fork+execs substrate processes — so the crate carries
+//! no ADR-0122 identity/runtime marker ladder and its dependencies are flat and
+//! unconditional. The RPC transport it forwards over lives in `aether-rpc`; the
+//! dependency runs strictly this way, never back.
+//!
 //! See issue 763 for the full design.
 
 pub mod kinds;
 mod proxy;
 mod server;
-#[cfg(feature = "runtime")]
 mod store;
 
 pub use proxy::EngineProxy;
 #[cfg(not(target_family = "wasm"))]
 pub use proxy::EngineProxyConfig;
 pub use server::EngineServer;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 pub use server::{EngineConfig, EngineConfigLayer, EngineOverlay};

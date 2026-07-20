@@ -21,7 +21,7 @@
 // `#[actor]`-emitted `HandlesKind<K>` markers (always-on against the
 // identity, ADR-0122). `RpcInboundReady` is the cap's own wake-mail kind
 // (ADR-0121); `Settled` stays in `aether-kinds`.
-use crate::rpc::kinds::RpcInboundReady;
+use crate::kinds::RpcInboundReady;
 use aether_kinds::trace::Settled;
 
 // Re-export the cap's config at file root for chassis builders. The
@@ -33,30 +33,27 @@ use aether_kinds::trace::Settled;
 mod config;
 #[cfg(not(target_family = "wasm"))]
 pub use config::RpcServerConfig;
-#[cfg(feature = "runtime")]
 pub use runtime::RpcServerHandle;
 
 // Named at file root so the runtime half reaches it through `super::`
 // (`RpcServerState` stores `peer_kind: PeerKind`).
-use crate::rpc::wire::PeerKind;
+use crate::wire::PeerKind;
 
 // The standalone connection plumbing (sidecar event type, per-connection
 // state, reader loop, oversize guard) lives in `connection`; the runtime
 // half `use`s it. It names `aether_substrate` types and has no consumer
-// outside `runtime.rs`, so it rides the `feature = "runtime"` gate rather
-// than `not(wasm)` — a transport-only native build never compiles it.
-#[cfg(feature = "runtime")]
+// outside `runtime.rs`.
 mod connection;
 
 #[cfg(test)]
 mod tests;
 
 // Round-trip test scaffolding (echo actor + its kinds) — the far-end
-// receiver of an RPC `Call`. `pub` so the sibling `engine::proxy` subtree
-// (which forwards onto this same `Call` path through a booted
-// `RpcServerCapability`) can reach it; `#[cfg(test)]`, so the `pub` never
-// reaches the cap's shipped surface.
-#[cfg(test)]
+// receiver of an RPC `Call`. `pub` so `aether-engine`'s proxy suite (which
+// forwards onto this same `Call` path through a booted `RpcServerCapability`)
+// can reach it; the `test-support` feature is off by default, so the `pub`
+// never reaches the shipped surface.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_echo;
 
 /// `aether.rpc.server` cap **identity** (ADR-0122 identity/runtime split,
@@ -65,9 +62,8 @@ pub mod test_echo;
 /// markers, and the name-inventory entry, all emitted always-on by
 /// `#[actor]` from the runtime `impl NativeActor`. The state-bearing runtime
 /// (`RpcServerState`, which owns the TCP listener bookkeeping and
-/// per-connection state) plus the handler bodies live in `runtime.rs` behind
-/// the one `feature = "runtime"` gate, so a transport-only build never names
-/// `RpcServerState` nor pulls `aether_substrate` through this cap.
+/// per-connection state) plus the handler bodies live in `runtime.rs`, so the
+/// identity file never names `RpcServerState`.
 #[actor(singleton)]
 pub struct RpcServerCapability;
 
@@ -83,5 +79,4 @@ use aether_actor::actor;
 // `RpcServerState`, `InFlight`, the `RpcServerHandle` boot artifact, the
 // `#[runtime] impl NativeActor` with the handler bodies, the per-connection
 // helper methods) — lives in `runtime.rs`, gated once here.
-#[cfg(feature = "runtime")]
 mod runtime;

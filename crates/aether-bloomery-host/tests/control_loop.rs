@@ -27,10 +27,10 @@ use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, Digest, Event, Evidence, EvidenceKind, Fact,
     IdempotencyKey, Membership, Outcome, Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
 };
-use aether_capabilities::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
 
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to

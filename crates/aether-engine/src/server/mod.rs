@@ -26,11 +26,10 @@
 //!
 //! Native-only: the cap fork+execs processes and threads the
 //! `std::process::Child` handle into the proxy, so its substrate-typed
-//! runtime half lives behind `feature = "runtime"` in the `runtime` module. The
-//! `#[actor]` macro divides the identity from that runtime (ADR-0122): the
-//! [`EngineServer`] ZST and its addressing markers stay always-on so
-//! `aether-capabilities` still compiles for `wasm32`, while the state and
-//! handlers compile only under `runtime`.
+//! runtime half lives in the `runtime` module. The `#[actor]` macro divides
+//! the identity from that runtime (ADR-0122): the [`EngineServer`] ZST and
+//! its addressing markers stay always-on, while the state and handlers live
+//! behind the `runtime` seam.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
@@ -39,26 +38,15 @@
 
 // Handler-signature kinds must be importable at file root — the
 // `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
-// the identity, outside the `feature = "runtime"` gate, so they reference
-// these kinds from here.
-use crate::engine::kinds::{EngineAlive, EngineDied};
-use crate::rpc::RouteEnvelope;
+// the identity, so they reference these kinds from here. The per-handler
+// reply kinds those markers also name arrive through the `use runtime::*`
+// glob below.
+use crate::kinds::{EngineAlive, EngineDied};
 use aether_kinds::{
     ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
     UploadBinary, UploadComponent,
 };
-// The per-handler reply kinds the `#[actor]`-emitted native markers name.
-// Those markers ride `not(wasm)`, so they exist on every host build — `runtime`
-// on or off — but a marker-only host build (`--no-default-features`) has no
-// `use runtime::*` to bring the reply kinds into scope. This fills exactly that
-// gap: it imports them only when the runtime glob is absent (`not(runtime)`),
-// so the two paths are complementary rather than overlapping. A `runtime` host
-// build still reaches these kinds through `use runtime::*`.
-#[cfg(all(not(target_family = "wasm"), not(feature = "runtime")))]
-use aether_kinds::{
-    ListComponentBinariesResult, ListEngineBinariesResult, ListEnginesResult, ResolveComponentResult,
-    SpawnEngineResult, TerminateEngineResult, UploadBinaryResult, UploadComponentResult,
-};
+use aether_rpc::RouteEnvelope;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -69,11 +57,11 @@ use std::sync::{Arc, Mutex};
 // spawn-dir resolution). All three are native-only — the cap forks
 // processes and owns sockets — so they elide on wasm alongside the
 // runtime half.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 mod artifacts;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 mod config;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 mod fleet;
 
 // `EngineConfig` (+ its derive-emitted `EngineOverlay`) ride through
@@ -81,7 +69,7 @@ mod fleet;
 // `HubCli`, resolves argv-then-env, and passes the config to
 // `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
 // the engines cap is native-only, so the config has no wasm consumer.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::{EngineConfig, EngineConfigLayer, EngineOverlay};
 
 /// `aether.engine` engines-cap **identity** (ADR-0122 identity/runtime
@@ -90,17 +78,16 @@ pub use config::{EngineConfig, EngineConfigLayer, EngineOverlay};
 /// name-inventory entry, all emitted always-on by `#[actor]`. The
 /// state-bearing runtime (`runtime::EngineServerState`, which holds the
 /// supervised-fleet table + the `aether_substrate`-typed mailer + the
-/// artifact store) lives behind the one `feature = "runtime"` gate, so a
-/// transport-only build never names `EngineServerState` nor pulls
-/// `aether_substrate` through this cap.
+/// artifact store) lives in `runtime.rs`, so the identity file never names
+/// `EngineServerState`.
 #[actor(singleton)]
 pub struct EngineServer;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
 // divides what it emits). Everything that names an `aether_substrate` type —
 // the handler/init ctx, the runtime state, the artifact/fleet helpers — lives
-// in the `runtime` module below, gated once by `feature = "runtime"`; the
-// `#[actor] impl` reaches all of it through the single `use runtime::*` glob.
+// in the `runtime` module below; the `#[actor] impl` reaches all of it through
+// the single `use runtime::*` glob.
 // The handler-signature kinds (`ListEngines` / `SpawnEngine` / …) stay
 // always-on at file root — the always-on `HandlesKind<K>` markers name them.
 use aether_actor::actor;
@@ -109,15 +96,13 @@ use aether_actor::actor;
 // reaches all of it (state, ctx types, artifact/fleet helpers, result kinds)
 // through this single seam, so the glob is intentional rather than a few dozen
 // one-line imports.
-#[cfg(feature = "runtime")]
 #[allow(clippy::wildcard_imports)]
 use runtime::*;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
 // `EngineServerState`, the `EngineEntry` / `DeadRecord` helper types, the
-// `record_death` helper) — lives in `runtime.rs`, gated once here. The
-// `#[actor] impl` above reaches it through the `use runtime::*` glob.
-#[cfg(feature = "runtime")]
+// `record_death` helper) — lives in `runtime.rs`. The `#[actor] impl` above
+// reaches it through the `use runtime::*` glob.
 mod runtime;
 
 // The `#[cfg(test)]` [`ReplySink`] is a field-bearing test fixture, so it
@@ -125,8 +110,7 @@ mod runtime;
 // surface (`NativeActor` / `NativeCtx` / `NativeInitCtx` / `BootError`) and its
 // reply-kind handler signatures (`ListEnginesResult` / … — named by the
 // always-on `HandlesKind<K>` markers) resolve through the same
-// `feature = "runtime"` `use runtime::*` glob the `EngineServer` impl uses; a
-// `#[cfg(test)]` build is always native + runtime, so the glob is in scope.
+// `use runtime::*` glob the `EngineServer` impl uses.
 
 /// Reply sink: records the latest reply of each engines-cap reply
 /// kind into shared cells so a unit test can drive a handler via
@@ -181,7 +165,7 @@ mod tests {
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
-    use crate::engine::kinds::{EngineAlive, EngineDied};
+    use crate::kinds::{EngineAlive, EngineDied};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::descriptors;
@@ -312,7 +296,7 @@ mod tests {
     #[test]
     fn bootstrap_populates_and_default_resolves_to_headless() {
         use super::artifacts::{bootstrap_ingest, resolve_selector};
-        use crate::engine::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+        use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
         use std::collections::HashSet;
         use std::fs;
         use std::os::unix::fs::PermissionsExt;

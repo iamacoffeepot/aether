@@ -162,6 +162,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
+ "aether-rpc",
  "aether-substrate",
  "aether-trace",
  "anyhow",
@@ -191,16 +192,13 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "aether-trace",
- "aether-window",
  "base64",
  "bytemuck",
  "clap",
  "confique",
- "dirs",
  "httparse",
  "inventory",
  "serde",
- "serde_json",
  "sha2",
  "syn",
  "tracing",
@@ -307,6 +305,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-engine"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-codec",
+ "aether-data",
+ "aether-kinds",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-trace",
+ "clap",
+ "confique",
+ "dirs",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tracing",
+ "wat",
+]
+
+[[package]]
 name = "aether-fs"
 version = "0.3.0-alpha"
 dependencies = [
@@ -402,11 +421,13 @@ name = "aether-mcp"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-capabilities",
  "aether-codec",
  "aether-data",
+ "aether-engine",
+ "aether-fs",
  "aether-inventory",
  "aether-kinds",
+ "aether-rpc",
  "aether-substrate",
  "aether-trace",
  "anyhow",
@@ -457,6 +478,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-rpc"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-codec",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "aether-trace",
+ "aether-window",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "aether-substrate"
 version = "0.3.0-alpha"
 dependencies = [
@@ -495,6 +532,7 @@ dependencies = [
  "aether-codec",
  "aether-contentgen",
  "aether-data",
+ "aether-engine",
  "aether-fs",
  "aether-gemini",
  "aether-inventory",
@@ -502,6 +540,7 @@ dependencies = [
  "aether-kit",
  "aether-math",
  "aether-render",
+ "aether-rpc",
  "aether-substrate",
  "aether-test-fixtures-kinds",
  "aether-text",

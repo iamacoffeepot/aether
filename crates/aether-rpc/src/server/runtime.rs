@@ -1,9 +1,7 @@
 //! The `aether.rpc.server` runtime half (ADR-0122 identity/runtime split).
-//! Compiled only under `feature = "runtime"` (the `mod runtime;`
-//! declaration in the parent carries the gate), so a transport-only build
-//! of the [`RpcServerCapability`](super::RpcServerCapability) identity never
-//! names these types nor pulls `aether_substrate`. The substrate-typed
-//! imports are gated once by this module rather than line-by-line; the
+//! The [`RpcServerCapability`](super::RpcServerCapability) identity file
+//! names none of these types. The substrate-typed
+//! imports are collected once by this module rather than line-by-line; the
 //! `#[actor] impl` in the parent reaches the state, ctx types, the
 //! `RpcServerHandle` boot artifact, and the per-connection helpers through
 //! the single `use runtime::*` glob.
@@ -35,8 +33,8 @@ use aether_substrate::net::teardown_connect_addr;
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
-pub use crate::rpc::kinds::{CallSettled, RouteEnvelope};
-pub use crate::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
+pub use crate::kinds::{CallSettled, RouteEnvelope};
+pub use crate::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
 pub use aether_codec::frame::{FrameError, write_frame};
 pub use aether_data::{Kind, KindId, MailId, MailboxId};
 pub use aether_substrate::Mail;

@@ -3,7 +3,7 @@
 //! own mailbox each interval, plus the RAII handle that stops + joins it
 //! on drop. Native-only (owns an OS thread + channel).
 
-use crate::engine::kinds::EngineHeartbeatTick;
+use crate::kinds::EngineHeartbeatTick;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::mail::mailer::Mailer;

@@ -78,9 +78,9 @@ Wire changes need:
 
 ## Change route
 
-- Frames and addresses: `crates/aether-capabilities/src/rpc/wire.rs`
-- Native server/session: `crates/aether-capabilities/src/rpc/server/`
-- Engine proxy/server: `crates/aether-capabilities/src/engine/`
+- Frames and addresses: `crates/aether-rpc/src/wire.rs`
+- Native server/session: `crates/aether-rpc/src/server/`
+- Engine proxy/server: `crates/aether-engine/src/`
 - MCP client/session: `crates/aether-mcp/src/{rpc.rs,tools/}`
 - Stream framing: `crates/aether-codec/src/frame.rs`
 - Decisions: ADR-0072 (amended), ADR-0074, ADR-0089, ADR-0118

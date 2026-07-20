@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
-use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
-use aether_capabilities::{EngineConfig, EngineServer};
+use aether_engine::{EngineConfig, EngineServer};
 use aether_kinds::BinaryManifest;
+use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};

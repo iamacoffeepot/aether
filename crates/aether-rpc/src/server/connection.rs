@@ -5,7 +5,7 @@
 //! runtime modules so the actor core stays navigable.
 
 use super::RpcInboundReady;
-use crate::rpc::{RpcError, WireFrame};
+use crate::{RpcError, WireFrame};
 use aether_codec::frame::{FrameError, read_frame};
 use aether_data::{Kind, KindId, MailboxId};
 use aether_substrate::Mail;

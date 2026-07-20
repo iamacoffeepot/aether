@@ -1,0 +1,59 @@
+[package]
+name = "aether-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.rpc` — the generic TCP RPC transport, extracted from
+# `aether-capabilities` (iamacoffeepot/aether#3735) as part of the arc that
+# dissolves the capabilities monolith. Owns the type-erased wire vocabulary
+# (`WireFrame` + substructs, `RpcClient`), the `RpcServerCapability` singleton
+# that binds a listener and dispatches inbound `Call` envelopes into the local
+# actor system, and the `RouteEnvelope` / `CallSettled` forwarding kinds.
+#
+# Native-only: no wasm guest addresses this transport, so the crate carries no
+# ADR-0122 identity/runtime marker ladder — dependencies are flat and
+# unconditional and there is no marker build to preserve.
+#
+# Layering: this crate knows nothing of `aether-engine`. The hub supervisor
+# forwards over this transport and therefore depends on it; the edge never runs
+# back (the cycle was broken in #3734).
+
+[features]
+# The round-trip echo actor + its kinds — the far-end receiver of an RPC
+# `Call`. Compiled into this crate's own `cargo test` build unconditionally;
+# the feature exposes it to a sibling crate's tests (`aether-engine`'s proxy
+# suite forwards onto this same `Call` path through a booted
+# `RpcServerCapability`), which a bare `#[cfg(test)]` cannot reach across a
+# crate boundary. Off by default, so it never reaches the shipped surface.
+test-support = []
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+aether-substrate = { path = "../aether-substrate" }
+serde = { workspace = true, features = ["derive", "alloc"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+# ADR-0121: the `Kind` derive (`kinds.rs`, `wire.rs`) emits a
+# `cfg(not(target_family = "wasm"))`-gated `inventory::submit!` per kind, so
+# native builds need `inventory` reachable.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# The server test addresses `HeadlessWindowCapability` to exercise the
+# `Component` local-RPC-server reply path, and `TraceDispatchCapability` for the
+# settlement notices that close a call. Both are test-only fixtures here.
+aether-trace = { path = "../aether-trace" }
+aether-window = { path = "../aether-window" }
+# The cap unit tests boot a chassis through the canonical
+# `aether_substrate::testing` fixture, enabled by the substrate `test-support`
+# feature. Dev-dependency feature unification applies to test builds only, so
+# this never enters the production graph.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+[lints]
+workspace = true

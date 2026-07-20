@@ -1,0 +1,70 @@
+[package]
+name = "aether-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.engine` — the engine-management capability cluster, extracted from
+# `aether-capabilities` (iamacoffeepot/aether#3735) as part of the arc that
+# dissolves the capabilities monolith. Owns the `EngineProxy` (one outbound RPC
+# connection to a forked substrate), the `EngineServer` engines cap (spawn /
+# list / terminate over a supervised fleet), the ADR-0115 content-addressed
+# binary store, and the ADR-0090 `Engine{Config,ConfigLayer,Overlay}`.
+#
+# Native-only — the cap fork+execs processes and owns sockets — so the crate
+# carries no ADR-0122 identity/runtime marker ladder: dependencies are flat and
+# unconditional and there is no marker build to preserve.
+#
+# Layering: depends on `aether-rpc` for the transport it forwards over. The
+# edge runs strictly this way (the cycle was broken in #3734).
+
+# cargo-machete (the CI unused-deps gate) scans source without expanding
+# macros, so both entries below are false positives — the deps are real.
+# `EngineConfig`'s `#[derive(aether_substrate::Config)]` emits a
+# `#[derive(confique::Config)]` layer struct and a `#[derive(clap::Args)]`
+# overlay struct, neither of which names either crate in this crate's source.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+aether-rpc = { path = "../aether-rpc" }
+aether-substrate = { path = "../aether-substrate" }
+clap = { workspace = true }
+confique = { workspace = true }
+# The hub binary store and the per-engine spawn dir default to
+# `dirs::data_dir()` when the config leaves them unset.
+dirs = "6"
+serde = { workspace = true, features = ["derive", "alloc"] }
+# JSON serialization for the engine artifact registry + the hub binary store
+# (`server/artifacts.rs`, `store`).
+serde_json = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+# ADR-0121: the `Kind` derive (`kinds.rs`) emits a
+# `cfg(not(target_family = "wasm"))`-gated `inventory::submit!` per kind, so
+# native builds need `inventory` reachable.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# The proxy round-trip suite forwards onto the RPC `Call` path through a booted
+# `RpcServerCapability`, so it needs the transport crate's echo fixture.
+aether-rpc = { path = "../aether-rpc", features = ["test-support"] }
+# The proxy suite boots `TraceDispatchCapability` for the settlement notices
+# that close a forwarded call.
+aether-trace = { path = "../aether-trace" }
+# The cap unit tests boot a chassis through the canonical
+# `aether_substrate::testing` fixture, enabled by the substrate `test-support`
+# feature. Dev-dependency feature unification applies to test builds only, so
+# this never enters the production graph.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# ADR-0138: the store's component-manifest reader tests assemble minimal wasm
+# fixtures (custom sections only) with `wat`.
+wat = "1"
+
+[lints]
+workspace = true

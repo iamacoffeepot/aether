@@ -31,23 +31,22 @@
 //! will read is already in hand on `conn.server`.
 //!
 //! Native-only: the state owns a `TcpStream` (via `RpcConnection`)
-//! and an OS thread, so the substrate-typed runtime half lives behind
-//! `feature = "runtime"` in the `runtime` module. The `#[actor]` macro divides the
+//! and an OS thread, so the substrate-typed runtime half lives in the
+//! `runtime` module. The `#[actor]` macro divides the
 //! identity from that runtime (ADR-0122): the [`EngineProxy`] ZST and its
-//! addressing markers stay always-on so `aether-capabilities` still compiles
-//! for `wasm32`, while the state, handlers, and `Drop` compile only under
+//! addressing markers stay in the identity file, while the state, handlers,
+//! and `Drop` live behind
 //! `runtime`.
 
 // Handler-signature kinds must be importable at file root — the
 // `#[actor]` macro emits `impl HandlesKind<K>` markers always-on against
-// the identity, outside the `feature = "runtime"` gate, so they reference
-// these kinds from here.
-use crate::engine::kinds::{EngineHeartbeatTick, ForwardEnvelope};
+// the identity, so they reference these kinds from here.
+use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 use aether_kinds::TerminateEngine;
 // `RpcInboundReady` is owned by the RPC server cap (ADR-0121); the proxy
 // shares the wake-mail kind. Imported at file root for the always-on
 // `HandlesKind<RpcInboundReady>` marker.
-use crate::rpc::RpcInboundReady;
+use aether_rpc::RpcInboundReady;
 
 // The proxy's implementation, split along its seams (ADR-0121):
 // `config` (the init config + heartbeat tuning), `connect` (the
@@ -57,9 +56,9 @@ use crate::rpc::RpcInboundReady;
 // alongside the runtime half.
 #[cfg(not(target_family = "wasm"))]
 mod config;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 mod connect;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 mod heartbeat;
 #[cfg(test)]
 mod sinks;
@@ -73,14 +72,14 @@ mod sinks;
 // `runtime` gate to stay off a marker-only host build.
 #[cfg(not(target_family = "wasm"))]
 pub use config::EngineProxyConfig;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 pub use config::HeartbeatParams;
 
 // The engines cap (`aether.engine`) classifies a failed `spawn_child`
 // with this to decide whether to re-fork on a fresh port (a stolen-port
 // child-exited death) or report a dead spawn. Native-only — it names
 // `SpawnError` / `BootError`.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+#[cfg(not(target_family = "wasm"))]
 pub use connect::is_reforkable_spawn_failure;
 
 /// `aether.engine.proxy:<id>` cap **identity** (ADR-0122 identity/runtime
@@ -89,17 +88,16 @@ pub use connect::is_reforkable_spawn_failure;
 /// name-inventory entry, all emitted always-on by
 /// `#[actor]`. The state-bearing runtime (`runtime::EngineProxyState`, which
 /// holds the `aether_substrate`-typed RPC connection + the forked child +
-/// heartbeat handle) lives behind the one `feature = "runtime"` gate, so a
-/// transport-only build never names `EngineProxyState` nor pulls
-/// `aether_substrate` through this cap.
+/// heartbeat handle) lives in `runtime.rs`, so the identity file never names
+/// `EngineProxyState`.
 #[actor(instanced)]
 pub struct EngineProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
 // divides what it emits). Everything that names an `aether_substrate` type —
 // the handler/init ctx, the runtime state, the connect/heartbeat helpers,
-// `Drop` — lives in the `runtime` module below, gated once by
-// `feature = "runtime"`; the struct-hosted `#[actor]` reads that module's
+// `Drop` — lives in the `runtime` module below; the struct-hosted `#[actor]`
+// reads that module's
 // `impl NativeActor` off disk to emit the identity. The handler-signature
 // kinds (`ForwardEnvelope` / `RpcInboundReady` / …) stay always-on at file
 // root — the always-on `HandlesKind<K>` markers name them.
@@ -109,7 +107,6 @@ use aether_actor::actor;
 // `EngineProxyState`, its `Drop` + helper methods, `engine_cap_mailbox`) plus
 // the `#[runtime] impl NativeActor` — lives in `runtime.rs`, gated once here.
 // The struct-hosted `#[actor]` above reads it off disk to emit the identity.
-#[cfg(feature = "runtime")]
 mod runtime;
 
 #[cfg(test)]
@@ -125,13 +122,13 @@ mod tests {
     use super::{
         DeathReason, EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig, HeartbeatParams, ProxyReplySink,
     };
-    use crate::engine::kinds::ForwardEnvelope;
-    use crate::rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
-    use crate::rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
-    use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+    use crate::kinds::ForwardEnvelope;
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
+    use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
+    use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
+    use aether_rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use aether_substrate::Subname;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::{Mail, Source, SourceAddr};

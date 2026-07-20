@@ -33,7 +33,6 @@ extern crate alloc;
 extern crate self as aether_capabilities;
 
 pub mod component;
-pub mod engine;
 pub mod game;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
 // the `aether.http` egress client and the `aether.http.server` inbound
@@ -47,7 +46,6 @@ pub mod input;
 // chassis drives one frame at a time. Always-native via `#[actor(singleton)]`,
 // so a wasm component can address it by name.
 pub mod lifecycle;
-pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
 pub mod trampoline;
@@ -61,12 +59,6 @@ pub use component::{ComponentHostCapability, resolve_embedded};
 // addressing without dragging the wasmtime stack in.
 #[cfg(feature = "runtime")]
 pub use component::ComponentHostConfig;
-pub use engine::EngineProxy;
-#[cfg(not(target_family = "wasm"))]
-pub use engine::EngineProxyConfig;
-pub use engine::EngineServer;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use engine::{EngineConfig, EngineConfigLayer, EngineOverlay};
 pub use http::{HttpCapability, HttpConfig};
 // ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
 // always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /

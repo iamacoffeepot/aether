@@ -8,13 +8,11 @@ license.workspace = true
 # `.mcp.json` at this binary; it owns the `rmcp` HTTP server and the
 # tool surface, and reaches engines purely as an RPC *client* — it dials
 # the hub's `RpcServerCapability` and relays tool calls as wire `Call`s.
-# The wire surface (`rpc::*`, `trace_walk::*`) comes from
-# `aether-capabilities` (ADR-0124, which dissolved the `aether-rpc`
-# crate). Interim posture: the dependency rides default features, so the
-# coordinator's builds carry the substrate-side runtime; the "no
-# `aether-substrate` / wasmtime / wgpu in the production graph" invariant
-# is suspended until issue 2534 flips this dep to
-# `default-features = false` under per-package feature unification.
+# The wire surface comes from `aether-rpc` and the engines-cap config from
+# `aether-engine` (iamacoffeepot/aether#3735); the trace walk from
+# `aether-trace`. Both native-only crates carry the substrate-side runtime, so
+# the "no `aether-substrate` / wasmtime / wgpu in the production graph"
+# invariant stays suspended (issue 2534).
 #
 # Until the P5d cutover the embedded `aether-substrate-bundle::hub::mcp`
 # server keeps running on its own port — this crate is additive.
@@ -31,18 +29,24 @@ name = "aether-tunnel"
 path = "src/bin/aether-tunnel.rs"
 
 [dependencies]
-# ADR-0124: the wire vocabulary (`rpc::{MailEnvelope, MailboxAddress,
-# RpcClient, WireFrame, ...}`) + the decentralized trace walk
-# (`trace_walk::TreeWalk`) — the coordinator's entire production surface.
-# Default features for now (see the manifest header); issue 2534 flips
-# this to `default-features = false` once the marker-only host build is
-# green.
-aether-capabilities = { path = "../aether-capabilities" }
+# ADR-0124: the wire vocabulary (`MailEnvelope`, `MailboxAddress`,
+# `RpcClient`, `WireFrame`, …) — the coordinator's entire production surface.
+aether-rpc = { path = "../aether-rpc" }
+# The engines-cap config + server the test-support chassis boots
+# (`EngineConfig` / `EngineServer`).
+aether-engine = { path = "../aether-engine" }
 # The `aether.trace` cap (extracted from capabilities, #3719): the
 # always-on `walk::TreeWalk` stitch (`tools/mail.rs`) plus the runtime
 # `TraceDispatchCapability` the test-support chassis mounts.
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 aether-codec = { path = "../aether-codec" }
+# The `aether.fs.*` kind family (`aether.fs.write` / `.read` / `.list` / …).
+# Identity-only — the coordinator never mounts the fs cap; it links the crate so
+# those kinds' `Kind`-derived inventory submissions land in the static
+# `descriptors::all()` vocabulary the per-engine encode cache prefills from
+# (ADR-0091). Inherited transitively through `aether-capabilities` until the
+# rpc/engine extraction (#3735) dropped that dependency.
+aether-fs = { path = "../aether-fs", default-features = false }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 

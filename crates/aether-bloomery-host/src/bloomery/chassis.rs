@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use aether_actor::Addressable;
 use aether_capabilities::http::{HttpServerCapability, HttpServerConfig};
-use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_kinds::BinaryManifest;
+use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;

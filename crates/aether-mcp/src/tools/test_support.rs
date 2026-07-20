@@ -2,10 +2,10 @@
 
 use super::*;
 pub(super) use crate::args::*;
-pub(super) use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle};
-pub(super) use aether_capabilities::{EngineConfig, EngineServer};
 pub(super) use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
+pub(super) use aether_engine::{EngineConfig, EngineServer};
 pub(super) use aether_kinds::descriptors;
+pub(super) use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle};
 pub(super) use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 pub(super) use aether_substrate::mail::mailer::Mailer;
 pub(super) use aether_substrate::mail::outbound::HubOutbound;
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 // (issue 2672). Brought into scope (rather than named by absolute path
 // inline) to satisfy the `clippy::absolute_paths` restriction.
 use aether_actor::actor;
-use aether_capabilities::rpc::{CallSettled, RouteEnvelope};
+use aether_rpc::{CallSettled, RouteEnvelope};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 /// The canned live vocabulary a [`RouteInventorySink`] replies with, plus
