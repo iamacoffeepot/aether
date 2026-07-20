@@ -126,6 +126,13 @@ pub enum MonitorError {
     /// closed, and `MonitorNotice` already fired (or would have, if any
     /// monitor were registered). Registering now is meaningless.
     TargetTombstoned,
+    /// The calling actor's transport carries no spawner / actor
+    /// registry (a `new_for_test` binding), so there is no monitor
+    /// index to register against. Production transports always carry
+    /// one; handlers that monitor their registrants treat this as
+    /// "not monitorable" and skip, which keeps them drivable under
+    /// test bindings.
+    Unsupported,
 }
 
 impl ActorRegistry {
@@ -470,6 +477,32 @@ impl ActorRegistry {
         watchers
     }
 
+    /// ADR-0079 §8 (amended): vacate path. Drains `monitors_of[id]` and
+    /// returns the watcher list for the caller to fan out
+    /// [`aether_kinds::MonitorNotice`] mail — the forward-drain third of
+    /// [`Self::close_actor`], without the tombstone and without the
+    /// reverse-index walk. The slot stays `Live`: vacating declares the
+    /// mailbox's *occupant* gone (a wasm unload behind a still-addressable
+    /// trampoline) while the actor itself remains addressable and
+    /// refillable, so `register_monitor` keeps working against it and a
+    /// later occupant's watchers register fresh.
+    ///
+    /// The reverse index is untouched for the same reason `close_actor`
+    /// leaves the drained watchers' `monitoring` lists in place: the
+    /// stale reverse edge is cleaned idempotently by the watcher's
+    /// `MonitorHandle::Drop` (or its own close). Idempotent — a second
+    /// vacate returns an empty watcher list.
+    pub(crate) fn vacate_actor(&self, id: MailboxId) -> Vec<MailboxId> {
+        self.monitors_of
+            .write()
+            .expect("monitors_of lock poisoned; fail-fast per ADR-0063")
+            .remove(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.watcher)
+            .collect()
+    }
+
     /// Number of watchers registered against `target` right now. Test-
     /// facing only — callers in production don't peek at the index.
     #[cfg(test)]
@@ -601,6 +634,43 @@ mod tests {
         assert_eq!(r.monitor_count(b), 1);
         let _ = r.close_actor(a);
         assert_eq!(r.monitor_count(b), 0, "dead watcher should be pruned from b's monitors_of");
+    }
+
+    #[test]
+    fn vacate_actor_returns_watchers_and_keeps_slot_live() {
+        let r = ActorRegistry::new();
+        let target = MailboxId(2);
+        let watcher_a = MailboxId(10);
+        let watcher_b = MailboxId(11);
+        insert_live_stub(&r, target);
+        r.register_monitor(watcher_a, target).unwrap();
+        r.register_monitor(watcher_b, target).unwrap();
+
+        let watchers = r.vacate_actor(target);
+        assert_eq!(watchers.len(), 2);
+        assert!(watchers.contains(&watcher_a));
+        assert!(watchers.contains(&watcher_b));
+        assert_eq!(r.monitor_count(target), 0, "forward index drained");
+
+        // The vacated slot is neither dead nor tombstoned — the mailbox
+        // stays addressable, and a fresh registration against it (the
+        // next occupant's watcher) succeeds where a closed slot would
+        // refuse with TargetTombstoned.
+        assert!(r.is_live(target));
+        assert!(!r.is_tombstoned(target));
+        r.register_monitor(watcher_a, target).expect("vacated slot accepts new monitors");
+        assert_eq!(r.monitor_count(target), 1);
+    }
+
+    #[test]
+    fn vacate_actor_idempotent_and_empty_without_watchers() {
+        let r = ActorRegistry::new();
+        let target = MailboxId(2);
+        let watcher = MailboxId(10);
+        insert_live_stub(&r, target);
+        r.register_monitor(watcher, target).unwrap();
+        assert_eq!(r.vacate_actor(target).len(), 1);
+        assert!(r.vacate_actor(target).is_empty(), "second vacate has nothing to drain");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-05-06
 - **Amended:** 2026-05-09 — Section 6 retired the `on_close` name in favour of `unwire`, added the symmetric `wire` hook, and recorded the rationale for moving away from `Drop`'s reserved Rust semantics.
+- **Amended:** 2026-07-20 — Section 8 added the vacate path: `MonitorNotice` fires on close *or* vacate (a wasm unload behind a still-live trampoline mailbox), so watchers learn "state keyed by this target is stale" for both departures. Enables the component-host teardown fan-out inversion (issues 3740 / 3741).
 
 ## Context
 
@@ -207,7 +208,9 @@ impl Drop for MonitorHandle { /* demonitor via registry */ }
 
 pub struct MonitorNotice { pub target: MailboxId }                              // framework kind
 
-pub enum MonitorError { TargetNotFound, TargetTombstoned }
+pub enum MonitorError { TargetNotFound, TargetTombstoned, Unsupported }
+// Unsupported (amended 2026-07-20): the transport carries no actor registry
+// (a test binding) — handlers treat it as "not monitorable" and skip.
 ```
 
 Registry gains two indices (forward + reverse) for bidirectional bookkeeping:
@@ -220,6 +223,16 @@ On actor close: drain `monitors_of[X]`, send `MonitorNotice` to each live monito
 Default unidirectional, like Erlang `monitor` (not `link`). Compose two unidirectionals if bidirectional is wanted. No `CloseReason` field on `MonitorNotice` for v1 (purely additive if needed). No monitoring of not-yet-existent targets — `monitor()` errors if target isn't Live at call time. No explicit `Demonitor` mail kind — registration via direct registry call, deregistration via `MonitorHandle::Drop`.
 
 Replace semantics mesh cleanly with this: replace is "actor continues with new code/state," not "actor dies." `MonitorNotice` does *not* fire on replace. The mailbox stays Live throughout the splice; `monitors_of` entries are unaffected.
+
+**Vacate (amended 2026-07-20).** Close is not the only way a watched mailbox's occupant departs. A wasm component drop is a wasm unload behind a trampoline that stays alive — the mailbox remains addressable and refillable, so the close fan-out never runs, yet every piece of sibling-cap state keyed by that `MailboxId` (input subscriptions, lifecycle stage entries, http routes) is stale the moment the occupant is gone. The primitive gains a second firing event:
+
+```rust
+fn vacate(&self);                                    // on NativeCtx — self-service only
+```
+
+`vacate` drains `monitors_of[self]` and fires one `MonitorNotice` per watcher, exactly as close does, but without tombstoning and without walking the reverse index — the forward-drain third of the close transaction. The slot stays Live: `monitor()` keeps working against it, and registrations made after the vacate watch the next occupant (or the eventual close). `MonitorNotice` therefore means "the actor occupying `target` is gone; state keyed by `target` is stale" — fired at most once per registration, on vacate or close, whichever comes first. A watcher that re-registers after a notice is watching a fresh occupancy. Self-service only: an actor declares its *own* mailbox vacated (the trampoline's `DropComponent` handler is the production caller); there is no vacate-a-peer API, for the same reason there is no force-kill primitive.
+
+Replace still does not fire either event — the occupant continues (ADR-0022). Drop fires vacate; close fires the full transaction.
 
 ## Consequences
 
