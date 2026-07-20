@@ -14,8 +14,12 @@ mod tests {
     /// hash, and resolves the name back.
     #[test]
     fn fleetharness_uploads_lists_and_dedups_a_real_binary() {
-        let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
         let mut harness = FleetHarness::start();
+        // The headless bin moved to `aether-chassis-headless` (#3811), so
+        // `CARGO_BIN_EXE_*` no longer resolves here; take the same
+        // dist-manifest path `FleetHarness` forks engines from.
+        let headless = aether_harness_fleet::headless_bin_path();
+        let headless = headless.to_str().expect("dist headless path is utf-8");
 
         // Upload + capture the manifest via the hub's one-time fork of
         // `<binary> --describe`.

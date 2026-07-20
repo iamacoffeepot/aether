@@ -57,7 +57,7 @@ use std::path::Path;
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
-/// by `Self::build`. Same shape as `crate::DesktopChassis` post
+/// by `Self::build`. Same shape as the desktop chassis marker post
 /// ADR-0071 phase 3.
 pub struct HeadlessChassis;
 

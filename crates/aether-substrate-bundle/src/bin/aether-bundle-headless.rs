@@ -13,8 +13,8 @@ use anyhow::Context as _;
 
 use aether_chassis::autoload::expand_replicas;
 use aether_chassis::bundle_pack::decode_pack;
+use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate::Chassis;
-use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 
 /// The component pack, embedded at build time. `build.rs` stages it
 /// into `OUT_DIR/bundle_pack.bin` from `AETHER_BUNDLE_MANIFEST` (the

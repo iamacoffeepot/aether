@@ -101,6 +101,15 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-substrate-bundle) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The headless chassis crate's integration tests (rehomed from the
+# bundle, #3811) fork real headless processes (describe_manifest,
+# spawn_args_overlay) or cold-load fixture wasm (headless_autoload) —
+# the same fork/compile contention class as the bundle suites above,
+# so they carry the same 180s wall-clock backstop.
+[[profile.ci.overrides]]
+filter = "package(=aether-chassis-headless) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The rehomed tcp fleet-load test (`fleetharness_tcp_load`, #3780) forks a
 # real debug `aether-substrate-headless` process through `FleetHarness` and
 # then churns real loopback listeners/sessions on top — the same
