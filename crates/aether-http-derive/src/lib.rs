@@ -1,6 +1,6 @@
 //! Proc macros for the typed route-authoring surface over the
 //! `aether.http.server` capability (ADR-0131 / ADR-0154). Two attribute
-//! macros, re-exported through `aether_capabilities::http` so consumers
+//! macros, re-exported through `aether_http` so consumers
 //! write `#[http::router]` / `#[http::route]` next to the
 //! `http::FromRequest` / `http::Path` / `http::Ctx` runtime types the
 //! parent crate owns.
@@ -30,7 +30,7 @@
 //! run as N interchangeable instances of one round-robin member set.
 //!
 //! The macros only emit token paths at the runtime vocabulary
-//! (`::aether_capabilities::http::…`, `::aether_data::…`, `::serde::…`);
+//! (`::aether_http::…`, `::aether_data::…`, `::serde::…`);
 //! they name none of those types directly, so this crate depends on
 //! nothing but `syn` / `quote` / `proc-macro2`.
 
@@ -648,7 +648,7 @@ fn method_filter_token(method: &Ident) -> syn::Result<TokenStream2> {
     let known = ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options"];
     if known.iter().any(|name| method == name) {
         return Ok(quote! {
-            ::core::option::Option::Some(::aether_capabilities::http::kinds::HttpMethod::#method)
+            ::core::option::Option::Some(::aether_http::kinds::HttpMethod::#method)
         });
     }
     Err(syn::Error::new(
@@ -797,7 +797,7 @@ fn emit_minted_kind(group: &Group<'_>) -> TokenStream2 {
         )]
         #[kind(name = #kind_name)]
         pub struct #kind_struct {
-            pub request: ::aether_capabilities::http::kinds::HttpServerRequest,
+            pub request: ::aether_http::kinds::HttpServerRequest,
         }
     }
 }
@@ -825,7 +825,7 @@ fn emit_group_glue(group: &Group<'_>) -> TokenStream2 {
             __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
     };
     let not_found = quote! {
-        ::aether_capabilities::http::kinds::HttpServerResponse {
+        ::aether_http::kinds::HttpServerResponse {
             status: 404,
             headers: ::std::vec::Vec::new(),
             body: ::std::vec::Vec::from(&b"no matching route"[..]),
@@ -853,7 +853,7 @@ fn emit_group_glue(group: &Group<'_>) -> TokenStream2 {
                 #glue_first,
                 __aether_ctx: &mut #ctx_c,
                 __aether_mail: #kind_struct,
-            ) -> ::aether_capabilities::http::kinds::HttpServerResponse {
+            ) -> ::aether_http::kinds::HttpServerResponse {
                 #preamble
                 #(#arms)*
                 #not_found
@@ -901,11 +901,11 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
         .zip(capture_positions)
         .map(|((ident, ty), position)| {
             quote! {
-                let #ident = match <#ty as ::aether_capabilities::http::FromPathSegment>::from_path_segment(
+                let #ident = match <#ty as ::aether_http::FromPathSegment>::from_path_segment(
                     __aether_segs[#position],
                 ) {
                     ::core::result::Result::Ok(__aether_value) =>
-                        ::aether_capabilities::http::Path(__aether_value),
+                        ::aether_http::Path(__aether_value),
                     ::core::result::Result::Err(__aether_response) => #on_fail,
                 };
             }
@@ -913,7 +913,7 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
 
     let req_binds = route.params.iter().filter_map(|param| match param {
         Param::FromReq { ident, ty } => Some(quote! {
-            let #ident = match <#ty as ::aether_capabilities::http::FromRequest>::from_request(
+            let #ident = match <#ty as ::aether_http::FromRequest>::from_request(
                 &__aether_request,
             ) {
                 ::core::result::Result::Ok(__aether_value) => __aether_value,
@@ -936,10 +936,10 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
     let call_and_tail = if group.deferred {
         quote! {
             match #invoke {
-                ::aether_capabilities::http::Outcome::Reply(__aether_response) => {
-                    ::aether_capabilities::http::answer_now(__aether_ctx, &__aether_response);
+                ::aether_http::Outcome::Reply(__aether_response) => {
+                    ::aether_http::answer_now(__aether_ctx, &__aether_response);
                 }
-                ::aether_capabilities::http::Outcome::Deferred => {}
+                ::aether_http::Outcome::Deferred => {}
             }
             return;
         }
@@ -953,10 +953,10 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
         if #len_check #(#literal_checks)* {
             #(#path_binds)*
             #(#req_binds)*
-            let __aether_http_ctx = ::aether_capabilities::http::Ctx::new(
+            let __aether_http_ctx = ::aether_http::Ctx::new(
                 __aether_ctx,
                 __aether_request,
-                ::aether_capabilities::http::Route {
+                ::aether_http::Route {
                     prefix: #static_head,
                     method: #method_expr,
                 },
@@ -988,7 +988,7 @@ fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
         #[handler::manual]
         fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_reply: #reply_kind) {
             let __aether_response = #call;
-            ::aether_capabilities::http::answer_deferred(__aether_ctx, &__aether_response);
+            ::aether_http::answer_deferred(__aether_ctx, &__aether_response);
         }
     }
 }
@@ -1001,8 +1001,8 @@ fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStrea
     let Group { method_expr, kind_struct, .. } = group;
     let static_head = LitStr::new(&group.static_head, Span::call_site());
     quote! {
-        #ctx.actor::<::aether_capabilities::http::HttpServerCapability>()
-            .send(&::aether_capabilities::http::kinds::RegisterRouteSelf {
+        #ctx.actor::<::aether_http::HttpServerCapability>()
+            .send(&::aether_http::kinds::RegisterRouteSelf {
                 prefix: #static_head.to_string(),
                 method: #method_expr,
                 kind: <#kind_struct as ::aether_data::Kind>::ID,

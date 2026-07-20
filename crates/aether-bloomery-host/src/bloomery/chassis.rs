@@ -9,8 +9,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use aether_actor::Addressable;
-use aether_capabilities::http::{HttpServerCapability, HttpServerConfig};
 use aether_component::{ComponentHostCapability, ComponentHostConfig};
+use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};

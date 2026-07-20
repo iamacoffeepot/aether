@@ -1,56 +1,14 @@
-//! Native chassis capabilities (issue 552 stage 2e). Each module
-//! implements one of the substrate's chassis-policy mailboxes as a
-//! [`NativeActor`] — owning its mailbox name, state, and handlers.
-//! The `Builder::with_actor` boot path on `aether-substrate` is the
-//! installation site; chassis mains pick which caps to load
-//! (Log/Io/Http are universal; the audio and render caps now live in
-//! the `aether-audio` / `aether-render` crates).
+//! The residue of the native chassis-capability crate (issue 552 stage
+//! 2e), now down to a single stub cap.
 //!
-//! Pre-stage-2e these modules lived under
-//! `aether_substrate::capabilities`. The split decouples the
-//! cap-marker layer from the substrate runtime so wasm components
-//! can address caps via `ctx.actor::<R>().send(&kind)` (resolved
-//! through `R::NAMESPACE`) without dragging in wasmtime / wgpu /
-//! cpal. Today
-//! the crate always pulls `aether-substrate` (the `NativeActor`
-//! impls live alongside the structs); the header-only wasm build is
-//! a follow-up.
-//!
-//! Issue 576 promoted `BroadcastCapability` into a real catch-all chassis
-//! cap — it lives here alongside the rest, holds an
-//! `Arc<HubOutbound>`, and dispatches every kind it receives through
-//! a `#[fallback]` handler that fans the envelope out to every
-//! attached MCP session.
-//!
-//! [`NativeActor`]: aether_substrate::actor::native::NativeActor
-//! [`Addressable`]: aether_actor::Addressable
+//! Every real capability that lived here has been extracted to its own
+//! per-cap crate by the arc that dissolves this monolith — the `http`
+//! client and server were the last, moving to `aether-http` and
+//! `aether-http-derive` (iamacoffeepot/aether#3758). What remains is
+//! [`test_bench`], the `aether.test_bench` fail-fast stub that desktop and
+//! headless compose so `aether.test_bench.advance` mail errors instead of
+//! warn-dropping into a hung reply slot.
 
-// ADR-0131: self-alias so the `#[http::router]` macro's emitted
-// `::aether_capabilities::…` paths resolve inside this crate's own
-// route fixtures (the pattern `aether-actor` / `aether-substrate`
-// already use for their derive-emitted paths).
-extern crate alloc;
-extern crate self as aether_capabilities;
-
-// The two HTTP capabilities, co-located under one submodule (ADR-0121):
-// the `aether.http` egress client and the `aether.http.server` inbound
-// server (a native singleton modeled on `RpcServerCapability` — binds a
-// port, parses each HTTP/1.1 request into mail to a handler component,
-// writes the handler's reply back as the HTTP response). They own their
-// shared wire kinds in `http/kinds.rs`.
-pub mod http;
 pub mod test_bench;
-
-pub use http::{HttpCapability, HttpConfig};
-// ADR-0108 `aether.http.server` cap (issue 1760). `HttpServerConfig` is the
-// always-on domain struct; the `Config`-derive `HttpServerConfigLayer` /
-// `HttpServerOverlay` and the bound-port `HttpServerHandle` are native-only.
-#[cfg(feature = "runtime")]
-pub use http::HttpServerConfigLayer;
-#[cfg(not(target_family = "wasm"))]
-pub use http::HttpServerHandle;
-#[cfg(feature = "runtime")]
-pub use http::HttpServerOverlay;
-pub use http::{HttpServerCapability, HttpServerConfig};
 
 pub use test_bench::UnsupportedTestBenchCapability;

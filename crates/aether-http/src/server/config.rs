@@ -72,7 +72,7 @@ pub struct HttpServerConfig {
     /// drains one and the cap replenishes credit. A count, not a byte or time
     /// quantity, so it carries no unit suffix.
     ///
-    /// [`HttpResponseChunk`]: crate::http::kinds::HttpResponseChunk
+    /// [`HttpResponseChunk`]: crate::kinds::HttpResponseChunk
     #[cfg_attr(feature = "runtime", config(default = 16))]
     pub response_stream_window: u32,
     /// Inbound request-stream credit-window depth ([`DEFAULT_REQUEST_STREAM_WINDOW`],
@@ -82,8 +82,8 @@ pub struct HttpServerConfig {
     /// pressure up into TCP so a fast peer cannot outrun a slow handler. A
     /// count, not a byte or time quantity, so it carries no unit suffix.
     ///
-    /// [`HttpRequestChunk`]: crate::http::kinds::HttpRequestChunk
-    /// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
+    /// [`HttpRequestChunk`]: crate::kinds::HttpRequestChunk
+    /// [`HttpRequestCredit`]: crate::kinds::HttpRequestCredit
     #[cfg_attr(feature = "runtime", config(default = 16))]
     pub request_stream_window: u32,
     /// Dispatch-shard count (ADR-0135): how many instanced dispatch actors

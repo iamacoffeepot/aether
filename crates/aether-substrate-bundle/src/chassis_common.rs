@@ -24,15 +24,15 @@ use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLayer};
 use aether_audio::AudioConfigLayer;
-use aether_capabilities::http::HttpConfigLayer;
-use aether_capabilities::http::HttpServerConfigLayer;
-use aether_capabilities::{HttpCapability, HttpServerCapability, HttpServerConfig, http::HttpConfig};
 use aether_component::{ComponentHostCapability, ComponentHostConfig};
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
 use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
 use aether_game::{GameGatewayCapability, GameGatewayConfig};
 use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLayer};
+use aether_http::HttpConfigLayer;
+use aether_http::HttpServerConfigLayer;
+use aether_http::{HttpCapability, HttpConfig, HttpServerCapability, HttpServerConfig};
 use aether_input::{InputCapability, InputConfig};
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
@@ -512,7 +512,7 @@ impl ChassisBootConfig {
 /// metas + records.
 ///
 /// Lives bundle-side rather than in `aether-substrate::config` because
-/// the cap layer types live in `aether-capabilities`, which depends on
+/// the cap layer types live in the per-cap crates, which depend on
 /// `aether-substrate` (not the reverse) — the generic `known_keys`
 /// assembly fn is in `config`; the concrete chassis registry is here.
 #[must_use]

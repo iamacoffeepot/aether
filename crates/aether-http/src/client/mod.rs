@@ -27,7 +27,7 @@ pub use config::{HttpConfigLayer, HttpOverlay};
 // `#[actor]` emits the `impl HandlesKind<K> for X {}` markers always-on
 // against the identity (outside the `feature = "runtime"` gate), so they
 // reference `Fetch` from here. `HttpMethod` is named by `HttpMailboxExt`.
-use crate::http::kinds::{Fetch, HttpMethod};
+use crate::kinds::{Fetch, HttpMethod};
 use aether_actor::WasmActorMailbox;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
@@ -37,7 +37,7 @@ use aether_substrate::actor::native::NativeActorMailbox;
 // `not(wasm32)` rather than `runtime`; the runtime-gated handler in
 // `runtime.rs` names it through the kinds path directly.
 #[cfg(not(target_family = "wasm"))]
-use crate::http::kinds::FetchResult;
+use crate::kinds::FetchResult;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -54,7 +54,7 @@ pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
 /// Lifts the two most common HTTP verbs to a typed method so callers
 /// stop reconstructing `Fetch { method: HttpMethod::Get, headers:
 /// vec![], body: vec![], timeout_ms: None, .. }` for a basic
-/// request. Same shape and rationale as [`aether_fs::FsMailboxExt`].
+/// request. Same shape and rationale as `aether_fs::FsMailboxExt`.
 ///
 /// All methods are fire-and-forget. Replies arrive as
 /// `aether.http.fetch_result`, correlated by the echoed `url`

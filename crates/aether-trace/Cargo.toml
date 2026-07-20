@@ -15,12 +15,10 @@ license.workspace = true
 # `DispatchTracedAck`, `TraceEvent`, `TraceRingEntry`, …) live in
 # `aether-kinds`, so this crate only references them.
 #
-# Like `aether-window` / `aether-fs` and unlike the pure-leaf
-# `aether-clipboard`, `aether-capabilities` RETAINS a
-# `default-features = false` dependency on this crate: `engine/proxy`
-# (real code) plus the `rpc` and `http` server tests still address the
-# trace cap. So capabilities keeps the identity-only dep and forwards
-# `aether-trace/runtime` from its own `runtime` feature.
+# A leaf: nothing depends back on it from `aether-capabilities`. Its
+# consumers hold their own dependency — `aether-engine`'s proxy addresses
+# the trace cap in real code, and the `aether-rpc` / `aether-http` server
+# tests address it through a dev-dependency (no re-export facade).
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity + `HandlesKind` markers (and the always-on `walk`

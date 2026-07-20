@@ -1,5 +1,5 @@
 use super::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use crate::http::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
+use crate::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
 use aether_actor::Addressable;
 use aether_data::Kind as KindTrait;
 use aether_data::KindId;
@@ -41,14 +41,14 @@ mod test_handlers {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
 
-    use crate::http::{RequestStream, ResponseStream};
+    use crate::{RequestStream, ResponseStream};
 
-    use crate::http;
-    use crate::http::kinds::{
+    use crate as http;
+    use crate::kinds::{
         HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen, HttpResponseStreamOpen,
         HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf, UnregisterRouteSelf,
     };
-    use crate::http::server::HttpServerCapability;
+    use crate::server::HttpServerCapability;
 
     /// Claims `/api` through the typed authoring surface (`#[http::router]`
     /// / `#[http::route]`, ADR-0131): the macro mints the route's

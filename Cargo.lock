@@ -159,10 +159,10 @@ dependencies = [
  "aether-actor",
  "aether-bloomery",
  "aether-bloomery-github",
- "aether-capabilities",
  "aether-codec",
  "aether-component",
  "aether-data",
+ "aether-http",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
@@ -187,32 +187,11 @@ name = "aether-capabilities"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-capabilities-derive",
  "aether-component",
  "aether-data",
- "aether-fs",
  "aether-kinds",
  "aether-substrate",
- "aether-trace",
- "base64",
- "bytemuck",
- "clap",
- "confique",
- "httparse",
  "inventory",
- "serde",
- "syn",
- "tracing",
- "ureq",
- "url",
-]
-
-[[package]]
-name = "aether-capabilities-derive"
-version = "0.3.0-alpha"
-dependencies = [
- "proc-macro2",
- "quote",
  "syn",
 ]
 
@@ -385,6 +364,38 @@ dependencies = [
  "serde_json",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "aether-http"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-data",
+ "aether-http-derive",
+ "aether-kinds",
+ "aether-substrate",
+ "aether-trace",
+ "base64",
+ "bytemuck",
+ "clap",
+ "confique",
+ "httparse",
+ "inventory",
+ "serde",
+ "tracing",
+ "ureq",
+ "url",
+]
+
+[[package]]
+name = "aether-http-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -594,6 +605,7 @@ dependencies = [
  "aether-fs",
  "aether-game",
  "aether-gemini",
+ "aether-http",
  "aether-input",
  "aether-inventory",
  "aether-kinds",
@@ -668,10 +680,10 @@ name = "aether-test-fixtures-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-capabilities",
  "aether-component",
  "aether-data",
  "aether-fs",
+ "aether-http",
  "aether-input",
  "aether-kinds",
  "aether-lifecycle",

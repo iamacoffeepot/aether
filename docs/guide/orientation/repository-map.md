@@ -69,7 +69,7 @@ other guest modules.
 
 ## Derive, fixture, and tooling crates
 
-`aether-capabilities-derive`, `aether-data-derive`, and `aether-derive` hold
+`aether-http-derive`, `aether-data-derive`, and `aether-derive` hold
 code generation shared across the workspace. When a source annotation appears
 to do more than its local file explains, inspect its derive implementation and
 expanded tests.

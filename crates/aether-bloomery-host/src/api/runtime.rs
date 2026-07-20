@@ -51,9 +51,10 @@ use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Membership, Outcome,
     Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
 };
-use aether_capabilities::http::{self, HttpHeader, HttpServerResponse};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailId, MailboxId};
+use aether_http as http;
+use aether_http::{HttpHeader, HttpServerResponse};
 use aether_kinds::trace::Settled;
 use aether_substrate::{InboundMail, Mailer};
 

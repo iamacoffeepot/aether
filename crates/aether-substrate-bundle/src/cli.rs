@@ -33,7 +33,7 @@
 use clap::{Args, Parser};
 
 // Per-cap overlays are emitted by `#[derive(aether_substrate::Config)]`
-// next to the domain struct in `aether-capabilities`. Re-exporting them
+// next to the domain struct in each cap's own crate. Re-exporting them
 // here keeps the `cli.common.<cap>.into_layer()` call sites unchanged.
 // The `NamespaceRoots` overlay's name follows the domain struct
 // (`NamespaceRootsOverlay`), not the namespace prefix (`FsOverlay`) —
@@ -41,12 +41,12 @@ use clap::{Args, Parser};
 // reading.
 pub use aether_anthropic::AnthropicOverlay;
 pub use aether_audio::AudioOverlay;
-pub use aether_capabilities::http::HttpOverlay;
-pub use aether_capabilities::http::HttpServerOverlay;
 pub use aether_contentgen::ContentGenOverlay;
 pub use aether_engine::EngineOverlay;
 pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_gemini::GeminiOverlay;
+pub use aether_http::HttpOverlay;
+pub use aether_http::HttpServerOverlay;
 
 pub use crate::chassis_common::ChassisBootOverlay;
 pub use crate::desktop::driver::WindowOverlay;

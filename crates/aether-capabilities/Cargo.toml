@@ -4,159 +4,48 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Issue 552 stage 2e: the chassis-cap layer extracted out of
-# `aether-substrate`. Hosts the six native chassis capabilities
-# (Log, Handle, Io, Net, Audio, Render) plus the `HubBroadcast`
-# synthetic actor marker.
+# Issue 552 stage 2e originally extracted the chassis-cap layer out of
+# `aether-substrate` into this crate. The arc that dissolves the monolith
+# has since moved every real capability into its own per-cap crate; the
+# `http` client and server were the last, leaving for `aether-http` /
+# `aether-http-derive` (iamacoffeepot/aether#3758).
 #
-# Why a separate crate: the load-bearing motivation is that wasm
-# components want to address chassis caps via `ctx.send_to::<R>` —
-# resolved through `R::NAMESPACE` — without pulling in
-# `aether-substrate`'s wasmtime / wgpu / cpal stack. Splitting the
-# cap structs and their `Actor` markers off `aether-substrate`
-# keeps the wasm-component compile graph small.
+# What remains is the `aether.test_bench` fail-fast stub cap, which desktop
+# and headless compose so `aether.test_bench.advance` mail errors instead
+# of warn-dropping into a hung reply slot.
 #
-# Stage 4 (this PR, issue 563) feature-gates everything substrate-
-# adjacent under `runtime` so wasm components can dep with
-# `default-features = false` and pick up only the target-agnostic
-# Actor / Singleton / HandlesKind markers. The `#[actor]` macro
-# emits `NativeActor` + `NativeDispatch` + handler-method impls
-# under `#[cfg(not(target_family = "wasm"))]`, so the feature gate
-# here matches: cfg cleanly elides on wasm regardless of how the
-# consumer flips features.
-
-# cargo-machete (the CI unused-deps gate) scans source without resolving
-# features, so both entries below are false positives — the deps are real —
-# and are ignored here rather than removed.
-#
-# `clap` is used only through the `#[derive(clap::Args)]` the Config derive
-# emits on the per-cap `*Overlay` structs under the optional `runtime` feature
-# (see the `clap` dependency comment below).
-#
-# `aether-fs` is retained for the rustdoc intra-doc links to
-# `aether_fs::FsMailboxExt` that several cap modules reference (the shared
-# cap-mailbox-extension shape), which CI's `broken_intra_doc_links` gate would
-# flag if the dep were dropped, plus the `aether-fs/runtime` forward the
-# chassis-boot cap tests exercise. machete counts neither doc-links nor feature
-# forwards as usage. (Its former in-code consumers, the text / gemini caps,
-# were extracted to their own crates, #3727 / #3705.)
-[package.metadata.cargo-machete]
-ignored = ["aether-fs", "clap"]
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the ZST
+# cap identity with its `Addressable`, `HandlesKind`, and name-inventory
+# markers compiles always-on; the `aether_substrate`-typed state and
+# `#[runtime] impl` are gated behind it.
 
 [features]
-# Default-on: chassis-target builds get the full cap set with their
-# substrate-side runtime impls. Wasm consumers do
-# `default-features = false` and opt into per-cap marker features
-# (`text`) for the caps they typed-send to.
 default = ["runtime"]
-
-# iamacoffeepot/aether#2311 (identity/runtime split): the `#[actor]` macro gates
-# a split cap's runtime impls (`Lifecycle` / `NativeActor` / `Dispatch` + handler
-# bodies) behind this feature, so a marker-only build (`default-features = false`
-# with just a cap marker) compiles only the cap's identity + addressing markers
-# and never names the state type or pulls the substrate runtime through it. This
-# is the single "this build carries the substrate-side runtime" concept: it pulls
-# every wasm-incompatible dep + the `aether-substrate` runtime the `NativeActor`
-# macro arm references. Always on for chassis.
-runtime = [
-    "dep:aether-substrate",
-    "aether-component/runtime",
-    "aether-fs/runtime",
-    "dep:base64",
-    "dep:clap",
-    "dep:confique",
-    "dep:httparse",
-    "dep:tracing",
-    "dep:ureq",
-    "dep:url",
-    # The retained `aether-trace` dep (below) is identity-only by default;
-    # forward its runtime half so chassis / test builds of this crate boot
-    # the `TraceDispatchCapability` runtime the `http` server tests exercise.
-    "aether-trace/runtime",
-]
-
-# The render / audio / text caps were extracted to their own crates
-# (iamacoffeepot/aether#3721, #3723, #3727); their marker/identity now ride
-# those crates, not a local feature.
+runtime = ["dep:aether-substrate"]
 
 [dependencies]
-# Always-on: target-agnostic SDK + data layer + kind types. These
-# compile fine for `wasm32-unknown-unknown` and carry the markers
-# wasm components rely on.
+# Always-on: target-agnostic SDK + data layer + kind types. These compile
+# fine for `wasm32-unknown-unknown` and carry the markers wasm components
+# rely on.
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
-# The `aether.fs` cap lives in its own crate (iamacoffeepot/aether#3706).
-# Retained here identity-only for the rustdoc intra-doc links several cap
-# modules make to `aether_fs::FsMailboxExt` (the shared cap-mailbox-extension
-# shape) plus the chassis-boot cap tests that exercise the fs runtime.
-# `default-features = false` keeps the marker-only wasm build from dragging the
-# fs runtime; the `runtime` feature below forwards `aether-fs/runtime`. (See the
-# `[package.metadata.cargo-machete]` note above — machete counts neither
-# doc-links nor feature forwards as usage.)
-aether-fs = { path = "../aether-fs", default-features = false }
-# ADR-0131: the `#[http::router]` / `#[http::route]` proc macros, re-exported
-# through the wasm-safe `http` module. Proc-macro crates are host-compiled, so
-# an unconditional dep leaves the wasm-header-only build unaffected.
-aether-capabilities-derive = { path = "../aether-capabilities-derive" }
-# The `aether.component` cap lives in its own crate
-# (iamacoffeepot/aether#3756). This is a genuine downward dependency, not a
-# facade: the remaining `http` cap names `ComponentHostCapability` when it
-# defers a request to a handler component (`http/defer.rs`), so this crate
-# re-exports none of those names. The edge disappears when `http` is
-# extracted in turn. `default-features = false` keeps the marker-only wasm
-# build from dragging wasmtime through; the `runtime` feature below forwards
-# `aether-component/runtime`.
-aether-component = { path = "../aether-component", default-features = false }
 aether-kinds = { path = "../aether-kinds" }
-# `alloc` rides along for the wire-shaped kind types whose owned-`String` /
-# `Vec` fields need serde's alloc impls even in the marker-only isolated
-# build.
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
-
-# iamacoffeepot/aether#3719: the `aether.trace` cap was extracted to its
-# own `aether-trace` crate, but capabilities RETAINS an identity-only
-# dependency on it — the `http` server tests still address the trace cap.
-# `default-features = false` keeps only the wasm-safe identity + walk; the
-# `runtime` feature above forwards `aether-trace/runtime` so chassis / test
-# builds get the `TraceDispatchCapability` runtime half.
-aether-trace = { path = "../aether-trace", default-features = false }
-# Native-only: gated behind the `runtime` feature so wasm builds
-# don't drag in wasmtime / cpal / wgpu transitively.
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime.
 aether-substrate = { path = "../aether-substrate", optional = true }
-# ADR-0129: the `Sec-WebSocket-Accept` handshake key is base64(SHA-1(key +
-# GUID)). SHA-1 is hand-rolled in `http/server/runtime.rs` (one fixed hash
-# does not earn a `sha1` crate); base64 is already a workspace dependency, so
-# the cap inherits it — runtime-gated, the websocket handshake is native-only.
-base64 = { workspace = true, optional = true }
-bytemuck = { workspace = true, features = ["derive"] }
-# ADR-0090 unit g (iamacoffeepot/aether#1264): the `Config` derive
-# emits per-cap `*Overlay` structs (`#[derive(clap::Args)]`) next to
-# the domain struct, retiring the hand-rolled overlays that used to
-# live in `aether-substrate-bundle::cli`. clap rides the `runtime`
-# feature so wasm builds skip it.
-clap = { workspace = true, optional = true }
-# ADR-0090: typed, layered config resolution. Used by the env-shaped
-# `*Layer` structs (e.g. `HttpConfigLayer`) that back each cap's
-# `*Config::from_env`. `default-features = false` keeps it env-only —
-# no TOML/YAML file parsers until ADR-0090's config-file step.
-confique = { workspace = true, optional = true }
-# ADR-0108 §1: the inbound HTTP/1.1 request-line + header parser for the
-# `aether.http.server` cap. Pure-Rust, no_std-capable, already a transitive
-# dependency; rides the `runtime` feature so wasm / marker-only builds skip it.
-httparse = { version = "1", optional = true }
-tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
-ureq = { version = "3", optional = true, features = ["rustls"] }
-url = { version = "2", optional = true }
 
-# ADR-0121: the `Kind` derive (used by caps that own their kinds, e.g.
-# `http/kinds.rs`) emits a `cfg(not(target_family = "wasm"))`-gated
-# `inventory::submit!` per kind, so native builds need `inventory`
-# reachable. Wasm guests don't (the derive's gate skips emission).
+# The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!`, so native builds need `inventory` reachable; wasm
+# guests don't (the gate skips emission).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+# `tests/embeddable_resolution.rs` exercises the ADR-0099 §5/§6 host-carry
+# fold through `aether_component::resolve_embedded`. Dev-only — no source
+# file in this crate names the component cap.
+aether-component = { path = "../aether-component" }
 # iamacoffeepot/aether#2517: the cap unit tests boot a chassis through the
 # canonical `aether_substrate::testing` fixture, enabled by the substrate
 # `test-support` feature. Dev-dependency feature unification applies to test

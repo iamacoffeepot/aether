@@ -1,0 +1,31 @@
+[package]
+name = "aether-http-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0131: the `#[http::router]` / `#[http::route]` proc macros for the
+# typed route-authoring surface over the `aether.http.server` cap. A leaf
+# below `aether-http`, which depends on it unconditionally and re-exports
+# both macros through its wasm-safe crate root. Proc-macro crates are
+# host-compiled, so the wasm-header-only build of the parent is unaffected
+# by the dep. The runtime types the macros compile down to (`FromRequest`,
+# `Ctx`, `Route`, `HttpServerRequest`, `RegisterRouteSelf`) live in
+# `aether-http`; this crate only emits paths at them.
+#
+# Renamed from `aether-capabilities-derive` (iamacoffeepot/aether#3758)
+# when the `http` cap was extracted: the crate was always 100% HTTP, so it
+# was misnamed rather than mislocated. The new name makes it a leaf under
+# `aether-http`, matching the `aether-actor` / `aether-actor-derive` and
+# `aether-data` / `aether-data-derive` convention.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

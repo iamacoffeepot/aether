@@ -53,8 +53,7 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # feature — `confique` via the `#[derive(confique::Config)]` on the config
 # layer, `clap` via the `#[derive(clap::Args)]` the same derive emits on
 # the `*Overlay` struct. Both are false positives: the deps are real and
-# runtime-gated. (aether-capabilities ignores only `clap` because it also
-# calls confique's API directly elsewhere; isolated here, both surface.)
+# runtime-gated.
 [package.metadata.cargo-machete]
 ignored = ["clap", "confique"]
 

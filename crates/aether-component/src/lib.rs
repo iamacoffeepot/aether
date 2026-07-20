@@ -33,13 +33,11 @@
 //! splitting them would put a hard dependency edge between two crates
 //! that share one mailbox family.
 //!
-//! `aether-capabilities` keeps a dependency on this crate only because
-//! its remaining `http` cap names [`ComponentHostCapability`] when it
-//! defers a request to a handler component. That is a genuine downward
-//! use, not a facade: the husk re-exports none of these names, so a
-//! consumer of the component cap depends on this crate directly and
-//! never enters the capabilities graph. The edge disappears when `http`
-//! is extracted in turn.
+//! `aether-http` depends on this crate because its deferred-reply path
+//! names [`ComponentHostCapability`] to resolve the handler component it
+//! answers through. That is a genuine downward use, not a facade:
+//! neither crate re-exports the other's names, so a consumer of the
+//! component cap depends on this crate directly.
 //!
 //! The ADR-0122 identity/runtime split rides the `runtime` feature: the
 //! ZST cap and trampoline identities with their `Addressable`,

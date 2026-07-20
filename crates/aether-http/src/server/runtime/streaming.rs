@@ -30,7 +30,7 @@ impl HttpShardState {
         let _ = ctx.send_envelope_detached(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
         self.signal_reader(conn_id, ReaderControl::Stream { credit: window });
         tracing::debug!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             conn = conn_id,
             stream = stream_id,
             window,
@@ -126,7 +126,7 @@ impl HttpShardState {
             Ok(half) => half,
             Err(e) => {
                 tracing::warn!(
-                    target: "aether_substrate::http_server",
+                    target: "aether_http::server",
                     conn = conn_id,
                     error = %e,
                     "http stream: writer clone failed; closing",
@@ -151,7 +151,7 @@ impl HttpShardState {
                 Ok(thread) => thread,
                 Err(e) => {
                     tracing::warn!(
-                        target: "aether_substrate::http_server",
+                        target: "aether_http::server",
                         conn = conn_id,
                         error = %e,
                         "http stream: writer thread spawn failed; closing",
@@ -177,7 +177,7 @@ impl HttpShardState {
         // `stream_id` from this first credit mail.
         self.send_stream_credit(ctx, stream_id, window);
         tracing::debug!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             conn = conn_id,
             stream = stream_id,
             window,

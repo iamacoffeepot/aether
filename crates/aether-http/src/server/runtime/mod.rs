@@ -45,12 +45,12 @@ pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 // The shard's `#[runtime] impl` (super::shard::runtime) reaches the kind
 // vocabulary its moved handler bodies name through this module's glob, so
 // the kinds the shard shares with the concern submodules stay `pub use`.
-pub use crate::http::kinds::{
+pub use crate::kinds::{
     HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd, HttpRequestStreamOpen,
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse,
     HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
-use crate::http::kinds::{
+use crate::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
 use aether_kinds::MonitorNotice;
@@ -140,7 +140,7 @@ impl NativeActor for HttpServerCapability {
                                 break;
                             }
                             tracing::warn!(
-                                target: "aether_substrate::http_server",
+                                target: "aether_http::server",
                                 port,
                                 %error,
                                 "http accept() failed; backing off before retry",
@@ -153,7 +153,7 @@ impl NativeActor for HttpServerCapability {
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
         tracing::info!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             addr = %config.bind_addr,
             port,
             "http server bound",
@@ -187,7 +187,7 @@ impl NativeActor for HttpServerCapability {
         let wake_addr = teardown_connect_addr(&state.config.bind_addr, state.listener_port);
         if let Err(error) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100)) {
             tracing::warn!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 port = state.listener_port,
                 addr = %wake_addr,
                 %error,
@@ -198,7 +198,7 @@ impl NativeActor for HttpServerCapability {
             let _ = thread.join();
         }
         tracing::info!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             port = state.listener_port,
             "http server closed",
         );
@@ -224,7 +224,7 @@ impl NativeActor for HttpServerCapability {
                 // sidecars to that shard's channel.
                 _ => {
                     tracing::debug!(
-                        target: "aether_substrate::http_server",
+                        target: "aether_http::server",
                         "unexpected non-accept event at supervisor dropped",
                     );
                 }

@@ -18,8 +18,8 @@ the step where each bites.
 
 ## The exemplar to copy
 
-Follow [`HttpConfig`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/http/client/config.rs)
-in `crates/aether-capabilities/src/http/client/config.rs`. It's the same struct the
+Follow [`HttpConfig`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-http/src/client/config.rs)
+in `crates/aether-http/src/client/config.rs`. It's the same struct the
 [Configuration](../systems/configuration.md) explainer excerpts, it carries most
 of the hints you'll reach for (`default`, `env`, `cli_long`, `csv_set`,
 `ms_duration`, `layer_field`), and it's wired into both full-stack chassis. Open

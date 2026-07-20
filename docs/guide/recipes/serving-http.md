@@ -51,7 +51,7 @@ returned registry selector. `spawn_substrate` does not accept `binary_path`.
 ## 2. Set up the crate
 
 The http server cap needs **no marker feature** — unlike `render` / `audio` /
-`text` / `ui`, `aether_capabilities::http` and its kinds are always-on, so a
+`text` / `ui`, `aether_http` and its kinds are always-on, so a
 default-features-off wasm build sees them with no extra feature wiring:
 
 ```toml
@@ -66,7 +66,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-capabilities = { path = "../aether-capabilities", default-features = false }
+aether-http = { path = "../aether-http", default-features = false }
 ```
 
 ## 3. Write the handler
@@ -81,8 +81,8 @@ an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 
 ```rust
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::http::HttpServerCapability;
-use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use aether_http::HttpServerCapability;
+use aether_http::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
 use aether_data::Kind as _;
 
 pub struct Web;
@@ -199,8 +199,8 @@ matching no route is answered `503`, unless some component claimed the `/`
 catch-all (as the §3 handler does) — then everything unmatched goes there.
 
 ```rust
-use aether_capabilities::http::HttpServerCapability;
-use aether_capabilities::http::kinds::{HttpServerRequest, RegisterRouteSelf};
+use aether_http::HttpServerCapability;
+use aether_http::kinds::{HttpServerRequest, RegisterRouteSelf};
 use aether_data::Kind as _;
 
 fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
@@ -289,8 +289,8 @@ matched route, dereffing to the ctx so mail sends read as usual — and returns
 `HttpServerResponse`:
 
 ```rust
-use aether_capabilities::http;
-use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse};
+use aether_http as http;
+use aether_http::kinds::{HttpServerRequest, HttpServerResponse};
 
 #[http::router]
 #[actor]
@@ -376,7 +376,7 @@ claimed it — e.g. no handler loaded yet) returns `503 Service Unavailable`.
 Pass a `Vec<HttpHeader>` in the returned `HttpServerResponse`:
 
 ```rust
-use aether_capabilities::http::kinds::HttpHeader;
+use aether_http::kinds::HttpHeader;
 
 HttpServerResponse {
     status: 200,
@@ -419,8 +419,8 @@ ctx, so the credit handler is `#[handler::manual]`:
 
 ```rust
 use aether_actor::{Manual, WasmCtx, WasmInitCtx};
-use aether_capabilities::http::ResponseStream;
-use aether_capabilities::http::kinds::{
+use aether_http::ResponseStream;
+use aether_http::kinds::{
     HttpResponseStreamOpen, HttpServerRequest, HttpStreamCredit,
 };
 
@@ -487,7 +487,7 @@ returning it:
 
 ```rust
 use aether_actor::{Manual, OutboundReply, WasmCtx};
-use aether_capabilities::http::kinds::{HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse};
+use aether_http::kinds::{HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse};
 
 #[handler::manual]
 fn on_request(&mut self, ctx: &mut WasmCtx<'_, Manual>, req: HttpServerRequest) {

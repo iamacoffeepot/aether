@@ -459,7 +459,7 @@ impl HttpShardState {
             Ok(half) => half,
             Err(e) => {
                 tracing::warn!(
-                    target: "aether_substrate::http_server",
+                    target: "aether_http::server",
                     conn = conn_id,
                     error = %e,
                     "http websocket: writer clone failed; closing",
@@ -486,7 +486,7 @@ impl HttpShardState {
                 Ok(thread) => thread,
                 Err(e) => {
                     tracing::warn!(
-                        target: "aether_substrate::http_server",
+                        target: "aether_http::server",
                         conn = conn_id,
                         error = %e,
                         "http websocket: writer thread spawn failed; closing",
@@ -521,7 +521,7 @@ impl HttpShardState {
         // Flip the parked reader into the frame loop.
         self.signal_reader(conn_id, ReaderControl::Upgrade);
         tracing::debug!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             conn = conn_id,
             stream = stream_id,
             window,
