@@ -2,10 +2,12 @@
 //! `aether-test-fixtures`'s `probe` cdylib into a real chassis and exercises
 //! `aether.input.subscribe` / `aether.input.unsubscribe` and the
 //! `aether.component.drop` lifecycle's effect on the input subscriber
-//! set. Replaces the pre-issue-634-Phase-4 harness which drove the
-//! retired `InputCapability::for_test` / `subscribe_for_test` /
-//! `unsubscribe_for_test` helpers and used `mailer.drain_all` to
-//! synchronise. Tracked under issue 648.
+//! set. Tracked under issue 648.
+//!
+//! Minimal composition (issue #3764): the component host (probe wasm)
+//! plus the input cap on the bench basics — no render, no wgpu gate.
+//! The probe wasm must be pre-built (`require_wasm` skips otherwise;
+//! `AETHER_REQUIRE_RUNTIME=1` turns the skip into a hard failure).
 //!
 //! Targets the `Key` input stream, not `Tick`: issue 1490 moved `Tick`
 //! off `aether.input` onto `aether.lifecycle` (it is a frame-lifecycle
@@ -15,21 +17,28 @@
 //! broadcasts a `key_observed` per dispatch; Tick-via-lifecycle delivery
 //! is covered by the `substrate_bench` frame-loop scenarios.
 
-use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId};
-use aether_input::{InputCapability, SubscribeInputResult, UnsubscribeInput};
+use aether_input::{InputCapability, InputConfig, SubscribeInputResult, UnsubscribeInput};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
+
+fn boot_bench() -> SubstrateBench {
+    SubstrateBench::builder()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .build()
+        .expect("boot")
+}
 
 fn load_probe_named(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
@@ -91,10 +100,10 @@ fn drop_component(bench: &mut SubstrateBench, mailbox_id: MailboxId) {
 /// subscriber set rather than firing unconditionally.
 #[test]
 fn empty_subscribers_means_no_delivery() {
-    if require_runtime("aether_test_fixtures_bundle").is_none() {
+    if require_wasm("aether_test_fixtures_bundle").is_none() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = boot_bench();
     send_keys(&mut bench, 2);
     assert_eq!(
         bench.count_observed(KeyObserved::NAME),
@@ -112,10 +121,10 @@ fn empty_subscribers_means_no_delivery() {
 /// probe's re-broadcast proves the `on_text_input` fan-out is wired.
 #[test]
 fn subscribed_component_receives_published_text_input() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = boot_bench();
     let _mbox = load_probe_named(&mut bench, &wasm_path, "typist");
     let baseline = bench.count_observed(TextInputObserved::NAME);
 
@@ -130,10 +139,10 @@ fn subscribed_component_receives_published_text_input() {
 /// One subscribed probe broadcasts once per injected key.
 #[test]
 fn subscribed_component_receives_published_keys() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = boot_bench();
     let _mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(KeyObserved::NAME);
 
@@ -147,10 +156,10 @@ fn subscribed_component_receives_published_keys() {
 /// 4 broadcasts.
 #[test]
 fn two_subscribers_each_receive_every_key() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = boot_bench();
     let _mbox_a = load_probe_named(&mut bench, &wasm_path, "a");
     let _mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
     let baseline = bench.count_observed(KeyObserved::NAME);
@@ -170,10 +179,10 @@ fn two_subscribers_each_receive_every_key() {
 /// from that probe.
 #[test]
 fn unsubscribe_stops_delivery() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = boot_bench();
     let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(KeyObserved::NAME);
 
@@ -202,10 +211,10 @@ fn unsubscribe_stops_delivery() {
 /// the dropped probe.
 #[test]
 fn drop_clears_subscriptions() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = boot_bench();
     let mbox = load_probe_named(&mut bench, &wasm_path, "victim");
     let baseline = bench.count_observed(KeyObserved::NAME);
 

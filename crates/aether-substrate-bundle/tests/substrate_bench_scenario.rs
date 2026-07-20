@@ -1,8 +1,7 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
-//! a `SubstrateBench` and exercises one substrate primitive — input
-//! subscription, drop, `replace_component` (all via
-//! `aether-test-fixtures`'s `probe` cdylib), or the chassis `aether.fs`
-//! adapter's read/write/delete/list round trips — driving every step
+//! a `SubstrateBench` and exercises one substrate primitive — boot
+//! lifecycle, component listing/exports, inline-child state, or text
+//! (via `aether-test-fixtures`'s `probe` cdylib) — driving every step
 //! through `SubstrateBench::execute` (issue 868). The render scenarios
 //! moved to `aether-render`'s own `render_scenario` target (issue #3771).
 //!
@@ -11,8 +10,7 @@
 //!   `mesa-vulkan-drivers`).
 //! - The fixture's wasm hasn't been built — fixture-loading tests
 //!   read `target/wasm32-unknown-unknown/{debug,release}/examples/probe.wasm`
-//!   and skip with an `eprintln!` when it's absent. fs scenarios
-//!   don't load the fixture, so they only need wgpu. CI builds the
+//!   and skip with an `eprintln!` when it's absent. CI builds the
 //!   fixture wasm before invoking `cargo test`; setting
 //!   `AETHER_REQUIRE_RUNTIME=1` (CI does) flips both skip points
 //!   into hard panics so a missing pre-build is loud.
@@ -34,9 +32,7 @@
 use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
-use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
 use aether_data::{Kind, MailboxId};
-use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
 use aether_kinds::{
     CachedFontMetrics, ClipRect, DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent,
     LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent, ReplaceResult,
@@ -168,12 +164,8 @@ fn require_wgpu_only() -> bool {
 
 #[path = "substrate_bench_scenario/boot.rs"]
 mod boot;
-#[path = "substrate_bench_scenario/clipboard.rs"]
-mod clipboard;
 #[path = "substrate_bench_scenario/component.rs"]
 mod component;
-#[path = "substrate_bench_scenario/fs.rs"]
-mod filesystem;
 #[path = "substrate_bench_scenario/inline_child.rs"]
 mod inline_child;
 #[path = "substrate_bench_scenario/text.rs"]
