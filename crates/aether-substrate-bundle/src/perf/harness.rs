@@ -37,7 +37,7 @@ use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCt
 use aether_trace::walk::fold_nodes;
 
 use crate::perf::report::LatencySection;
-use crate::test_bench::TestBench;
+use crate::substrate_bench::SubstrateBench;
 
 /// Fire-and-forward payload the relay actors pass along. The `seq`
 /// field is carried for legibility when eyeballing a trace; the relay
@@ -812,7 +812,7 @@ pub struct CellResult {
 ///   dispatch cost). This is the harness's historical behaviour,
 ///   verbatim.
 /// - `Saturate` emits a burst of `backlog` `Ping`s on each tick and
-///   measures completed mails/sec. `TestBench::advance` drains the queue
+///   measures completed mails/sec. `SubstrateBench::advance` drains the queue
 ///   to quiescence every frame (`bench.rs:630`), so one Ping per tick can
 ///   never build a backlog — the burst is what creates the deep ready
 ///   queue the throughput metric is meant to capture. Per-hop latency
@@ -899,7 +899,7 @@ pub const DEFAULT_SATURATE_BACKLOG: u32 = 512;
 /// saturation-invariant math (issue 1990). Reads `AETHER_ACTOR_TRACE_RING_SIZE`
 /// (the chassis-wide knob) when set, else the `aether-actor` const
 /// [`DEFAULT_TRACE_RING_CAP`]. The sweep cell ([`run_sweep_samples`])
-/// pins the same value on its `TestBench` so the `backlog * (2 +
+/// pins the same value on its `SubstrateBench` so the `backlog * (2 +
 /// out_degree) <= ring_cap` clamp and the ring the relay actually writes
 /// agree — bumping the knob to chase a high-volume lap (the use case that
 /// motivated the issue) lifts both together instead of silently keeping
@@ -1020,7 +1020,7 @@ pub fn wide_fanout_widths_from_env() -> Vec<usize> {
 }
 
 /// Drive the sweep and return per-cell percentiles. Each cell boots a
-/// fresh [`TestBench`], wires the topology + tick source, advances, then
+/// fresh [`SubstrateBench`], wires the topology + tick source, advances, then
 /// harvests every participating actor's per-actor trace ring (ADR-0086
 /// Phase 3) directly by name and folds them into one node set. A cell
 /// whose bench fails to boot (no wgpu adapter) or whose ring harvest
@@ -1204,7 +1204,7 @@ fn throughput_from_nodes(mails: &[MailNodeWire]) -> Option<f64> {
 /// harvest yields no keep-up cell rather than a wrong one — mirroring the
 /// trace harvest's fail-closed posture.
 fn harvest_keepup(
-    tb: &mut TestBench,
+    tb: &mut SubstrateBench,
     names: &[String],
     topo_name: &str,
     drive: Drive,
@@ -1255,12 +1255,12 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
     let mut rows: Vec<CellSamples> = Vec::new();
 
     // Issue 1990: the effective trace-ring cap (env knob or const
-    // default) governs both the sweep's `TestBench` rings and the
+    // default) governs both the sweep's `SubstrateBench` rings and the
     // per-cell burst clamp below — resolved once so they can't drift.
     let trace_ring_cap = effective_trace_ring_cap();
     for &workers in &cfg.workers {
         for topo in &cfg.topologies {
-            let Ok(mut tb) = TestBench::builder()
+            let Ok(mut tb) = SubstrateBench::builder()
                 .with_workers(Some(workers))
                 .trace_ring_capacity(Some(trace_ring_cap))
                 .size(16, 16)
@@ -1269,7 +1269,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 tracing::warn!(
                     target: "aether_perf",
                     topo = %topo.name, workers,
-                    "sweep cell skipped: TestBench boot failed (likely no wgpu adapter)",
+                    "sweep cell skipped: SubstrateBench boot failed (likely no wgpu adapter)",
                 );
                 continue;
             };

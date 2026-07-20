@@ -1,9 +1,9 @@
-//! `TestBench::execute` — a declarative op sequence over the
-//! settlement-gated `TestBench` primitives (issue 868).
+//! `SubstrateBench::execute` — a declarative op sequence over the
+//! settlement-gated `SubstrateBench` primitives (issue 868).
 //!
-//! Every `test_bench`-driven test is a small state machine: load a
+//! Every `substrate_bench`-driven test is a small state machine: load a
 //! component, advance, send a mail, advance, capture, send cleanup.
-//! Each step calls a separate [`TestBench`] method, and each method
+//! Each step calls a separate [`SubstrateBench`] method, and each method
 //! is independently responsible for waiting on its causal chain to
 //! settle (ADR-0080 §6). That per-method settlement glue has been a
 //! recurring flake source (issues 834 / 836 / 838 / 860): when a
@@ -11,7 +11,7 @@
 //! surfaced the race, and the fix was a one-off patch to the
 //! offending method.
 //!
-//! [`TestBench::execute`] centralizes the sequencing: it takes a
+//! [`SubstrateBench::execute`] centralizes the sequencing: it takes a
 //! labelled list of [`BenchOp`]s, dispatches each through the
 //! matching settlement-gated primitive, blocks on settlement, then
 //! proceeds. When the next timing race surfaces it gets fixed once,
@@ -26,11 +26,11 @@ use std::fmt;
 use aether_data::{Kind, KindId};
 use aether_kinds::NamedMail;
 
-use super::bench::{TestBench, TestBenchError};
+use super::bench::{SubstrateBench, SubstrateBenchError};
 
-/// One atomic step in a [`TestBench::execute`] sequence. Each variant
+/// One atomic step in a [`SubstrateBench::execute`] sequence. Each variant
 /// resolves via an existing settlement-gated primitive on
-/// [`TestBench`]; the sequencer waits for the op's causal chain to
+/// [`SubstrateBench`]; the sequencer waits for the op's causal chain to
 /// drain before proceeding to the next step.
 ///
 /// Build ops with the typed constructors ([`BenchOp::send_mail`],
@@ -115,7 +115,7 @@ pub enum BenchOutput {
     Captured(Vec<u8>),
 }
 
-/// Map of per-op outputs from a successful [`TestBench::execute`]
+/// Map of per-op outputs from a successful [`SubstrateBench::execute`]
 /// call, keyed by each op's label. Fetch results by label so tests
 /// read by intent (`result.captured("snap")`) and survive step
 /// reordering, rather than destructuring a positional array.
@@ -171,15 +171,15 @@ impl ExecutionResult {
     }
 }
 
-/// Failure modes of [`TestBench::execute`] and its result accessors.
+/// Failure modes of [`SubstrateBench::execute`] and its result accessors.
 #[derive(Debug)]
 pub enum ExecutionError {
     /// Two ops in the same `execute` call shared a label.
     DuplicateLabel(String),
     /// The op at `label` failed mid-sequence; `error` is the
-    /// underlying [`TestBenchError`] (settlement timeout, decode
+    /// underlying [`SubstrateBenchError`] (settlement timeout, decode
     /// failure, unknown mailbox, …). Aborts the sequence.
-    OpFailed { label: String, error: TestBenchError },
+    OpFailed { label: String, error: SubstrateBenchError },
     /// [`ExecutionResult::reply`] was asked for a label that didn't
     /// run a [`BenchOp::SendAndAwait`] (or didn't run at all).
     NoSuchReply(String),
@@ -209,9 +209,9 @@ impl fmt::Display for ExecutionError {
 
 impl error::Error for ExecutionError {}
 
-impl TestBench {
+impl SubstrateBench {
     /// Execute `steps` in order. Each op dispatches via the matching
-    /// settlement-gated [`TestBench`] primitive, blocks until its
+    /// settlement-gated [`SubstrateBench`] primitive, blocks until its
     /// causal chain drains (ADR-0080 §6), then proceeds. Outputs are
     /// keyed by each op's label; fetch them from the returned
     /// [`ExecutionResult`] (`captured(label)`, `reply::<R>(label)`).

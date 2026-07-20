@@ -43,7 +43,7 @@ stable tunnel → aether-mcp → hub + artifact stores
 - A **kind** is a named message schema; a **mailbox** is an actor address.
 - Native capabilities and wasm components use the same actor/mail model.
 - A **chassis** selects the drivers and native capability runtimes for a
-  process: desktop, headless, hub, or test bench.
+  process: desktop, headless, hub, or substrate bench.
 - The **hub** supervises child engines and stores content-addressed chassis and
   component artifacts.
 - `aether-mcp` adapts agent-facing JSON tools to live engine RPC/mail. The tool's
@@ -163,7 +163,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Guest SDKs | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-capabilities` | render, text, audio, FS, HTTP, TCP, lifecycle, fleet, providers, and other capabilities |
-| Chassis and harnesses | `aether-substrate-bundle` | desktop/headless/hub/test-bench, bundles, FleetBench, performance tools |
+| Chassis and harnesses | `aether-substrate-bundle` | desktop/headless/hub/substrate-bench, bundles, FleetBench, performance tools |
 | Product actors | `aether-kit`, `aether-mesh` | camera, widgets, workbench, terrain/world, simulation, geometry DSL |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
@@ -177,13 +177,13 @@ genuinely cross-cutting or explicitly upstream contracts.
 Choose the narrowest boundary that proves the change:
 
 - unit tests for codecs, parsers, validation, and state machines;
-- **TestBench** for the real in-process scheduler/capability/wasm/frame boundary;
+- **SubstrateBench** for the real in-process scheduler/capability/wasm/frame boundary;
 - **FleetBench** for real hub RPC, artifact stores, and forked child engines;
 - performance trials for paired latency/throughput/keep-up evidence;
 - the isolated nightly `fuzz/` crate for untrusted parsers and wire boundaries.
 
 See [Tests that earn their place](docs/guide/testing.md) and
-[TestBench and FleetBench](docs/guide/testing/testbench-and-fleetbench.md).
+[SubstrateBench and FleetBench](docs/guide/testing/substratebench-and-fleetbench.md).
 
 Packaging commands have distinct outputs:
 

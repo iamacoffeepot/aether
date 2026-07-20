@@ -14,7 +14,7 @@
 //! `RootManager` spawns `Ping.seq.max(1)` `Panel` siblings — from a
 //! single `receive` when `seq > 1`, covering issue iamacoffeepot/aether#2503's
 //! multi-spawn-per-receive path — and each spawned `Panel` broadcasts a
-//! `TickObserved` to the test-bench observer, so a scenario can confirm
+//! `TickObserved` to the substrate-bench observer, so a scenario can confirm
 //! every spawned sibling is addressable and live.
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
@@ -23,7 +23,7 @@
 
 use aether_actor::{ActorInitError, Mail, MailSender, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;
-use aether_test_fixtures_kinds::{TEST_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
+use aether_test_fixtures_kinds::{SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
 
 /// Entry export — the first type in the `export!` list. An unmodified
 /// host instantiates this one. Strict receiver: no `#[fallback]`.
@@ -67,12 +67,12 @@ impl WasmActor for Panel {
         Ok(Panel)
     }
 
-    /// On `Ping`, broadcast a `TickObserved` to the test-bench observer
+    /// On `Ping`, broadcast a `TickObserved` to the substrate-bench observer
     /// so a scenario can confirm a spawned `Panel` is addressable and
     /// dispatches mail.
     #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
-        ctx.send_to_named::<TickObserved>(TEST_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved { count: 1 });
+        ctx.send_to_named::<TickObserved>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved { count: 1 });
     }
 
     #[fallback]

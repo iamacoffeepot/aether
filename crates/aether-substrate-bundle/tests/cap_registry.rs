@@ -1,7 +1,7 @@
 //! iamacoffeepot/aether#1037: the queryable capability registry,
-//! exercised through a real component-load lifecycle on a `TestBench`.
+//! exercised through a real component-load lifecycle on a `SubstrateBench`.
 //!
-//! Each test boots a `TestBench`, loads (and where relevant replaces /
+//! Each test boots a `SubstrateBench`, loads (and where relevant replaces /
 //! drops) a component, and asks the substrate's `CapabilityRegistry`
 //! whether a mailbox `accepts(kind)` and `has_fallback`. The registry
 //! is the prerequisite for the DAG validator's dispatchability check
@@ -31,8 +31,8 @@ use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_fs::{FsCapability, Write};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult, Tick};
 use aether_kit::camera::CameraCreate;
-use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    BenchOp, SubstrateBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_test_fixtures_kinds::SetRender;
@@ -40,11 +40,11 @@ use std::env;
 use std::fs;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
-// land in this test binary (mirrors `test_bench_scenario.rs`).
+// land in this test binary (mirrors `substrate_bench_scenario.rs`).
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId {
+fn load_named(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -61,7 +61,7 @@ fn load_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId 
     }
 }
 
-/// wgpu-only skip gate, mirroring `test_bench_scenario.rs`. fs-cap
+/// wgpu-only skip gate, mirroring `substrate_bench_scenario.rs`. fs-cap
 /// tests need wgpu (the bench builds a `Gpu` at boot) but not a
 /// component wasm.
 fn require_wgpu_only() -> bool {
@@ -82,7 +82,7 @@ fn cap_registry_reports_accepted_kinds() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "probe");
     let caps = bench.capability_registry();
 
@@ -100,7 +100,7 @@ fn cap_registry_reports_fallback() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "strict");
     let caps = bench.capability_registry();
 
@@ -124,7 +124,7 @@ fn cap_registry_updates_on_replace() {
     let Some(kit_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_named(&mut bench, &probe_path, "swappable");
 
     // Pre-replace: probe accepts SetRender, rejects CameraCreate.
@@ -179,7 +179,7 @@ fn cap_registry_clears_on_drop() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "victim");
     assert!(bench.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
@@ -208,7 +208,8 @@ fn cap_registry_covers_native_cap() {
         return;
     }
     let sandbox = init_save_sandbox("cap-registry-fs");
-    let bench = TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let bench =
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let fs_mbox = mailbox_id_from_name(FsCapability::NAMESPACE);
     let caps = bench.capability_registry();

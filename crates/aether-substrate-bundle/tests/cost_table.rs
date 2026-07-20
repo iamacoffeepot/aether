@@ -1,5 +1,5 @@
 //! iamacoffeepot/aether#1128: the per-handler cost EWMA, exercised
-//! through a real component-load lifecycle on a `TestBench`.
+//! through a real component-load lifecycle on a `SubstrateBench`.
 //!
 //! Guards the redesign invariant that `WasmTrampoline::init` seeds the
 //! per-handler cost cells from the guest's declared handler set, under
@@ -22,7 +22,7 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -30,7 +30,7 @@ use aether_test_fixtures_kinds::SetRender;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
+fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -58,7 +58,7 @@ fn init_seeds_cells_and_dispatch_folds() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mbox = load_probe(&mut bench, &wasm_path);
 
     // At construction, before any dispatch: both declared handlers

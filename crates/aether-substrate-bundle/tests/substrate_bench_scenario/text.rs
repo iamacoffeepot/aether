@@ -19,11 +19,11 @@ fn text_draws_a_screen_space_string() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-text");
+    let sandbox = init_save_sandbox("substrate-bench-text");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let (frame_width, frame_height) = (128u32, 64u32);
-    let mut bench = TestBench::builder()
+    let mut bench = SubstrateBench::builder()
         .size(frame_width, frame_height)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -111,11 +111,11 @@ fn text_draw_clip_bounds_glyph_pixels() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-text-clip");
+    let sandbox = init_save_sandbox("substrate-bench-text-clip");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let mut bench =
-        TestBench::builder().size(128, 64).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(128, 64).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     let loaded = bench
         .execute(vec![(
             "load",
@@ -204,11 +204,11 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-font-metrics");
+    let sandbox = init_save_sandbox("substrate-bench-font-metrics");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let mut bench =
-        TestBench::builder().size(64, 32).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 32).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     // Grab by path with no prior load — exercises load-on-miss.
     let grabbed = bench
@@ -263,11 +263,11 @@ fn text_screen_origin_shifts_centroid() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-text-origin");
+    let sandbox = init_save_sandbox("substrate-bench-text-origin");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let (frame_width, frame_height) = (256u32, 128u32);
-    let mut bench = TestBench::builder()
+    let mut bench = SubstrateBench::builder()
         .size(frame_width, frame_height)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -367,11 +367,11 @@ fn text_draws_world_space_label() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-world-text");
+    let sandbox = init_save_sandbox("substrate-bench-world-text");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
     let (frame_width, frame_height) = (128u32, 96u32);
-    let mut bench = TestBench::builder()
+    let mut bench = SubstrateBench::builder()
         .size(frame_width, frame_height)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()

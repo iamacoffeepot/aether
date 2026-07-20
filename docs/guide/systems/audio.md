@@ -186,12 +186,12 @@ The production headless chassis currently registers a small inline
 `aether.audio` sink instead. It absorbs all audio mail and emits an error reply
 only for `aether.audio.set_master_gain`; it does **not** synthesize the newer
 reply kinds. Do not await schedule, track, instrument, reverb, or sender-gain
-results there. The minimal hub and TestBench chassis do not compose the audio
+results there. The minimal hub and SubstrateBench chassis do not compose the audio
 capability. These current facts are visible in
 [`headless/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/headless/chassis.rs),
 [`hub/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/hub/chassis.rs),
 and
-[`test_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/test_bench/chassis.rs).
+[`substrate_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/substrate_bench/chassis.rs).
 
 ## Where to change or extend it
 

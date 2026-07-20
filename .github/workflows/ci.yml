@@ -298,18 +298,18 @@ jobs:
         run: cargo nextest run ${{ steps.affected.outputs.package_args }} --all-features --profile ci
         env:
           AETHER_REQUIRE_RUNTIME: "1"
-      # iamacoffeepot/aether#2914: a failing direct TestBench visual
-      # assertion that armed `test_bench::artifacts::ArtifactGuard`
+      # iamacoffeepot/aether#2914: a failing direct SubstrateBench visual
+      # assertion that armed `substrate_bench::artifacts::ArtifactGuard`
       # leaves its actual/mask/measurements set under
-      # `target/test-bench-artifacts/`; a passing run writes nothing
+      # `target/substrate-bench-artifacts/`; a passing run writes nothing
       # there. Upload ignores the tree being absent, matching the
       # fuzz-crash-artifact upload pattern in fuzz-nightly.yml.
-      - name: Upload test-bench failure artifacts
+      - name: Upload substrate-bench failure artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: test-bench-artifacts
-          path: target/test-bench-artifacts/**
+          name: substrate-bench-artifacts
+          path: target/substrate-bench-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload FleetBench TCP load metrics

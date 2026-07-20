@@ -135,7 +135,7 @@ capabilities, and components.
 **Chassis**
 
 A process composition that selects drivers, capability runtimes, and frame-loop
-behavior. Desktop, headless, hub, and test bench are distinct chassis.
+behavior. Desktop, headless, hub, and substrate bench are distinct chassis.
 
 **Hub**
 

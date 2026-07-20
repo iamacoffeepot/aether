@@ -19,7 +19,7 @@ use aether_kit::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
     StateSummary, TickBundle,
 };
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{ColorRegionStats, decode_png, target_color_stats};
 use aether_tcp::{ListListeners, ListListenersResult};
 
@@ -51,7 +51,7 @@ fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) -> MailboxId {
+fn load_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) -> MailboxId {
     let result = bench
         .execute(vec![(
             "load",
@@ -77,7 +77,7 @@ fn load_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str, con
     }
 }
 
-fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
+fn drop_component(bench: &mut SubstrateBench, mailbox_id: MailboxId) {
     let result = bench
         .execute(vec![(
             "drop",
@@ -178,7 +178,7 @@ fn spawn_controlled_peer(
     (event_rx, command_tx, handle)
 }
 
-fn capture_entity(bench: &mut TestBench, label: &'static str) -> ColorRegionStats {
+fn capture_entity(bench: &mut SubstrateBench, label: &'static str) -> ColorRegionStats {
     let captured = bench
         .execute(vec![("settle", BenchOp::advance(3)), (label, BenchOp::capture())])
         .expect("settle and capture client scene");
@@ -186,7 +186,7 @@ fn capture_entity(bench: &mut TestBench, label: &'static str) -> ColorRegionStat
     target_color_stats(&image, ENTITY_SRGB, ENTITY_COLOR_TOLERANCE, None)
 }
 
-fn wait_for_authoritative_entity(bench: &mut TestBench, sim_address: &str) -> EntityState {
+fn wait_for_authoritative_entity(bench: &mut SubstrateBench, sim_address: &str) -> EntityState {
     let deadline = Instant::now() + TCP_TIMEOUT;
     loop {
         bench.execute(vec![("advance", BenchOp::advance(1))]).expect("advance player loop");
@@ -203,7 +203,7 @@ fn wait_for_authoritative_entity(bench: &mut TestBench, sim_address: &str) -> En
     }
 }
 
-fn gateway_listener_port(bench: &mut TestBench) -> u16 {
+fn gateway_listener_port(bench: &mut SubstrateBench) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let list = bench
@@ -241,7 +241,8 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     let server_addr = listener.local_addr().expect("controlled peer address").to_string();
     let session_identity = resolve_embedded("controlled-player-session");
     let (event_rx, command_tx, peer) = spawn_controlled_peer(listener, session_identity);
-    let mut bench = TestBench::start_with_size(FRAME_WIDTH, FRAME_HEIGHT).expect("boot controlled client TestBench");
+    let mut bench =
+        SubstrateBench::start_with_size(FRAME_WIDTH, FRAME_HEIGHT).expect("boot controlled client SubstrateBench");
 
     load_export(&mut bench, &wasm, "aether.kit.camera", CAMERA_NAME, Vec::new());
     bench
@@ -334,7 +335,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     };
     let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
     let sim_mailbox = resolve_embedded(SIM_NAME);
-    let mut bench = TestBench::builder()
+    let mut bench = SubstrateBench::builder()
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .game_gateway(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),
@@ -345,7 +346,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
             max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         })
         .build()
-        .expect("boot active gateway TestBench");
+        .expect("boot active gateway SubstrateBench");
     let listener_port = gateway_listener_port(&mut bench);
     load_export(
         &mut bench,

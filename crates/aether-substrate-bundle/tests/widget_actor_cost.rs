@@ -72,7 +72,7 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries land
@@ -92,7 +92,7 @@ const FIT_WIDGET_COUNT: usize = 4;
 /// returning their mailbox ids. Each load carries a distinct name so the
 /// instances register as separate mailboxes with their own cost cells.
 fn load_widgets(
-    bench: &mut TestBench,
+    bench: &mut SubstrateBench,
     wasm: &[u8],
     count: usize,
     redraw_each_tick: bool,
@@ -127,7 +127,7 @@ fn load_widgets(
 /// The EWMA mean execution time of one widget's `Tick` handler, in
 /// nanoseconds — its per-frame cost. Zero if the cell is missing (it should
 /// always be seeded at load).
-fn tick_mean_nanos(bench: &TestBench, mbox: MailboxId) -> u64 {
+fn tick_mean_nanos(bench: &SubstrateBench, mbox: MailboxId) -> u64 {
     let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
         panic!("cost tail for widget mailbox");
     };
@@ -135,7 +135,7 @@ fn tick_mean_nanos(bench: &TestBench, mbox: MailboxId) -> u64 {
 }
 
 /// Mean per-widget `Tick` cost across a set of loaded widgets, in nanoseconds.
-fn widget_mean_nanos(bench: &TestBench, ids: &[MailboxId]) -> u64 {
+fn widget_mean_nanos(bench: &SubstrateBench, ids: &[MailboxId]) -> u64 {
     let loaded = u64::try_from(ids.len()).unwrap_or(0);
     let total: u64 = ids.iter().map(|&m| tick_mean_nanos(bench, m)).sum();
     total.checked_div(loaded).unwrap_or(0)
@@ -216,7 +216,7 @@ fn widget_actor_per_frame_cost() {
             "cached"
         };
         for &count in &counts {
-            let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+            let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
             let ids = load_widgets(&mut bench, &wasm, count, redraw_each_tick, quad_count);
             let start = Instant::now();
             bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
@@ -269,7 +269,7 @@ fn widget_cost_vs_draw_weight() {
     let mut samples: Vec<(u32, u64)> = Vec::with_capacity(weights.len());
     for &weight in &weights {
         let quads = u32::try_from(weight).unwrap_or(u32::MAX);
-        let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+        let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
         let ids = load_widgets(&mut bench, &wasm, FIT_WIDGET_COUNT, true, quads);
         bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
         let per_widget = widget_mean_nanos(&bench, &ids);
@@ -296,7 +296,7 @@ fn widget_cost_vs_draw_weight() {
 /// outside the timed region, so the wall-clock is steady-state per-frame cost.
 #[allow(clippy::cast_precision_loss)] // elapsed nanos → f64 for a per-frame average; exactness is not load-bearing.
 fn measure_cell(wasm: &[u8], count: usize, redraw_each_tick: bool, quad_count: u32, ticks: u32) -> (f64, u64) {
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let ids = load_widgets(&mut bench, wasm, count, redraw_each_tick, quad_count);
     let start = Instant::now();
     bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");

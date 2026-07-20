@@ -25,7 +25,7 @@ use aether_kit::world::{
     AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, ProposalError, SUBCELLS_PER_CELL,
     SetCellHeights, SetChunk, WorldPositionMeters,
 };
-use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Rect, decode_png, run_checks, target_color_stats};
 use aether_text::{LoadFontBytes, LoadFontResult};
 
@@ -61,7 +61,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_export(bench: &mut TestBench, wasm_path: &Path, export: &str, name: &str, config: Vec<u8>) -> MailboxId {
+fn load_export(bench: &mut SubstrateBench, wasm_path: &Path, export: &str, name: &str, config: Vec<u8>) -> MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -85,7 +85,7 @@ fn load_export(bench: &mut TestBench, wasm_path: &Path, export: &str, name: &str
     }
 }
 
-fn load_panel_font(bench: &mut TestBench) -> u32 {
+fn load_panel_font(bench: &mut SubstrateBench) -> u32 {
     let loaded = bench
         .execute(vec![(
             "font",
@@ -104,7 +104,7 @@ fn load_panel_font(bench: &mut TestBench) -> u32 {
     }
 }
 
-fn click(bench: &mut TestBench, x: f32, y: f32) {
+fn click(bench: &mut SubstrateBench, x: f32, y: f32) {
     bench
         .execute(vec![
             ("press", BenchOp::send_mail("aether.input", &MouseButton { button: 0, x, y })),
@@ -114,11 +114,11 @@ fn click(bench: &mut TestBench, x: f32, y: f32) {
     bench.execute(vec![("settle", BenchOp::advance(3))]).expect("settle raw pointer click");
 }
 
-fn send_input<K: Kind>(bench: &mut TestBench, mail: &K) {
+fn send_input<K: Kind>(bench: &mut SubstrateBench, mail: &K) {
     bench.execute(vec![("input", BenchOp::send_mail("aether.input", mail))]).expect("raw input mail");
 }
 
-fn query_workbench(bench: &mut TestBench, workbench: &str) -> WorkbenchQueryResult {
+fn query_workbench(bench: &mut SubstrateBench, workbench: &str) -> WorkbenchQueryResult {
     bench
         .execute(vec![("query", BenchOp::send_and_await(workbench, &WorkbenchQuery))])
         .expect("query workbench")
@@ -126,7 +126,7 @@ fn query_workbench(bench: &mut TestBench, workbench: &str) -> WorkbenchQueryResu
         .expect("decode WorkbenchQueryResult")
 }
 
-fn wait_for_idle(bench: &mut TestBench, workbench: &str) -> WorkbenchQueryResult {
+fn wait_for_idle(bench: &mut SubstrateBench, workbench: &str) -> WorkbenchQueryResult {
     for _ in 0..16 {
         let result = query_workbench(bench, workbench);
         if !result.busy {
@@ -137,7 +137,7 @@ fn wait_for_idle(bench: &mut TestBench, workbench: &str) -> WorkbenchQueryResult
     panic!("workbench did not settle within sixteen frames")
 }
 
-fn capture(bench: &mut TestBench, workbench: &str, world: &str, label: &'static str) -> Vec<u8> {
+fn capture(bench: &mut SubstrateBench, workbench: &str, world: &str, label: &'static str) -> Vec<u8> {
     let viewport = child_address(workbench, "viewport");
     let panel = child_address(workbench, "tools");
     let console = child_address(workbench, "console");
@@ -176,7 +176,7 @@ fn differing_pixels(left_png: &[u8], right_png: &[u8], region: Rect) -> usize {
     left.chunks_exact(4).zip(right.chunks_exact(4)).filter(|(left, right)| left != right).count()
 }
 
-fn replace_numeric_with_zero(bench: &mut TestBench) {
+fn replace_numeric_with_zero(bench: &mut SubstrateBench) {
     click(bench, 90.0, 102.0);
     send_input(bench, &Modifiers { ctrl: true, ..Modifiers::default() });
     send_input(bench, &Key { code: KEY_A });
@@ -191,7 +191,7 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot TestBench");
+    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot SubstrateBench");
     let mark_book_mailbox = load_export(&mut bench, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME, Vec::new());
     let world_mailbox = load_export(&mut bench, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME, Vec::new());
     let terra_mailbox = load_export(

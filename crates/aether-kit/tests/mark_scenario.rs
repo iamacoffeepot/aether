@@ -15,7 +15,7 @@ use aether_kit::mark::{
     MarkList, MarkListResult, MarkRef, MarkUpdate, MarkUpdateResult,
 };
 use aether_kit::world::WorldPoint;
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 
 // Retain all of the kit's native inventory submissions in this integration
 // test binary, matching the other component scenarios.
@@ -28,7 +28,7 @@ fn component_address() -> String {
     format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::MailboxId {
+fn load_mark_book(bench: &mut SubstrateBench, wasm_path: &Path) -> aether_data::MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -58,7 +58,7 @@ fn mark_crud_and_allocation_survive_component_replace() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let mailbox_id = load_mark_book(&mut bench, &wasm_path);
     let address = component_address();
 

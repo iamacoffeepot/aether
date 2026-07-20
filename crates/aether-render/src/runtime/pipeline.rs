@@ -44,7 +44,7 @@ pub struct RenderHandles {
     pub frame_vertices: Arc<Mutex<Vec<u8>>>,
     /// Most-recently-rendered geometry, kept across frames
     /// (iamacoffeepot/aether#847). When `record_frame` runs with
-    /// an empty `frame_vertices` — typically a `TestBench::capture`
+    /// an empty `frame_vertices` — typically a `SubstrateBench::capture`
     /// that didn't dispatch a `Tick` — the GPU draw replays this
     /// buffer so the captured frame matches "what the user would
     /// see right now" instead of clear-color.
@@ -59,13 +59,13 @@ pub struct RenderHandles {
     /// textured_quads` pushes a `QuadBatch` here; `record_overlay_
     /// pass` consumes by swapping with `quad_last_submitted` — the
     /// same immediate-mode cache the triangle path uses, so a
-    /// `TestBench::capture` replays the last committed quads.
+    /// `SubstrateBench::capture` replays the last committed quads.
     pub quad_frame: Arc<Mutex<Vec<QuadBatch>>>,
     /// Most-recently-rendered quad batches, kept across frames so an
     /// idle `capture` (no producer this frame) replays them, matching
     /// `last_submitted`'s role for triangles.
     pub quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
-    /// Optional TestBench-only sink for overlay batches accepted by the
+    /// Optional SubstrateBench-only sink for overlay batches accepted by the
     /// low-level draw pass. Production chassis never install it, so they
     /// retain no second payload cache and clone no observation data.
     pub quad_observation: Arc<OnceLock<Arc<Mutex<Vec<DrawTexturedQuads>>>>>,
@@ -131,7 +131,7 @@ fn observed_batch(batch: &QuadBatch) -> DrawTexturedQuads {
 
 /// Mirror the low-level overlay pass's scissor rejection without moving that
 /// validation earlier in the production render path. This runs only when
-/// `TestBench` has installed an observation sink; keep its arithmetic aligned
+/// `SubstrateBench` has installed an observation sink; keep its arithmetic aligned
 /// with `aether_substrate::render::quad::clamped_scissor`.
 #[allow(clippy::cast_precision_loss)]
 fn overlay_clip_is_visible(clip: Option<[f32; 4]>, target_width: u32, target_height: u32) -> bool {
@@ -149,7 +149,7 @@ fn overlay_clip_is_visible(clip: Option<[f32; 4]>, target_width: u32, target_hei
 }
 
 impl RenderHandles {
-    /// Enable the TestBench-only committed-overlay observation sink.
+    /// Enable the SubstrateBench-only committed-overlay observation sink.
     /// Production chassis do not call this and therefore pay no payload
     /// cloning or history cost while recording frames.
     ///
@@ -164,7 +164,7 @@ impl RenderHandles {
     /// Install the wgpu resources the encoder-level methods read.
     /// The driver constructs [`RenderGpu`] once it has a device +
     /// queue — for desktop that's inside `resumed` after winit hands
-    /// back a window and surface; for test-bench it's right after
+    /// back a window and surface; for substrate-bench it's right after
     /// `build_passive` returns.
     ///
     /// # Panics
@@ -192,7 +192,7 @@ impl RenderHandles {
     /// texture, projection space, clip, geometry, UV, tint, and painter's
     /// order that [`Self::record_overlay_pass`] draws.
     ///
-    /// `TestBench` enables the observation sink during GPU initialization.
+    /// `SubstrateBench` enables the observation sink during GPU initialization.
     /// Production chassis leave it disabled, in which case this returns an
     /// empty vector and frame recording performs no observation cloning.
     ///
@@ -212,7 +212,7 @@ impl RenderHandles {
     fn expect_gpu(&self) -> &RenderGpu {
         self.gpu.get().expect(
             "RenderHandles::install_gpu must be called before encoder-level methods. \
-         Desktop installs in winit's resumed; test-bench installs after build_passive.",
+         Desktop installs in winit's resumed; substrate-bench installs after build_passive.",
         )
     }
 
@@ -220,7 +220,7 @@ impl RenderHandles {
     /// pass into `encoder` against the current frame's geometry.
     /// `extra_pipelines` are drawn after the main pipeline inside
     /// the same render pass — desktop passes a wireframe overlay
-    /// pipeline here when `AETHER_WIREFRAME=overlay`; test-bench
+    /// pipeline here when `AETHER_WIREFRAME=overlay`; substrate-bench
     /// passes `&[]`.
     ///
     /// ## Cache semantics (iamacoffeepot/aether#847)
@@ -238,12 +238,12 @@ impl RenderHandles {
     ///   the next frame reflects "the producer chose not to
     ///   emit," and render an empty draw list (clear-color
     ///   frame). Used by desktop's per-frame draw and by the
-    ///   test-bench's advance path. Matches a game's normal
+    ///   substrate-bench's advance path. Matches a game's normal
     ///   semantic: if the producer stops drawing, the screen
     ///   goes to clear color.
     /// - `true` — **replay-cache**: leave `last_submitted`
     ///   untouched and render its current contents. Used by
-    ///   `TestBench::capture` when it didn't dispatch a `Tick`
+    ///   `SubstrateBench::capture` when it didn't dispatch a `Tick`
     ///   of its own — the cache holds whatever the last advance
     ///   committed, which is the right "what would the user
     ///   see right now" answer. Retires the historical
@@ -279,7 +279,7 @@ impl RenderHandles {
     /// `replay_cache_when_idle` mirrors [`Self::record_frame`]'s cache
     /// semantics for quads: an empty live accumulator commits-current
     /// (clears the cache) under `false` — the per-frame draw / advance
-    /// path — and replays the cache under `true` — `TestBench::capture`
+    /// path — and replays the cache under `true` — `SubstrateBench::capture`
     /// without a dispatched tick.
     ///
     /// Each batch realizes its texture lazily (creating the wgpu
@@ -672,7 +672,7 @@ impl RenderHandles {
 /// Bundle of wgpu resources `RenderHandles` exposes post-install.
 /// Constructed by the driver from a wgpu device + queue obtained via
 /// `Adapter::request_device` (desktop: with surface compatibility;
-/// test-bench: offscreen-only). Holds the pipeline + offscreen
+/// substrate-bench: offscreen-only). Holds the pipeline + offscreen
 /// targets so encoder-level methods can record draws and capture
 /// copies without the driver threading these through every call.
 pub struct RenderGpu {

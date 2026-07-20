@@ -17,7 +17,7 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
     ColorRegionStats, FramePoint, Rect, decode_png, mean_absolute_error, run_checks, target_color_stats,
 };
@@ -45,7 +45,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_world(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
+fn load_world(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -77,7 +77,7 @@ fn top_down_view_projection(center_x: f32, center_z: f32, extent: f32) -> ViewPr
     ViewProjection { view_proj: (projection * view).to_cols_array() }
 }
 
-fn capture(bench: &mut TestBench, world: &str, label: &'static str) -> Vec<u8> {
+fn capture(bench: &mut SubstrateBench, world: &str, label: &'static str) -> Vec<u8> {
     let captured = bench
         .execute(vec![(
             label,
@@ -135,7 +135,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(32, 32).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(32, 32).expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 
@@ -183,7 +183,7 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
     let mailbox_id = load_world(&mut bench, &wasm_path);
     let world = component_address();
     let baseline_png = capture(&mut bench, &world, "baseline");

@@ -104,7 +104,7 @@ Choose the smallest command that crosses the changed boundary:
 | Formatting | `cargo fmt -- --check` |
 | Lints | `cargo clippy --all-targets -- -D warnings` |
 | Wasm/component boundary | the owning fixture/build command from CI |
-| TestBench behavior | focused integration test target |
+| SubstrateBench behavior | focused integration test target |
 | Hub/process boundary | focused FleetBench test with required dist artifacts |
 
 Do not run the full expensive matrix merely to appear thorough. Do not skip a
@@ -124,7 +124,7 @@ multiple worktrees at one shared `CARGO_TARGET_DIR`: incremental metadata can
 surface a dependency compiled from another branch and produce phantom errors.
 
 Tests must also isolate namespace roots, ports, artifact stores, and other host
-resources. Prefer TestBench/FleetBench builders and allocated temp roots over
+resources. Prefer SubstrateBench/FleetBench builders and allocated temp roots over
 process-global environment mutation.
 
 ## Hooks are guardrails

@@ -14,7 +14,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     load_probe(&mut bench, &wasm_path);
 
     // Capture's frame runs without a dispatched tick, so the probe
@@ -108,7 +108,7 @@ fn cube_render_projects_centered_silhouette() {
     // 128×96 matches the fixture's `view_proj` aspect (4:3), so the
     // silhouette projects undistorted.
     let (width, height) = (128u32, 96u32);
-    let mut bench = TestBench::start_with_size(width, height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(width, height).expect("boot");
     load_cube(&mut bench, &wasm_path);
 
     // Priming advance subscribes the cube to ticks; the next tick (run
@@ -183,7 +183,7 @@ fn textured_quad_draws_screen_space_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     // 8×8 checkerboard of opaque white and opaque red — both far from the
     // dark clear color, so every magnified texel of the quad reads as lit
@@ -283,7 +283,7 @@ fn textured_quad_draws_screen_space_rect() {
     );
 }
 
-fn create_observation_texture(bench: &mut TestBench) -> u32 {
+fn create_observation_texture(bench: &mut SubstrateBench) -> u32 {
     let created = bench
         .execute(vec![(
             "create",
@@ -339,7 +339,7 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let texture_id = create_observation_texture(&mut bench);
 
     let solid_clip = ClipRect { x: 2.0, y: 3.0, width: 20.0, height: 15.0 };
@@ -409,7 +409,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
     let texture_id = create_observation_texture(&mut bench);
     let valid_quad = TexturedQuad {
         x: 16.0,
@@ -549,7 +549,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     let texture_size = 8u32;
     let pixels = four_quadrant_texture_pixels(texture_size);
@@ -629,7 +629,7 @@ fn destroyed_texture_draw_drops_from_frame() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     let texture_width = 8u32;
     let texture_height = 8u32;
@@ -710,7 +710,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     let texture_width = 8u32;
     let texture_height = 4u32;
@@ -797,7 +797,7 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let pixels = vec![
         0, 0, 0, 0, 128, 128, 255, 255, //
         0, 0, 0, 0, 128, 128, 255, 255, //
@@ -858,7 +858,7 @@ fn textured_material_depth_tests_against_main_geometry() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let pixels = vec![255u8, 255, 255, 255];
     let created = bench
         .execute(vec![(
@@ -918,7 +918,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let created = bench
         .execute(vec![(
             "create",
@@ -965,7 +965,7 @@ fn solid_quad_draws_screen_space_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     // Known screen rect: top-left (16, 12), size 24×18.
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
@@ -1030,7 +1030,7 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let clipped = envelope(
         "aether.render",
         &DrawSolidQuads {
@@ -1072,7 +1072,7 @@ fn textured_quad_clip_bounds_pixels() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let created = bench
         .execute(vec![(
             "create",
@@ -1136,7 +1136,7 @@ fn capture_frame_checks_return_substrate_verdict() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     // Known screen rect: top-left (16, 12), size 24×18 — the same draw
     // `solid_quad_draws_screen_space_rect` decodes the PNG to score.
@@ -1241,14 +1241,14 @@ fn capture_frame_checks_return_substrate_verdict() {
 }
 
 /// Issue #2913 regression: a `CaptureFrame.similarity` request resolves
-/// its reference image from the `TestBench`'s configured `assets`
+/// its reference image from the `SubstrateBench`'s configured `assets`
 /// namespace root, the same way the desktop chassis wires
 /// `RenderConfig.assets_dir`. Captures a deterministic clear-color
 /// frame, stores that exact PNG under the sandbox's assets root as the
 /// reference, then requests a second capture with a `SimilarityCheck`
 /// against it. Two captures of the same unchanged scene are pixel-
 /// identical, so the score is `0.0` and the check passes — proving
-/// `TestBenchChassis::build_passive` no longer leaves `assets_dir`
+/// `SubstrateBenchChassis::build_passive` no longer leaves `assets_dir`
 /// unconditionally `None` (the bug this issue fixes; on unfixed `main`
 /// this fails at reference resolution with "no assets directory is
 /// configured").
@@ -1257,9 +1257,9 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("test-bench-render-similarity");
+    let sandbox = init_save_sandbox("substrate-bench-render-similarity");
     let mut bench =
-        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let reference = bench.execute(vec![("reference", BenchOp::capture())]).expect("capture reference frame");
     let reference_png = reference.captured("reference").expect("reference step ran");
@@ -1296,7 +1296,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
             assert_eq!(similarity_pass, Some(true), "a 0.0 score against a 0.0 threshold must pass");
         }
         CaptureFrameResult::Err { error } => panic!(
-            "capture_frame similarity replied Err (assets root not wired into TestBench?): \
+            "capture_frame similarity replied Err (assets root not wired into SubstrateBench?): \
              {error}"
         ),
     }
@@ -1318,7 +1318,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     let (first_x, first_y, first_w, first_h) = (4.0f32, 4.0f32, 12.0f32, 12.0f32);
     let (second_x, second_y, second_w, second_h) = (40.0f32, 4.0f32, 12.0f32, 12.0f32);
@@ -1446,7 +1446,7 @@ fn mask_stats(mask: &Image) -> MaskStats {
 }
 
 /// Issue 2914: `ArtifactGuard` closes the failure-diagnostic gap for a
-/// direct `TestBench` visual assertion. Draws the same known
+/// direct `SubstrateBench` visual assertion. Draws the same known
 /// solid-quad scene `capture_frame_checks_return_substrate_verdict`
 /// scores, then exercises the guard's full write contract against the
 /// real captured PNG and verdict:
@@ -1465,7 +1465,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(frame_width, frame_height).expect("boot");
 
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
     let draw = envelope(

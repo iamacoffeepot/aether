@@ -1,7 +1,7 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
 //! `WasmActor::Config` path. Loads the `ProbeWithConfig` actor from the
 //! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test.probe_with_config")`
-//! through a [`TestBench`] and asserts the wasm guest's config init path
+//! through a [`SubstrateBench`] and asserts the wasm guest's config init path
 //! handles both empty and explicit config bytes. Issue 2878 changed the empty
 //! path from "decode error" to "boot from `Config::default()`"; the encoded
 //! config path still proves the load mail's `config` bytes reach
@@ -15,7 +15,7 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -31,7 +31,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
     let report = bench
@@ -90,7 +90,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };

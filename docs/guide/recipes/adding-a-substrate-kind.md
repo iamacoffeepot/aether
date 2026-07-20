@@ -123,7 +123,7 @@ kind public; the helper is ergonomics, not a second protocol.
    installed without the resource.
 5. **Live discovery:** narrow `describe_kinds` to the exact name and
    `describe_handlers` to the owner.
-6. **End-to-end mail:** TestBench `send_and_await` and decode the typed result.
+6. **End-to-end mail:** SubstrateBench `send_and_await` and decode the typed result.
 
 Use FleetBench only if the contract itself crosses RPC/process boundaries.
 

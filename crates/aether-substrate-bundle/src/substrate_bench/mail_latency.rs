@@ -34,7 +34,7 @@ use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRin
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
-use super::TestBench;
+use super::SubstrateBench;
 use crate::perf::harness::{
     CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain,
     fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, summarize, tiers_from_env,
@@ -158,7 +158,7 @@ fn hold_id() -> MailboxId {
 
 /// Spawn every relay in `topo` onto `tb` (subname = relay index), wiring
 /// each relay's downstream ids. Shared by the settlement guards.
-fn spawn_topology(tb: &TestBench, topo: &Topology) {
+fn spawn_topology(tb: &SubstrateBench, topo: &Topology) {
     for i in 0..topo.downstreams.len() {
         let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
         let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
@@ -213,8 +213,8 @@ fn mail_saturation_profile() {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&w| w >= 1)
         .unwrap_or_else(|| available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1)));
-    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
-        eprintln!("skipping mail_saturation_profile: TestBench boot failed (no wgpu adapter)");
+    let Ok(tb) = SubstrateBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
+        eprintln!("skipping mail_saturation_profile: SubstrateBench boot failed (no wgpu adapter)");
         return;
     };
 
@@ -254,8 +254,8 @@ fn mail_saturation_profile() {
 #[allow(clippy::print_stderr)]
 fn depth_chain_settles_every_root() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
-        eprintln!("skipping depth_chain_settles_every_root: TestBench boot failed (no wgpu)");
+    let Ok(tb) = SubstrateBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
+        eprintln!("skipping depth_chain_settles_every_root: SubstrateBench boot failed (no wgpu)");
         return;
     };
 
@@ -291,7 +291,7 @@ fn depth_chain_settles_every_root() {
 #[allow(clippy::print_stderr)]
 fn emit_settlement_settles_every_root(topo: &Topology) {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
+    let Ok(tb) = SubstrateBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping emit_settlement_settles_every_root: no wgpu adapter");
         return;
     };
@@ -336,7 +336,7 @@ fn emit_settlement_settles_wide_fanout() {
 #[allow(clippy::print_stderr)]
 fn emit_settlement_settles_with_holds() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
+    let Ok(tb) = SubstrateBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping emit_settlement_settles_with_holds: no wgpu adapter");
         return;
     };
@@ -355,7 +355,7 @@ fn emit_settlement_settles_with_holds() {
 
 /// Query one actor's per-actor trace ring over the mail wire
 /// (`aether.trace.tail`), filtered to `root`. Returns the ring slice.
-fn trace_tail(tb: &mut TestBench, mailbox_name: &str, root: MailId) -> Vec<TraceRingEntry> {
+fn trace_tail(tb: &mut SubstrateBench, mailbox_name: &str, root: MailId) -> Vec<TraceRingEntry> {
     let req = TraceTail { max: 0, since: None, root: Some(root) }.encode_into_bytes();
     let reply = tb.send_bytes_and_await(mailbox_name, TraceTail::ID, req).expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
@@ -377,7 +377,7 @@ fn trace_tail(tb: &mut TestBench, mailbox_name: &str, root: MailId) -> Vec<Trace
 #[test]
 #[allow(clippy::print_stderr)]
 fn trace_ring_dual_write_routes_events_to_owning_rings() {
-    let Ok(mut tb) = TestBench::builder().with_workers(Some(2)).size(16, 16).build() else {
+    let Ok(mut tb) = SubstrateBench::builder().with_workers(Some(2)).size(16, 16).build() else {
         eprintln!("skipping trace_ring_dual_write_routes_events_to_owning_rings: no wgpu adapter");
         return;
     };
@@ -413,7 +413,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
 }
 
 /// Issue 1990: a non-default `trace_ring_capacity` set on the
-/// `TestBenchBuilder` is honoured by the chassis-host trace ring — drive
+/// `SubstrateBenchBuilder` is honoured by the chassis-host trace ring — drive
 /// more off-actor injected roots than the small cap and the unfiltered
 /// tail reports `truncated_before` (the FIFO-eviction gap cursor). The
 /// chassis-host ring is outside the `Spawner`/builder slot path, so this
@@ -424,7 +424,8 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
 fn small_trace_ring_cap_laps_chassis_host_ring() {
     const CAP: usize = 4;
     const INJECTS: usize = CAP + 6;
-    let Ok(tb) = TestBench::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build() else {
+    let Ok(tb) = SubstrateBench::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build()
+    else {
         eprintln!("skipping small_trace_ring_cap_laps_chassis_host_ring: no wgpu adapter");
         return;
     };
@@ -473,7 +474,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
     // Two trace slots per settled inbound mail (Received + Finished); enough
     // settled roots to comfortably overrun the floor were it to grow.
     const INJECTS: usize = FLOOR * 4;
-    let Ok(mut tb) = TestBench::builder()
+    let Ok(mut tb) = SubstrateBench::builder()
         .with_workers(Some(2))
         .trace_ring_capacity(Some(FLOOR))
         .trace_ring_max_capacity(Some(MAX))
@@ -527,7 +528,8 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     // enough roots to comfortably overrun CAP. Each is settled before the
     // next so the ring fills deterministically.
     const INJECTS: usize = CAP * 3;
-    let Ok(mut tb) = TestBench::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build()
+    let Ok(mut tb) =
+        SubstrateBench::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build()
     else {
         eprintln!("skipping small_trace_ring_cap_laps_per_actor_ring: no wgpu adapter");
         return;
@@ -583,7 +585,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
 #[test]
 #[allow(clippy::print_stderr)]
 fn guided_walk_reconstructs_causal_tree() {
-    let Ok(mut tb) = TestBench::builder().with_workers(Some(2)).size(16, 16).build() else {
+    let Ok(mut tb) = SubstrateBench::builder().with_workers(Some(2)).size(16, 16).build() else {
         eprintln!("skipping guided_walk_reconstructs_causal_tree: no wgpu adapter");
         return;
     };
@@ -758,8 +760,8 @@ fn lifecycle_latency_observe() {
 #[allow(clippy::print_stdout, clippy::print_stderr, clippy::cast_precision_loss)]
 fn settlement_detection_latency() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
-        eprintln!("skipping settlement_detection_latency: TestBench boot failed (no wgpu adapter)");
+    let Ok(tb) = SubstrateBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
+        eprintln!("skipping settlement_detection_latency: SubstrateBench boot failed (no wgpu adapter)");
         return;
     };
 

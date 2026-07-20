@@ -199,7 +199,7 @@ fn segment_actor_id(segment: &str) -> ActorId {
 /// and chain-fold root → leaf. A `MailboxId` is **never** the hash of a
 /// joined path string — it is this fold over the path's nodes — so
 /// string-addressing callers (the registry's name lookup, the MCP
-/// `recipient_name` surface, the test bench) resolve a hosted / nested
+/// `recipient_name` surface, the substrate bench) resolve a hosted / nested
 /// actor through here rather than hashing the whole name. The cold path:
 /// type addressing stays a const fold, and only written paths pay this
 /// parse. A single-segment path (every root cap) folds to that segment's

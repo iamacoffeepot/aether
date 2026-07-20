@@ -1,5 +1,5 @@
 //! Visual assertions over decoded frame pixels. PNGs come back from
-//! `TestBench::capture` as bytes; this module decodes once and runs
+//! `SubstrateBench::capture` as bytes; this module decodes once and runs
 //! O(n) checks against the pixel buffer. Assertion functions take a
 //! `&Image` so a single capture can drive many asserts without
 //! re-decoding.
@@ -12,7 +12,7 @@ use thiserror::Error;
 
 /// Decoded frame: RGBA8 pixels in row-major top-down order, width
 /// and height in pixels. The chassis renders at the size requested
-/// at boot (`TestBench::start_with_size`); decoded `width`/`height`
+/// at boot (`SubstrateBench::start_with_size`); decoded `width`/`height`
 /// always match.
 pub struct Image {
     pub width: u32,
@@ -550,7 +550,7 @@ pub fn run_checks(rgba: Vec<u8>, width: u32, height: u32, checks: &[FrameCheck])
 /// top-left-only behavior (`check.background` is ignored for that
 /// reduction, matching `run_checks`), so a diagnostic artifact can
 /// never visualize a different partition than the verdict it explains.
-/// Crate-internal: consumed only by `test_bench::artifacts` (issue
+/// Crate-internal: consumed only by `substrate_bench::artifacts` (issue
 /// 2914).
 #[must_use]
 pub(crate) fn diagnostic_mask(image: &Image, check: &FrameCheck) -> Vec<u8> {

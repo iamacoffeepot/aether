@@ -1,4 +1,4 @@
-//! `TestBench` actor-log reader proof (issue 1856): load the `probe` fixture,
+//! `SubstrateBench` actor-log reader proof (issue 1856): load the `probe` fixture,
 //! advance one tick to fire its first-tick `tracing::info!`, tail its per-actor
 //! `ActorLogRing` (ADR-0081) for the `typed_send_alive` info entry, then walk
 //! the `since` cursor to confirm it does not re-yield the seen entry.
@@ -8,7 +8,7 @@
 #![allow(clippy::print_stderr)]
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor` entries are
-// present in this test binary (same rationale as test_bench_scenario.rs).
+// present in this test binary (same rationale as substrate_bench_scenario.rs).
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
@@ -19,7 +19,7 @@ mod tests {
 
     use aether_actor::Addressable;
     use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
-    use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+    use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 
     const PROBE_NAME: &str = "probe";
 
@@ -38,19 +38,19 @@ mod tests {
     const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
     /// Load `probe`, advance one tick, poll its lineage address with
-    /// `TestBench::log_tail` until the `typed_send_alive` info entry appears,
+    /// `SubstrateBench::log_tail` until the `typed_send_alive` info entry appears,
     /// then re-query past the returned cursor and assert it is not
     /// re-yielded — the in-process counterpart to
     /// `fleetbench_actor_logs_surface_the_probe_first_tick_entry`.
     #[test]
-    fn test_bench_actor_logs_surface_the_probe_first_tick_entry() {
+    fn substrate_bench_actor_logs_surface_the_probe_first_tick_entry() {
         let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
             return;
         };
-        let mut bench = match TestBench::start_with_size(64, 48) {
+        let mut bench = match SubstrateBench::start_with_size(64, 48) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };

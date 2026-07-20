@@ -4,15 +4,15 @@
 //!
 //! - `src/<chassis>/` — chassis-specific source (chassis impl,
 //!   driver capability, render plumbing, etc.) for the four chassis:
-//!   `desktop`, `headless`, `hub`, `test_bench`.
+//!   `desktop`, `headless`, `hub`, `substrate_bench`.
 //! - `src/hub/` — the hub chassis (the `aether-substrate-hub` binary's
 //!   thin Chassis impl post-issue-763 P5f).
-//! - `src/test_bench/` — the test-bench chassis plus the in-process
-//!   `TestBench` library API consumers reach via
-//!   `aether_substrate_bundle::test_bench::TestBench`.
+//! - `src/substrate_bench/` — the substrate-bench chassis plus the in-process
+//!   `SubstrateBench` library API consumers reach via
+//!   `aether_substrate_bundle::substrate_bench::SubstrateBench`.
 //! - `src/bin/<chassis>.rs` — minimal entry point per binary
 //!   (`aether-substrate`, `aether-substrate-headless`,
-//!   `aether-substrate-hub`, `aether-substrate-test-bench` —
+//!   `aether-substrate-hub`, `aether-substrate-bench` —
 //!   output names preserved across the rename).
 //!
 //! The lib root re-exports a convenience surface (the most-used
@@ -36,7 +36,7 @@ pub mod desktop;
 pub mod headless;
 pub mod hub;
 pub mod perf;
-pub mod test_bench;
+pub mod substrate_bench;
 pub mod visual;
 
 pub use aether_component::{ComponentHostCapability, ComponentHostConfig};

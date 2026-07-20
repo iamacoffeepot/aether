@@ -294,7 +294,7 @@ impl Registry {
     /// used `register_inbox` for a `captured.push(...)` closure
     /// (synchronous Vec append, no downstream dispatcher), and once
     /// strict settlement propagation landed in
-    /// `TestBench::run_frame` the test surfaced as a 5s
+    /// `SubstrateBench::run_frame` the test surfaced as a 5s
     /// `SettlementTimeout`. Fix: switch to [`Self::register_inline`].
     ///
     /// The dispatch-type asymmetry helps catch this — Inbox

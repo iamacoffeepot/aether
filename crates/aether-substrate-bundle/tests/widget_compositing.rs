@@ -44,7 +44,7 @@ use aether_math::Rgba;
 use aether_render::{
     CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
@@ -109,7 +109,7 @@ fn four_color_texture_pixels(size: u32) -> Vec<u8> {
     pixels
 }
 
-fn create_four_color_texture(bench: &mut TestBench) -> u32 {
+fn create_four_color_texture(bench: &mut SubstrateBench) -> u32 {
     let size = 8;
     let created = bench
         .execute(vec![(
@@ -146,7 +146,7 @@ fn leaf_config(width: f32, height: f32, color: Rgba) -> Vec<u8> {
 /// Load the `Widget` root export from the kit wasm under the name `panel`,
 /// carrying `config`, and block on `LoadResult` so the root is
 /// instantiated before the capture frame runs.
-fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &WidgetConfig) {
+fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], config: &WidgetConfig) {
     let loaded = bench
         .execute(vec![(
             "load",
@@ -169,7 +169,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &WidgetConfig) {
     }
 }
 
-fn load_scroll_panel(bench: &mut TestBench, wasm: &[u8], child: WidgetChildSpec) {
+fn load_scroll_panel(bench: &mut SubstrateBench, wasm: &[u8], child: WidgetChildSpec) {
     let config = PanelConfig {
         x: 12.0,
         y: 8.0,
@@ -236,7 +236,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
 
     // Root chrome fills the middle (8,8)-(56,40); two leaves sit inside it
     // — child a red at (12,12)-(24,24), child b green at (36,20)-(48,32).
@@ -311,7 +311,7 @@ fn nested_tree_draws_in_depth_first_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
 
     // Interior node b: green chrome (0,0,20,20), one white leaf b1 inset at
     // local (2,2), sized 6×6.
@@ -444,7 +444,7 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         }],
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     load_panel(&mut bench, &wasm, &config);
     let captured = bench
         .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
@@ -490,7 +490,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let texture_id = create_four_color_texture(&mut bench);
 
     let root_texture_clip = WidgetClipRect { x: 6.0, y: 6.0, width: 12.0, height: 12.0 };
@@ -712,7 +712,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         .encode_into_bytes(),
     };
 
-    let mut bench = TestBench::start_with_size(80, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(80, 48).expect("boot");
     load_scroll_panel(&mut bench, &wasm, scroll);
     let captured = bench
         .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])

@@ -158,7 +158,7 @@ multi-atlas spill. See
 
 ## Chassis and feature caveats
 
-Desktop and the render-capable TestBench compose both text and render, so all
+Desktop and the render-capable SubstrateBench compose both text and render, so all
 operations are usable. The full-stack headless chassis also composes the CPU
 text capability: font loading and `font_metrics` can work when the addressed fs
 namespace is present, but drawing cannot. Its headless render cap returns
@@ -168,7 +168,7 @@ quads. The minimal hub chassis does not compose `aether.text` or
 
 The current composition is defined in
 [`chassis_common.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs),
-[`test_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/test_bench/chassis.rs),
+[`substrate_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/substrate_bench/chassis.rs),
 and
 [`render/headless_runtime.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/headless_runtime.rs).
 

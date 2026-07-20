@@ -34,7 +34,7 @@ use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
 use aether_kit::widget::{BehaviorHostSpec, ScriptRef};
 use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use serde::{Deserialize, Serialize};
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
@@ -84,7 +84,7 @@ fn host_address() -> String {
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider
 /// over `0..=255`, its initial script inline. The host spawns the wrapped
 /// slider in `wire`, so the first tick brings the whole slot up.
-fn load_panel_with_host(bench: &mut TestBench, kit_wasm: &[u8], script: Vec<u8>) {
+fn load_panel_with_host(bench: &mut SubstrateBench, kit_wasm: &[u8], script: Vec<u8>) {
     let wrapped_config = SliderConfig {
         min: 0.0,
         max: 255.0,
@@ -165,7 +165,7 @@ fn drag(panel: &str) -> Vec<(&'static str, BenchOp)> {
 
 /// Read the panel's log ring from `since`, returning the new messages plus the
 /// next cursor so a later phase reads only its own entries.
-fn read_panel_log(bench: &mut TestBench, since: Option<u64>) -> (Vec<String>, u64) {
+fn read_panel_log(bench: &mut SubstrateBench, since: Option<u64>) -> (Vec<String>, u64) {
     match bench.log_tail(&panel_address(), since, None) {
         LogTailResult::Ok { entries, next_since, .. } => (entries.into_iter().map(|e| e.message).collect(), next_since),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
@@ -203,7 +203,7 @@ fn emitted_counts(messages: &[String]) -> Vec<u32> {
 
 /// Swap the running script for `bytes` via `aether.behavior.set_script`,
 /// asserting the host replies `LoadScriptResult::Ok`.
-fn swap_script(bench: &mut TestBench, label: &str, bytes: Vec<u8>) {
+fn swap_script(bench: &mut SubstrateBench, label: &str, bytes: Vec<u8>) {
     let host = host_address();
     let swapped = bench
         .execute(vec![(label, BenchOp::send_and_await(&host, &SetScript { bytes }))])
@@ -240,7 +240,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let v2 = fs::read(&v2_path).expect("read intercept_slider_v2 wasm");
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
 
-    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(240, 220).expect("boot");
     load_panel_with_host(&mut bench, &kit_wasm, intercept);
     let panel = panel_address();
 

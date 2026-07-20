@@ -6,7 +6,7 @@ license.workspace = true
 
 # ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
 # manifest, registry, control-plane dispatch, hub client) for the
-# substrate. Powers every chassis (desktop, headless, hub, test-bench)
+# substrate. Powers every chassis (desktop, headless, hub, substrate-bench)
 # from `aether-substrate-bundle`. Winit + pollster stay bundle-side;
 # wgpu + png are gated behind the optional `render` feature so
 # chassis that don't render (headless, hub) skip the wgpu/png

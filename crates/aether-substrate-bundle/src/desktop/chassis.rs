@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::test_bench::UnsupportedTestBenchCapability;
+use crate::substrate_bench::UnsupportedSubstrateBenchCapability;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
@@ -148,7 +148,7 @@ impl DesktopChassis {
     /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
     /// profile, the mailbox namespaces this binary links, and the
     /// `build.rs` provenance. The desktop chassis layers the audio /
-    /// render / test-bench / lifecycle caps plus the RPC server onto the
+    /// render / substrate-bench / lifecycle caps plus the RPC server onto the
     /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
     /// base. `--describe` prints this without opening a winit event loop —
     /// the hub can capture a desktop binary's manifest on a headless host.
@@ -159,7 +159,7 @@ impl DesktopChassis {
             <AudioCapability as Addressable>::NAMESPACE,
             <ClipboardCapability as Addressable>::NAMESPACE,
             <RenderCapability as Addressable>::NAMESPACE,
-            <UnsupportedTestBenchCapability as Addressable>::NAMESPACE,
+            <UnsupportedSubstrateBenchCapability as Addressable>::NAMESPACE,
             <LifecycleCapability as Addressable>::NAMESPACE,
             <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
@@ -511,7 +511,7 @@ impl DesktopChassis {
             .with_actor::<AudioCapability>(audio)
             .with_actor::<ClipboardCapability>(ClipboardConfig::System)
             .with_actor::<RenderCapability>(render_config)
-            .with_actor::<UnsupportedTestBenchCapability>(())
+            .with_actor::<UnsupportedSubstrateBenchCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         let builder = maybe_with_http_server(builder, http_server);

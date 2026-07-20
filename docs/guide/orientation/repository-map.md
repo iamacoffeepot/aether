@@ -7,7 +7,7 @@ as their responsibility requires.
 product actors and reusable UI/gameplay pieces       aether-kit
 native services and their public mail contracts      aether-<capability> crates
 guest actor and behavior authoring SDKs               aether-actor, aether-behavior
-process profiles, binaries, test bench, packaging     aether-substrate-bundle
+process profiles, binaries, substrate bench, packaging     aether-substrate-bundle
 mail runtime, wasm host, scheduler, chassis traits    aether-substrate
 wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
 operator bridge                                       aether-mcp
@@ -53,7 +53,7 @@ compares these with native capabilities.
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-engine`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
 | `aether-anthropic`, `aether-gemini`, `aether-contentgen` | the two content-gen provider caps and the adapter/staging/transport layer they share |
-| `aether-substrate-bundle` | desktop, headless, hub, and test-bench chassis; autoload; bundle packing; performance binaries |
+| `aether-substrate-bundle` | desktop, headless, hub, and substrate-bench chassis; autoload; bundle packing; performance binaries |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches |
 
 The substrate is mechanism. A capability is policy and I/O represented as an

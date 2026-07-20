@@ -29,7 +29,7 @@ use aether_kit::world::{Material, SetChunk, SetRegion};
 use aether_kit::{
     EditorConfig, EditorKeyChord, EditorRegionRect, MoverConfig, MoverTeleport, RegionInputLanes, RegionSpec,
 };
-use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats};
 
 const WINDOW_WIDTH: u32 = 128;
@@ -40,7 +40,7 @@ const HEIGHT_BREAK_ROW: usize = 8;
 const CLIFF_HEIGHT_OCTIMETERS: i32 = 256;
 const REGION_ID: u32 = 1;
 
-/// `TestBench` readback RGB for the renderer's clear color.
+/// `SubstrateBench` readback RGB for the renderer's clear color.
 const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
 /// The built-in Sand style's documented sRGB design value.
 const SAND_CLIFF_SRGB: [u8; 3] = [217, 199, 140];
@@ -75,12 +75,12 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str) -> MailboxId {
+fn load_kit_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str) -> MailboxId {
     load_kit_export_with_config(bench, wasm, export, name, Vec::new())
 }
 
 fn load_kit_export_with_config(
-    bench: &mut TestBench,
+    bench: &mut SubstrateBench,
     wasm: &[u8],
     export: &str,
     name: &str,
@@ -112,7 +112,7 @@ fn load_kit_export_with_config(
     }
 }
 
-fn load_mover_editor_shell(bench: &mut TestBench, wasm: &[u8], mover: MailboxId) {
+fn load_mover_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], mover: MailboxId) {
     let lanes = RegionInputLanes { key_press: true, key_release: true, ..RegionInputLanes::default() };
     let config = EditorConfig {
         regions: vec![RegionSpec {
@@ -177,7 +177,7 @@ fn scene_checks() -> Vec<FrameCheck> {
 /// Capture the mover camera/marker and world into one frame, asking the
 /// substrate for basic silhouette checks so `ArtifactGuard` can preserve the
 /// exact frame, masks, and measurements when a visual assertion fails.
-fn capture_scene(bench: &mut TestBench, mover: &str, world: &str, label: &'static str) -> SceneCapture {
+fn capture_scene(bench: &mut SubstrateBench, mover: &str, world: &str, label: &'static str) -> SceneCapture {
     let checks = scene_checks();
     let captured = bench
         .execute(vec![(
@@ -247,7 +247,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
     let world = component_address("world");
     let mover_address = component_address("mover");
     let _world_mailbox = load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
@@ -324,7 +324,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = TestBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
 
     let world = component_address("world");
     let mover = component_address("mover");

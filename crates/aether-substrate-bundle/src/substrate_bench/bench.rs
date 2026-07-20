@@ -1,4 +1,4 @@
-//! `TestBench` — the in-process driver for the test-bench chassis (ADR-0067).
+//! `SubstrateBench` — the in-process driver for the substrate-bench chassis (ADR-0067).
 //!
 //! Boots the same substrate machinery `main.rs` does, but attaches a
 //! [`RecordingBackend`] to `outbound` instead of relying on an external
@@ -8,7 +8,7 @@
 //!
 //! The chassis-control handler is the same one the binary uses —
 //! it pushes `Advance` / `CaptureRequested` events onto the events
-//! channel. `TestBench::advance` drains the queue (which lets the
+//! channel. `SubstrateBench::advance` drains the queue (which lets the
 //! handler run), pumps any pending events through `run_frame`
 //! synchronously, then drains the loopback for the matching reply.
 //!
@@ -52,8 +52,8 @@ use aether_substrate::{
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
 
-use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
-use super::config::TestBenchClipboardMode;
+use super::chassis::{SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS};
+use super::config::SubstrateBenchClipboardMode;
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
 use crate::chassis_common::SettlementConfig;
@@ -67,7 +67,7 @@ use std::thread;
 pub const DEFAULT_WIDTH: u32 = 800;
 pub const DEFAULT_HEIGHT: u32 = 600;
 
-/// Errors `TestBench` API methods surface. `Boot` covers any failure
+/// Errors `SubstrateBench` API methods surface. `Boot` covers any failure
 /// in the substrate's `build()`; `Decode` covers structured reply
 /// decode failures (rare — implies a kind shape mismatch); `Timeout`
 /// covers replies that never arrive (chassis hung or wrong target);
@@ -82,7 +82,7 @@ pub const DEFAULT_HEIGHT: u32 = 600;
 /// never reaches, so a `SettlementTimeout` names a genuine wedge and
 /// carries a `pending` dump of the stuck roots and their counts.
 #[derive(Debug)]
-pub enum TestBenchError {
+pub enum SubstrateBenchError {
     Boot(String),
     Decode(String),
     Timeout {
@@ -103,7 +103,7 @@ pub enum TestBenchError {
     },
 }
 
-impl fmt::Display for TestBenchError {
+impl fmt::Display for SubstrateBenchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Boot(e) => write!(f, "substrate boot failed: {e}"),
@@ -126,14 +126,14 @@ impl fmt::Display for TestBenchError {
 /// wait, i.e. how often [`await_internal_signal`] logs `gate … slow …
 /// extending` while a slow-but-healthy chain is still settling. The log
 /// heartbeat, not the gate — a chain that settles is unaffected by its
-/// value; only the backstop cap (see [`TestBench::settlement_cap`])
+/// value; only the backstop cap (see [`SubstrateBench::settlement_cap`])
 /// declares a wedge. Long enough to absorb wasm compile + cap dispatcher
 /// wake under nextest CPU contention.
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl error::Error for TestBenchError {}
+impl error::Error for SubstrateBenchError {}
 
-/// In-process test-bench driver. Owns the substrate, runs the
+/// In-process substrate-bench driver. Owns the substrate, runs the
 /// chassis events loop synchronously inside its API methods, routes
 /// substrate replies through a loopback channel.
 ///
@@ -142,7 +142,7 @@ impl error::Error for TestBenchError {}
 /// the scheduler workers). Methods are `&mut self` because they
 /// mutate frame state and pump events; concurrent calls are not
 /// supported.
-pub struct TestBench {
+pub struct SubstrateBench {
     queue: Arc<Mailer>,
     registry: Arc<aether_substrate::Registry>,
     outbound: Arc<HubOutbound>,
@@ -200,18 +200,18 @@ pub struct TestBench {
     observed_kinds: Arc<Mutex<Vec<String>>>,
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
-    /// `TestBench` drops the boot which joins the worker threads.
+    /// `SubstrateBench` drops the boot which joins the worker threads.
     _boot: SubstrateBoot,
 
-    /// `PassiveChassis<TestBenchChassis>` holding the booted Log +
+    /// `PassiveChassis<SubstrateBenchChassis>` holding the booted Log +
     /// Render passives via the `chassis_builder` typed map. Held for
     /// the bench's lifetime so the passives' dispatcher threads
     /// stay alive; drops in reverse declaration order before
     /// `_boot`, so render+log shut down before the scheduler joins.
-    passive: PassiveChassis<TestBenchChassis>,
+    passive: PassiveChassis<SubstrateBenchChassis>,
 }
 
-/// A request enqueued through [`TestBench::send_deferred`] whose reply will
+/// A request enqueued through [`SubstrateBench::send_deferred`] whose reply will
 /// be awaited later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingBenchReply {
@@ -225,16 +225,16 @@ pub struct PendingBenchReply {
 /// so the boot path is reproducible and the value shows up in logs.
 const TESTBENCH_SESSION_UUID: u128 = 0x7E57_BE7C_C0FF_EE15_AE7E_7BE7_5E55_1077;
 
-/// Builder for [`TestBench`]. Holds the optional config a test wants
+/// Builder for [`SubstrateBench`]. Holds the optional config a test wants
 /// to override (offscreen target size, ADR-0041 namespace roots).
 /// Tests that want full default behaviour skip the builder and call
-/// [`TestBench::start`] / [`TestBench::start_with_size`] directly.
+/// [`SubstrateBench::start`] / [`SubstrateBench::start_with_size`] directly.
 ///
 /// Per issue 464, the `namespace_roots` override lets a test redirect
 /// `save://` / `assets://` / `config://` at a tempdir without touching
 /// process env. Pair with `tempfile::TempDir` to scope the redirect to
 /// a single test.
-pub struct TestBenchBuilder {
+pub struct SubstrateBenchBuilder {
     width: u32,
     height: u32,
     namespace_roots: Option<NamespaceRoots>,
@@ -243,11 +243,11 @@ pub struct TestBenchBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
-    clipboard_mode: TestBenchClipboardMode,
+    clipboard_mode: SubstrateBenchClipboardMode,
     game_gateway: GameGatewayConfig,
 }
 
-impl Default for TestBenchBuilder {
+impl Default for SubstrateBenchBuilder {
     fn default() -> Self {
         Self {
             width: DEFAULT_WIDTH,
@@ -258,13 +258,13 @@ impl Default for TestBenchBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
-            clipboard_mode: TestBenchClipboardMode::default(),
+            clipboard_mode: SubstrateBenchClipboardMode::default(),
             game_gateway: GameGatewayConfig::default(),
         }
     }
 }
 
-impl TestBenchBuilder {
+impl SubstrateBenchBuilder {
     /// Set the offscreen target size. Width / height are clamped to a
     /// minimum of 1 inside `Gpu::new`.
     #[must_use]
@@ -346,7 +346,7 @@ impl TestBenchBuilder {
     /// deterministic in-memory storage; `Unavailable` composes the fail-fast
     /// companion for negative-path scenarios.
     #[must_use]
-    pub fn clipboard_mode(mut self, mode: TestBenchClipboardMode) -> Self {
+    pub fn clipboard_mode(mut self, mode: SubstrateBenchClipboardMode) -> Self {
         self.clipboard_mode = mode;
         self
     }
@@ -359,11 +359,11 @@ impl TestBenchBuilder {
         self
     }
 
-    /// Boot the bench. Equivalent to `TestBench::start_with_size` for
+    /// Boot the bench. Equivalent to `SubstrateBench::start_with_size` for
     /// the default builder; overrides applied via the builder methods
     /// flow through to `SubstrateBoot::builder` and the chassis-side
     /// IO sink wiring.
-    pub fn build(self) -> Result<TestBench, TestBenchError> {
+    pub fn build(self) -> Result<SubstrateBench, SubstrateBenchError> {
         // Lower the per-field `Option` overrides onto the `Copy`
         // `RingCapacities`, defaulting each unset field to the
         // `aether-actor` const cap.
@@ -381,7 +381,7 @@ impl TestBenchBuilder {
             trace_max: self.trace_ring_max_capacity.unwrap_or(trace),
         };
         let settlement_cap = self.settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
-        TestBench::start_inner(
+        SubstrateBench::start_inner(
             self.width,
             self.height,
             self.namespace_roots,
@@ -394,23 +394,23 @@ impl TestBenchBuilder {
     }
 }
 
-impl TestBench {
-    /// Begin a `TestBench` boot. Default size 800x600, no
+impl SubstrateBench {
+    /// Begin a `SubstrateBench` boot. Default size 800x600, no
     /// `NamespaceRoots` override — chained methods on the returned
     /// builder set those.
     #[must_use]
-    pub fn builder() -> TestBenchBuilder {
-        TestBenchBuilder::default()
+    pub fn builder() -> SubstrateBenchBuilder {
+        SubstrateBenchBuilder::default()
     }
 
-    /// Boot a `TestBench` at the default 800x600 offscreen size.
-    pub fn start() -> Result<Self, TestBenchError> {
+    /// Boot a `SubstrateBench` at the default 800x600 offscreen size.
+    pub fn start() -> Result<Self, SubstrateBenchError> {
         Self::start_with_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
     }
 
-    /// Boot a `TestBench` with a specific offscreen target size.
+    /// Boot a `SubstrateBench` with a specific offscreen target size.
     /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
-    pub fn start_with_size(width: u32, height: u32) -> Result<Self, TestBenchError> {
+    pub fn start_with_size(width: u32, height: u32) -> Result<Self, SubstrateBenchError> {
         Self::start_inner(
             width,
             height,
@@ -418,14 +418,14 @@ impl TestBench {
             None,
             RingCapacities::default(),
             SettlementConfig::from_env().to_cap(),
-            TestBenchClipboardMode::default(),
+            SubstrateBenchClipboardMode::default(),
             GameGatewayConfig::default(),
         )
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "private lowering seam for the TestBenchBuilder's independent boot overrides"
+        reason = "private lowering seam for the SubstrateBenchBuilder's independent boot overrides"
     )]
     fn start_inner(
         width: u32,
@@ -434,22 +434,22 @@ impl TestBench {
         pool_workers: Option<usize>,
         ring_caps: RingCapacities,
         settlement_cap: Duration,
-        clipboard_mode: TestBenchClipboardMode,
+        clipboard_mode: SubstrateBenchClipboardMode,
         game_gateway: GameGatewayConfig,
-    ) -> Result<Self, TestBenchError> {
+    ) -> Result<Self, SubstrateBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
 
         // ADR-0071 phase 6: substrate boot + every cap goes through
-        // `TestBenchChassis::build_passive` — the same path the
+        // `SubstrateBenchChassis::build_passive` — the same path the
         // binary uses. Io is part of the chain when
         // `namespace_roots` is supplied and pre-validation passes;
         // the chassis warns and skips Io otherwise. Tests that care
         // about io supply tempdir roots through
         // `start_with_namespace_roots`; otherwise the bench skips Io.
-        let env = TestBenchEnv {
-            name: "test-bench".to_owned(),
+        let env = SubstrateBenchEnv {
+            name: "substrate-bench".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             workers: WORKERS,
             pool_workers,
@@ -466,8 +466,8 @@ impl TestBench {
             // loops the bench stores this value for.
             teardown_cap: settlement_cap,
         };
-        let TestBenchBuild { passive, boot, render_handles, kind_tick } =
-            TestBenchChassis::build_passive(env).map_err(|e| TestBenchError::Boot(e.to_string()))?;
+        let SubstrateBenchBuild { passive, boot, render_handles, kind_tick } =
+            SubstrateBenchChassis::build_passive(env).map_err(|e| SubstrateBenchError::Boot(e.to_string()))?;
 
         // Attach a `RecordingBackend` to the boot's outbound. Replies
         // the substrate emits via `outbound.send_reply` arrive here
@@ -481,7 +481,7 @@ impl TestBench {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
-        // Chassis route-freezing: the test bench wires its loopback driver to
+        // Chassis route-freezing: the substrate bench wires its loopback driver to
         // the lifecycle cap's own id (its NAMESPACE) — ctx-less harness setup,
         // no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
@@ -624,11 +624,16 @@ impl TestBench {
     /// spawned) to drain. By the time this returns, any subsequent
     /// observation is causally after the producer's full chain — no
     /// nudge_tick-style band-aids needed for render-flush races.
-    pub(crate) fn send_bytes(&self, recipient_name: &str, kind: KindId, bytes: Vec<u8>) -> Result<(), TestBenchError> {
+    pub(crate) fn send_bytes(
+        &self,
+        recipient_name: &str,
+        kind: KindId,
+        bytes: Vec<u8>,
+    ) -> Result<(), SubstrateBenchError> {
         let mailbox = self
             .registry
             .lookup(recipient_name)
-            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+            .ok_or_else(|| SubstrateBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         self.push_and_settle(recipient_name, "<bytes>", mailbox, kind, bytes)
     }
 
@@ -643,42 +648,42 @@ impl TestBench {
         mailbox: MailboxId,
         kind: KindId,
         payload: Vec<u8>,
-    ) -> Result<(), TestBenchError> {
+    ) -> Result<(), SubstrateBenchError> {
         let cid = self.fresh_correlation_id();
         let registry = self.passive.settlement_registry();
         let root = self.queue.push_chassis_root_mail(cid, mailbox, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
         match await_internal_signal(
             &rx,
-            "test_bench.push_and_settle",
+            "substrate_bench.push_and_settle",
             SETTLEMENT_TIMEOUT,
             self.settlement_cap,
             TerminalDisposition::ReplyErr,
         ) {
             WaitOutcome::Settled => Ok(()),
             WaitOutcome::Wedged(_) => {
-                Err(self.settlement_timeout(recipient_name.to_owned(), kind_name, "test_bench.push_and_settle"))
+                Err(self.settlement_timeout(recipient_name.to_owned(), kind_name, "substrate_bench.push_and_settle"))
             }
         }
     }
 
-    /// Build a [`TestBenchError::SettlementTimeout`] carrying a dump of the
+    /// Build a [`SubstrateBenchError::SettlementTimeout`] carrying a dump of the
     /// settlement table's currently-pending roots, and log it (issue 2062).
     /// Shared by the settlement gate sites so a wedge — a genuine
     /// deadlock/livelock, since the cap is a generous backstop a healthy
     /// chain never reaches — names the stuck root(s) and their
     /// `(in_flight, held_open)` counts instead of surfacing a bare timeout.
-    fn settlement_timeout(&self, recipient: String, kind_name: &'static str, gate: &str) -> TestBenchError {
+    fn settlement_timeout(&self, recipient: String, kind_name: &'static str, gate: &str) -> SubstrateBenchError {
         let pending = format_pending_roots(&self.queue.trace_handle().settlement_counter().pending_roots());
         tracing::error!(
-            target: "aether_substrate::test_bench",
+            target: "aether_substrate::substrate_bench",
             gate,
             recipient = %recipient,
             kind = kind_name,
             pending = %pending,
             "settlement gate wedged: chain did not settle before the patience backstop",
         );
-        TestBenchError::SettlementTimeout { recipient, kind_name, pending }
+        SubstrateBenchError::SettlementTimeout { recipient, kind_name, pending }
     }
 
     /// Issue 607 Phase 3: spawn an instanced actor onto the bench's
@@ -751,7 +756,7 @@ impl TestBench {
         mailbox: MailboxId,
         kind: KindId,
         payload: Vec<u8>,
-    ) -> Result<Vec<u8>, TestBenchError> {
+    ) -> Result<Vec<u8>, SubstrateBenchError> {
         let cid = self.fresh_correlation_id();
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         self.queue.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
@@ -811,11 +816,11 @@ impl TestBench {
         recipient_name: &str,
         kind: KindId,
         payload: Vec<u8>,
-    ) -> Result<Vec<u8>, TestBenchError> {
+    ) -> Result<Vec<u8>, SubstrateBenchError> {
         let mailbox = self
             .registry
             .lookup(recipient_name)
-            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+            .ok_or_else(|| SubstrateBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         self.queue.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
@@ -827,14 +832,14 @@ impl TestBench {
     ///
     /// This is the asynchronous counterpart to `send_and_await` for tests that
     /// need several requests in flight at once to validate correlation.
-    pub fn send_deferred<K>(&self, recipient_name: &str, mail: &K) -> Result<PendingBenchReply, TestBenchError>
+    pub fn send_deferred<K>(&self, recipient_name: &str, mail: &K) -> Result<PendingBenchReply, SubstrateBenchError>
     where
         K: Kind,
     {
         let mailbox = self
             .registry
             .lookup(recipient_name)
-            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+            .ok_or_else(|| SubstrateBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         self.queue.push(Mail::new(mailbox, K::ID, mail.encode_into_bytes(), 1).with_reply_to(reply_to));
@@ -843,7 +848,7 @@ impl TestBench {
 
     /// Pump until the reply for a request returned by [`Self::send_deferred`]
     /// arrives, stashing out-of-order replies for later awaits.
-    pub fn await_deferred<R>(&mut self, pending: PendingBenchReply) -> Result<R, TestBenchError>
+    pub fn await_deferred<R>(&mut self, pending: PendingBenchReply) -> Result<R, SubstrateBenchError>
     where
         R: Kind,
     {
@@ -854,22 +859,22 @@ impl TestBench {
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with
     /// `AdvanceResult::Ok`.
-    pub(crate) fn advance(&mut self, ticks: u32) -> Result<u32, TestBenchError> {
+    pub(crate) fn advance(&mut self, ticks: u32) -> Result<u32, SubstrateBenchError> {
         let cid = self.fresh_correlation_id();
         // Issue 603 Phase 4: advance migrated from `aether.control`
-        // (chassis_handler closure) onto `aether.test_bench`
-        // (`TestBenchCapability`).
+        // (chassis_handler closure) onto `aether.substrate_bench`
+        // (`SubstrateBenchCapability`).
         self.push_to_mailbox(
-            // Harness route to the bench's own `TestBenchCapability` mailbox by
+            // Harness route to the bench's own `SubstrateBenchCapability` mailbox by
             // its well-known name — ctx-less driver-side push, no resolver here.
             #[allow(clippy::disallowed_methods)]
-            aether_data::mailbox_id_from_name("aether.test_bench"),
+            aether_data::mailbox_id_from_name("aether.substrate_bench"),
             &Advance { ticks },
             cid,
         );
         match self.pump_until_reply::<AdvanceResult>(cid, "AdvanceResult")? {
             AdvanceResult::Ok { ticks_completed } => Ok(ticks_completed),
-            AdvanceResult::Err { error } => Err(TestBenchError::Advance(error)),
+            AdvanceResult::Err { error } => Err(SubstrateBenchError::Advance(error)),
         }
     }
 
@@ -890,7 +895,7 @@ impl TestBench {
     /// rendered, which matches "what the user would see right now"
     /// in the same way wgpu / D3D / Vulkan swapchain front buffers
     /// behave.
-    pub(crate) fn capture(&mut self) -> Result<Vec<u8>, TestBenchError> {
+    pub(crate) fn capture(&mut self) -> Result<Vec<u8>, SubstrateBenchError> {
         self.capture_with_mails(Vec::new(), Vec::new())
     }
 
@@ -904,7 +909,7 @@ impl TestBench {
         &mut self,
         pre: Vec<aether_kinds::NamedMail>,
         after: Vec<aether_kinds::NamedMail>,
-    ) -> Result<Vec<u8>, TestBenchError> {
+    ) -> Result<Vec<u8>, SubstrateBenchError> {
         let cid = self.fresh_correlation_id();
         // Issue 603 Phase 2: capture_frame moved to the render
         // capability's `aether.render` mailbox. Pre-Phase-2 the mail
@@ -918,7 +923,7 @@ impl TestBench {
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,
-                // The `TestBench::capture` API returns the PNG only; the
+                // The `SubstrateBench::capture` API returns the PNG only; the
                 // substrate-side verdict path (iamacoffeepot/aether#1777)
                 // and similarity path (iamacoffeepot/aether#1780) are
                 // exercised through `BenchOp::send_and_await` scenarios.
@@ -929,7 +934,7 @@ impl TestBench {
         );
         match self.pump_until_reply::<CaptureFrameResult>(cid, "CaptureFrameResult")? {
             CaptureFrameResult::Ok { png, .. } => Ok(png),
-            CaptureFrameResult::Err { error } => Err(TestBenchError::Capture(error)),
+            CaptureFrameResult::Err { error } => Err(SubstrateBenchError::Capture(error)),
         }
     }
 
@@ -937,7 +942,7 @@ impl TestBench {
     /// with our session as the reply target and `cid` as the correlation
     /// id. Issue 603 retired `aether.control` as the catch-all for
     /// chassis-peripheral kinds; each one now routes to its own cap
-    /// (`aether.render.capture_frame`, `aether.test_bench.advance`,
+    /// (`aether.render.capture_frame`, `aether.substrate_bench.advance`,
     /// `aether.window.set_mode`, etc.).
     fn push_to_mailbox<K>(&self, mailbox: MailboxId, mail: &K, cid: u64)
     where
@@ -967,7 +972,7 @@ impl TestBench {
     /// receivers on a 100ms `recv_timeout`, so without this sleep a
     /// capability-mediated reply (e.g. `aether.fs.write` →
     /// `WriteResult`) can't beat the bail-out check.
-    fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, TestBenchError>
+    fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, SubstrateBenchError>
     where
         R: Kind,
     {
@@ -979,7 +984,7 @@ impl TestBench {
     /// reply payload bytes instead of decoding. Backs
     /// [`Self::send_bytes_and_await`] and the `SendAndAwait` op of
     /// [`Self::execute`], where the reply type is decoded on demand.
-    fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, TestBenchError> {
+    fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, SubstrateBenchError> {
         let event = self.pump_until_event(cid, expected)?;
         Self::reply_payload(event, expected)
     }
@@ -989,7 +994,7 @@ impl TestBench {
     /// [`EgressEvent`]. Shared loop body of [`Self::pump_until_reply`]
     /// (typed decode) and [`Self::pump_until_reply_bytes`] (raw
     /// bytes).
-    fn pump_until_event(&mut self, cid: u64, expected: &'static str) -> Result<EgressEvent, TestBenchError> {
+    fn pump_until_event(&mut self, cid: u64, expected: &'static str) -> Result<EgressEvent, SubstrateBenchError> {
         // Adaptive backoff between quiet polls. A frame's settlement
         // round-trip (driver → pool → settlement registry → reply)
         // completes in ~1 ms, but a flat coarse sleep makes every tick
@@ -1066,7 +1071,7 @@ impl TestBench {
                 last_progress = Instant::now();
             } else {
                 if last_progress.elapsed() >= stall_deadline {
-                    return Err(TestBenchError::Timeout { expected, pumped_iterations: iterations });
+                    return Err(SubstrateBenchError::Timeout { expected, pumped_iterations: iterations });
                 }
                 thread::sleep(backoff);
                 backoff = (backoff * 2).min(BACKOFF_CAP);
@@ -1074,7 +1079,7 @@ impl TestBench {
         }
     }
 
-    fn decode_reply<R>(event: EgressEvent, expected: &'static str) -> Result<R, TestBenchError>
+    fn decode_reply<R>(event: EgressEvent, expected: &'static str) -> Result<R, SubstrateBenchError>
     where
         R: Kind,
     {
@@ -1083,22 +1088,22 @@ impl TestBench {
                 // ADR-0100: decode through the kind's declared codec
                 // (cast or structured), not a hardcoded structured path.
                 R::decode_from_bytes(&payload).ok_or_else(|| {
-                    TestBenchError::Decode(format!(
+                    SubstrateBenchError::Decode(format!(
                         "{expected} decode failed via Kind::decode_from_bytes (kind={kind_name})"
                     ))
                 })
             }
-            other => Err(TestBenchError::Decode(format!("expected {expected} reply event, got {other:?}"))),
+            other => Err(SubstrateBenchError::Decode(format!("expected {expected} reply event, got {other:?}"))),
         }
     }
 
     /// Extract the raw payload bytes from a session-targeted reply
     /// event. The bytes-level counterpart to [`Self::decode_reply`] —
     /// the caller decodes later via [`super::ExecutionResult::reply`].
-    fn reply_payload(event: EgressEvent, expected: &'static str) -> Result<Vec<u8>, TestBenchError> {
+    fn reply_payload(event: EgressEvent, expected: &'static str) -> Result<Vec<u8>, SubstrateBenchError> {
         match event {
             EgressEvent::ToSession { payload, .. } => Ok(payload),
-            other => Err(TestBenchError::Decode(format!("expected {expected} reply event, got {other:?}"))),
+            other => Err(SubstrateBenchError::Decode(format!("expected {expected} reply event, got {other:?}"))),
         }
     }
 
@@ -1118,7 +1123,7 @@ impl TestBench {
     // doesn't track the partial-move via the `Advance { reply_to, .. }`
     // pattern.
     #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), TestBenchError> {
+    fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), SubstrateBenchError> {
         match event {
             ChassisEvent::Advance { reply_to, ticks } => {
                 for _ in 0..ticks {
@@ -1135,9 +1140,9 @@ impl TestBench {
         Ok(())
     }
 
-    fn run_frame(&mut self, dispatch_tick: bool) -> Result<(), TestBenchError> {
+    fn run_frame(&mut self, dispatch_tick: bool) -> Result<(), SubstrateBenchError> {
         if dispatch_tick {
-            // ADR-0082 PR 3b: TestBench pushes `LifecycleAdvance` to the
+            // ADR-0082 PR 3b: SubstrateBench pushes `LifecycleAdvance` to the
             // lifecycle driver, which broadcasts the `Tick` stage directly
             // to its stage subscribers (issue 1490 retired the
             // `Tick → aether.input` relay; components subscribe `Tick` on
@@ -1238,7 +1243,7 @@ impl TestBench {
                 for rx in req.pre_settlements {
                     if let WaitOutcome::Wedged(_) = await_internal_signal(
                         &rx,
-                        "test_bench.capture_pre_mail",
+                        "substrate_bench.capture_pre_mail",
                         SETTLEMENT_TIMEOUT,
                         self.settlement_cap,
                         TerminalDisposition::ReplyErr,
@@ -1246,7 +1251,7 @@ impl TestBench {
                         return Err(self.settlement_timeout(
                             "capture pre-mail chain".to_owned(),
                             "<pre-mail>",
-                            "test_bench.capture_pre_mail",
+                            "substrate_bench.capture_pre_mail",
                         ));
                     }
                 }
@@ -1334,7 +1339,7 @@ mod tests {
         assert_eq!(format_pending_roots(&[]), "<none>");
     }
 
-    use crate::test_bench::BenchOp;
+    use crate::substrate_bench::BenchOp;
     use std::thread;
     use std::time::Instant;
 
@@ -1348,10 +1353,10 @@ mod tests {
     /// own tests; this covers the *diagnostic content*.
     #[test]
     fn settlement_wedge_dump_names_stuck_root() {
-        let tb = match TestBench::start_with_size(64, 48) {
+        let tb = match SubstrateBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };
@@ -1360,7 +1365,7 @@ mod tests {
         tb.queue.trace_handle().settlement_counter().record_sent(stuck);
 
         let err = tb.settlement_timeout("stuck.recipient".to_owned(), "StuckKind", "test.wedge");
-        let TestBenchError::SettlementTimeout { pending, .. } = &err else {
+        let SubstrateBenchError::SettlementTimeout { pending, .. } = &err else {
             panic!("expected SettlementTimeout, got {err:?}");
         };
         assert!(pending.contains("in_flight=1"), "dump should name the stuck root with in_flight=1: {pending}");
@@ -1374,17 +1379,17 @@ mod tests {
     /// is well-formed; deeper visual assertions land in the scenario
     /// library.
     ///
-    /// The unit test lets `TestBench::start_with_size` fail naturally
+    /// The unit test lets `SubstrateBench::start_with_size` fail naturally
     /// on driverless runners and skips on any boot error, rather than
     /// pulling in the `test_helpers` wgpu probe — keeping the lib
     /// unit test self-contained (the same skip semantics, keyed off
     /// the boot result rather than a separate adapter probe).
     #[test]
     fn boot_advance_capture_round_trip() {
-        let mut tb = match TestBench::start_with_size(64, 48) {
+        let mut tb = match SubstrateBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };
@@ -1413,10 +1418,10 @@ mod tests {
     /// in-process.
     #[test]
     fn capture_frame_send_and_await_returns_png() {
-        let mut tb = match TestBench::start_with_size(64, 48) {
+        let mut tb = match SubstrateBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };
@@ -1470,10 +1475,10 @@ mod tests {
 
         type CapturedRow = (MailId, MailId, Option<MailId>);
 
-        let mut tb = match TestBench::start_with_size(64, 48) {
+        let mut tb = match SubstrateBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };
@@ -1572,10 +1577,10 @@ mod tests {
         use aether_substrate::mail::registry::MailDispatch;
         use std::sync::Mutex;
 
-        let mut tb = match TestBench::start_with_size(64, 48) {
+        let mut tb = match SubstrateBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };
@@ -1624,7 +1629,7 @@ mod tests {
     }
 
     /// Issue 607 Phase 3 verify: spawn an instanced actor through
-    /// `TestBench::spawn_actor`, exercise `Subname::Counter` +
+    /// `SubstrateBench::spawn_actor`, exercise `Subname::Counter` +
     /// `Subname::Named`, assert returned `MailboxId` matches the
     /// deterministic full-name hash, confirm reused subnames fail,
     /// and confirm `after_init` mail lands as the actor's first
@@ -1683,10 +1688,10 @@ mod tests {
             }
         }
 
-        let tb = match TestBench::start_with_size(64, 48) {
+        let tb = match SubstrateBench::start_with_size(64, 48) {
             Ok(tb) => tb,
             Err(e) => {
-                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
                 return;
             }
         };

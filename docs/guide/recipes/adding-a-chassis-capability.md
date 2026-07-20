@@ -255,11 +255,11 @@ Where that line goes depends on which chassis should carry the cap:
   list in the same file, in lockstep: that list is read straight off each
   cap's `Addressable::NAMESPACE` for the `--describe` manifest, so its
   *membership* has to track the chain by hand.
-- **The test-bench chassis** — the in-process harness does not call
+- **The substrate-bench chassis** — the in-process harness does not call
   `with_common_caps`; it has a separate, reduced builder chain in
-  [`crates/aether-substrate-bundle/src/test_bench/chassis.rs`][testbench];
+  [`crates/aether-substrate-bundle/src/substrate_bench/chassis.rs`][substratebench];
   add the capability there too when scenarios should drive it, and thread any
-  required config through `TestBenchEnv`. `TextCapability` is registered in both
+  required config through `SubstrateBenchEnv`. `TextCapability` is registered in both
   compositions for this reason.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
@@ -283,7 +283,7 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 [adr70]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md
 [adr71]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md
 [common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs
-[testbench]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/test_bench/chassis.rs
+[substratebench]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/substrate_bench/chassis.rs
 
 ## 5. Passive cap or driver?
 
@@ -295,7 +295,7 @@ hub's `HubServerDriverCapability` instead owns the `SubstrateBoot` and blocks th
 thread on SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
 listener. A driver implements `DriverCapability` (not `NativeActor`) and is
 supplied with `.driver(d)` rather than `.with_actor`; the type-state builder
-enforces exactly one. The in-process TestBench uses `build_passive` and lets its
+enforces exactly one. The in-process SubstrateBench uses `build_passive` and lets its
 embedder drive it, so it deliberately has no driver capability.
 
 If the cap drives — owns a loop or a peripheral — its name carries
@@ -346,7 +346,7 @@ for the same path still reply to their respective sessions.
 
 For an end-to-end check across the real in-process boundaries — rendering, the
 frame loop, and the capabilities explicitly installed by its reduced builder —
-drive [TestBench](../testing/testbench-and-fleetbench.md) instead. It boots that
+drive [SubstrateBench](../testing/substratebench-and-fleetbench.md) instead. It boots that
 chassis from a Rust thread and sends mail through the same encode path the MCP
 tool uses. Supply namespace roots when the scenario needs `aether.fs`.
 

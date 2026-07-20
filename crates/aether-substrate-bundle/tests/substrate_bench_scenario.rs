@@ -1,9 +1,9 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
-//! a `TestBench` and exercises one substrate primitive — input
+//! a `SubstrateBench` and exercises one substrate primitive — input
 //! subscription, drop, `capture_frame` round-trip, `replace_component`
 //! (all via `aether-test-fixtures`'s `probe` cdylib), or the chassis `aether.fs`
 //! adapter's read/write/delete/list round trips — driving every step
-//! through `TestBench::execute` (issue 868).
+//! through `SubstrateBench::execute` (issue 868).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
@@ -18,9 +18,9 @@
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
 //! gate, `save://` sandbox) live in
-//! `aether_substrate_bundle::test_bench::test_helpers` (issues 460 +
+//! `aether_substrate_bundle::substrate_bench::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox flows in via
-//! `TestBench::builder().namespace_roots(...)` rather than env-var
+//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test`
@@ -49,8 +49,8 @@ use aether_render::{
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
-use aether_substrate_bundle::test_bench::{
-    ArtifactGuard, BenchOp, TestBench,
+use aether_substrate_bundle::substrate_bench::{
+    ArtifactGuard, BenchOp, SubstrateBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_substrate_bundle::visual::{
@@ -115,7 +115,7 @@ fn artifact_dir(id: &str) -> PathBuf {
         .and_then(Path::parent)
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
     let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
-    target_root.join("test-bench-artifacts").join(id)
+    target_root.join("substrate-bench-artifacts").join(id)
 }
 
 fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
@@ -153,10 +153,10 @@ fn lit_fraction_in_rect(img: &Image, x: u32, y: u32, width: u32, height: u32, bg
 /// the drop / replace scenarios target. Pre-Phase-4 of issue 603 the
 /// bench's `aether.control` mailbox (renamed to `aether.component` in
 /// issue 638 phase 3) served as a single FIFO point for both load and
-/// advance; Phase 4 split advance onto `aether.test_bench`, so load is
+/// advance; Phase 4 split advance onto `aether.substrate_bench`, so load is
 /// no longer naturally ordered ahead of advance — `SendAndAwait`
 /// blocks on `LoadResult` before returning.
-fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
+fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -178,7 +178,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 /// `load_probe`; the cube scenario only needs the load to succeed (it
 /// captures rather than mailing the component), so the returned
 /// `MailboxId` is discarded.
-fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
+fn load_cube(bench: &mut SubstrateBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -215,19 +215,19 @@ fn require_wgpu_only() -> bool {
     false
 }
 
-#[path = "test_bench_scenario/boot.rs"]
+#[path = "substrate_bench_scenario/boot.rs"]
 mod boot;
-#[path = "test_bench_scenario/clipboard.rs"]
+#[path = "substrate_bench_scenario/clipboard.rs"]
 mod clipboard;
-#[path = "test_bench_scenario/component.rs"]
+#[path = "substrate_bench_scenario/component.rs"]
 mod component;
-#[path = "test_bench_scenario/fs.rs"]
+#[path = "substrate_bench_scenario/fs.rs"]
 mod filesystem;
-#[path = "test_bench_scenario/inline_child.rs"]
+#[path = "substrate_bench_scenario/inline_child.rs"]
 mod inline_child;
-#[path = "test_bench_scenario/render.rs"]
+#[path = "substrate_bench_scenario/render.rs"]
 mod render;
-#[path = "test_bench_scenario/text.rs"]
+#[path = "substrate_bench_scenario/text.rs"]
 mod text;
 
 // Pre-#775 the bench emitted `aether.observation.frame_stats` every

@@ -11,7 +11,7 @@ use super::*;
 /// `on_rehydrate` reconstructs the child by type and restores its count —
 /// so the post-replace query reads 2, not the fresh-`init` 0. Reload is
 /// engine-internal correctness (dehydrate → composite → rehydrate
-/// reconstruct), which is `TestBench`'s lane; #1916's `FleetBench` already
+/// reconstruct), which is `SubstrateBench`'s lane; #1916's `FleetBench` already
 /// proved the over-the-wire child addressing, so this doesn't re-prove it.
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
@@ -29,7 +29,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // the `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
@@ -133,7 +133,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // it under the `Named("tagged")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:tagged");
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineTagParent`, capturing its mailbox id for the replace. The
@@ -223,7 +223,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
 /// *parent* answers and the chain **settles**. A `SettlementTimeout` on
 /// the post-teardown probe would be the leak this verb exists to prevent.
 /// Teardown settlement is engine-internal (membrane fallthrough → parent
-/// dispatch tail → `record_finished`), `TestBench`'s lane; #1916's
+/// dispatch tail → `record_finished`), `SubstrateBench`'s lane; #1916's
 /// `FleetBench` already proved over-the-wire inline addressing.
 #[test]
 fn despawn_inline_child_settles_orphan_mail_via_parent() {
@@ -241,7 +241,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineDespawnParent` from the `inline_child` bundle, then probe

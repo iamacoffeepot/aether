@@ -1,11 +1,11 @@
 //! Post-issue-634-Phase-4 end-to-end smoke for the trampoline-as-actor
-//! routing path. Boots a [`TestBench`], loads `aether-test-fixtures`'s `probe`
+//! routing path. Boots a [`SubstrateBench`], loads `aether-test-fixtures`'s `probe`
 //! into it via the same `aether.component` mail surface a hub-driven
 //! session uses, and asserts the wasm host-fn call chain
-//! (`ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved)`)
+//! (`ctx.send_to_named(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved)`)
 //! reaches the bench's loopback observation queue. Issue 775 retired
 //! the previous `ctx.actor::<BroadcastCapability>().send(...)` shape;
-//! the test-bench observer mailbox replaced the broadcast cap for
+//! the substrate-bench observer mailbox replaced the broadcast cap for
 //! scenario observation.
 //!
 //! Replaces the pre-Phase-4 WAT-driven harness which drove a hand-built
@@ -21,13 +21,13 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_test_fixtures_kinds::TickObserved;
 use std::fs;
 
 const PROBE_NAME: &str = "probe";
 
-fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
+fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = bench
         .execute(vec![(
@@ -45,7 +45,7 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 }
 
 /// Tick fanout reaches a freshly-loaded wasm component, the
-/// component's `ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &...)`
+/// component's `ctx.send_to_named(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &...)`
 /// host call lands the kind on the bench's loopback observation
 /// queue, and `count_observed` sees it. End-to-end proof of host-fn
 /// linking, trampoline dispatch, `wire`-time input subscription, and
@@ -55,7 +55,7 @@ fn tick_roundtrip_component_to_sink() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
@@ -83,7 +83,7 @@ fn batched_ticks_preserve_per_mailbox_count() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 

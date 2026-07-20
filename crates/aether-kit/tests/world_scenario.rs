@@ -2,7 +2,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 //! World-stamp acceptance coverage through the real wasm component and
-//! `TestBench` render path. The host tests pin scalar area math and chunk-border
+//! `SubstrateBench` render path. The host tests pin scalar area math and chunk-border
 //! remeshing; this test proves a compact `stamp_hexagon` mail reaches the
 //! handler and produces the expected smooth scalar-contour silhouette.
 //!
@@ -23,7 +23,7 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
@@ -70,7 +70,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_world(bench: &mut TestBench, wasm_path: &Path) {
+fn load_world(bench: &mut SubstrateBench, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = bench
         .execute(vec![(
@@ -131,7 +131,7 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 
@@ -214,7 +214,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
     let edge_brush_source = MarkRef { id: MarkId::new(14), revision: 1 };
@@ -434,7 +434,7 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 

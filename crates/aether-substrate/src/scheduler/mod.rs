@@ -73,7 +73,7 @@ pub fn install_tuning(t: SchedulerTuning) {
 }
 
 /// Read the installed [`SchedulerTuning`], or [`SchedulerTuning::default`]
-/// when nothing was installed. An uninstalled path — `TestBench`, the
+/// when nothing was installed. An uninstalled path — `SubstrateBench`, the
 /// `ctx.rs` test harnesses that start a pool directly, unit tests — sees
 /// the defaults transparently; a boot that installs first always wins the
 /// race (the install-before-`Pool::start` ordering invariant).

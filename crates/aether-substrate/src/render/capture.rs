@@ -1,7 +1,7 @@
 //! Capture-path readback: record an offscreen → buffer copy onto an
 //! existing encoder, then map the buffer and encode a PNG. The two
 //! halves split because desktop interleaves the capture copy between
-//! its main pass and the swapchain blit; test-bench just submits
+//! its main pass and the swapchain blit; substrate-bench just submits
 //! after the copy.
 
 use super::COPY_ROW_ALIGN;

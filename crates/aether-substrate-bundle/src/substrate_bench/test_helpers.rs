@@ -1,4 +1,4 @@
-//! Shared test helpers for in-process test-bench scenarios (issue
+//! Shared test helpers for in-process substrate-bench scenarios (issue
 //! 460; relocated from `aether-scenario` per issue 821).
 //!
 //! Three concerns lifted out of every per-component scenario file:
@@ -12,14 +12,14 @@
 //!
 //! These helpers don't reference any scenario vocabulary (Script /
 //! Step / Check) — they live on the chassis side so any test that
-//! drives a `TestBench` directly can call them, scenario crate or
+//! drives a `SubstrateBench` directly can call them, scenario crate or
 //! not.
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! use aether_substrate_bundle::test_bench::{
-//!     TestBench,
+//! use aether_substrate_bundle::substrate_bench::{
+//!     SubstrateBench,
 //!     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
 //! };
 //!
@@ -29,7 +29,7 @@
 //!         return;
 //!     };
 //!     let sandbox = init_save_sandbox("my-component");
-//!     let mut bench = TestBench::builder()
+//!     let mut bench = SubstrateBench::builder()
 //!         .size(64, 48)
 //!         .namespace_roots(test_namespace_roots(sandbox))
 //!         .build()
@@ -50,15 +50,15 @@ use std::process;
 /// across a binary's tests resolve to the same dir — handy for
 /// `write_fixture` consumers that look up the sandbox by label.
 ///
-/// Per issue 464, the sandbox is just a directory; `TestBench`
-/// receives it via `TestBench::builder().namespace_roots(...)`, not
+/// Per issue 464, the sandbox is just a directory; `SubstrateBench`
+/// receives it via `SubstrateBench::builder().namespace_roots(...)`, not
 /// via env-var mutation. The `OnceLock` no longer linearises a
 /// `set_var` call — it just memoises the path.
 static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Probe for any usable wgpu adapter. Used by `require_runtime` and
 /// by tests that need wgpu but not a wasm component (e.g. IO sink
-/// scenarios in `aether-substrate-bundle`'s own test-bench tests).
+/// scenarios in `aether-substrate-bundle`'s own substrate-bench tests).
 #[must_use]
 pub fn has_wgpu_adapter() -> bool {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -172,11 +172,11 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
 /// on the first call and the same path is returned on every
 /// subsequent call. Per issue 464, this helper no longer mutates
 /// process env — callers pass the returned path to
-/// `TestBench::builder().namespace_roots(test_namespace_roots(path))`.
+/// `SubstrateBench::builder().namespace_roots(test_namespace_roots(path))`.
 ///
 /// `label` is baked into the dirname so the tempdir is self-describing
 /// (`/tmp/aether-<label>-tests-<pid>`); pass a stable per-crate label
-/// like `"kit-mesh"` or `"test-bench-io"`. Each integration test
+/// like `"kit-mesh"` or `"substrate-bench-io"`. Each integration test
 /// binary is its own process, so the label is only ever set once per
 /// process and collisions across binaries don't arise.
 ///
@@ -196,7 +196,7 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
 /// [`init_save_sandbox`]) backs the `save://` namespace; `assets://`
 /// and `config://` reuse the same dir so writes that target either
 /// don't escape the sandbox. Pass the result to
-/// `TestBench::builder().namespace_roots(...)`.
+/// `SubstrateBench::builder().namespace_roots(...)`.
 ///
 /// Per issue 464, this is the no-env replacement for the old
 /// `init_save_sandbox`-sets-`AETHER_SAVE_DIR` pattern.

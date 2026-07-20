@@ -1,6 +1,6 @@
 //! Cross-thread channel from the chassis-control handler to the
 //! tick loop (ADR-0067). The handler runs on a scheduler worker;
-//! the tick loop runs on the main thread. Both `aether.test_bench.advance`
+//! the tick loop runs on the main thread. Both `aether.substrate_bench.advance`
 //! and `aether.render.capture_frame` need to wake the tick loop —
 //! this channel carries the wake.
 //!
@@ -20,7 +20,7 @@ use aether_substrate::Source;
 /// is mpsc which would tolerate multiple producers if a future
 /// chassis variant grew them.
 pub enum ChassisEvent {
-    /// `aether.test_bench.advance { ticks }`. The tick loop runs
+    /// `aether.substrate_bench.advance { ticks }`. The tick loop runs
     /// `ticks` full cycles (Tick fanout → drain → render or capture)
     /// then replies with `AdvanceResult::Ok { ticks_completed }`.
     Advance { reply_to: Source, ticks: u32 },
@@ -57,7 +57,7 @@ impl EventReceiver {
 
     /// Non-blocking peek. Returns `Empty` immediately when no event
     /// is queued and `Disconnected` when every sender is gone. The
-    /// in-process `TestBench` driver uses this to drain events
+    /// in-process `SubstrateBench` driver uses this to drain events
     /// inline between queue settles.
     ///
     /// The binary's events loop uses `recv` (blocking), not this —

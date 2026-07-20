@@ -98,7 +98,7 @@ actor/router contract.
 | Build only component wasm quickly | `cargo xtask dist --no-bins` |
 | Run an agent-controlled fleet | hub + uploaded binary/component registries |
 | Ship one precomposed executable | `cargo xtask bundle` |
-| Exercise runtime code without packaging | Cargo run/test or TestBench |
+| Exercise runtime code without packaging | Cargo run/test or SubstrateBench |
 
 ## Release terminology
 

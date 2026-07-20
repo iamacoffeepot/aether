@@ -190,7 +190,7 @@ mod tests {
     // ADR-0082 retired the frame-bound pending counter; the
     // DrawTriangle → render dispatch path is now covered end-to-end
     // by the bundle scenario tests (`tick_roundtrip_component_to_sink`
-    // and the `test_bench_scenario` suite), which exercise it through
+    // and the `substrate_bench_scenario` suite), which exercise it through
     // real settlement rather than a per-mailbox counter poll.
 
     /// Issue #2831: `destroy_texture` removes a user-owned registry entry,
@@ -255,7 +255,7 @@ mod tests {
         drop(chassis);
     }
 
-    /// The diagnostic white texture id is visible to `TestBench` callers but
+    /// The diagnostic white texture id is visible to `SubstrateBench` callers but
     /// remains engine-owned: `UpdateTexture` must not recolor later solid
     /// draws through the shared sentinel texel.
     #[test]

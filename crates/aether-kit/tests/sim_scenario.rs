@@ -10,7 +10,7 @@ use aether_kit::sim::{
     CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn,
     TrajectoryEvent, TrajectoryKind,
 };
-use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -37,7 +37,7 @@ fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_sim(bench: &mut TestBench, wasm_path: &Path, name: &str) -> String {
+fn load_sim(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> String {
     let config = SimConfig {
         fact_sink: None,
         ring_depth: 8,
@@ -67,7 +67,7 @@ fn load_sim(bench: &mut TestBench, wasm_path: &Path, name: &str) -> String {
     }
 }
 
-fn poll(bench: &mut TestBench, address: &str, label: &'static str) -> PollResult {
+fn poll(bench: &mut SubstrateBench, address: &str, label: &'static str) -> PollResult {
     bench
         .execute(vec![(label, BenchOp::send_and_await(address, &Poll { since_tick: 0 }))])
         .expect("poll turn sim")
@@ -80,7 +80,7 @@ fn turn_sim_moves_in_tick_order_and_replays_byte_identically_through_real_wasm()
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = TestBench::start_with_size(96, 96).expect("boot");
+    let mut bench = SubstrateBench::start_with_size(96, 96).expect("boot");
     let first = load_sim(&mut bench, &wasm_path, FIRST_SIM_NAME);
     let second = load_sim(&mut bench, &wasm_path, SECOND_SIM_NAME);
 
