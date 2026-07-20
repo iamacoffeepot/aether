@@ -87,11 +87,18 @@ impl HttpShardState {
     /// in-flight entry so the settlement safety net no longer trips `502` on
     /// this chain, write the chunked response head, spawn the per-connection
     /// writer thread, and grant the handler its initial credit window.
-    /// `stream_id` == the request's dispatch correlation id `C`.
+    ///
+    /// `correlation` is the request's dispatch correlation id — the key of the
+    /// in-flight entry this reply belongs to, and nothing more. The stream it
+    /// opens gets its own id from [`HttpShardState::next_stream_id`], the same
+    /// counter `accept_websocket` mints from: a correlation id is minted per
+    /// sender (`MailId` is the pair `{sender, correlation_id}`), so the bare
+    /// value is unique only within one sender and cannot identify a stream
+    /// (ADR-0128 §2 as amended 2026-07-20; issue 3730).
     pub fn open_stream(
         &mut self,
         ctx: &mut NativeCtx<'_>,
-        stream_id: u64,
+        correlation: u64,
         conn_id: ConnId,
         open: &HttpResponseStreamOpen,
     ) {
@@ -105,8 +112,9 @@ impl HttpShardState {
         // no-op behavior.
         let (keep_alive, handler) = self
             .in_flight
-            .remove(&stream_id)
+            .remove(&correlation)
             .map_or((false, MailboxId(0)), |pending| (pending.keep_alive, pending.handler));
+        let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
 
