@@ -113,7 +113,7 @@ impl LifecycleCapabilityState {
         }
         self.last_slow_warn = Some(Instant::now());
         tracing::warn!(
-            target: "aether_capabilities::lifecycle",
+            target: "aether_lifecycle",
             root = ?root,
             latency_millis = latency.as_millis(),
             ewma_millis = ewma.as_millis(),
@@ -141,7 +141,7 @@ impl LifecycleCapabilityState {
             return;
         };
         tracing::error!(
-            target: "aether_capabilities::lifecycle",
+            target: "aether_lifecycle",
             root = ?pending.root,
             elapsed_millis = pending.started.elapsed().as_millis(),
             timeout_millis = self.advance_timeout.as_millis(),
@@ -180,7 +180,7 @@ mod tests {
     //! ADR-0082 §3 quit-flag semantics and the #1048/#1052
     //! settlement-latency gate, pinned at the unit layer.
     use super::*;
-    use crate::lifecycle::runtime::test_cap;
+    use crate::runtime::test_cap;
     use aether_data::Kind;
     use aether_kinds::{Present, Render};
 

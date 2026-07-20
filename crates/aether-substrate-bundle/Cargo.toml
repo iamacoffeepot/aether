@@ -79,6 +79,10 @@ runtime = []
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities" }
+# iamacoffeepot/aether#3749: the lifecycle cap was extracted to
+# `aether-lifecycle`; every chassis composes `LifecycleCapability` and
+# builds its `LifecycleConfig` graph, so the bundle takes the runtime face.
+aether-lifecycle = { path = "../aether-lifecycle" }
 # iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
 # every chassis composes `InputCapability` + `InputConfig`.
 aether-input = { path = "../aether-input" }

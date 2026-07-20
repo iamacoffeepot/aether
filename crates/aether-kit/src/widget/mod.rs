@@ -54,10 +54,10 @@ pub use panel::WidgetPanel;
 pub use scroll::ScrollWidget;
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_render::{
     DrawSolidQuads, DrawTexturedQuads, RenderCapability, SolidQuad, TexturedQuad as RenderTexturedQuad,

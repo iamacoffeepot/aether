@@ -43,8 +43,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_data::{Kind, MailboxId};
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::keycode::KEY_TAB;
@@ -52,6 +50,8 @@ use aether_kinds::mouse_button;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput, Tick,
 };
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 

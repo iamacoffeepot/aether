@@ -26,10 +26,9 @@ use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLaye
 use aether_audio::AudioConfigLayer;
 use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
-use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::{
     ComponentHostCapability, ComponentHostConfig, GameGatewayCapability, GameGatewayConfig, HttpCapability,
-    HttpServerCapability, HttpServerConfig, LifecycleConfig, TcpCapability, http::HttpConfig,
+    HttpServerCapability, HttpServerConfig, TcpCapability, http::HttpConfig,
 };
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
@@ -38,6 +37,7 @@ use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLaye
 use aether_input::{InputCapability, InputConfig};
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
+use aether_lifecycle::{LifecycleConfig, LifecycleGraphData};
 use aether_render::RenderTuningConfigLayer;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_substrate::chassis::Chassis;
@@ -843,7 +843,7 @@ mod tests {
     use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
-    use aether_capabilities::LifecycleConfig;
+    use aether_lifecycle::LifecycleConfig;
     use aether_substrate::SchedulerTuning;
     use aether_substrate::config::ConfigError;
     use std::env;

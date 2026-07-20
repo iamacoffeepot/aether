@@ -43,12 +43,13 @@ tracing = { workspace = true, default-features = false }
 [dev-dependencies]
 # Examples migrate from kind-typed `Mailbox` resolutions to actor-
 # typed `ctx.actor::<R>()` calls (issue 575) — needs the cap markers
-# in scope. Pulls `native` so caps' `mod native` blocks compile (they
-# import `aether_substrate` types and are gated on the bridge's
-# default `cfg(not(target_family = "wasm"))`, not on the `native`
-# feature). `aether-substrate` deps back on `aether-actor`, but cargo
+# in scope. `aether-substrate` deps back on `aether-actor`, but cargo
 # permits dev-dep cycles for the test-target build graph.
-aether-capabilities = { path = "../aether-capabilities" }
+# iamacoffeepot/aether#3749: the lifecycle cap was extracted to
+# `aether-lifecycle`; the `hello` example addresses `LifecycleCapability`
+# + `LifecycleMailboxExt`. Its departure left no `aether_capabilities`
+# path in any example, so that dependency is gone.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 # iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
 # the `input_logger` example addresses `InputCapability` + `SubscribeInput`.
 aether-input = { path = "../aether-input", default-features = false }

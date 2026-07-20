@@ -20,7 +20,6 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
-use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     ComponentHostConfig, HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
@@ -32,6 +31,7 @@ use aether_gemini::GeminiConfig;
 use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
+use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
 use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};

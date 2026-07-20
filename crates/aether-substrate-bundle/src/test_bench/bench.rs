@@ -486,7 +486,7 @@ impl TestBench {
         // no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
         let lifecycle_mailbox =
-            aether_data::mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE);
+            aether_data::mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
         // build result for wire-compat with binaries that haven't migrated yet.

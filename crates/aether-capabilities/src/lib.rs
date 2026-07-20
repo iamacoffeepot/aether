@@ -41,10 +41,6 @@ pub mod game;
 // writes the handler's reply back as the HTTP response). They own their
 // shared wire kinds in `http/kinds.rs`.
 pub mod http;
-// `aether.lifecycle` cap (ADR-0082). The non-generic capability the
-// chassis drives one frame at a time. Always-native via `#[actor(singleton)]`,
-// so a wasm component can address it by name.
-pub mod lifecycle;
 pub mod tcp;
 pub mod test_bench;
 pub mod trampoline;
@@ -69,12 +65,6 @@ pub use http::HttpServerHandle;
 #[cfg(feature = "runtime")]
 pub use http::HttpServerOverlay;
 pub use http::{HttpServerCapability, HttpServerConfig};
-// ADR-0122 split: `LifecycleConfig` configures the runtime-only
-// `LifecycleCapabilityState`, so it rides the `runtime` gate with the
-// rest of the lifecycle runtime half.
-#[cfg(feature = "runtime")]
-pub use lifecycle::LifecycleConfig;
-pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 #[cfg(feature = "runtime")]
 pub use game::GameGatewayConfig;

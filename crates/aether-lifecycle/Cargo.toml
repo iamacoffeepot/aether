@@ -1,0 +1,57 @@
+[package]
+name = "aether-lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.lifecycle` capability (ADR-0082), extracted from
+# `aether-capabilities` (iamacoffeepot/aether#3749) as a leaf per-cap crate
+# of the arc that dissolves the capabilities monolith. Owns the lifecycle
+# graph + its typestate builder (`graph`), the `LifecycleConfig` init
+# config, the `LifecycleCapability` identity + its subscriber-table and
+# settlement-gating runtime (`runtime`), and the send-side
+# `LifecycleMailboxExt` facade. It is a pure leaf — no other capability
+# depends on it, so capabilities keeps no `aether-lifecycle` dependency
+# (no facade).
+#
+# The `aether.lifecycle.*` mail kinds (`LifecycleAdvance`, the subscribe
+# family, the stage-signal ZSTs) stay in `aether-kinds`: they are substrate
+# protocol vocabulary many actors address rather than a cap-internal
+# detail, so this crate only references them.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# wasm-safe identity and `HandlesKind` markers compile always-on; the
+# `aether_substrate`-typed runtime half (the graph state pointer,
+# subscriber table, fan-out, and settlement state machine) is gated so a
+# marker-only wasm guest can address `ctx.actor::<LifecycleCapability>()`
+# without dragging the substrate through.
+
+[features]
+default = ["runtime"]
+runtime = ["dep:aether-substrate", "dep:tracing"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime.
+aether-substrate = { path = "../aether-substrate", optional = true }
+# The settlement state machine warns on a force-completed advance and errors
+# on a missing state pointer. Rides the `runtime` feature — those log sites
+# are native-only.
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+
+# The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` HandlerEntry per handler, so native builds need
+# `inventory` reachable; wasm guests don't (the gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# The runtime unit tests boot the `aether_substrate::testing` mailer
+# fixture, enabled by the substrate `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+[lints]
+workspace = true

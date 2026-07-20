@@ -59,10 +59,10 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, TextInput, Tick};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{

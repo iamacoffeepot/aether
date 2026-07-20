@@ -11,12 +11,12 @@ pub use state::*;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Manual, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_data::MailboxId;
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgba;
 use aether_render::{DrawSolidQuads, RenderCapability, SolidQuad};
 use aether_text::{

@@ -13,13 +13,14 @@ use std::time::Duration;
 
 use aether_capabilities::TcpCapability;
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
-use aether_capabilities::{GameGatewayCapability, GameGatewayConfig, LifecycleCapability};
+use aether_capabilities::{GameGatewayCapability, GameGatewayConfig};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::Tick;
+use aether_lifecycle::LifecycleCapability;
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderHandles};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -34,7 +35,7 @@ use super::cap::{TestBenchCapConfig, TestBenchCapability};
 use super::config::TestBenchClipboardMode;
 use super::events::{ChassisEvent, EventSender};
 use crate::chassis_common::frame_lifecycle_config;
-use aether_capabilities::LifecycleConfig;
+use aether_lifecycle::LifecycleConfig;
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
 

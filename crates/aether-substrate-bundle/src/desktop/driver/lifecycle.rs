@@ -358,7 +358,7 @@ mod tests {
             registry.try_register_inbox("aether.lifecycle.advance_reply", handler).expect("register the reply inbox");
         let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
-        let cap_mailbox = mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE);
+        let cap_mailbox = mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);
 
         // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against

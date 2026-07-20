@@ -24,9 +24,9 @@
 //! cost to the measurement.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_kinds::{QuadSpace, Tick};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgba;
 use aether_render::{DrawSolidQuads, RenderCapability, SolidQuad};
 use aether_test_fixtures_kinds::UiWidgetConfig;
