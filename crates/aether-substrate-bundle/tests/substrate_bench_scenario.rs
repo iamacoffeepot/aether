@@ -1,9 +1,10 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
-//! a `SubstrateBench` and exercises one substrate primitive — input
-//! subscription, drop, `capture_frame` round-trip, `replace_component`
-//! (all via `aether-test-fixtures`'s `probe` cdylib), or the chassis `aether.fs`
-//! adapter's read/write/delete/list round trips — driving every step
-//! through `SubstrateBench::execute` (issue 868).
+//! a `SubstrateBench` and exercises one substrate primitive — the
+//! render / text / clipboard caps or the chassis `aether.fs` adapter's
+//! read/write/delete/list round trips — driving every step through
+//! `SubstrateBench::execute` (issue 868). The component-lifecycle,
+//! module-boot, and inline-child scenarios rehomed to
+//! `crates/aether-component/tests/` (issue #3769).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
@@ -38,9 +39,8 @@ use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardTex
 use aether_data::{Kind, MailboxId};
 use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
 use aether_kinds::{
-    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult, FrameCheck,
-    FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult, LoadComponent, LoadResult,
-    NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent, ReplaceResult, SimilarityCheck,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
+    FrameReduction, LoadComponent, LoadResult, NamedMail, QuadScale, QuadSpace, SimilarityCheck,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
 use aether_render::{
@@ -58,10 +58,7 @@ use aether_substrate_bench_capture::{
     ArtifactGuard, RenderBenchExt,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
-use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
-    SetRender, TagSpawnQuery, TagSpawnReport,
-};
+use aether_test_fixtures_kinds::SetRender;
 use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -85,13 +82,6 @@ fn probe_address() -> String {
     use aether_actor::Addressable;
     format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
 }
-const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
-/// ADR-0147 boot fixture markers (`crate::aether-test-fixtures-boot`): the boot
-/// actor broadcasts `BOOT_OBSERVED` from `wire` (once per instance) and
-/// `BOOT_TORN_DOWN` from `unwire` (once at teardown). The boot scenario counts
-/// them via `count_observed`.
-const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
-const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 
 /// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
 /// the kind's wire encoding (`encode_into_bytes`) so any K — cast
@@ -217,16 +207,10 @@ fn require_wgpu_only() -> bool {
     false
 }
 
-#[path = "substrate_bench_scenario/boot.rs"]
-mod boot;
 #[path = "substrate_bench_scenario/clipboard.rs"]
 mod clipboard;
-#[path = "substrate_bench_scenario/component.rs"]
-mod component;
 #[path = "substrate_bench_scenario/fs.rs"]
 mod filesystem;
-#[path = "substrate_bench_scenario/inline_child.rs"]
-mod inline_child;
 #[path = "substrate_bench_scenario/render.rs"]
 mod render;
 #[path = "substrate_bench_scenario/text.rs"]

@@ -5,13 +5,8 @@
 //! the guest can only distinguish them by the envelope request id returned from
 //! `send_tracked` and later surfaced by `WasmCtx::in_reply_to()`.
 
-// Skip diagnostics emit via stderr so `cargo nextest` surfaces a visible
-// "skipping: ..." line alongside `test ... ok`.
-#![allow(clippy::print_stderr)]
-
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
-use aether_substrate_bundle::FullBenchExt;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
@@ -21,10 +16,8 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
+use aether_substrate_bench::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::{
-    init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
-};
 use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
@@ -53,19 +46,19 @@ fn load_fs_demux(bench: &mut SubstrateBench, wasm: Vec<u8>, name: &str) -> (Mail
 
 #[test]
 fn same_payload_fs_replies_demux_by_request_id() {
-    let Some(wasm_path) = require_runtime(FIXTURE_CRATE) else {
+    let Some(wasm_path) = require_wasm(FIXTURE_CRATE) else {
         return;
     };
 
+    // Component host to load the fixture; sandboxed namespace roots so its
+    // `aether.fs.read` requests resolve — no render, so no wgpu gate.
     let sandbox = init_save_sandbox("reply-correlation");
-    let mut bench =
-        match SubstrateBench::builder().full().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build() {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-                return;
-            }
-        };
+    let mut bench = SubstrateBench::builder()
+        .with_component_host()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = write_fixture("same-payload.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");

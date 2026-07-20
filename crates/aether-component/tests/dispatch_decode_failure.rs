@@ -13,8 +13,8 @@
 //! `Component::instantiate` / `deliver` API: deliver a `Mail` carrying
 //! `SetRender::ID` (a `#[repr(C)]` 4-byte cast-shape kind) with a 2-byte payload,
 //! which the cast decoder rejects on its `len() == size_of` check, and assert the
-//! dispatch return code. Gated on `require_runtime` like the sibling integration
-//! tests, so it skips cleanly on a driverless / wasm-not-built box.
+//! dispatch return code. Gated on `require_wasm` like the sibling integration
+//! tests, so it skips cleanly on a wasm-not-built box.
 
 use std::fs;
 use std::sync::Arc;
@@ -22,13 +22,13 @@ use std::sync::Arc;
 use aether_data::Kind;
 use aether_substrate::actor::wasm::host_fns;
 use aether_substrate::{Component, ComponentCtx, HubOutbound, Mail, MailboxId, Mailer, Registry};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_test_fixtures_kinds::SetRender;
 use wasmtime::{Engine, Linker, Module};
 
 #[test]
 fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
-    let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
