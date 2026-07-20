@@ -1,4 +1,10 @@
 //! Real `aether.tcp` + game gateway + `TurnSim` acceptance coverage.
+//!
+//! Minimal composition (issue #3764): the three-crate integration needs
+//! the component host (`TurnSim` wasm), tcp (real loopback sessions), and
+//! the active gateway on the bench basics — every assertion reads the
+//! `PlayerFrame` stream off the socket, so no render cap (and no wgpu
+//! gate) is composed; the sim's frame output warn-drops harmlessly.
 
 #![allow(clippy::print_stderr)]
 
@@ -14,8 +20,8 @@ use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::{RenderBenchBuilderExt, test_helpers::require_runtime};
 use aether_tcp::TcpCapability;
 use aether_tcp::{ListListeners, ListListenersResult};
 
@@ -119,17 +125,11 @@ fn advance(bench: &mut SubstrateBench) {
 
 #[test]
 fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
-    // Issue #3765: explicit composition — the three-crate integration
-    // needs the component host (TurnSim wasm), tcp (real loopback
-    // sessions), the active gateway, and render for the wasm's frame
-    // output; the rest of the old full() set goes uncomposed.
     let mut bench = SubstrateBench::builder()
-        .size(96, 96)
-        .with_render()
         .with_component_host()
         .with_actor::<TcpCapability>(())
         .with_actor::<GameGatewayCapability>(GameGatewayConfig {

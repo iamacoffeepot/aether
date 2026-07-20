@@ -355,9 +355,12 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-codec",
+ "aether-component",
  "aether-data",
  "aether-kinds",
+ "aether-kit",
  "aether-substrate",
+ "aether-substrate-bench",
  "aether-tcp",
  "inventory",
  "serde",
