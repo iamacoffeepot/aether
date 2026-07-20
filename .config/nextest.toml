@@ -92,6 +92,22 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-substrate-bundle) & binary(fleetbench_replace)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The `aether-text` text scenario binary (rehomed from the bundle's
+# `substrate_bench_scenario` dispatcher, issue #3772) boots a wgpu
+# `SubstrateBench` per test and runs a dozen GPU captures; on CI's
+# shared 2-core runner the frames rasterize in software under
+# full-suite contention, so the binary stretches well past the 60s
+# steady-state cap while still making timely progress. It ran under
+# the bundle's 180s `kind(test)` cap above before the move; carry the
+# same wall-clock backstop — a deadlock guard a healthy run never
+# reaches. `kind(test)` scopes it to the integration binary; the
+# crate's unit tests keep the 60s default. Ordering: nextest applies
+# the first matching override per setting, so any narrower
+# `aether-text` binary override must be listed before this one.
+[[profile.ci.overrides]]
+filter = "package(=aether-text) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # Trybuild fixtures spawn a nested `cargo` build per `.rs` fixture.
 # iamacoffeepot/aether#1275 feature-gated wasmtime out of the
 # `aether-derive` fixture dep graph (local wall-clock 240s → 18s on
