@@ -185,7 +185,7 @@ pretend capability.
 | kind/schema/validation | unit tests beside `kinds.rs`/validator |
 | state machine/adapter mapping | runtime unit tests with a fake adapter |
 | actor mail/reply/settlement | focused TestBench test |
-| marker/runtime feature split | marker-only build/CI job |
+| marker/runtime feature split | `cargo build -p <cap> --no-default-features` |
 | chassis composition/resource | chassis/TestBench integration test |
 | hub/process routing | FleetBench |
 
