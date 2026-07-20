@@ -4,7 +4,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-use crate::http::server::shard::HttpDispatchShard;
+use crate::server::shard::HttpDispatchShard;
 use aether_substrate::Subname;
 
 /// `aether.http.server` supervisor state (ADR-0135). Owns the TCP listener +
@@ -67,7 +67,7 @@ pub struct HttpSupervisorState {
 /// tables, websocket state — over the 1/N slice of connections the
 /// supervisor assigned here. The dispatcher holds this as the shard actor's
 /// state; the addressing identity is the distinct ZST
-/// [`HttpDispatchShard`](crate::http::server::shard::HttpDispatchShard).
+/// [`HttpDispatchShard`](crate::server::shard::HttpDispatchShard).
 pub struct HttpShardState {
     /// The supervisor's shared route table (ADR-0130/0135); this shard only
     /// reads it, at request-dispatch time.
@@ -190,7 +190,7 @@ impl HttpSupervisorState {
                 }),
                 Err(e) => {
                     tracing::warn!(
-                        target: "aether_substrate::http_server",
+                        target: "aether_http::server",
                         shard = %subname,
                         error = ?e,
                         "http dispatch shard spawn failed",
@@ -199,7 +199,7 @@ impl HttpSupervisorState {
             }
         }
         tracing::info!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             port = self.listener_port,
             shards = self.shards.len(),
             "http dispatch shards spawned",
@@ -215,7 +215,7 @@ impl HttpSupervisorState {
         if self.shards.is_empty() {
             refuse_connection(stream, 503, "no dispatch shards");
             tracing::warn!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 %peer,
                 "http conn refused: no dispatch shards",
             );
@@ -225,7 +225,7 @@ impl HttpSupervisorState {
         if live >= self.config.max_connections {
             refuse_connection(stream, 503, "server at connection capacity");
             tracing::warn!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 %peer,
                 live,
                 "http conn refused: at capacity",
@@ -356,7 +356,7 @@ impl HttpShardState {
             Ok(half) => half,
             Err(e) => {
                 tracing::warn!(
-                    target: "aether_substrate::http_server",
+                    target: "aether_http::server",
                     %peer,
                     error = %e,
                     "http conn: try_clone failed; dropping",
@@ -369,7 +369,7 @@ impl HttpShardState {
         // every blocking read on this socket.
         if let Err(e) = read_half.set_read_timeout(Some(self.request_timeout)) {
             tracing::warn!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 %peer,
                 error = %e,
                 "http conn: set_read_timeout failed; dropping",
@@ -406,7 +406,7 @@ impl HttpShardState {
             Ok(thread) => thread,
             Err(e) => {
                 tracing::warn!(
-                    target: "aether_substrate::http_server",
+                    target: "aether_http::server",
                     %peer,
                     error = %e,
                     "http reader thread spawn failed",
@@ -430,7 +430,7 @@ impl HttpShardState {
             },
         );
         tracing::debug!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             conn = conn_id,
             %peer,
             "http conn accepted",
@@ -533,7 +533,7 @@ impl HttpShardState {
         };
         if let Err(e) = conn.write_half.write_all(bytes).and_then(|()| conn.write_half.flush()) {
             tracing::debug!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 conn = conn_id,
                 error = %e,
                 "http response write failed",
@@ -569,7 +569,7 @@ impl HttpShardState {
         // write to a dead socket.
         self.in_flight.retain(|_, pending| pending.conn_id != conn_id);
         tracing::debug!(
-            target: "aether_substrate::http_server",
+            target: "aether_http::server",
             conn = conn_id,
             peer = %conn.peer,
             reason,

@@ -71,7 +71,7 @@ can be rendered into the server reply contract.
 
 Treat the macros as the public authoring surface and the raw kinds as the
 portable protocol. When debugging expansion or adding an extractor, read both
-`http/typed.rs` and `aether-capabilities-derive`; behavior may be generated
+`aether-http`'s `typed.rs` and `aether-http-derive`; behavior may be generated
 rather than visible in the handler source.
 
 The worked examples are split across [Serving HTTP from a component](../recipes/serving-http.md).
@@ -154,9 +154,9 @@ two capabilities share shapes but not runtime ownership.
 
 ## Change route and decisions
 
-- Public kinds: `crates/aether-capabilities/src/http/kinds.rs`
-- Typed authoring and handles: `crates/aether-capabilities/src/http/{typed,stream}.rs`
-- Runtime: `crates/aether-capabilities/src/http/server/`
-- Derives: `crates/aether-capabilities-derive/src/lib.rs`
+- Public kinds: `crates/aether-http/src/kinds.rs`
+- Typed authoring and handles: `crates/aether-http/src/{typed,stream}.rs`
+- Runtime: `crates/aether-http/src/server/`
+- Derives: `crates/aether-http-derive/src/lib.rs`
 - Integration boundary: `crates/aether-substrate-bundle/tests/http_serving.rs`
 - ADR-0108, ADR-0128–ADR-0136 (all accepted; read amendments in order)

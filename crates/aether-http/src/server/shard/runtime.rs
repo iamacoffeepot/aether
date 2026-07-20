@@ -15,9 +15,9 @@
 // state + event + helper types come through this glob rather than a
 // bespoke list.
 #[allow(clippy::wildcard_imports)]
-use crate::http::server::runtime::*;
+use crate::server::runtime::*;
 
-use crate::http::kinds::HttpInboundReady;
+use crate::kinds::HttpInboundReady;
 use aether_actor::runtime;
 
 use super::HttpDispatchShard;
@@ -158,7 +158,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — a streaming handler sends this after replying
     /// [`HttpResponseStreamOpen`], paced by the cap's
-    /// [`HttpStreamCredit`](crate::http::kinds::HttpStreamCredit) grants.
+    /// [`HttpStreamCredit`](crate::kinds::HttpStreamCredit) grants.
     #[handler::single]
     fn on_response_chunk(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, chunk: HttpResponseChunk) {
         state.push_chunk(chunk.stream_id, chunk.body);
@@ -183,11 +183,11 @@ impl NativeActor for HttpDispatchShard {
     ///
     /// # Agent
     /// Not user-callable — a streaming handler sends this after receiving
-    /// [`HttpRequestStreamOpen`](crate::http::kinds::HttpRequestStreamOpen), as
-    /// it drains [`HttpRequestChunk`](crate::http::kinds::HttpRequestChunk)
+    /// [`HttpRequestStreamOpen`](crate::kinds::HttpRequestStreamOpen), as
+    /// it drains [`HttpRequestChunk`](crate::kinds::HttpRequestChunk)
     /// mails, to let the cap deliver more of the request body.
     ///
-    /// [`HttpStreamCredit`]: crate::http::kinds::HttpStreamCredit
+    /// [`HttpStreamCredit`]: crate::kinds::HttpStreamCredit
     #[handler::single]
     fn on_request_credit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, credit: HttpRequestCredit) {
         state.replenish_reader_credit(credit.stream_id, credit.credit);
@@ -225,7 +225,7 @@ impl NativeActor for HttpDispatchShard {
             state.send_ws_message(conn_id, msg.binary, &msg.data);
         } else {
             tracing::debug!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 stream = msg.stream_id,
                 "outbound websocket message for unknown stream dropped",
             );
@@ -246,7 +246,7 @@ impl NativeActor for HttpDispatchShard {
             state.send_ws_close(conn_id, close.code, &close.reason);
         } else {
             tracing::debug!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 stream = close.stream_id,
                 "outbound websocket close for unknown stream dropped",
             );

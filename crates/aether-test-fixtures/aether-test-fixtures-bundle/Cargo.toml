@@ -16,11 +16,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aether-actor = { path = "../../aether-actor" }
-# `default-features = false` exercises the wasm-header-only build of
-# aether-capabilities — the cap markers (Actor / Singleton / HandlesKind)
-# compile for wasm without dragging the native runtime in. `render` opts
-# into the marker layer for `RenderCapability`; `audio` is unused here.
-aether-capabilities = { path = "../../aether-capabilities", default-features = false }
+# iamacoffeepot/aether#3758: the http caps were extracted to `aether-http`;
+# the http_handler fixture authors `#[http::router]` routes and addresses
+# `HttpServerCapability`. `default-features = false` exercises the
+# wasm-header-only build — the cap markers (Actor / Singleton /
+# HandlesKind), the typed route surface, and the stream handles compile for
+# wasm without dragging the native runtime in.
+aether-http = { path = "../../aether-http", default-features = false }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`; the http_handler fixture addresses
 # `ComponentHostCapability`. Marker face only.

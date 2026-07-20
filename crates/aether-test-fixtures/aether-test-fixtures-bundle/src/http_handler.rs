@@ -24,15 +24,15 @@
 use std::collections::BTreeMap;
 
 use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::http;
-use aether_capabilities::http::HttpServerCapability;
-use aether_capabilities::http::kinds::{
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, MailboxId};
+use aether_http as http;
+use aether_http::HttpServerCapability;
+use aether_http::kinds::{
     HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
     WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
-use aether_capabilities::http::{ResponseStream, WebSocketStream};
-use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId};
+use aether_http::{ResponseStream, WebSocketStream};
 use aether_kinds::DropComponent;
 
 /// Bind the calling actor as the `/` catch-all (ADR-0130/0131) so every

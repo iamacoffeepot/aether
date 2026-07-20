@@ -5,7 +5,7 @@ use super::{
     route_matches, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
     validate_ws_handshake,
 };
-use crate::http::kinds::{HttpHeader, HttpMethod};
+use crate::kinds::{HttpHeader, HttpMethod};
 use std::time::{Duration, UNIX_EPOCH};
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
@@ -303,7 +303,7 @@ mod route_registration {
         Arc, KindId, MailboxId, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
         unregister_routes_all,
     };
-    use crate::http::kinds::HttpMethod;
+    use crate::kinds::HttpMethod;
 
     fn fresh_routes() -> SharedRoutes {
         Arc::new(RwLock::new(Vec::new()))
@@ -474,7 +474,7 @@ mod wake_coalescing {
     //! ADR-0135 §4 — the wake-mail coalescing protocol on [`WakeSink`].
 
     use super::super::{InboundEvent, WakeSink};
-    use crate::http::kinds::HttpInboundReady;
+    use crate::kinds::HttpInboundReady;
     use aether_data::{Kind, KindId};
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};

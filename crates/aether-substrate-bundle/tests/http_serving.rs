@@ -36,10 +36,10 @@ use aether_anthropic::AnthropicConfig;
 use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
+use aether_http::HttpConfig;
+use aether_http::{HttpServerConfig, HttpServerHandle};
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::AutoloadComponent;
-use aether_substrate_bundle::capabilities::http::HttpConfig;
-use aether_substrate_bundle::capabilities::{HttpServerConfig, HttpServerHandle};
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{
     init_save_sandbox, locate_component_wasm, test_namespace_roots,

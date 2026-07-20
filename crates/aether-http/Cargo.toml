@@ -1,0 +1,121 @@
+[package]
+name = "aether-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The two HTTP capabilities — the `aether.http` egress client and the
+# `aether.http.server` inbound server (ADR-0108, ADR-0129, ADR-0130,
+# ADR-0131, ADR-0133, ADR-0136, ADR-0154) — extracted from
+# `aether-capabilities` (iamacoffeepot/aether#3758) as the final per-cap
+# crate of the arc that dissolves the capabilities monolith.
+#
+# Both caps move as one unit, co-located under one crate per ADR-0121:
+# they are two directions of one wire vocabulary (`kinds`), and the typed
+# route-authoring surface (`typed`, `stream`) is authored against the
+# server while the client is the egress side of the same `aether.http`
+# family. They stay two distinct capabilities — separate cap structs,
+# separate `NAMESPACE` / mailboxes.
+#
+# It depends downward on `aether-component`: `defer.rs` names
+# `ComponentHostCapability` to resolve the handler component a deferred
+# request is answered through (ADR-0154). That is a genuine use, not a
+# facade.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# mail kinds, the wasm-safe cap identities with their `Addressable`,
+# per-handler `HandlesKind`, and name-inventory markers, the typed route
+# surface, and the stream handles compile always-on, so a marker-only wasm
+# guest can address `ctx.actor::<HttpCapability>()` and author
+# `#[http::router]` routes without dragging the substrate through. The
+# `aether_substrate`-typed half (both cap states, the listener and its
+# dispatch shards, the deferred-reply obligation table) is gated behind it.
+
+# cargo-machete (the CI unused-deps gate) scans source without resolving
+# features, so `clap` is a false positive — it is used only through the
+# `#[derive(clap::Args)]` the Config derive emits on the `HttpOverlay` /
+# `HttpServerOverlay` structs under the optional `runtime` feature.
+[package.metadata.cargo-machete]
+ignored = ["clap"]
+
+[features]
+default = ["runtime"]
+runtime = [
+    "aether-component/runtime",
+    "dep:aether-substrate",
+    "dep:base64",
+    "dep:clap",
+    "dep:confique",
+    "dep:httparse",
+    "dep:tracing",
+    "dep:ureq",
+    "dep:url",
+]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# ADR-0154: `defer.rs` names `ComponentHostCapability` to address the
+# handler component a deferred request is answered through, and links
+# `resolve_embedded` for the lineage-aware resolution it uses.
+# `default-features = false` keeps the marker-only wasm build from dragging
+# wasmtime through; the `runtime` feature forwards `aether-component/runtime`.
+aether-component = { path = "../aether-component", default-features = false }
+# ADR-0131: the `#[http::router]` / `#[http::route]` / `#[http::reply]` proc
+# macros, re-exported from this crate's root. Proc-macro crates are
+# host-compiled, so the unconditional dep leaves the wasm-header-only build
+# unaffected.
+aether-http-derive = { path = "../aether-http-derive" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# `HttpMethod` is a `Pod`/`Zeroable` wire enum, and `stream.rs` bounds its
+# chunk sends on `NoUninit`.
+bytemuck = { workspace = true, features = ["derive"] }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime.
+aether-substrate = { path = "../aether-substrate", optional = true }
+# ADR-0129: the `Sec-WebSocket-Accept` handshake key is base64(SHA-1(key +
+# GUID)). SHA-1 is hand-rolled in the server runtime (one fixed hash does not
+# earn a `sha1` crate). Runtime-gated — the websocket handshake is native-only.
+base64 = { workspace = true, optional = true }
+# ADR-0090 unit g: the `Config` derive emits the `HttpOverlay` /
+# `HttpServerOverlay` `#[derive(clap::Args)]` structs next to each domain
+# struct. Rides the `runtime` feature so wasm builds skip it.
+clap = { workspace = true, optional = true }
+# ADR-0090: typed, layered config resolution behind the env-shaped
+# `HttpConfigLayer` / `HttpServerConfigLayer` structs.
+# `default-features = false` keeps it env-only.
+confique = { workspace = true, optional = true }
+# ADR-0108 §1: the inbound HTTP/1.1 request-line + header parser for the
+# `aether.http.server` cap. Pure-Rust, rides the `runtime` feature.
+httparse = { version = "1", optional = true }
+# Both cap runtimes log bind / accept / dispatch transitions and warn on a
+# malformed request, an unroutable path, or an egress failure. Called
+# fully-qualified (`tracing::warn!`), so it carries no `use`.
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+# The blocking egress HTTP client behind the `aether.http` cap.
+ureq = { version = "3", optional = true, features = ["rustls"] }
+# URL parse / join for the egress cap's redirect handling and the server's
+# request-target parsing.
+url = { version = "2", optional = true }
+
+# ADR-0121: the `Kind` derive (this crate owns the HTTP wire kinds in
+# `kinds.rs`) and the `#[actor]` macro each emit a
+# `cfg(not(target_family = "wasm"))`-gated `inventory::submit!`, so native
+# builds need `inventory` reachable. Wasm guests don't (the gate skips
+# emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The cap unit tests boot a chassis through the canonical
+# `aether_substrate::testing` fixture, enabled by the substrate
+# `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The server tests address the `aether.trace` cap to assert dispatch
+# settlement across a served request.
+aether-trace = { path = "../aether-trace", features = ["runtime"] }
+
+[lints]
+workspace = true

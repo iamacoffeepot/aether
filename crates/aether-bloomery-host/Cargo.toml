@@ -25,7 +25,7 @@ default = ["runtime"]
 # `#[runtime] impl NativeActor` and the chassis assembly reference.
 runtime = [
     "dep:aether-substrate",
-    "dep:aether-capabilities",
+    "dep:aether-http",
     "dep:aether-component",
     "dep:aether-rpc",
     "dep:aether-trace",
@@ -59,7 +59,10 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 
 # Runtime-only (native).
 aether-substrate = { path = "../aether-substrate", optional = true }
-aether-capabilities = { path = "../aether-capabilities", optional = true }
+# iamacoffeepot/aether#3758: the http caps were extracted to `aether-http`.
+# The bloomery chassis installs `HttpServerCapability` and its API actor
+# renders `HttpServerResponse`s, so it takes the runtime face.
+aether-http = { path = "../aether-http", optional = true }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`. The bloomery chassis installs
 # `ComponentHostCapability` with its wasmtime-typed `ComponentHostConfig`,

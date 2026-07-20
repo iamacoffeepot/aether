@@ -169,7 +169,7 @@ to fill. For a request that needs custom headers, a method beyond GET/POST, a
 body on a non-POST, or a per-request timeout, send the `Fetch` kind directly:
 `ctx.actor::<HttpCapability>().send(&Fetch { url, method, headers, body, timeout_ms })`.
 The kinds live with the capability in
-`aether-capabilities/src/http/kinds.rs` (ADR-0121).
+`aether-http/src/kinds.rs` (ADR-0121).
 
 **From an agent over MCP.** `send_mail` rides settlement and hands back the
 correlated reply, so a fetch is a single call: mail `aether.http.fetch` to

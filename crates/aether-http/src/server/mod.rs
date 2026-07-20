@@ -10,13 +10,13 @@
 //! dispatcher drains the queue.
 //!
 //! On a parsed request the cap dispatches an
-//! [`HttpServerRequest`](crate::http::kinds::HttpServerRequest) to the configured
+//! [`HttpServerRequest`](crate::kinds::HttpServerRequest) to the configured
 //! handler mailbox as a fresh causal chain via
 //! `NativeCtx::send_envelope_detached` (the wake mail is causally unrelated
 //! to the inbound request), records the open response socket in an
 //! in-flight table keyed by the dispatch's correlation id, and subscribes
 //! to settlement of the dispatched root. The handler replies
-//! [`HttpServerResponse`](crate::http::kinds::HttpServerResponse); the reply
+//! [`HttpServerResponse`](crate::kinds::HttpServerResponse); the reply
 //! routes back to the cap, the
 //! reply-interception fallback formats the HTTP/1.1 response and writes it
 //! to the held socket. A response-less chain settles into `502`, a
@@ -39,8 +39,8 @@
 // the supervisor's surface is the sidecar wake plus route registration
 // (ADR-0130); the per-request kinds (streaming, websocket, settlement,
 // reply interception) live on the dispatch shard identity in `shard`.
-use crate::http::kinds::HttpInboundReady;
-use crate::http::kinds::{
+use crate::kinds::HttpInboundReady;
+use crate::kinds::{
     RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
 // `MonitorNotice` rides the handled-kind list like the registration
@@ -77,8 +77,8 @@ pub const DEFAULT_RESPONSE_STREAM_WINDOW: u32 = 16;
 /// streaming handler before it parks the per-connection reader awaiting the
 /// handler's [`HttpRequestCredit`] replenishment.
 ///
-/// [`HttpRequestChunk`]: crate::http::kinds::HttpRequestChunk
-/// [`HttpRequestCredit`]: crate::http::kinds::HttpRequestCredit
+/// [`HttpRequestChunk`]: crate::kinds::HttpRequestChunk
+/// [`HttpRequestCredit`]: crate::kinds::HttpRequestCredit
 pub const DEFAULT_REQUEST_STREAM_WINDOW: u32 = 16;
 /// Default `websocket_idle_timeout_millis` (ADR-0129): the read deadline on an
 /// upgraded websocket connection between frames, 5 minutes. Distinct from

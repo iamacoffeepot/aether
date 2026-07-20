@@ -527,7 +527,7 @@ pub fn run_reader_loop(
         });
         if expects_continue && let Err(e) = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n") {
             tracing::debug!(
-                target: "aether_substrate::http_server",
+                target: "aether_http::server",
                 conn = conn_id,
                 error = %e,
                 "http conn: 100-continue write failed",
@@ -627,7 +627,7 @@ pub fn run_reader_loop(
                 Ok(ReaderControl::Respond { bytes, resume }) => {
                     if let Err(e) = stream.write_all(&bytes).and_then(|()| stream.flush()) {
                         tracing::debug!(
-                            target: "aether_substrate::http_server",
+                            target: "aether_http::server",
                             conn = conn_id,
                             error = %e,
                             "http response write failed",

@@ -18,11 +18,11 @@ license.workspace = true
 # while the trampoline's references back to the cap are rustdoc links
 # only. Neither half is useful alone.
 #
-# `aether-capabilities` depends on this crate only because its remaining
-# `http` cap names `ComponentHostCapability` to defer a request to a
-# handler component. That is a genuine downward use, not a facade: the
-# husk re-exports none of these names. The edge disappears when `http` is
-# extracted in turn.
+# The `http` cap's deferred-reply path names `ComponentHostCapability` to
+# resolve the handler component it answers through, so `aether-http`
+# depends on this crate. That is a genuine downward use, not a facade —
+# neither crate re-exports the other's names. `aether-capabilities` keeps
+# only a dev-dependency, for the embeddable-resolution test.
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the ZST
 # cap and trampoline identities with their `Addressable`, per-handler

@@ -18,8 +18,8 @@ fallback or omits the runtime.
 | `aether.window` | mode, title, focus and headless replies | `aether-capabilities/src/window` | [Window](../systems/window.md) |
 | `aether.clipboard` | text get/set through system or in-memory backend | `aether-capabilities/src/clipboard` | [Clipboard](../systems/clipboard.md) |
 | `aether.fs` | namespaced read/write/copy/delete/list/fetch-fold | `aether-capabilities/src/fs` | [File I/O](../systems/file-io.md) |
-| `aether.http` | outbound HTTP fetch | `aether-capabilities/src/http/client` | [HTTP egress](../systems/http.md) |
-| `aether.http.server` | inbound HTTP, routes, streams, websocket | `aether-capabilities/src/http/server` | [HTTP server](../systems/http-server.md) |
+| `aether.http` | outbound HTTP fetch | `aether-http/src/client` | [HTTP egress](../systems/http.md) |
+| `aether.http.server` | inbound HTTP, routes, streams, websocket | `aether-http/src/server` | [HTTP server](../systems/http-server.md) |
 | `aether.tcp` | listener/connect control and session actors | `aether-tcp/src` | [TCP](../systems/tcp.md) |
 | `aether.rpc.server` | framed internal process RPC | `aether-rpc/src` | [RPC](../systems/rpc.md) |
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-capabilities/src/inventory` | [Inventory](../systems/inventory-and-transforms.md) |

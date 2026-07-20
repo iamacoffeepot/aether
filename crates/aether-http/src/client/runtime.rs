@@ -26,7 +26,7 @@ use ureq::http::Request;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
-use crate::http::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
+use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
 /// kind by the cap before handing to the adapter.
@@ -307,7 +307,7 @@ impl UreqHttpAdapter {
         for h in headers {
             if h.name.eq_ignore_ascii_case("host") {
                 tracing::warn!(
-                    target: "aether_substrate::http",
+                    target: "aether_http",
                     value = %h.value,
                     "stripping caller-set Host header",
                 );
@@ -417,14 +417,14 @@ fn ureq_error_to_http_error(e: ureq::Error) -> HttpError {
 pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
     if config.disabled {
         tracing::info!(
-            target: "aether_substrate::http",
+            target: "aether_http",
             "http adapter disabled — every fetch replies Disabled",
         );
         return Arc::new(DisabledHttpAdapter);
     }
 
     tracing::info!(
-        target: "aether_substrate::http",
+        target: "aether_http",
         allowlist_size = config.allowlist.len(),
         require_https = config.require_https,
         max_body_bytes = config.max_body_bytes,
@@ -437,8 +437,8 @@ pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::{FetchRequest, FetchResponse, HttpAdapter, HttpCapabilityState, UreqHttpAdapter, build_http_adapter};
-    use crate::http::client::{DEFAULT_MAX_BODY_BYTES, HttpCapability, HttpConfig};
-    use crate::http::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
+    use crate::client::{DEFAULT_MAX_BODY_BYTES, HttpCapability, HttpConfig};
+    use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
     use aether_data::MailboxId;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
@@ -672,7 +672,7 @@ mod tests {
     // directly rather than through a live redirecting server.
     mod redirect_classification {
         use super::super::{RedirectDecision, classify_redirect, redirect_method_and_body};
-        use crate::http::kinds::{HttpError, HttpMethod};
+        use crate::kinds::{HttpError, HttpMethod};
         use std::collections::HashSet;
 
         fn allowlist(hosts: &[&str]) -> HashSet<String> {
