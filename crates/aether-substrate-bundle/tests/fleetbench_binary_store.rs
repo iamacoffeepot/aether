@@ -3,12 +3,10 @@
 //! content-addressed, capture its `--describe` manifest, list it back,
 //! dedup an identical re-upload, and resolve its name.
 
-mod fleetbench;
-
 mod tests {
     use aether_kinds::{ListEngineBinaries, UploadBinaryResult};
 
-    use crate::fleetbench::FleetBench;
+    use aether_fleet_bench::FleetBench;
 
     /// Upload the real `aether-substrate-headless` binary, then assert
     /// the store ingested it content-addressed with the right

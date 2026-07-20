@@ -5,12 +5,10 @@
 //! filter across the real RPC hop, then walk the `since` cursor to confirm
 //! it does not re-yield the seen entry.
 
-mod fleetbench;
-
 mod tests {
     use aether_kinds::LogTailResult;
 
-    use crate::fleetbench::{FleetBench, dist_component_available, poll_until};
+    use aether_fleet_bench::{FleetBench, dist_component_available, poll_until};
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.

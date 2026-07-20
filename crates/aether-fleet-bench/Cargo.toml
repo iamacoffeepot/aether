@@ -1,0 +1,33 @@
+[package]
+name = "aether-fleet-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `FleetBench` — the real-process E2E test-support harness over the hub/RPC
+# path (issue 1451), extracted from `aether-substrate-bundle`'s tests tree
+# (iamacoffeepot/aether#3767) so fleet scenarios can dev-dep the harness from
+# any crate. It boots a hub-shaped passive chassis, connects a raw-frame
+# `TcpStream` client, and fork+execs real `aether-substrate-headless`
+# processes resolved through `dist/manifest.json` (the `cargo xtask dist`
+# tree) — no `CARGO_BIN_EXE_*`, which only resolves inside the package that
+# defines the binary.
+
+[dependencies]
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data" }
+aether-engine = { path = "../aether-engine" }
+aether-kinds = { path = "../aether-kinds" }
+aether-rpc = { path = "../aether-rpc" }
+# The harness boots its hub chassis through the canonical
+# `aether_substrate::testing::TestChassis`, enabled by the substrate
+# `test-support` feature. The crate is test-support end to end — it is only
+# ever a dev-dependency — so the feature rides the normal dep and never
+# enters a production graph.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+aether-trace = { path = "../aether-trace" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

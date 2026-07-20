@@ -2,8 +2,6 @@
 //! lineages. Correctness is exact; timing and handler-cost values are emitted
 //! only as diagnostics in `target/fleetbench-metrics/tcp-load.json`.
 
-mod fleetbench;
-
 mod tests {
     use std::collections::BTreeSet;
     use std::env::{self, VarError};
@@ -29,7 +27,7 @@ mod tests {
     };
     use serde::Serialize;
 
-    use crate::fleetbench::{FleetBench, dist_component_available, poll_until};
+    use aether_fleet_bench::{FleetBench, dist_component_available, poll_until};
 
     const FIXTURE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_EXPORT: &str = "test.tcp_load_probe";
