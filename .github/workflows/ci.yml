@@ -142,7 +142,8 @@ jobs:
   # author's reflexive `cargo build` hits against a marker-only consumer.
   # `aether-render` stands in for the per-cap crates: it is the largest of
   # them and the one whose runtime half gates the most (wgpu, clap,
-  # confique), so its marker face is the strictest of the set. The other jobs never exercise it: clippy / docs / test build
+  # confique), so its marker face is the strictest of the set. The other jobs
+  # never exercise it: clippy / docs / test build
   # `--workspace`, where resolver-3 feature unification turns `runtime` back on
   # for the crate (ADR-0122 §33), and the wasm cross-build elides the native
   # half. So this guard is an isolated `-p` build — never `--workspace`, which
