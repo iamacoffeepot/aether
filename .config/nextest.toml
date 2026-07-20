@@ -55,6 +55,22 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-substrate-bundle) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The `aether-render` render scenario binary (rehomed from the bundle's
+# `substrate_bench_scenario` dispatcher, issue #3771) boots a wgpu
+# `SubstrateBench` per test and runs ~18 GPU captures; on CI's shared
+# 2-core runner the frames rasterize in software under full-suite
+# contention, so the binary stretches well past the 60s steady-state cap
+# while still making timely progress. It ran under the bundle's 180s
+# `kind(test)` cap above before the move; carry the same wall-clock
+# backstop — a deadlock guard a healthy run never reaches. `kind(test)`
+# scopes it to the integration binary; the crate's unit tests keep the
+# 60s default. Ordering: nextest applies the first matching override per
+# setting, so any narrower `aether-render` binary override must be
+# listed before this one.
+[[profile.ci.overrides]]
+filter = "package(=aether-render) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The fleetbench replace binary also cold-loads `aether_kit.wasm` and was
 # measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary.

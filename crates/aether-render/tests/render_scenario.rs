@@ -1,4 +1,197 @@
-use super::*;
+//! Render-cap bench scenarios (rehomed from `aether-substrate-bundle`'s
+//! `substrate_bench_scenario/render.rs`, issue #3771): `capture_frame`
+//! pre/after mail bundles, cube projection through a camera, and the
+//! ADR-0105/ADR-0140 textured-quad + solid-quad + material surfaces,
+//! each driven through an in-process `SubstrateBench`.
+//!
+//! Every bench composes exactly the caps its scenario needs (issue
+//! #3764): all scenarios compose the render cap via
+//! `RenderBenchBuilderExt::with_render`; the two wasm-loading scenarios
+//! (probe round trip, cube projection) add `.with_component_host()`;
+//! the similarity scenario adds `.namespace_roots(...)` for the
+//! `aether.fs` cap its reference-image lookup reads through.
+//!
+//! Skipped when:
+//! - No wgpu adapter is available (driverless Linux runners without
+//!   `mesa-vulkan-drivers`).
+//! - The fixture's wasm hasn't been built — the wasm-loading tests read
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_test_fixtures_bundle.wasm`
+//!   and skip with an `eprintln!` when it's absent. CI builds the
+//!   fixture wasm (`cargo xtask dist`) before invoking the tests;
+//!   setting `AETHER_REQUIRE_RUNTIME=1` (CI does) flips both skip
+//!   points into hard panics so a missing pre-build is loud.
+//!
+//! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
+//! gate, `save://` sandbox) live in
+//! `aether_substrate_bench_capture::test_helpers` (issues 460 + 821).
+//! Per issue 464, the sandbox flows in via
+//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
+//! mutation.
+
+// Integration-test skip diagnostic: emit via stderr so `cargo test`
+// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
+#![allow(clippy::print_stderr)]
+// Test reads the AETHER_REQUIRE_RUNTIME CI skip toggle and the standard
+// CARGO_TARGET_DIR build-output override — test-harness knobs, not cap
+// config.
+#![allow(clippy::disallowed_methods)]
+
+use std::env;
+use std::fs;
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+
+use aether_data::{Kind, MailboxId};
+use aether_kinds::{
+    CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
+    LoadResult, NamedMail, QuadScale, QuadSpace, SimilarityCheck,
+};
+use aether_math::{Rgb, Rgba};
+use aether_render::{
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
+    DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
+    TextureFormat, TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
+};
+use aether_substrate::render as substrate_render;
+use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::visual::{
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
+};
+use aether_substrate_bench_capture::{
+    ArtifactGuard, RenderBenchBuilderExt, RenderBenchExt,
+    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
+};
+use aether_test_fixtures_kinds::SetRender;
+
+// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
+// entries are present in this test binary. Without the reference, the
+// host-target rlib's descriptor symbols can be stripped by the linker
+// and `aether_kinds::descriptors::all()` won't see fixture kinds.
+#[allow(unused_imports)]
+use aether_test_fixtures_kinds as _;
+
+/// Caller-supplied component name passed to `LoadComponent`.
+const PROBE_NAME: &str = "probe";
+/// Full trampoline address the substrate registers under post-issue-634
+/// Phase 4. Mail destined for the loaded probe goes here, not to the
+/// bare `PROBE_NAME` (which isn't a registered mailbox). Built from
+/// The `/`-rendered lineage a loaded component registers at (ADR-0099
+/// §4): the component host `aether.component` `/`-joined to the
+/// trampoline node — exactly what `LoadResult.name` reports.
+fn probe_address() -> String {
+    use aether_actor::Addressable;
+    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
+}
+
+/// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
+/// the kind's wire encoding (`encode_into_bytes`) so any K — cast
+/// or structured — packs correctly.
+fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
+    NamedMail {
+        recipient_name: recipient.to_owned(),
+        kind_name: K::NAME.to_owned(),
+        payload: mail.encode_into_bytes(),
+        count: 1,
+    }
+}
+
+/// Mirrors `ArtifactGuard`'s private root resolution (`CARGO_MANIFEST_DIR`
+/// two levels up to the workspace root, `CARGO_TARGET_DIR` override if
+/// set) so the artifact-guard scenario below can locate the directory a
+/// real [`ArtifactGuard::arm`] call just wrote to. `id` must already be
+/// filesystem-safe (alphanumeric/`-`/`_` only) — the scenario below only
+/// ever passes ids it controls, so no sanitization is needed here.
+fn artifact_dir(id: &str) -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
+    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
+    target_root.join("substrate-bench-artifacts").join(id)
+}
+
+fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
+    let start = ((y * img.width + x) * 4) as usize;
+    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
+}
+
+fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
+    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
+}
+
+fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
+    !rgb_close(rgba_at(img, x, y), bg, tolerance)
+}
+
+/// Load the probe into the bench via `execute`, blocking on the
+/// `LoadResult` reply so subsequent `advance` ops see a
+/// fully-instantiated and tick-subscribed component. Returns the
+/// loaded component's `MailboxId` (the trampoline address), which
+/// the drop / replace scenarios target. Pre-Phase-4 of issue 603 the
+/// bench's `aether.control` mailbox (renamed to `aether.component` in
+/// issue 638 phase 3) served as a single FIFO point for both load and
+/// advance; Phase 4 split advance onto `aether.substrate_bench`, so load is
+/// no longer naturally ordered ahead of advance — `SendAndAwait`
+/// blocks on `LoadResult` before returning.
+fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("load_component: {error}"),
+    }
+}
+
+/// Load the `cube` fixture into the bench, blocking on `LoadResult`
+/// so the subsequent advance sees a tick-subscribed component. Mirrors
+/// `load_probe`; the cube scenario only needs the load to succeed (it
+/// captures rather than mailing the component), so the returned
+/// `MailboxId` is discarded.
+fn load_cube(bench: &mut SubstrateBench, wasm_path: &Path) {
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some("test.cube".to_owned()),
+                    config: Vec::new(),
+                    // `Cube` is a non-entry actor in the bundle.
+                    export: Some("test.cube".to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load_component(cube): {error}"),
+    }
+}
+
+/// Most scenarios here need wgpu (the composed render cap builds a
+/// `Gpu` at boot) but not the fixture wasm. Skips on wgpu-less
+/// runners and panics under `AETHER_REQUIRE_RUNTIME` so a
+/// CI-side regression is loud.
+fn require_wgpu_only() -> bool {
+    if has_wgpu_adapter() {
+        return true;
+    }
+    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
+    eprintln!("skipping: no wgpu adapter available");
+    false
+}
 
 /// `capture_frame` round-trip with non-empty mail bundles. The
 /// pre-mail bundle flips the fixture's render state to "visible red";
@@ -14,7 +207,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
     load_probe(&mut bench, &wasm_path);
 
     // Capture's frame runs without a dispatched tick, so the probe
@@ -108,7 +301,8 @@ fn cube_render_projects_centered_silhouette() {
     // 128×96 matches the fixture's `view_proj` aspect (4:3), so the
     // silhouette projects undistorted.
     let (width, height) = (128u32, 96u32);
-    let mut bench = SubstrateBench::builder().size(width, height).full().build().expect("boot");
+    let mut bench =
+        SubstrateBench::builder().size(width, height).with_render().with_component_host().build().expect("boot");
     load_cube(&mut bench, &wasm_path);
 
     // Priming advance subscribes the cube to ticks; the next tick (run
@@ -183,7 +377,7 @@ fn textured_quad_draws_screen_space_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     // 8×8 checkerboard of opaque white and opaque red — both far from the
     // dark clear color, so every magnified texel of the quad reads as lit
@@ -339,7 +533,7 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
     let texture_id = create_observation_texture(&mut bench);
 
     let solid_clip = ClipRect { x: 2.0, y: 3.0, width: 20.0, height: 15.0 };
@@ -409,7 +603,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
     let texture_id = create_observation_texture(&mut bench);
     let valid_quad = TexturedQuad {
         x: 16.0,
@@ -549,7 +743,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let texture_size = 8u32;
     let pixels = four_quadrant_texture_pixels(texture_size);
@@ -629,7 +823,7 @@ fn destroyed_texture_draw_drops_from_frame() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let texture_width = 8u32;
     let texture_height = 8u32;
@@ -710,7 +904,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let texture_width = 8u32;
     let texture_height = 4u32;
@@ -797,7 +991,7 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
     let pixels = vec![
         0, 0, 0, 0, 128, 128, 255, 255, //
         0, 0, 0, 0, 128, 128, 255, 255, //
@@ -858,7 +1052,7 @@ fn textured_material_depth_tests_against_main_geometry() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
     let pixels = vec![255u8, 255, 255, 255];
     let created = bench
         .execute(vec![(
@@ -918,7 +1112,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
     let created = bench
         .execute(vec![(
             "create",
@@ -965,7 +1159,7 @@ fn solid_quad_draws_screen_space_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     // Known screen rect: top-left (16, 12), size 24×18.
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
@@ -1030,7 +1224,7 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
     let clipped = envelope(
         "aether.render",
         &DrawSolidQuads {
@@ -1072,7 +1266,7 @@ fn textured_quad_clip_bounds_pixels() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
     let created = bench
         .execute(vec![(
             "create",
@@ -1136,7 +1330,7 @@ fn capture_frame_checks_return_substrate_verdict() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     // Known screen rect: top-left (16, 12), size 24×18 — the same draw
     // `solid_quad_draws_screen_space_rect` decodes the PNG to score.
@@ -1259,7 +1453,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
     }
     let sandbox = init_save_sandbox("substrate-bench-render-similarity");
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
@@ -1322,7 +1516,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let (first_x, first_y, first_w, first_h) = (4.0f32, 4.0f32, 12.0f32, 12.0f32);
     let (second_x, second_y, second_w, second_h) = (40.0f32, 4.0f32, 12.0f32, 12.0f32);
@@ -1469,7 +1663,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
     let draw = envelope(
