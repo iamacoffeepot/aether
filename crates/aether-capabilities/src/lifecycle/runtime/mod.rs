@@ -245,6 +245,7 @@ impl NativeActor for LifecycleCapability {
             settlement_latency_ewma: None,
             last_slow_warn: None,
             mailer,
+            monitors: BTreeMap::new(),
         })
     }
 
