@@ -41,7 +41,6 @@ pub mod game;
 // writes the handler's reply back as the HTTP response). They own their
 // shared wire kinds in `http/kinds.rs`.
 pub mod http;
-pub mod tcp;
 pub mod test_bench;
 pub mod trampoline;
 
@@ -69,7 +68,6 @@ pub use http::{HttpServerCapability, HttpServerConfig};
 #[cfg(feature = "runtime")]
 pub use game::GameGatewayConfig;
 pub use game::{GameGatewayCapability, PlayerSessionActor};
-pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]

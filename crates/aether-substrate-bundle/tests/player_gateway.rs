@@ -11,12 +11,12 @@ use aether_actor::Addressable;
 use aether_capabilities::GameGatewayConfig;
 use aether_capabilities::component::resolve_embedded;
 use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
-use aether_capabilities::tcp::{ListListeners, ListListenersResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
+use aether_tcp::{ListListeners, ListListenersResult};
 
 const SIM_NAME: &str = "player-turn-sim";
 const LISTENER_NAME: &str = "players";

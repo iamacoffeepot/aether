@@ -45,7 +45,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///    [`session_close`](Self::session_close),
 ///    [`connect_session_write`](Self::connect_session_write), and
 ///    [`connect_session_close`](Self::connect_session_close). Mirror
-///    [`aether_fs::FsMailboxExt`] (issue 580): lift the cap-shaped
+///    `aether_fs::FsMailboxExt` (issue 580): lift the cap-shaped
 ///    kinds (`Close`, `SessionWrite`, ...) one indirection above the
 ///    raw `.send(&Kind { .. })` so component code stops reconstructing
 ///    the struct (and the `.into()` ceremony) at every call site.
@@ -56,7 +56,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 /// 2. Peer resolvers — [`listener::<R>`](Self::listener),
 ///    [`session::<R>`](Self::session), and
 ///    [`connect_session::<R>`](Self::connect_session). Mirror
-///    [`crate::component::ComponentHostWasmExt::loaded`] (issue 654):
+///    the component host's `ComponentHostWasmExt::loaded` (issue 654):
 ///    the "aether.tcp.listener:" / "aether.tcp.session:" prefixes live
 ///    in exactly two methods in the workspace — these — so a future
 ///    namespace rename touches one constant ([`TcpListenerActor::NAMESPACE`]
@@ -64,7 +64,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///
 /// All request methods are fire-and-forget. Replies arrive on the
 /// matching `*Result` kinds (see ADR-0079 + the kind definitions in
-/// `crate::tcp::kinds`). Synchronous wrappers (`bind_listener_sync`
+/// [`crate::kinds`]). Synchronous wrappers (`bind_listener_sync`
 /// etc.) were on the original issue 580 sketch — parked as a follow-up
 /// so this PR stays mechanical.
 ///
@@ -200,8 +200,8 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
 /// session peer resolvers return [`NativeActorMailbox<'a, R>`] here
 /// (with a transport-binding lifetime) vs [`WasmActorMailbox<R>`] on
 /// FFI, and a single trait can't carry both signatures. The precedent
-/// is [`crate::component::ComponentHostWasmExt`] /
-/// [`crate::component::ComponentHostNativeExt`] (issue 654).
+/// is the component host's `ComponentHostWasmExt` /
+/// `ComponentHostNativeExt` (issue 654).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait TcpNativeExt {
     /// Mail `aether.tcp.connect { addr, name, consumer }` to the cap.

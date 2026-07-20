@@ -24,13 +24,13 @@ pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx}
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::{KindId, Mail, Mailer};
 
-pub use crate::tcp::config::TcpSessionConfig;
+pub use crate::config::TcpSessionConfig;
 
 use aether_actor::runtime;
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::tcp::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite};
+use crate::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpSessionActor;
 
@@ -164,7 +164,7 @@ impl NativeActor for TcpSessionActor {
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
         tracing::info!(
-            target: "aether_substrate::tcp",
+            target: "aether_tcp",
             session = %config.session_name,
             peer = %config.peer,
             "tcp session opened",
@@ -200,7 +200,7 @@ impl NativeActor for TcpSessionActor {
             let _ = t.join();
         }
         tracing::info!(
-            target: "aether_substrate::tcp",
+            target: "aether_tcp",
             session = %state.session_name,
             peer = %state.peer,
             "tcp session closed",
@@ -237,7 +237,7 @@ impl NativeActor for TcpSessionActor {
                             Ok(None) => break,
                             Err(error) => {
                                 tracing::warn!(
-                                    target: "aether_substrate::tcp",
+                                    target: "aether_tcp",
                                     session = %state.session_name,
                                     peer = %state.peer,
                                     error = %error,
@@ -292,7 +292,7 @@ impl NativeActor for TcpSessionActor {
     fn on_session_write(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SessionWrite) {
         if let Err(e) = state.write_half.write_all(&mail.bytes) {
             tracing::warn!(
-                target: "aether_substrate::tcp",
+                target: "aether_tcp",
                 session = %state.session_name,
                 peer = %state.peer,
                 error = %e,

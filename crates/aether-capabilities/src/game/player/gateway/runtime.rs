@@ -14,7 +14,7 @@ use aether_substrate::chassis::error::BootError;
 use super::{BindListenerResult, GameGatewayCapability, MonitorNotice, SessionClosed, SessionData, TickBundle};
 use crate::game::player::PlayerSessionActor;
 use crate::game::player::session::PlayerSessionConfig;
-use crate::tcp::{TcpCapability, TcpNativeExt, TcpSessionActor};
+use aether_tcp::{TcpCapability, TcpNativeExt, TcpSessionActor};
 
 const DEFAULT_LISTENER_NAME: &str = "players";
 const DEFAULT_INTERVAL_NANOS: u64 = 1_000_000_000 / 60;

@@ -95,6 +95,9 @@ aether-engine = { path = "../aether-engine" }
 # the chassis bundle needs its wgpu runtime half (RenderCapability / RenderGpu /
 # RenderHandles / RenderTuningConfigLayer for the desktop + test-bench drivers).
 aether-render = { path = "../aether-render", features = ["runtime"] }
+# iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`; every
+# chassis composes `TcpCapability`, so the bundle takes the runtime face.
+aether-tcp = { path = "../aether-tcp" }
 # iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`;
 # the chassis bundle wires `TextCapability`, so it needs the runtime half
 # (fontdue TTF parse / rasterize + the substrate-side runtime).

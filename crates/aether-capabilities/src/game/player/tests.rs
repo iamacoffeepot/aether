@@ -28,7 +28,7 @@ use super::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSession
 use crate::game::{
     GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary, TickBundle,
 };
-use crate::tcp::{BindListener, ListListeners, ListListenersResult, TcpCapability, TcpListenerActor, TcpSessionActor};
+use aether_tcp::{BindListener, ListListeners, ListListenersResult, TcpCapability, TcpListenerActor, TcpSessionActor};
 
 const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;

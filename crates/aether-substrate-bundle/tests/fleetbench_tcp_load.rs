@@ -16,13 +16,13 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use aether_capabilities::tcp::{
-        BindListener, BindListenerResult, ListListeners, ListListenersResult, SessionDataReady, SessionWrite,
-        UnbindListener, UnbindListenerResult,
-    };
     use aether_codec::frame::max_frame_size;
     use aether_data::{EngineId, Kind};
     use aether_kinds::{CostRow, CostTail, CostTailResult};
+    use aether_tcp::{
+        BindListener, BindListenerResult, ListListeners, ListListenersResult, SessionDataReady, SessionWrite,
+        UnbindListener, UnbindListenerResult,
+    };
     use aether_test_fixtures_kinds::{
         CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
         TcpLoadTopology,
