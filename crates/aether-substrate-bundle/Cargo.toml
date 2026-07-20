@@ -13,19 +13,6 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
-# Standalone bundle builds (#1529, generalizing #1518): a chassis that
-# auto-loads the component pack embedded at build time, so the binary
-# runs hub-less. `build.rs` stages the pack the bins embed; `cargo xtask
-# bundle --chassis {desktop|headless}` builds the component wasms and
-# drives this.
-[[bin]]
-name = "aether-bundle-desktop"
-path = "src/bin/aether-bundle-desktop.rs"
-
-[[bin]]
-name = "aether-bundle-headless"
-path = "src/bin/aether-bundle-headless.rs"
-
 # The `runtime` feature exists solely to drive the `#[actor]` split
 # path's hardcoded `feature = "runtime"` gate (the macro convention from
 # iamacoffeepot/aether#2311 / ADR-0122): a split cap's `NativeActor` /
@@ -61,13 +48,6 @@ aether-component = { path = "../aether-component" }
 # Same crate as `wasmtime::Result` re-exports (issue #571).
 anyhow = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
-
-[build-dependencies]
-# `build.rs` parses the `AETHER_BUNDLE_MANIFEST` JSON and encodes the
-# bundle pack through `src/bundle_pack.rs` (compiled in via `#[path]`,
-# #1529), so the build script needs serde + serde_json in build scope.
-serde = { workspace = true, features = ["derive", "std"] }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

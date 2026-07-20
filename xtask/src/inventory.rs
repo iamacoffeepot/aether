@@ -31,10 +31,16 @@ const BEHAVIOR_DEP: &str = "aether-behavior";
 /// [`discover_behaviors`] excludes on.
 const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 
-/// Cargo package owning the full-stack chassis binaries and the wasm-
-/// executing scenario tests the affected-set coupling rule keys on. The
-/// hub chassis moved to its own crate (issue #3810); the remaining
-/// bundle-resident bins live here.
+/// Cargo package owning the standalone bundle binaries (`cargo xtask
+/// bundle` builds them with the component pack staged); the chassis
+/// binaries themselves live in the per-chassis crates listed in
+/// [`CHASSIS_BINS`].
+pub const BUNDLE_PACKAGE: &str = "aether-chassis-bundle";
+
+/// The residue chassis-bundle crate the affected-set wasm-coupling rule
+/// still names. Retires with the crate itself (#3816) — every
+/// wasm-executing scenario suite has already rehomed, so the coupling
+/// injection is a no-op selection of a testless crate until then.
 pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
 
 /// Chassis (host-target) binaries packaged into `dist/bin/`, as
