@@ -192,7 +192,11 @@ mod tests {
 
     #[test]
     fn hub_routes_engine_addressed_calls_to_a_real_substrate() {
-        let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
+        // The forked headless chassis resolves through `dist/manifest.json`
+        // (`cargo xtask dist` first) — `CARGO_BIN_EXE_*` only resolves inside
+        // the package that defines the binary, and this suite lives in
+        // `aether-rpc`, not the bundle.
+        let headless = aether_fleet_bench::headless_bin_path().to_string_lossy().into_owned();
         // Bootstrap an isolated binary store so the hub resolves a
         // `default` selector to the headless bin (ADR-0115, #1954) —
         // threaded onto the engines-cap config below.
@@ -209,7 +213,7 @@ mod tests {
         let engine_config = EngineConfig {
             binary_store_dir: Some(bin_store.to_string_lossy().into_owned()),
             engine_store_root: Some(root.to_string_lossy().into_owned()),
-            binary_bootstrap: HashSet::from([headless.to_owned()]),
+            binary_bootstrap: HashSet::from([headless]),
             ..EngineConfig::default()
         };
 
