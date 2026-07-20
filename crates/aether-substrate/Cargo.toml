@@ -123,6 +123,12 @@ proptest.workspace = true
 # aether-substrate), which cargo allows; aether-kit's bundle dev-dep was
 # the standing precedent.
 aether-substrate-bench = { path = "../aether-substrate-bench" }
+# iamacoffeepot/aether#3781: the fleet actor-log tail test
+# (`fleetbench_logs`, ActorLogRing tail + since cursor over RPC) rehomed
+# here next to the SubstrateBench-side log test — same ring, both
+# transports. Drives the real hub → RPC → forked-headless stack; another
+# permitted test-target dev-dep cycle back through the bundle.
+aether-fleet-bench = { path = "../aether-fleet-bench" }
 # The tests address the component host and probe the fs cap's registry
 # rows by its namespace/kinds.
 aether-actor = { path = "../aether-actor" }

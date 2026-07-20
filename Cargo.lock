@@ -607,6 +607,7 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-derive",
+ "aether-fleet-bench",
  "aether-fs",
  "aether-kinds",
  "aether-kit",

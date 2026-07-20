@@ -68,17 +68,23 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-component) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
-# The `aether-substrate` bench binaries (cap_registry / cost_table /
-# substrate_bench_logs, rehomed from aether-substrate-bundle,
-# iamacoffeepot/aether#3770) cold-load fixture wasm — cap_registry's
-# replace test additionally cold-compiles `aether_kit.wasm`, the exact
-# load that pushed the aether-kit binaries past 60s (#2805) — so the
-# crate rides the same kit-precedent 120s cap. `kind(test)` scopes it to
-# the integration binaries; the crate's `kind(lib)` unit tests keep the
-# 60s default.
+# The `aether-substrate` integration binaries mix two rehomed slow
+# classes: the bench tests (cap_registry / cost_table /
+# substrate_bench_logs, iamacoffeepot/aether#3770) cold-load fixture wasm
+# — cap_registry's replace test additionally cold-compiles
+# `aether_kit.wasm`, the exact load that pushed the aether-kit binaries
+# past 60s (#2805) — and the fleet log-tail test (`fleetbench_logs`,
+# iamacoffeepot/aether#3781) forks a real debug
+# `aether-substrate-headless` process and waits for it to bind. The fork
+# class stretches well past 60s under contention with the sibling fleet
+# suites, so the whole package rides the same 180s deadlock-guard
+# backstop as the bundle / rpc / engine overrides below — a wall-clock
+# guard a healthy run never reaches. `kind(test)` scopes the cap to the
+# integration binaries; the crate's `kind(lib)` unit tests keep the 60s
+# default.
 [[profile.ci.overrides]]
 filter = "package(=aether-substrate) & kind(test)"
-slow-timeout = { period = "120s", terminate-after = 1 }
+slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
 # routing fleet suites) fork real debug `aether-substrate` processes and wait
