@@ -5,6 +5,7 @@ members = [
     "crates/aether-chassis",
     "crates/aether-chassis-desktop",
     "crates/aether-chassis-headless",
+    "crates/aether-chassis-harness",
     "crates/aether-chassis-hub",
     "crates/aether-harness-substrate",
     "crates/aether-harness-substrate-capture",

@@ -2,17 +2,12 @@
 //!
 //! Standard Cargo layout:
 //!
-//! - `src/bin/` — the `aether-substrate-harness` chassis entry point
-//!   plus the standalone bundle and perf bins. The desktop, headless,
-//!   and hub chassis live in `aether-chassis-desktop` /
-//!   `aether-chassis-headless` / `aether-chassis-hub`.
+//! - `src/bin/` — the standalone bundle and perf bins. The desktop,
+//!   headless, hub, and harness chassis live in their own
+//!   `aether-chassis-*` crates.
 //!
-//! The substrate-harness chassis machinery and the in-process
-//! `SubstrateHarness` live in the `aether-harness-substrate` crate
-//! (GPU capture support in `aether-harness-substrate-capture`); this
-//! crate keeps the `aether-substrate-harness` binary entry point. The
-//! shared chassis-composition layer — boot fragments, config registry,
-//! CLI roots, autoload, the bundle-pack format — lives in
+//! The shared chassis-composition layer — boot fragments, config
+//! registry, CLI roots, autoload, the bundle-pack format — lives in
 //! `aether-chassis` (issue #3809).
 //!
 //! The lib root re-exports a convenience surface (the most-used

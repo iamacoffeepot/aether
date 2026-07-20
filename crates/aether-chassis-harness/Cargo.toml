@@ -1,0 +1,45 @@
+[package]
+name = "aether-chassis-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The harness chassis (issue #3813): the standalone binary form of the
+# in-process SubstrateHarness — a loopback-driven chassis for
+# deterministic operations and test evidence. The chassis machinery
+# lives in `aether-harness-substrate` (GPU capture in
+# `aether-harness-substrate-capture`); this crate is the thin
+# `aether-substrate-harness` binary composition over them plus the
+# shared `aether-chassis` layer.
+
+[[bin]]
+name = "aether-substrate-harness"
+path = "src/bin/substrate-harness.rs"
+
+# Same `runtime` convention as the other chassis crates (ADR-0122).
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-chassis = { path = "../aether-chassis" }
+aether-substrate = { path = "../aether-substrate", features = ["render"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+# The caps the harness bin composes beyond the harness basics.
+aether-render = { path = "../aether-render", features = ["runtime"] }
+aether-lifecycle = { path = "../aether-lifecycle" }
+aether-input = { path = "../aether-input" }
+aether-game = { path = "../aether-game" }
+aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
+aether-tcp = { path = "../aether-tcp" }
+aether-text = { path = "../aether-text", features = ["runtime"] }
+aether-fs = { path = "../aether-fs" }
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+anyhow = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+[lints]
+workspace = true
