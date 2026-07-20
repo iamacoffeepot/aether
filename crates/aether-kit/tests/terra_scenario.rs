@@ -1,6 +1,6 @@
 //! Strict typed terra flow through two real wasm components.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench::test_helpers::require_wasm;
 use std::fs;
 use std::path::Path;
 
@@ -15,7 +15,6 @@ use aether_kit::terra::{
 };
 use aether_kit::world::WorldPoint;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -108,10 +107,10 @@ fn expect_applied(result: TerraCommandResult) -> AppliedCommand {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
     let mark_mailbox = load_mark_book(&mut bench, &wasm_path);
     load_terra(&mut bench, &wasm_path, mark_mailbox);
     let mark_address = component_address(MARK_COMPONENT_NAME);

@@ -9,24 +9,18 @@
 //! wrapped slider in `wire` (the #2746 inline-child lifecycle), so a drag flows
 //! slider → host → panel and the script interposes in the middle.
 //!
-//! Observation is the panel's per-actor log ring (ADR-0081), the same surface
-//! `widget_set` reads: the transformed mail flows child → host → panel *inside
-//! the cluster*, never crossing the render / broadcast sink `count_observed`
-//! watches. Each phase reads the ring with a `since` cursor so one phase's
-//! entries never bleed into another's assertions.
+//! Observation is the panel's per-actor log ring (ADR-0081): the transformed
+//! mail flows child → host → panel *inside the cluster*, never crossing the
+//! broadcast sink `count_observed` watches. Each phase reads the ring with a
+//! `since` cursor so one phase's entries never bleed into another's assertions.
 //!
-//! Skipped when no wgpu adapter is available or the `behavior`-feature kit wasm
-//! / the fixture script wasm has not been pre-built (the shared `require_runtime`
-//! gate). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard
-//! failure.
+//! Minimal composition (issue #3764): the component host on the bench basics —
+//! every assertion reads the log ring, so no render cap (and no wgpu gate) is
+//! composed; the widgets' draw mail warn-drops harmlessly. Skipped when the
+//! `behavior`-feature kit wasm / the fixture script wasm has not been pre-built
+//! (the `require_wasm` gate). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn the
+//! skip into a hard failure.
 
-// Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
-// "skipping: ..." alongside `test ... ok` (issue 891).
-#![allow(clippy::print_stderr)]
-// Pixel-rect layout constants read clearest as float literals inline.
-#![allow(clippy::cast_precision_loss)]
-
-use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 
 use aether_actor::Addressable;
@@ -35,8 +29,8 @@ use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
 use aether_kit::widget::{BehaviorHostSpec, ScriptRef};
 use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
+use aether_substrate_bench::test_helpers::require_wasm;
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use serde::{Deserialize, Serialize};
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
@@ -225,16 +219,16 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // The host-carrying kit variant (`--features behavior`, wasmi linked in),
     // built to its own stem by `cargo xtask dist` so the stock `aether_kit.wasm`
     // the other scenarios load stays lean (issue 2688).
-    let Some(kit_path) = require_runtime("aether_kit_behavior") else {
+    let Some(kit_path) = require_wasm("aether_kit_behavior") else {
         return;
     };
-    let Some(intercept_path) = require_runtime("intercept_slider") else {
+    let Some(intercept_path) = require_wasm("intercept_slider") else {
         return;
     };
-    let Some(v2_path) = require_runtime("intercept_slider_v2") else {
+    let Some(v2_path) = require_wasm("intercept_slider_v2") else {
         return;
     };
-    let Some(trap_path) = require_runtime("trap_script") else {
+    let Some(trap_path) = require_wasm("trap_script") else {
         return;
     };
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
@@ -242,7 +236,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let v2 = fs::read(&v2_path).expect("read intercept_slider_v2 wasm");
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
 
-    let mut bench = SubstrateBench::builder().size(240, 220).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().with_component_host().build().expect("boot");
     load_panel_with_host(&mut bench, &kit_wasm, intercept);
     let panel = panel_address();
 
