@@ -15,6 +15,7 @@
 //! broadcasts a `key_observed` per dispatch; Tick-via-lifecycle delivery
 //! is covered by the `substrate_bench` frame-loop scenarios.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::path::Path;
 
 use aether_actor::Addressable;
@@ -22,7 +23,8 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_input::{InputCapability, SubscribeInputResult, UnsubscribeInput};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
 

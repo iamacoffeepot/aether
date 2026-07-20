@@ -8,6 +8,8 @@
 //! `SubstrateBenchCapability` claiming `aether.substrate_bench` (Phase 4), and
 //! `aether.control.platform_info` was deleted entirely (Phase 4).
 
+use std::any::Any;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,21 +17,19 @@ use aether_component::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
-use aether_kinds::Tick;
+use aether_kinds::{FrameCheck, FrameVerdict, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderHandles};
+use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::{
-    Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
-};
+use aether_substrate::mail::MailboxId;
+use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue};
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
 use super::cap::{SubstrateBenchCapConfig, SubstrateBenchCapability};
 use super::events::{ChassisEvent, EventSender};
-use crate::chassis_common::frame_lifecycle_config;
-use aether_lifecycle::LifecycleConfig;
+use aether_lifecycle::{LifecycleConfig, frame_lifecycle_config};
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
 
@@ -98,6 +98,57 @@ impl Chassis for SubstrateBenchChassis {
 /// after the bench basics so composition order stays chassis-owned.
 pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis> + Send>;
 
+/// PNG bytes, optional [`FrameVerdict`], optional similarity score, and
+/// optional similarity pass a capture produces. The verdict is `Some`
+/// iff the request carried `checks` (iamacoffeepot/aether#1777); the
+/// similarity score / pass are `Some` iff the request carried a
+/// `reference` (iamacoffeepot/aether#1780).
+pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
+
+/// Frame-pump seam for GPU render support (issue #3765). The core bench
+/// owns the advance/capture pump but no render types; a hook (the
+/// `GpuFrameHook` in `aether-substrate-bench-capture`) supplies the
+/// per-frame draw, the capture readback, and the render mailbox the
+/// capture request routes to. A bench without a hook skips the draw on
+/// advance and replies `Err` to captures.
+pub trait FrameHook: Send {
+    /// Draw the current accumulator into the offscreen target — the
+    /// advance path's per-frame render, no readback.
+    fn render_frame(&mut self);
+    /// Render with capture readback: encoded PNG plus optional verdict
+    /// and similarity scoring on the same RGBA.
+    fn render_and_capture(&mut self, checks: &[FrameCheck], reference: Option<&ReferenceCapture>) -> CaptureOutcome;
+    /// The mailbox `capture_frame` requests route to (the render cap's
+    /// namespace, resolved by the hook so the core stays render-free).
+    fn capture_mailbox(&self) -> MailboxId;
+    /// Downcast surface for capture-crate extension methods (overlay
+    /// snapshots) that need the hook's concrete type.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Boot-internal wiring handed to a [`RenderExt`] so it can construct
+/// the render cap's config without the core naming render types: the
+/// capture handoff queue, the embedder-loop wake, the shared
+/// observation log, the capture-similarity assets root, and the reply
+/// egress.
+pub struct BenchWiring {
+    pub capture_queue: CaptureQueue,
+    /// Wakes the embedder loop with `ChassisEvent::CaptureRequested`;
+    /// errors only when the chassis is shutting down.
+    pub capture_wake: Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>,
+    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    pub assets_dir: Option<PathBuf>,
+    pub outbound: Arc<aether_substrate::HubOutbound>,
+}
+
+/// Chassis-composition half of the render seam (issue #3765): given the
+/// boot wiring, chain the render cap onto the [`Builder`]. Implemented
+/// by `aether-substrate-bench-capture`'s `GpuRenderExt`; the core calls
+/// it in the render slot of the cap chain.
+pub trait RenderExt: Send {
+    fn compose(&self, wiring: &BenchWiring, builder: Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis>;
+}
+
 /// Bag of resolved configs the substrate-bench chassis takes at build
 /// time. Constructed by the embedder — the binary's `main()` reads
 /// env vars; the in-process [`super::SubstrateBench`] takes builder
@@ -154,11 +205,11 @@ pub struct SubstrateBenchEnv {
     /// pre-issue-673 silent-skip semantics. When `None`, fs is not
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
-    /// Compose the render cap (and its capture backend). Off, the chassis
-    /// boots no `RenderCapability`, publishes no `RenderHandles`, and
-    /// [`SubstrateBenchBuild::render_handles`] is `None` — mail to
-    /// `aether.render` warn-drops and captures are unavailable.
-    pub render: bool,
+    /// Render-cap composition seam. `Some` chains the render cap (with
+    /// its capture backend built from the boot wiring) into the cap
+    /// chain; `None` boots no render cap — mail to `aether.render`
+    /// warn-drops and captures are unavailable.
+    pub render_ext: Option<Box<dyn RenderExt>>,
     /// Compose the component host. Off, `aether.component.load` /
     /// `replace` / `drop` have no recipient — benches that never touch
     /// wasm skip the cap entirely.
@@ -196,13 +247,6 @@ pub struct SubstrateBenchEnv {
 pub struct SubstrateBenchBuild {
     pub passive: PassiveChassis<SubstrateBenchChassis>,
     pub boot: SubstrateBoot,
-    /// Driver-facing accumulator + GPU bundle, `Some` iff the env
-    /// composed the render cap. Pre-PR-E2 the embedder also got
-    /// `Arc<RenderCapability>` via `passive.capability()` to call
-    /// `install_gpu` / `record_frame` / etc. on it; post-E2 render is a
-    /// facade cap (dispatcher owns the cap) and the encoder-level
-    /// methods live on [`RenderHandles`].
-    pub render_handles: Option<RenderHandles>,
     pub kind_tick: KindId,
 }
 
@@ -235,7 +279,7 @@ impl SubstrateBenchChassis {
             events_tx,
             capture_queue,
             namespace_roots,
-            render,
+            render_ext,
             component_host,
             compose,
             teardown_cap,
@@ -254,26 +298,24 @@ impl SubstrateBenchChassis {
         // assets root, independent of whether fs cap boot itself succeeds.
         let assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
 
-        // Capture handoff lives on `RenderCapability` post-issue-603
-        // Phase 2. The cap dispatcher parks the request on
-        // `capture_queue`; the embedder loop sees `CaptureRequested`
-        // and routes through `record_frame` + readback like before.
-        // Built only when the env composes render.
+        // Capture handoff lives on the render cap post-issue-603 Phase 2:
+        // its dispatcher parks the request on `capture_queue` and wakes
+        // the embedder loop, which routes through the frame hook's
+        // readback. The wiring is built unconditionally (cheap Arc
+        // clones); it only reaches a render cap when `render_ext` is
+        // `Some` (issue #3765).
         let events_for_render = events_tx.clone();
-        let render_config = render.then(|| RenderConfig {
-            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+        let wiring = BenchWiring {
+            capture_queue,
+            capture_wake: Arc::new(move || {
+                events_for_render
+                    .send(ChassisEvent::CaptureRequested)
+                    .map_err(|_| "substrate-bench chassis shutting down — capture aborted")
+            }),
             observed_kinds: observed_kinds.clone(),
             assets_dir,
-            capture_backend: Some(CaptureBackend {
-                queue: capture_queue,
-                wake: Arc::new(move || {
-                    events_for_render
-                        .send(ChassisEvent::CaptureRequested)
-                        .map_err(|_| "substrate-bench chassis shutting down — capture aborted")
-                }),
-                outbound: Arc::clone(&boot.outbound),
-            }),
-        });
+            outbound: Arc::clone(&boot.outbound),
+        };
 
         // Phase 4: advance lands on `SubstrateBenchCapability` claiming
         // `aether.substrate_bench`. The cap pushes `ChassisEvent::Advance`
@@ -367,8 +409,8 @@ impl SubstrateBenchChassis {
                 hub_outbound: Arc::clone(&boot.outbound),
             });
         }
-        if let Some(config) = render_config {
-            builder = builder.with_actor::<RenderCapability>(config);
+        if let Some(ext) = &render_ext {
+            builder = ext.compose(&wiring, builder);
         }
         for apply in compose {
             builder = apply(builder);
@@ -382,25 +424,11 @@ impl SubstrateBenchChassis {
         }
         let passive = builder.build_passive()?;
 
-        // Issue 629 / Phase A: render publishes its `RenderHandles`
-        // bundle on the chassis's `ExportedHandles` map during `init`.
-        // Embedders retrieve via `PassiveChassis::handle::<H>()` — no
-        // `Arc<RenderCapability>` ever escapes the dispatcher thread.
-        let render_handles: Option<RenderHandles> = if render {
-            Some(passive.handle::<RenderHandles>().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "SubstrateBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before SubstrateBench builds",
-                )
-            })?)
-        } else {
-            None
-        };
-
         // The cap config already cloned `events_tx`; dropping the
         // local copy lets the receiver hang up cleanly once every
         // sender is released.
         drop(events_tx);
 
-        Ok(SubstrateBenchBuild { passive, boot, render_handles, kind_tick })
+        Ok(SubstrateBenchBuild { passive, boot, kind_tick })
     }
 }

@@ -29,6 +29,7 @@
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
+use aether_substrate_bundle::FullBenchExt;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
@@ -38,7 +39,8 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::MailboxId;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";

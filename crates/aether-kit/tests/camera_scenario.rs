@@ -16,15 +16,17 @@
 //!   builds the wasm before invoking `cargo test`.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate) live in `aether_substrate_bundle::substrate_bench::test_helpers`
+//! gate) live in `aether_substrate_bench_capture::test_helpers`
 //! (issues 460 + 821).
 
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
 use aether_render::ViewProjection;
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{decode_png, not_all_black};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{decode_png, not_all_black};
+use aether_substrate_bundle::FullBenchExt;
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as

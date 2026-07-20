@@ -18,7 +18,7 @@ mod settlement;
 // and exempts only `pub use`).
 use super::{LifecycleCapability, LifecycleGraphData};
 
-pub use self::config::LifecycleConfig;
+pub use self::config::{LifecycleConfig, frame_lifecycle_config};
 #[cfg(test)]
 pub use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
 pub use self::settlement::{PendingAdvance, Step, resolve_edge};

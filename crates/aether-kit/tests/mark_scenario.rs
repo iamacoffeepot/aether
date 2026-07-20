@@ -5,6 +5,7 @@
 //! with the same wasm. The final allocation proves both live marks and the
 //! deleted-id watermark crossed the lifecycle boundary.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
@@ -15,7 +16,8 @@ use aether_kit::mark::{
     MarkList, MarkListResult, MarkRef, MarkUpdate, MarkUpdateResult,
 };
 use aether_kit::world::WorldPoint;
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 // Retain all of the kit's native inventory submissions in this integration
 // test binary, matching the other component scenarios.

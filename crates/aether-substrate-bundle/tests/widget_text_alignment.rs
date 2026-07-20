@@ -37,6 +37,7 @@
 // a pixel region.
 #![allow(clippy::suboptimal_flops)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -49,10 +50,8 @@ use aether_kinds::{
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_render::RenderCapability;
-use aether_substrate_bundle::substrate_bench::{
-    BenchOp, SubstrateBench,
-    test_helpers::{init_save_sandbox, require_runtime},
-};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, require_runtime};
 use aether_text::{LoadFont, LoadFontResult};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window

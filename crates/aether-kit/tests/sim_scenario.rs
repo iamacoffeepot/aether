@@ -1,5 +1,6 @@
 //! Tick-native turn simulation through two real instances of the kit wasm.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
@@ -10,7 +11,8 @@ use aether_kit::sim::{
     CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn,
     TrajectoryEvent, TrajectoryKind,
 };
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 #[allow(unused_imports)]
 use aether_kit as _;

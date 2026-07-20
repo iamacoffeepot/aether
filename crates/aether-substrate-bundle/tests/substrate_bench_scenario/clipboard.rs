@@ -1,6 +1,7 @@
 use super::*;
 
-use aether_substrate_bundle::substrate_bench::SubstrateBenchClipboardMode;
+use aether_clipboard::HeadlessClipboardCapability;
+use aether_substrate_bundle::FullBenchExt;
 
 const CLIPBOARD_MAILBOX: &str = "aether.clipboard";
 
@@ -33,15 +34,11 @@ fn clipboard_set_then_get_round_trips_in_memory() {
 
 #[test]
 fn unavailable_clipboard_err_replies_to_get_and_set() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let mut bench = SubstrateBench::builder()
-        .full()
-        .size(64, 48)
-        .clipboard_mode(SubstrateBenchClipboardMode::Unavailable)
-        .build()
-        .expect("boot");
+    // Issue #3765: minimal composition — the unavailable-mode round
+    // trip needs only the fail-fast clipboard on the bench basics, so
+    // no render (and no wgpu gate) is composed at all.
+    let mut bench =
+        SubstrateBench::builder().size(64, 48).with_actor::<HeadlessClipboardCapability>(()).build().expect("boot");
 
     let result = bench
         .execute(vec![

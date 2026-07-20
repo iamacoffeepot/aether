@@ -1,6 +1,6 @@
 //! `FleetBench` — a real-process E2E test-support harness over the
 //! hub/RPC path (issue 1451). Where `SubstrateBench`
-//! (`aether-substrate-bundle`'s in-process harness) drives the substrate
+//! (`aether-substrate-bench`'s in-process harness) drives the substrate
 //! over a loopback channel, `FleetBench`
 //! drives the *actual* hub → RPC → forked-headless-substrate stack: it
 //! boots a hub-shaped passive chassis (`RpcServerCapability` +

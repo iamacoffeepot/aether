@@ -32,13 +32,14 @@ use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail
 /// is `frame_loop::DRAIN_BUDGET`; a starved-but-healthy chain resolves
 /// before this cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
-use aether_substrate_bundle::chassis_root::next_chassis_correlation;
-use aether_substrate_bundle::resolve_teardown_cap;
-use aether_substrate_bundle::substrate_bench::{
-    RenderSizeConfig, SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS,
+use aether_render::RenderHandles;
+use aether_substrate_bench::{
+    SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS,
     events::{self, ChassisEvent},
-    render::Gpu,
 };
+use aether_substrate_bench_capture::{Gpu, GpuRenderExt};
+use aether_substrate_bundle::chassis_root::next_chassis_correlation;
+use aether_substrate_bundle::{RenderSizeConfig, resolve_teardown_cap};
 
 fn main() -> anyhow::Result<()> {
     let capture_queue = CaptureQueue::new();
@@ -66,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         // Issue #3764: the standalone binary is the MCP-drivable chassis,
         // so it composes the full cap set — an in-process bench composes
         // per scenario instead.
-        render: true,
+        render_ext: Some(Box::new(GpuRenderExt)),
         component_host: true,
         compose: vec![
             Box::new(|b| b.with_actor::<aether_input::InputCapability>(aether_input::InputConfig::default())),
@@ -84,10 +85,14 @@ fn main() -> anyhow::Result<()> {
         teardown_cap: resolve_teardown_cap(),
     };
 
-    let SubstrateBenchBuild { passive, boot, render_handles, kind_tick } = SubstrateBenchChassis::build_passive(env)?;
+    let SubstrateBenchBuild { passive, boot, kind_tick } = SubstrateBenchChassis::build_passive(env)?;
 
     let (width, height) = RenderSizeConfig::from_env().to_size();
-    let render_handles = render_handles.expect("substrate-bench binary composes render");
+    // Issue 629 / Phase A: render publishes its handles on the chassis's
+    // `ExportedHandles` map during `init`; the binary composes render
+    // above, so the fetch cannot miss.
+    let render_handles: RenderHandles =
+        passive.handle::<RenderHandles>().expect("substrate-bench binary composes render");
     let gpu = Gpu::new(width, height, render_handles);
     tracing::info!(
         target: "aether_substrate::boot",

@@ -16,18 +16,19 @@
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
 //! gate, `save://` sandbox) live in
-//! `aether_substrate_bundle::substrate_bench::test_helpers` (issues 460 +
+//! `aether_substrate_bench_capture::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox is plumbed via
 //! `SubstrateBench::builder().full().namespace_roots(...)` rather than env-var
 //! mutation.
 
 use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
 use aether_kit::mesh::LoadMesh;
-use aether_substrate_bundle::substrate_bench::{
-    BenchOp, SubstrateBench,
-    test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::{
+    init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
-use aether_substrate_bundle::visual::{decode_png, differs_from_background};
+use aether_substrate_bench_capture::visual::{decode_png, differs_from_background};
+use aether_substrate_bundle::FullBenchExt;
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as

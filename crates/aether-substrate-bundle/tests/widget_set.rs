@@ -25,6 +25,7 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 
 use aether_actor::Addressable;
@@ -39,7 +40,8 @@ use aether_kit::{
     ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
     WidgetChildSpec, WidgetControlState, WidgetKind,
 };
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {

@@ -85,6 +85,8 @@ inventory = { workspace = true }
 # for `wasm32-unknown-unknown` and discovered at runtime under
 # `target/wasm32-unknown-unknown/{debug,release}/`.
 [dev-dependencies]
+aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
 aether-substrate-bundle = { path = "../aether-substrate-bundle" }
 
 [lints]

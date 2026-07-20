@@ -1,0 +1,59 @@
+[package]
+name = "aether-substrate-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `SubstrateBench` — the in-process bench harness (ADR-0067, issue #3765).
+# Boots a substrate-bench chassis (basics only: trace dispatch, the bench
+# cap, lifecycle, fail-fast headless window, the observer mailbox) over a
+# `RecordingBackend` loopback; each test composes the caps its scenario
+# needs via the builder (issue #3764). Render/GPU capture support is the
+# sibling `aether-substrate-bench-capture` crate behind the
+# `FrameHook`/`RenderExt` seam, so a non-visual consumer's dependency
+# closure never carries aether-render or wgpu.
+
+# The `runtime` feature exists solely to drive the `#[actor]` split
+# path's hardcoded `feature = "runtime"` gate on the bench cap pair
+# (mirrors aether-substrate-bundle); the harness itself is
+# unconditionally runtime-shaped.
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-component = { path = "../aether-component" }
+aether-data = { path = "../aether-data" }
+aether-fs = { path = "../aether-fs" }
+aether-kinds = { path = "../aether-kinds" }
+aether-lifecycle = { path = "../aether-lifecycle" }
+aether-substrate = { path = "../aether-substrate" }
+aether-trace = { path = "../aether-trace" }
+aether-window = { path = "../aether-window" }
+anyhow = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+clap = { workspace = true }
+confique = { workspace = true }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+# cargo-machete's source-only scan cannot see that `clap` and `confique`
+# are used exclusively through `#[derive(aether_substrate::Config)]`
+# codegen on `SettlementConfig` (`confique` via the emitted config layer,
+# `clap` via the emitted `Args` overlay), so both are false positives.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# `SettlementRegistry::subscribe_settlement` hands back crossbeam
+# receivers; the in-crate mail-latency harness and settlement tests hold
+# them directly.
+crossbeam-channel = "0.5"
+
+[lints]
+workspace = true

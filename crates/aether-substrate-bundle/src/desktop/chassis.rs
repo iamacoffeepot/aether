@@ -19,7 +19,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::substrate_bench::UnsupportedSubstrateBenchCapability;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
@@ -32,21 +31,22 @@ use aether_http::{HttpConfig as HttpConf, HttpServerConfig};
 use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
-use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::{LifecycleCapability, frame_lifecycle_config};
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderTuningConfig};
 use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate_bench::UnsupportedSubstrateBenchCapability;
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, WindowConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, frame_lifecycle_config,
-    load_chassis_config, maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file,
-    resolve_teardown_cap_with_file, resolve_with_file, with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
+    maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
+    resolve_with_file, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;

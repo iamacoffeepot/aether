@@ -149,7 +149,7 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 
 ## Source routes
 
-- Public SubstrateBench API: `crates/aether-substrate-bundle/src/substrate_bench/`
+- Public SubstrateBench API: `crates/aether-substrate-bench/src/`
 - Scenario examples: `crates/aether-substrate-bundle/tests/substrate_bench_scenario/`
 - FleetBench harness: `crates/aether-fleet-bench/src/lib.rs`
 - Fleet scenarios: `crates/aether-substrate-bundle/tests/fleetbench_*.rs`

@@ -26,7 +26,7 @@ use aether_kinds::Advance;
 // `EventSender` is a bundle-local channel sender (not an
 // `aether_substrate` type), so the always-on config carries it at file
 // root.
-use crate::substrate_bench::events::EventSender;
+use crate::events::EventSender;
 
 /// Configuration for [`SubstrateBenchCapability`]. Carries the
 /// `EventSender` the embedder loop reads on, so the handler can hand
@@ -102,7 +102,7 @@ mod runtime {
     use super::EventSender;
     use std::sync::Arc;
 
-    pub use crate::substrate_bench::events::ChassisEvent;
+    pub use crate::events::ChassisEvent;
     pub use aether_kinds::AdvanceResult;
     pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     pub use aether_substrate::chassis::error::BootError;

@@ -132,7 +132,7 @@ The contract is real only when the pinned value is computed.
 ## Where the test goes
 
 Once a test clears the bar, the harness follows from what it checks. Engine-internal
-and visual correctness goes to **SubstrateBench** (`aether_substrate_bundle::substrate_bench`)
+and visual correctness goes to **SubstrateBench** (`aether-substrate-bench`)
 with a concrete assertion (`captured`, `reply`, `count_observed`); behavior over the
 wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
 **FleetBench** (the `aether-fleet-bench` crate). FleetBench is

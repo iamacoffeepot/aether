@@ -40,12 +40,9 @@ use aether_trace::walk::TreeWalk;
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
+use crate::settlement_config::SettlementConfig;
 use aether_actor::Addressable;
-use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_fs::NamespaceRoots;
-use aether_game::{GameGatewayCapability, GameGatewayConfig};
-use aether_input::{InputCapability, InputConfig};
-use aether_render::{DrawTexturedQuads, RenderCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
@@ -53,16 +50,19 @@ use aether_substrate::{
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
-use aether_tcp::TcpCapability;
-use aether_text::TextCapability;
 
-use super::chassis::{ComposeFn, SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS};
-use super::config::SubstrateBenchClipboardMode;
+use super::chassis::{
+    ComposeFn, FrameHook, RenderExt, SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS,
+};
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
-use super::render::Gpu;
-use crate::chassis_common::SettlementConfig;
 use std::error;
 use std::thread;
+
+/// Boxed [`FrameHook`] constructor the render extension registers on the
+/// builder: runs after the chassis boots, against the live passive (to
+/// fetch published render handles) and the builder's offscreen size.
+pub type HookFactory =
+    Box<dyn FnOnce(&PassiveChassis<SubstrateBenchChassis>, u32, u32) -> anyhow::Result<Box<dyn FrameHook>> + Send>;
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness
@@ -155,9 +155,10 @@ pub struct SubstrateBench {
     capture_queue: CaptureQueue,
     events_rx: EventReceiver,
 
-    /// Offscreen wgpu pipeline, `Some` iff the builder composed render
-    /// (issue #3764). Captures and overlay snapshots require it.
-    gpu: Option<Gpu>,
+    /// Frame-pump render seam, `Some` iff the builder registered a
+    /// render extension (issues #3764/#3765). Captures require it; an
+    /// advance without one skips the per-frame draw.
+    hook: Option<Box<dyn FrameHook>>,
 
     /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
     /// fires one `LifecycleAdvance` here per requested tick; the
@@ -249,9 +250,7 @@ pub struct SubstrateBenchBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
-    clipboard_mode: Option<SubstrateBenchClipboardMode>,
-    game_gateway: Option<GameGatewayConfig>,
-    render: bool,
+    render_ext: Option<(Box<dyn RenderExt>, HookFactory)>,
     component_host: bool,
     compose: Vec<ComposeFn>,
 }
@@ -267,9 +266,7 @@ impl Default for SubstrateBenchBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
-            clipboard_mode: None,
-            game_gateway: None,
-            render: false,
+            render_ext: None,
             component_host: false,
             compose: Vec::new(),
         }
@@ -354,24 +351,6 @@ impl SubstrateBenchBuilder {
         self
     }
 
-    /// Compose a clipboard actor into this bench: `InMemory` is
-    /// deterministic storage, `Unavailable` the fail-fast companion for
-    /// negative-path scenarios. The default composes no clipboard at all
-    /// — clipboard mail warn-drops (issue #3764).
-    #[must_use]
-    pub fn clipboard_mode(mut self, mode: SubstrateBenchClipboardMode) -> Self {
-        self.clipboard_mode = Some(mode);
-        self
-    }
-
-    /// Compose the trusted player gateway, for a real tcp loopback
-    /// scenario. The default composes no gateway at all.
-    #[must_use]
-    pub fn game_gateway(mut self, config: GameGatewayConfig) -> Self {
-        self.game_gateway = Some(config);
-        self
-    }
-
     /// Compose an arbitrary capability into this bench. The bench boots
     /// its basics (trace dispatch, the bench cap, lifecycle, fail-fast
     /// headless window) and each scenario composes exactly the caps it
@@ -390,13 +369,16 @@ impl SubstrateBenchBuilder {
         self
     }
 
-    /// Compose the render cap, its capture backend, and the offscreen
-    /// wgpu pipeline. Without this, captures and
-    /// [`SubstrateBench::committed_overlay_snapshot`] are unavailable and
-    /// `aether.render` mail warn-drops.
+    /// Register the render seam (issue #3765): `ext` chains the render
+    /// cap into the chassis builder from the boot wiring, and
+    /// `hook_factory` builds the frame-pump [`FrameHook`] against the
+    /// booted chassis and the builder's offscreen size. The capture
+    /// crate's `RenderBenchBuilderExt::with_render` is the intended
+    /// caller; without a registration, captures reply `Err` and the
+    /// advance path skips the per-frame draw.
     #[must_use]
-    pub fn with_render(mut self) -> Self {
-        self.render = true;
+    pub fn render_ext(mut self, ext: Box<dyn RenderExt>, hook_factory: HookFactory) -> Self {
+        self.render_ext = Some((ext, hook_factory));
         self
     }
 
@@ -407,22 +389,6 @@ impl SubstrateBenchBuilder {
     pub fn with_component_host(mut self) -> Self {
         self.component_host = true;
         self
-    }
-
-    /// Compose the full pre-#3764 cap set: render + component host +
-    /// input + tcp + text + in-memory clipboard + inert game gateway
-    /// (fs still rides `namespace_roots`). Transitional bridge for the
-    /// bundle-resident scenario tests and the standalone binary; a test
-    /// rehoming to its cap crate states its minimal composition instead.
-    #[must_use]
-    pub fn full(mut self) -> Self {
-        self.clipboard_mode.get_or_insert_with(SubstrateBenchClipboardMode::default);
-        self.game_gateway.get_or_insert_with(GameGatewayConfig::default);
-        self.with_render()
-            .with_component_host()
-            .with_actor::<InputCapability>(InputConfig::default())
-            .with_actor::<TcpCapability>(())
-            .with_actor::<TextCapability>(())
     }
 
     /// Boot the bench. Overrides applied via the builder methods flow
@@ -466,12 +432,14 @@ impl SubstrateBench {
             trace_ring_capacity,
             trace_ring_max_capacity,
             settlement_cap,
-            clipboard_mode,
-            game_gateway,
-            render,
+            render_ext,
             component_host,
-            mut compose,
+            compose,
         } = builder;
+        let (render_ext, hook_factory) = match render_ext {
+            Some((ext, factory)) => (Some(ext), Some(factory)),
+            None => (None, None),
+        };
 
         // Lower the per-field `Option` overrides onto the `Copy`
         // `RingCapacities`, defaulting each unset field to the
@@ -490,23 +458,6 @@ impl SubstrateBench {
             trace_max: trace_ring_max_capacity.unwrap_or(trace),
         };
         let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
-
-        // Lower the typed clipboard / game options onto the generic
-        // compose surface — they are plain caps with no boot-internal
-        // wiring, kept as named builder options for discoverability.
-        if let Some(mode) = clipboard_mode {
-            compose.push(match mode {
-                SubstrateBenchClipboardMode::InMemory => {
-                    Box::new(|b| b.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory))
-                }
-                SubstrateBenchClipboardMode::Unavailable => {
-                    Box::new(|b| b.with_actor::<HeadlessClipboardCapability>(()))
-                }
-            });
-        }
-        if let Some(config) = game_gateway {
-            compose.push(Box::new(move |b| b.with_actor::<GameGatewayCapability>(config)));
-        }
 
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
@@ -530,7 +481,7 @@ impl SubstrateBench {
             events_tx,
             capture_queue: capture_queue.clone(),
             namespace_roots,
-            render,
+            render_ext,
             component_host,
             compose,
             // Issue #2509: the teardown gate honors the same resolved cap
@@ -538,8 +489,16 @@ impl SubstrateBench {
             // loops the bench stores this value for.
             teardown_cap: settlement_cap,
         };
-        let SubstrateBenchBuild { passive, boot, render_handles, kind_tick } =
+        let SubstrateBenchBuild { passive, boot, kind_tick } =
             SubstrateBenchChassis::build_passive(env).map_err(|e| SubstrateBenchError::Boot(e.to_string()))?;
+
+        // Issue #3765: the render extension's frame hook builds against
+        // the booted chassis (it fetches the published render handles)
+        // at the builder's offscreen size.
+        let hook = hook_factory
+            .map(|factory| factory(&passive, width, height))
+            .transpose()
+            .map_err(|e| SubstrateBenchError::Boot(e.to_string()))?;
 
         // Attach a `RecordingBackend` to the boot's outbound. Replies
         // the substrate emits via `outbound.send_reply` arrive here
@@ -547,8 +506,6 @@ impl SubstrateBench {
         // correlates by `correlation_id`.
         let (recording, loopback_rx) = RecordingBackend::new();
         boot.outbound.attach_backend(Arc::new(recording));
-
-        let gpu = render_handles.map(|handles| Gpu::new(width, height, handles));
 
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
@@ -570,7 +527,7 @@ impl SubstrateBench {
             loopback_rx,
             capture_queue,
             events_rx,
-            gpu,
+            hook,
             lifecycle_mailbox,
             kind_lifecycle_advance,
             frame: 0,
@@ -617,28 +574,13 @@ impl SubstrateBench {
         self.observed_kinds.lock().expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)").clone()
     }
 
-    /// Snapshot the ordered, typed overlay submissions from the latest
-    /// frame committed by [`Self::execute`]'s `advance` or `capture` op.
-    /// Solid submissions appear normalized as [`DrawTexturedQuads`] over
-    /// the renderer's reserved white texture. Batches rejected while
-    /// recording — for example a missing texture, invalid/empty clip, or
-    /// an overlay pass beyond the fixed vertex budget — are absent.
-    ///
-    /// Capture uses replay-cache semantics: if it receives no new overlay
-    /// mail, this snapshot remains the frame from the latest committed
-    /// advance or capture. An advance that commits an empty overlay frame
-    /// clears the snapshot. Returned values own their data and are isolated
-    /// from later frames.
-    ///
-    /// # Panics
-    /// Panics if the bench was built without [`SubstrateBenchBuilder::with_render`]
-    /// — there is no overlay pipeline to snapshot (issue #3764).
+    /// Borrow the registered frame hook, if any. The capture crate's
+    /// `RenderBenchExt` reaches its concrete `GpuFrameHook` through this
+    /// (via [`FrameHook::as_any`]) for render-typed accessors like the
+    /// committed-overlay snapshot (issue #3765).
     #[must_use]
-    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
-        self.gpu
-            .as_ref()
-            .expect("committed_overlay_snapshot requires a bench built with .with_render() (issue #3764)")
-            .committed_overlay_snapshot()
+    pub fn frame_hook(&self) -> Option<&dyn FrameHook> {
+        self.hook.as_deref()
     }
 
     /// Tail `mailbox_name`'s per-actor log ring (ADR-0081). Mirrors
@@ -989,16 +931,18 @@ impl SubstrateBench {
         pre: Vec<aether_kinds::NamedMail>,
         after: Vec<aether_kinds::NamedMail>,
     ) -> Result<Vec<u8>, SubstrateBenchError> {
+        // Issue 603 Phase 2: capture_frame routes to the render cap's
+        // mailbox; the hook supplies the id so the core stays
+        // render-free (issue #3765). No hook ⇒ no render cap booted ⇒
+        // fail fast instead of warn-dropping the mail.
+        let capture_mailbox = self
+            .hook
+            .as_ref()
+            .map(|hook| hook.capture_mailbox())
+            .ok_or_else(|| SubstrateBenchError::Capture("render not composed — no capture pipeline".to_owned()))?;
         let cid = self.fresh_correlation_id();
-        // Issue 603 Phase 2: capture_frame moved to the render
-        // capability's `aether.render` mailbox. Pre-Phase-2 the mail
-        // landed on `aether.control` and routed through the
-        // chassis_handler closure.
         self.push_to_mailbox(
-            // Harness route to the render cap's own id (its NAMESPACE) —
-            // ctx-less driver-side push, no resolver here.
-            #[allow(clippy::disallowed_methods)]
-            aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE),
+            capture_mailbox,
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,
@@ -1335,11 +1279,13 @@ impl SubstrateBench {
                     }
                 }
                 // A capture request can only originate from the render
-                // cap's capture backend, so `gpu` is `Some` on every
+                // cap's capture backend, so the hook is `Some` on every
                 // reachable path; reply `Err` rather than panic if that
                 // invariant ever breaks.
-                let result = match self.gpu.as_mut() {
-                    Some(gpu) => CaptureFrameResult::from(gpu.render_and_capture(&req.checks, req.reference.as_ref())),
+                let result = match self.hook.as_mut() {
+                    Some(hook) => {
+                        CaptureFrameResult::from(hook.render_and_capture(&req.checks, req.reference.as_ref()))
+                    }
                     None => CaptureFrameResult::Err { error: "render not composed — no capture pipeline".to_owned() },
                 };
                 for mail in req.after_mails {
@@ -1359,8 +1305,8 @@ impl SubstrateBench {
                 // to move the reply below other work in this arm.
             }
             None => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render();
+                if let Some(hook) = self.hook.as_mut() {
+                    hook.render_frame();
                 }
             }
         }
@@ -1427,7 +1373,7 @@ mod tests {
         assert_eq!(format_pending_roots(&[]), "<none>");
     }
 
-    use crate::substrate_bench::BenchOp;
+    use crate::BenchOp;
     use std::thread;
     use std::time::Instant;
 
@@ -1459,91 +1405,6 @@ mod tests {
         assert!(pending.contains("in_flight=1"), "dump should name the stuck root with in_flight=1: {pending}");
         // The rendered error string carries the dump too.
         assert!(err.to_string().contains("in_flight=1"), "Display should surface the pending dump: {err}");
-    }
-
-    /// Boot, advance one tick, capture, sanity-check the PNG.
-    /// The default scene is empty so the captured frame is the
-    /// background-clear color uniformly. The test asserts the PNG
-    /// is well-formed; deeper visual assertions land in the scenario
-    /// library.
-    ///
-    /// The unit test lets `SubstrateBench::start_with_size` fail naturally
-    /// on driverless runners and skips on any boot error, rather than
-    /// pulling in the `test_helpers` wgpu probe — keeping the lib
-    /// unit test self-contained (the same skip semantics, keyed off
-    /// the boot result rather than a separate adapter probe).
-    #[test]
-    fn boot_advance_capture_round_trip() {
-        let mut tb = match SubstrateBench::builder().size(64, 48).with_render().build() {
-            Ok(tb) => tb,
-            Err(e) => {
-                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-                return;
-            }
-        };
-        let result =
-            tb.execute(vec![("tick", BenchOp::advance(1)), ("snap", BenchOp::capture())]).expect("advance + capture");
-        let png = result.captured("snap").expect("snap step ran");
-        assert!(
-            png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
-            "captured bytes are not a PNG: first 8 bytes={:?}",
-            &png.iter().take(8).copied().collect::<Vec<u8>>(),
-        );
-    }
-
-    /// iamacoffeepot/aether#1273: `on_capture_frame` parks the request
-    /// on the capture queue and returns immediately — the reply happens
-    /// later on the chassis main thread. ADR-0086 §12 says deferred
-    /// replies MUST hold-open against the trace root; without that hold
-    /// `Settled{root}` fires before the reply lands and the wire `Call`
-    /// driving the MCP tool ends with zero collected reply events.
-    ///
-    /// This test sends `CaptureFrame` via `BenchOp::send_and_await` (the
-    /// shape the issue's regression test calls for) and asserts the
-    /// reply decodes to `CaptureFrameResult::Ok { png: <non-empty> }`.
-    /// The PNG comes back through the loopback's `EgressEvent::ToSession`
-    /// — same correlation-id round-trip the MCP harness uses, but
-    /// in-process.
-    #[test]
-    fn capture_frame_send_and_await_returns_png() {
-        let mut tb = match SubstrateBench::builder().size(64, 48).with_render().build() {
-            Ok(tb) => tb,
-            Err(e) => {
-                eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");
-                return;
-            }
-        };
-        let result = tb
-            .execute(vec![
-                ("tick", BenchOp::advance(1)),
-                (
-                    "capture",
-                    BenchOp::send_and_await(
-                        RenderCapability::NAMESPACE,
-                        &CaptureFrame {
-                            mails: Vec::new(),
-                            after_mails: Vec::new(),
-                            checks: Vec::new(),
-                            similarity: None,
-                        },
-                    ),
-                ),
-            ])
-            .expect("advance + send_and_await(CaptureFrame)");
-        let reply: CaptureFrameResult = result.reply("capture").expect("capture step replied with CaptureFrameResult");
-        match reply {
-            CaptureFrameResult::Ok { png, verdict, .. } => {
-                assert!(verdict.is_none(), "no checks were requested, so the verdict must be absent");
-                assert!(
-                    png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
-                    "captured bytes are not a PNG: first 8 bytes={:?}",
-                    &png.iter().take(8).copied().collect::<Vec<u8>>(),
-                );
-            }
-            CaptureFrameResult::Err { error } => {
-                panic!("capture_frame replied Err: {error}");
-            }
-        }
     }
 
     /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted

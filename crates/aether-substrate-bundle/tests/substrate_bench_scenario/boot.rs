@@ -17,6 +17,7 @@
 //! component list — the marker is the signal that its `unwire` actually ran.
 
 use super::*;
+use aether_substrate_bundle::FullBenchExt;
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
 /// return its trampoline `MailboxId`.

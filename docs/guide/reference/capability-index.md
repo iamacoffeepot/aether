@@ -28,7 +28,7 @@ fallback or omits the runtime.
 | `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
 | `aether.gemini` | image and music generation | `aether-gemini/src` | [Content generation](../systems/content-generation.md) |
 | `aether.game.gateway` | trusted player/session-to-sim binding | `aether-game/src` | [Player sessions](../systems/player-sessions.md) |
-| `aether.substrate_bench` | deterministic test-chassis advance/control | `aether-substrate-bundle/src/substrate_bench` | [SubstrateBench](../testing/substratebench-and-fleetbench.md) |
+| `aether.substrate_bench` | deterministic test-chassis advance/control | `aether-substrate-bench/src` | [SubstrateBench](../testing/substratebench-and-fleetbench.md) |
 
 Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
 `aether.engine.proxy`, `aether.http.server.shard`, and guest trampolines gain

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use aether_data::Kind;
 use aether_substrate::actor::wasm::host_fns;
 use aether_substrate::{Component, ComponentCtx, HubOutbound, Mail, MailboxId, Mailer, Registry};
-use aether_substrate_bundle::substrate_bench::test_helpers::require_runtime;
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::SetRender;
 use wasmtime::{Engine, Linker, Module};
 

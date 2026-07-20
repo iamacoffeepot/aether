@@ -1,5 +1,6 @@
 //! Strict typed terra flow through two real wasm components.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
@@ -13,7 +14,8 @@ use aether_kit::terra::{
     TerraCommandResult, TerraConfig, TerraError, TerraQuery, TerraQueryResult, WorldDelta,
 };
 use aether_kit::world::WorldPoint;
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 #[allow(unused_imports)]
 use aether_kit as _;

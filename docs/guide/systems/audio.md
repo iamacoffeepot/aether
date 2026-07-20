@@ -191,7 +191,7 @@ capability. These current facts are visible in
 [`headless/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/headless/chassis.rs),
 [`hub/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/hub/chassis.rs),
 and
-[`substrate_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/substrate_bench/chassis.rs).
+[`substrate_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bench/src/chassis.rs).
 
 ## Where to change or extend it
 

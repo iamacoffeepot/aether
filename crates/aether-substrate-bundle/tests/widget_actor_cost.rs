@@ -64,6 +64,7 @@
 // knobs, not cap config.
 #![allow(clippy::disallowed_methods)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::env;
 use std::fs;
 use std::time::Instant;
@@ -72,7 +73,8 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries land

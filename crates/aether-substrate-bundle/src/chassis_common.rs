@@ -35,7 +35,7 @@ use aether_http::HttpServerConfigLayer;
 use aether_http::{HttpCapability, HttpConfig, HttpServerCapability, HttpServerConfig};
 use aether_input::{InputCapability, InputConfig};
 use aether_inventory::InventoryCapability;
-use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
+use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData};
 use aether_render::RenderTuningConfigLayer;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
@@ -349,53 +349,61 @@ impl SchedulerTuningConfig {
     }
 }
 
-/// Default cumulative settlement-patience cap, in seconds (issue 2062).
-/// Five minutes — a generous deadlock/livelock backstop a healthy chain
-/// never reaches even on a saturated box, not the gate a healthy chain
-/// meets. The literal `default = 300` on [`SettlementConfig`] must equal
-/// this; `settlement_config_defaults_match` guards the pair.
-const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
+// Issue #3765: `SettlementConfig` (the `AETHER_SETTLEMENT_CAP_SECS`
+// knob) rehomed to `aether-substrate-bench`, its primary consumer; the
+// chassis teardown resolution below reads the same knob through the
+// re-import.
+use aether_substrate_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
+pub use aether_substrate_bench::{SettlementConfig, SettlementConfigLayer};
 
-/// Settlement-patience backstop knob (issue 2062). The bench's settlement
-/// gates block on the settlement signal and treat this cap as a generous
-/// deadlock/livelock backstop, not the 30 s wall-clock correctness gate
-/// that false-fired under `nextest --workspace` saturation (a healthy-but-
-/// slow chain settling at e.g. 45 s was wrongly declared wedged). The
-/// `#[derive(aether_substrate::Config)]` emits the env-shaped
-/// `SettlementConfigLayer`, the clap-shaped `SettlementOverlay`, the
-/// `FromArgvThenEnv` impl, and the inherent `from_env` /
-/// `from_argv_then_env` shims (ADR-0090 unit g) — mirrors
-/// [`ActorRingConfig`]. Resolved once at gate construction and lowered via
-/// [`Self::to_cap`] to the `Duration` the bench reads.
-#[derive(Clone, Debug, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_SETTLEMENT", cli_prefix = "settlement")]
-pub struct SettlementConfig {
-    /// `AETHER_SETTLEMENT_CAP_SECS=<seconds>` cumulative settlement
-    /// patience before a gate is declared wedged (default
-    /// [`DEFAULT_SETTLEMENT_CAP_SECS`]). `0` is the sentinel for "no cap —
-    /// wait forever," for attaching a debugger to a suspected deadlock; in
-    /// that mode the per-round warn log stays the live signal.
-    #[config(env = "AETHER_SETTLEMENT_CAP_SECS", default = 300)]
-    pub cap_secs: u64,
+/// Render-size knob for the standalone substrate-bench binary
+/// (`AETHER_SUBSTRATE_BENCH_SIZE=WxH`). Mirrors the single-field
+/// `SettlementConfig` shape: a `#[derive(aether_substrate::Config)]`
+/// struct resolved `from_env()` and lowered to `(u32, u32)` by
+/// [`Self::to_size`]. Lives binary-side (issue #3765) — the in-process
+/// bench sizes through its builder, not process env.
+///
+/// The explicit `env =` pin is belt-and-suspenders against a future field
+/// rename, matching how `ActorRingConfig` pins its historical keys.
+#[derive(Clone, Debug, Default, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_SUBSTRATE_BENCH", cli_prefix = "substrate-bench")]
+pub struct RenderSizeConfig {
+    /// `AETHER_SUBSTRATE_BENCH_SIZE=WxH` render dimensions for the offscreen
+    /// wgpu surface. Falls back to `800x600` on missing/unparseable input
+    /// with a warn log (default `None`).
+    #[config(env = "AETHER_SUBSTRATE_BENCH_SIZE")]
+    pub size: Option<String>,
 }
 
-impl Default for SettlementConfig {
-    fn default() -> Self {
-        Self { cap_secs: DEFAULT_SETTLEMENT_CAP_SECS }
-    }
-}
-
-impl SettlementConfig {
-    /// Lower the resolved knob to the cumulative-cap [`Duration`] the
-    /// settlement gates read. `0` maps to [`Duration::MAX`] — the
-    /// "no cap" sentinel, which the gate's `waited >= cap` test never
-    /// trips, so the wait blocks on the signal forever.
+impl RenderSizeConfig {
+    /// Lower the resolved knob to `(width, height)` pixels. Preserves the
+    /// `parse_size_env` semantics verbatim: missing env var, missing `x`
+    /// separator, non-numeric parts, or a zero dimension all fall back to
+    /// [`DEFAULT_WIDTH`] × [`DEFAULT_HEIGHT`] with a `warn` log.
     #[must_use]
-    pub fn to_cap(&self) -> Duration {
-        if self.cap_secs == 0 {
-            Duration::MAX
+    pub fn to_size(&self) -> (u32, u32) {
+        let Some(raw) = self.size.as_deref() else {
+            return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        };
+        if let Some((w, h)) = raw.split_once('x') {
+            match (w.parse::<u32>(), h.parse::<u32>()) {
+                (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
+                _ => {
+                    tracing::warn!(
+                        target: "aether_substrate::boot",
+                        value = %raw,
+                        "AETHER_SUBSTRATE_BENCH_SIZE unparseable — falling back to default",
+                    );
+                    (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+                }
+            }
         } else {
-            Duration::from_secs(self.cap_secs)
+            tracing::warn!(
+                target: "aether_substrate::boot",
+                value = %raw,
+                "AETHER_SUBSTRATE_BENCH_SIZE missing 'x' separator — falling back to default",
+            );
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
         }
     }
 }
@@ -632,57 +640,6 @@ pub fn tick_only_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfi
     LifecycleConfig { graph, initial_subscribers: vec![], advance_timeout_millis }
 }
 
-/// Build the three-stage frame lifecycle config the display-driving
-/// chassis share (ADR-0082 §11, issues 1378 + 1489):
-/// `Tick → Render → Present → Tick` (looping), with the `Quit` escape to
-/// a `Shutdown` terminal on the `Present` stage. The chassis drives a
-/// full `Tick → Render → Present` cycle per frame; `Render` broadcasts
-/// only after the entire `Tick` chain has settled (ADR-0080 §6), so a
-/// render producer's `on_render` runs once every actor's per-frame
-/// `Tick` compute is done — no submitting against half-updated
-/// cross-actor state.
-///
-/// The `Quit` escape lives on `Present`, not `Tick`: a `quit_pending`
-/// flag set mid-frame is consumed only once the cap reaches `Present`,
-/// so the in-flight frame has broadcast its full `Tick → Render →
-/// Present` cycle before the lifecycle advances to `Shutdown` (ADR-0082
-/// §3 "drain the frame before exit"). `Present` is a chassis-GPU-work
-/// ordering point with an empty subscriber set today — it exists to host
-/// this drain edge; per-stage component subscription lands when a
-/// producer needs a post-`Render` hook.
-///
-/// Like [`tick_only_lifecycle_config`], components subscribe the `Tick`
-/// (and `Render`) stage directly on `aether.lifecycle` (ADR-0082
-/// §7/§11), so the config wires no initial subscribers. Desktop and
-/// `substrate_bench` adopt this graph; headless stays
-/// [`tick_only_lifecycle_config`] (its render cap is a no-op, so a
-/// `Render` / `Present` stage would settle to no GPU work).
-///
-/// `advance_timeout_millis` is the resolved value from
-/// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
-/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the substrate-bench).
-///
-/// # Panics
-/// Panics if the (compile-time-fixed) graph fails to build — it can't,
-/// the shape is structurally valid; the `expect` documents the
-/// invariant.
-#[must_use]
-pub fn frame_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
-    let graph = LifecycleGraphData::builder()
-        .state::<Tick>()
-        .next::<Render>()
-        .state::<Render>()
-        .next::<Present>()
-        .state::<Present>()
-        .next::<Tick>()
-        .quit::<Shutdown>()
-        .terminal::<Shutdown>()
-        .start::<Tick>()
-        .build()
-        .expect("frame lifecycle graph is structurally valid");
-    LifecycleConfig { graph, initial_subscribers: vec![], advance_timeout_millis }
-}
-
 /// Args every full-stack chassis hands to [`with_common_caps`]. Kept
 /// as a flat struct (no defaults) so an added cap forces the chassis
 /// builders to acknowledge it.
@@ -836,9 +793,7 @@ mod tests {
     use super::ChassisBootConfig;
     use super::ChassisBootConfigLayer;
     use super::DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS;
-    use super::DEFAULT_SETTLEMENT_CAP_SECS;
     use super::SchedulerTuningConfigLayer;
-    use super::SettlementConfig;
     use super::chassis_known_keys;
     use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
@@ -853,7 +808,6 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::PoisonError;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     /// Process-wide guard around the `AETHER_ACTOR_*` ring env mutation,
     /// so ring tests serialise their set/remove pairs.
@@ -987,18 +941,6 @@ mod tests {
     }
 
     #[test]
-    fn settlement_to_cap_maps_seconds_and_zero_sentinel() {
-        // Issue 2062 — the only logic this knob owns: seconds → `Duration`,
-        // with `0` as the "no cap — wait forever" sentinel. Constructed
-        // directly, so the test exercises our `to_cap`, not confique's
-        // env/argv resolution (which the derive macro generates and
-        // confique's own tests cover).
-        assert_eq!(SettlementConfig { cap_secs: 0 }.to_cap(), Duration::MAX, "0 → wait forever");
-        assert_eq!(SettlementConfig { cap_secs: 45 }.to_cap(), Duration::from_secs(45),);
-        assert_eq!(SettlementConfig::default().to_cap(), Duration::from_secs(DEFAULT_SETTLEMENT_CAP_SECS),);
-    }
-
-    #[test]
     fn settlement_key_is_known() {
         // Guards the one-line registration of `SettlementConfigLayer::META`
         // in the chassis registry: without it the cap env key trips the
@@ -1053,45 +995,6 @@ mod tests {
         let cfg = ChassisBootConfig { workers: Some(0), ..ChassisBootConfig::default() };
         assert_eq!(cfg.to_workers(), Some(1));
     }
-
-    #[test]
-    fn frame_lifecycle_graph_is_tick_render_present_with_shutdown_terminal() {
-        // ADR-0082 §11 / issues 1378 + 1489: the display-driving chassis
-        // graph is `Tick → Render → Present → Tick` (looping) with the
-        // `Quit` escape to a `Shutdown` terminal on the `Present` stage.
-        // The graph's edge accessors (`next` / `quit` per state) are
-        // crate-private to `aether-lifecycle`, so this crate-boundary
-        // check reads the public `Debug` (start + the non-terminal state
-        // kinds + terminals) plus the now-empty `initial_subscribers`
-        // set. Quit-edge *placement* (on `Present`, not `Tick`) is
-        // verified at the cap-unit layer (`lifecycle.rs` `resolve_edge`
-        // tests, which can read `state().quit`) and end-to-end by the
-        // `substrate_bench` quit-drain scenario.
-        use aether_data::Kind;
-        use aether_kinds::{Present, Render, Shutdown, Tick};
-
-        let cfg = super::frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT);
-        let graph_dbg = format!("{:?}", cfg.graph);
-        let tick = format!("{:?}", <Tick as Kind>::ID);
-        let render = format!("{:?}", <Render as Kind>::ID);
-        let present = format!("{:?}", <Present as Kind>::ID);
-        let shutdown = format!("{:?}", <Shutdown as Kind>::ID);
-
-        // Start state is Tick.
-        assert!(graph_dbg.contains(&format!("start: {tick}")), "expected start Tick in {graph_dbg}");
-        // Tick, Render, and Present are all non-terminal states.
-        assert!(graph_dbg.contains(&render), "expected a Render state in {graph_dbg}");
-        assert!(graph_dbg.contains(&present), "expected a Present state in {graph_dbg}");
-        // Shutdown is the sole terminal.
-        assert!(graph_dbg.contains(&format!("terminals: [{shutdown}]")), "expected Shutdown terminal in {graph_dbg}");
-
-        // No initial subscribers: components subscribe the `Tick` stage
-        // directly on `aether.lifecycle` (ADR-0082 §7/§11); the boot-time
-        // `Tick → aether.input` relay retired with the input cap's
-        // `on_tick` fan-out.
-        assert!(cfg.initial_subscribers.is_empty());
-    }
-
     #[test]
     fn chassis_known_keys_includes_scheduler_hot_path_knobs() {
         // ADR-0090 unit b2: the scheduler hot-path knobs join the

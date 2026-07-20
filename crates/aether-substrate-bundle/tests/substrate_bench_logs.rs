@@ -19,7 +19,9 @@ mod tests {
 
     use aether_actor::Addressable;
     use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
-    use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
+    use aether_substrate_bench::{BenchOp, SubstrateBench};
+    use aether_substrate_bench_capture::test_helpers::require_runtime;
+    use aether_substrate_bundle::FullBenchExt;
 
     const PROBE_NAME: &str = "probe";
 

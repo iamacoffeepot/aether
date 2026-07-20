@@ -11,6 +11,7 @@
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
+use aether_substrate_bundle::FullBenchExt;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
@@ -20,9 +21,9 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bundle::substrate_bench::{
-    BenchOp, SubstrateBench,
-    test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::{
+    init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
 use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux};
 

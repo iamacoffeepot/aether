@@ -1,5 +1,6 @@
 //! Terrain proposal lifecycle and pixel identity through the real kit wasm.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
@@ -17,8 +18,10 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bundle::substrate_bench::{ArtifactGuard, BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::ArtifactGuard;
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{
     ColorRegionStats, FramePoint, Rect, decode_png, mean_absolute_error, run_checks, target_color_stats,
 };
 

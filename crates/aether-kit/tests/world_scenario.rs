@@ -10,6 +10,7 @@
 //! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1` so either condition is a
 //! hard failure there.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::path::Path;
 
@@ -23,8 +24,9 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
 

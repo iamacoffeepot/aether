@@ -21,7 +21,7 @@ use aether_substrate::render::{self, RenderError, encode_png, vertex_buffer_layo
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::visual;
+use aether_substrate_bench_capture::visual;
 
 pub use render::VERTEX_BUFFER_BYTES;
 use std::iter;

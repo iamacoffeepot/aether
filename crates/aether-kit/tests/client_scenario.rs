@@ -1,5 +1,6 @@
 //! Real-TCP player client scenarios through the shipped `aether-kit` wasm.
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -19,8 +20,9 @@ use aether_kit::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
     StateSummary, TickBundle,
 };
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{ColorRegionStats, decode_png, target_color_stats};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
 use aether_tcp::{ListListeners, ListListenersResult};
 
 const CAMERA_NAME: &str = "client-camera";
@@ -339,9 +341,9 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
     let sim_mailbox = resolve_embedded(SIM_NAME);
     let mut bench = SubstrateBench::builder()
-        .full()
+        .full_sans_game()
         .size(FRAME_WIDTH, FRAME_HEIGHT)
-        .game_gateway(GameGatewayConfig {
+        .with_actor::<GameGatewayCapability>(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(sim_mailbox),

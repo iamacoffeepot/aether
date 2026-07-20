@@ -17,7 +17,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::substrate_bench::UnsupportedSubstrateBenchCapability;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
@@ -37,6 +36,7 @@ use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate_bench::UnsupportedSubstrateBenchCapability;
 use aether_window::HeadlessWindowCapability;
 
 use super::driver::{HeadlessTimerDriverCapability, TickConfig};

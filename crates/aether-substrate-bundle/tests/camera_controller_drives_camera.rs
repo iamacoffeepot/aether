@@ -23,6 +23,7 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
+use aether_substrate_bundle::FullBenchExt;
 use std::fs;
 
 use aether_actor::Addressable;
@@ -32,8 +33,9 @@ use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render
 use aether_kit::SetChunk;
 use aether_kit::camera::controller::ControllerConfig;
 use aether_kit::world::Material;
-use aether_substrate_bundle::substrate_bench::{BenchOp, SubstrateBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
+use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_substrate_bench_capture::test_helpers::require_runtime;
+use aether_substrate_bench_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 
 /// Capture surface — a 4:3 frame the camera's aspect matches once the
 /// `WindowSize` below lands.

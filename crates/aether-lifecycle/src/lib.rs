@@ -86,7 +86,7 @@ pub use subscribers::LifecycleMailboxExt;
 // `mod runtime;` gate. `LifecycleConfig` configures that runtime state, so its
 // re-export sources through `runtime` rather than a per-import gate here.
 #[cfg(feature = "runtime")]
-pub use runtime::LifecycleConfig;
+pub use runtime::{LifecycleConfig, frame_lifecycle_config};
 
 /// The `aether.lifecycle` cap **identity** (ADR-0122 identity/runtime
 /// split, ADR-0082). A ZST carrying only the addressing — the
