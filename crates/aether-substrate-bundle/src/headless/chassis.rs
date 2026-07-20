@@ -42,12 +42,11 @@ use aether_window::HeadlessWindowCapability;
 use aether_chassis::TickConfig;
 
 use super::driver::HeadlessTimerDriverCapability;
-use crate::hub;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
     maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
-    resolve_with_file, tick_only_lifecycle_config, with_common_caps,
+    resolve_with_file, rpc_port_from_env, tick_only_lifecycle_config, with_common_caps,
 };
 use aether_chassis::cli::{CommonOverlay, HeadlessCli};
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
@@ -229,7 +228,7 @@ impl HeadlessEnv {
         // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
         let tick_period = tick_config.to_tick_period();
         let rpc_addr =
-            cli_rpc_port.or_else(hub::rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
+            cli_rpc_port.or_else(rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = chassis_boot.to_workers();
         let lifecycle_advance_timeout_millis = chassis_boot.lifecycle_advance_timeout_millis;
         // Issue 1990: resolve the per-actor ring capacities from

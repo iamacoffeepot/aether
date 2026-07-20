@@ -3,13 +3,11 @@
 //! Standard Cargo layout:
 //!
 //! - `src/<chassis>/` — chassis-specific source (chassis impl,
-//!   driver capability, render plumbing, etc.) for the desktop,
-//!   headless, and hub chassis.
-//! - `src/hub/` — the hub chassis (the `aether-substrate-hub` binary's
-//!   thin Chassis impl post-issue-763 P5f).
+//!   driver capability, render plumbing, etc.) for the desktop and
+//!   headless chassis. The hub chassis lives in `aether-chassis-hub`.
 //! - `src/bin/<chassis>.rs` — minimal entry point per binary
 //!   (`aether-substrate`, `aether-substrate-headless`,
-//!   `aether-substrate-hub`, `aether-substrate-harness`).
+//!   `aether-substrate-harness`).
 //!
 //! The substrate-harness chassis machinery and the in-process
 //! `SubstrateHarness` live in the `aether-harness-substrate` crate
@@ -30,7 +28,6 @@
 
 pub mod desktop;
 pub mod headless;
-pub mod hub;
 
 pub use aether_component::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{

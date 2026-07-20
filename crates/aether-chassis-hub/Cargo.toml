@@ -1,0 +1,54 @@
+[package]
+name = "aether-chassis-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The hub chassis (issue #3810): the thin coordinator between
+# aether-mcp and the substrate fleet. Stands up trace dispatch, the
+# engines cap, and the RPC server, then blocks on SIGINT/SIGTERM.
+# Produces the `aether-substrate-hub` binary; the shared composition
+# layer comes from `aether-chassis`.
+
+[[bin]]
+name = "aether-substrate-hub"
+path = "src/bin/hub.rs"
+
+# Same `runtime` convention as the other chassis crates (ADR-0122):
+# composes the cap crates' substrate-typed halves, so default-on with
+# no transport-only face.
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-chassis = { path = "../aether-chassis" }
+aether-substrate = { path = "../aether-substrate" }
+# The hub's cap set: the engines cap (fleet fork/track), the RPC server
+# aether-mcp dials, and trace dispatch for `aether.trace` roots.
+aether-engine = { path = "../aether-engine" }
+aether-rpc = { path = "../aether-rpc" }
+aether-trace = { path = "../aether-trace", features = ["runtime"] }
+aether-actor = { path = "../aether-actor" }
+# Fully-qualified `aether_data::mailbox_id_from_name` resolves the
+# engines-cap route target.
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# The bin parses `HubCli` (ADR-0090 unit d) and bridges boot faults.
+clap = { workspace = true }
+anyhow = { workspace = true }
+# `--describe` prints the BinaryManifest as JSON (ADR-0115).
+serde_json = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+# The hub blocks on a SIGINT/SIGTERM signal in
+# `HubServerDriverRunning::run`; signal-hook is Unix-only, the Windows
+# fallback rides `ctrlc` for Ctrl-C only.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
+
+[lints]
+workspace = true

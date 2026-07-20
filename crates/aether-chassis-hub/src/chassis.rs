@@ -25,7 +25,8 @@ use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, val
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
-use crate::hub::DEFAULT_RPC_PORT;
+use crate::DEFAULT_RPC_PORT;
+use aether_chassis::boot::rpc_port_from_env;
 use aether_chassis::boot::{
     ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config, resolve_env_with_file,
     resolve_teardown_cap_with_file, resolve_with_file,
@@ -117,7 +118,7 @@ impl HubEnv {
         validate_env(&hub_known_keys())?;
         let config_file = load_chassis_config(cli.config.clone())?;
         let config_file = config_file.as_ref();
-        let rpc_port = cli.rpc_port.or_else(super::rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
+        let rpc_port = cli.rpc_port.or_else(rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
         Ok(Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
             engine: resolve_with_file::<EngineConfig>(cli.engine.clone().into_layer(), config_file, "engine")?,
