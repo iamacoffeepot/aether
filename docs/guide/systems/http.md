@@ -123,7 +123,7 @@ into new capabilities; use the sanctioned offload/settlement primitives from
 [Concurrency and blocking](concurrency.md). Moving these legacy sinks off the
 dispatcher is a separate architectural correction.
 
-The cap is wired on the desktop and headless chassis. The in-process substrate-bench
+The cap is wired on the desktop and headless chassis. The in-process substrate-harness
 chassis omits it, so `aether.http` is not a registered mailbox there and mail to
 it warn-drops like any unaddressed name.
 

@@ -92,7 +92,7 @@ fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
 /// Reserved sentinel `texture_id` for the internal 1×1 white texture
 /// used by `on_draw_solid_quads`. `create_texture` starts at `0` and
 /// increments, so `u32::MAX` is outside the range any caller-visible id
-/// occupies. Typed `SubstrateBench` observations expose the sentinel so normalized
+/// occupies. Typed `SubstrateHarness` observations expose the sentinel so normalized
 /// solid batches remain identifiable, but callers cannot allocate, update,
 /// or destroy it and it never collides with a user-created texture.
 pub const WHITE_TEXTURE_ID: u32 = u32::MAX;

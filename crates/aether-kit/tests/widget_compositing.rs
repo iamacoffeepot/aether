@@ -32,10 +32,13 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
-use aether_substrate_bench_capture::{RenderBenchBuilderExt, RenderBenchExt};
+use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use std::fs;
 
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace};
 use aether_kit::{
     PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, Theme, WidgetChildSpec, WidgetClipRect, WidgetConfig,
@@ -45,9 +48,6 @@ use aether_math::Rgba;
 use aether_render::{
     CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
 /// single dominant channel — the compositing order is then read off the
@@ -111,12 +111,12 @@ fn four_color_texture_pixels(size: u32) -> Vec<u8> {
     pixels
 }
 
-fn create_four_color_texture(bench: &mut SubstrateBench) -> u32 {
+fn create_four_color_texture(harness: &mut SubstrateHarness) -> u32 {
     let size = 8;
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture {
                     width: size,
@@ -148,11 +148,11 @@ fn leaf_config(width: f32, height: f32, color: Rgba) -> Vec<u8> {
 /// Load the `Widget` root export from the kit wasm under the name `panel`,
 /// carrying `config`, and block on `LoadResult` so the root is
 /// instantiated before the capture frame runs.
-fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], config: &WidgetConfig) {
-    let loaded = bench
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig) {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -171,7 +171,7 @@ fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], config: &WidgetConfig) {
     }
 }
 
-fn load_scroll_panel(bench: &mut SubstrateBench, wasm: &[u8], child: WidgetChildSpec) {
+fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetChildSpec) {
     let config = PanelConfig {
         x: 12.0,
         y: 8.0,
@@ -182,10 +182,10 @@ fn load_scroll_panel(bench: &mut SubstrateBench, wasm: &[u8], child: WidgetChild
         children: vec![child],
         owns_input: true,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -238,7 +238,8 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
 
     // Root chrome fills the middle (8,8)-(56,40); two leaves sit inside it
     // — child a red at (12,12)-(24,24), child b green at (36,20)-(48,32).
@@ -263,20 +264,20 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
             },
         ],
     };
-    load_panel(&mut bench, &wasm, &config);
+    load_panel(&mut harness, &wasm, &config);
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
 
     assert_eq!(
-        bench.count_observed("aether.render.draw_solid_quads"),
+        harness.count_observed("aether.render.draw_solid_quads"),
         1,
         "the whole two-widget cluster must reach the render sink as exactly one \
          DrawSolidQuads; observed: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 
     // The corner is outside the root chrome, so it stays the clear color —
@@ -313,7 +314,8 @@ fn nested_tree_draws_in_depth_first_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
 
     // Interior node b: green chrome (0,0,20,20), one white leaf b1 inset at
     // local (2,2), sized 6×6.
@@ -362,20 +364,20 @@ fn nested_tree_draws_in_depth_first_order() {
             },
         ],
     };
-    load_panel(&mut bench, &wasm, &config);
+    load_panel(&mut harness, &wasm, &config);
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
 
     assert_eq!(
-        bench.count_observed("aether.render.draw_solid_quads"),
+        harness.count_observed("aether.render.draw_solid_quads"),
         1,
         "the whole two-level tree must reach the render sink as exactly one \
          DrawSolidQuads; observed: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 
     // Depth-first order, read by hue: root chrome (blue) under the interior
@@ -446,15 +448,16 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         }],
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_panel(&mut bench, &wasm, &config);
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    load_panel(&mut harness, &wasm, &config);
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture clipped tree");
     let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode clipped capture");
 
     let solids: Vec<_> =
-        bench.committed_overlay_snapshot().into_iter().filter(|batch| batch.texture_id == WHITE_TEXTURE_ID).collect();
+        harness.committed_overlay_snapshot().into_iter().filter(|batch| batch.texture_id == WHITE_TEXTURE_ID).collect();
     assert_eq!(solids.len(), 3, "None, root clip, and nested clip are three runs");
     assert_eq!(solids[0].clip, None);
     assert_eq!(solids[1].clip, Some(ClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),);
@@ -492,8 +495,9 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    let texture_id = create_four_color_texture(&mut bench);
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let texture_id = create_four_color_texture(&mut harness);
 
     let root_texture_clip = WidgetClipRect { x: 6.0, y: 6.0, width: 12.0, height: 12.0 };
     let child_clip = WidgetClipRect { x: 26.0, y: 10.0, width: 26.0, height: 24.0 };
@@ -536,16 +540,16 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
             config: child,
         }],
     };
-    load_panel(&mut bench, &wasm, &config);
+    load_panel(&mut harness, &wasm, &config);
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture textured widget tree");
     let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode textured capture");
 
     let child_framebuffer_clip =
         ClipRect { x: child_clip.x, y: child_clip.y, width: child_clip.width, height: child_clip.height };
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     assert_eq!(snapshot.len(), 5, "solid/textured transitions form five runs");
 
     assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
@@ -714,15 +718,16 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         .encode_into_bytes(),
     };
 
-    let mut bench = SubstrateBench::builder().size(80, 48).with_render().with_component_host().build().expect("boot");
-    load_scroll_panel(&mut bench, &wasm, scroll);
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])
+    let mut harness =
+        SubstrateHarness::builder().size(80, 48).with_render().with_component_host().build().expect("boot");
+    load_scroll_panel(&mut harness, &wasm, scroll);
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])
         .expect("capture scrolled composite");
     let image = decode_png(captured.captured("snap").expect("scroll capture bytes")).expect("decode scroll capture");
 
     let clip = ClipRect { x: 12.0, y: 8.0, width: 24.0, height: 16.0 };
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     let content_batch = snapshot
         .iter()
         .find(|batch| batch.clip.as_ref() == Some(&clip))
@@ -757,7 +762,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         "content_origin - initial_offset and panel placement agree exactly",
     );
     assert_eq!(
-        bench.count_observed("aether.render.draw_solid_quads"),
+        harness.count_observed("aether.render.draw_solid_quads"),
         2,
         "the panel background and one equal-clip content run are the only solid batches",
     );

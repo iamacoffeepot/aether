@@ -1,16 +1,16 @@
-// Test-bench chassis binary entry point.
+// Test-harness chassis binary entry point.
 //
-// Reads chassis-relevant env vars into a `SubstrateBenchEnv`, asks
-// `SubstrateBenchChassis::build_passive` to assemble the substrate plus
+// Reads chassis-relevant env vars into a `SubstrateHarnessEnv`, asks
+// `SubstrateHarnessChassis::build_passive` to assemble the substrate plus
 // every capability (Log, Render, Io if roots pre-validate, etc.)
 // through the chassis_builder `Builder`, creates the offscreen
 // `Gpu`, then drives the events_rx loop on the main thread. The
 // chassis is embedder-driven (no `DriverCapability`) — `main()` IS
 // the driver.
 //
-// In-process counterpart lives in `aether-substrate-bench::SubstrateBench`
-// (the `SubstrateBench::start()` API ADR-0067 introduced); both paths
-// share `SubstrateBenchChassis::build_passive`.
+// In-process counterpart lives in `aether-harness-substrate::SubstrateHarness`
+// (the `SubstrateHarness::start()` API ADR-0067 introduced); both paths
+// share `SubstrateHarnessChassis::build_passive`.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -32,12 +32,12 @@ use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail
 /// is `frame_loop::DRAIN_BUDGET`; a starved-but-healthy chain resolves
 /// before this cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
-use aether_render::RenderHandles;
-use aether_substrate_bench::{
-    SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS,
+use aether_harness_substrate::{
+    SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
     events::{self, ChassisEvent},
 };
-use aether_substrate_bench_capture::{Gpu, GpuRenderExt};
+use aether_harness_substrate_capture::{Gpu, GpuRenderExt};
+use aether_render::RenderHandles;
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::{RenderSizeConfig, resolve_teardown_cap};
 
@@ -48,24 +48,24 @@ fn main() -> anyhow::Result<()> {
     // Per issue 464, this `main()` is the env-reading edge.
     let namespace_roots = NamespaceRoots::from_env();
 
-    let env = SubstrateBenchEnv {
-        name: "substrate-bench".to_owned(),
+    let env = SubstrateHarnessEnv {
+        name: "substrate-harness".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         workers: WORKERS,
         pool_workers: None,
-        // Issue 1990: the standalone substrate-bench binary keeps the default
-        // ring caps; the in-process `SubstrateBench` builder is the surface
-        // for tuning them (per-bench, no process env).
+        // Issue 1990: the standalone substrate-harness binary keeps the default
+        // ring caps; the in-process `SubstrateHarness` builder is the surface
+        // for tuning them (per-harness, no process env).
         ring_caps: aether_substrate::RingCapacities::default(),
         // Issue 2485: the standalone binary keeps the built-in scheduler
-        // tuning (per-bench, no process env).
+        // tuning (per-harness, no process env).
         scheduler_tuning: aether_substrate::SchedulerTuning::default(),
         observed_kinds: None,
         events_tx,
         capture_queue: capture_queue.clone(),
         namespace_roots: Some(namespace_roots),
         // Issue #3764: the standalone binary is the MCP-drivable chassis,
-        // so it composes the full cap set — an in-process bench composes
+        // so it composes the full cap set — an in-process harness composes
         // per scenario instead.
         render_ext: Some(Box::new(GpuRenderExt)),
         component_host: true,
@@ -85,14 +85,14 @@ fn main() -> anyhow::Result<()> {
         teardown_cap: resolve_teardown_cap(),
     };
 
-    let SubstrateBenchBuild { passive, boot, kind_tick } = SubstrateBenchChassis::build_passive(env)?;
+    let SubstrateHarnessBuild { passive, boot, kind_tick } = SubstrateHarnessChassis::build_passive(env)?;
 
     let (width, height) = RenderSizeConfig::from_env().to_size();
     // Issue 629 / Phase A: render publishes its handles on the chassis's
     // `ExportedHandles` map during `init`; the binary composes render
     // above, so the fetch cannot miss.
     let render_handles: RenderHandles =
-        passive.handle::<RenderHandles>().expect("substrate-bench binary composes render");
+        passive.handle::<RenderHandles>().expect("substrate-harness binary composes render");
     let gpu = Gpu::new(width, height, render_handles);
     tracing::info!(
         target: "aether_substrate::boot",
@@ -102,8 +102,8 @@ fn main() -> anyhow::Result<()> {
         width,
         height,
         workers = WORKERS,
-        profile = SubstrateBenchChassis::PROFILE,
-        "substrate-bench componentless boot — drive ticks via aether.substrate_bench.advance",
+        profile = SubstrateHarnessChassis::PROFILE,
+        "substrate-harness componentless boot — drive ticks via aether.substrate_harness.advance",
     );
 
     drive_events_loop(events_rx, capture_queue, boot, passive, gpu, kind_tick);
@@ -122,7 +122,7 @@ fn drive_events_loop(
     events_rx: events::EventReceiver,
     capture_queue: CaptureQueue,
     boot: aether_substrate::SubstrateBoot,
-    passive: aether_substrate::PassiveChassis<SubstrateBenchChassis>,
+    passive: aether_substrate::PassiveChassis<SubstrateHarnessChassis>,
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
 ) {
@@ -215,7 +215,7 @@ fn run_frame(
         // the wait, fail-fast on a genuine wedge (ADR-0063).
         if let WaitOutcome::Wedged(wedge) = await_internal_signal(
             &rx,
-            "substrate_bench_bin.frame_advance",
+            "substrate_harness_bin.frame_advance",
             frame_loop::DRAIN_BUDGET,
             FRAME_SETTLEMENT_CAP,
             TerminalDisposition::Abort,
@@ -227,14 +227,14 @@ fn run_frame(
     match capture_queue.take() {
         Some(req) => {
             // iamacoffeepot/aether#860: wait for pre-mail settlement
-            // before rendering (mirrors the substrate-bench lib fix). The
+            // before rendering (mirrors the substrate-harness lib fix). The
             // standalone bin replies `Err` on stuck-chain rather than
             // bailing out of the frame loop.
             let mut pre_failed: Option<String> = None;
             for rx in req.pre_settlements {
                 if let WaitOutcome::Wedged(wedge) = await_internal_signal(
                     &rx,
-                    "substrate_bench_bin.capture_pre_mail",
+                    "substrate_harness_bin.capture_pre_mail",
                     frame_loop::DRAIN_BUDGET,
                     FRAME_SETTLEMENT_CAP,
                     TerminalDisposition::ReplyErr,

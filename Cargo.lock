@@ -113,9 +113,9 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-fs",
+ "aether-harness-substrate",
  "aether-kinds",
  "aether-kit",
- "aether-substrate-bench",
  "aether-test-fixtures-behavior",
  "serde",
  "tracing",
@@ -196,8 +196,8 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
+ "aether-harness-substrate",
  "aether-substrate",
- "aether-substrate-bench",
  "arboard",
  "inventory",
  "serde",
@@ -221,11 +221,11 @@ dependencies = [
  "aether-actor",
  "aether-data",
  "aether-fleet-bench",
+ "aether-harness-substrate",
  "aether-kinds",
  "aether-kit",
  "aether-rpc",
  "aether-substrate",
- "aether-substrate-bench",
  "aether-test-fixtures-boot",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-defaultless",
@@ -346,8 +346,8 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
+ "aether-harness-substrate",
  "aether-substrate",
- "aether-substrate-bench",
  "clap",
  "confique",
  "dirs",
@@ -364,10 +364,10 @@ dependencies = [
  "aether-codec",
  "aether-component",
  "aether-data",
+ "aether-harness-substrate",
  "aether-kinds",
  "aether-kit",
  "aether-substrate",
- "aether-substrate-bench",
  "aether-tcp",
  "inventory",
  "serde",
@@ -394,6 +394,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-harness-substrate"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-data",
+ "aether-fs",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-substrate",
+ "aether-trace",
+ "aether-window",
+ "anyhow",
+ "bytemuck",
+ "clap",
+ "confique",
+ "crossbeam-channel",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "aether-harness-substrate-capture"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-harness-substrate",
+ "aether-kinds",
+ "aether-render",
+ "aether-substrate",
+ "anyhow",
+ "png",
+ "pollster",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wgpu",
+]
+
+[[package]]
 name = "aether-http"
 version = "0.3.0-alpha"
 dependencies = [
@@ -403,10 +446,10 @@ dependencies = [
  "aether-contentgen",
  "aether-data",
  "aether-gemini",
+ "aether-harness-substrate-capture",
  "aether-http-derive",
  "aether-kinds",
  "aether-substrate",
- "aether-substrate-bench-capture",
  "aether-substrate-bundle",
  "aether-test-fixtures-bundle",
  "aether-trace",
@@ -438,9 +481,9 @@ dependencies = [
  "aether-actor",
  "aether-component",
  "aether-data",
+ "aether-harness-substrate",
  "aether-kinds",
  "aether-substrate",
- "aether-substrate-bench",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "bytemuck",
@@ -484,14 +527,14 @@ dependencies = [
  "aether-data",
  "aether-fs",
  "aether-game",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
  "aether-input",
  "aether-kinds",
  "aether-lifecycle",
  "aether-math",
  "aether-mesh",
  "aether-render",
- "aether-substrate-bench",
- "aether-substrate-bench-capture",
  "aether-tcp",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
@@ -574,11 +617,11 @@ dependencies = [
  "aether-actor",
  "aether-component",
  "aether-data",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
  "aether-kinds",
  "aether-math",
  "aether-substrate",
- "aether-substrate-bench",
- "aether-substrate-bench-capture",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "bytemuck",
@@ -622,9 +665,9 @@ dependencies = [
  "aether-derive",
  "aether-fleet-bench",
  "aether-fs",
+ "aether-harness-substrate",
  "aether-kinds",
  "aether-kit",
- "aether-substrate-bench",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "bytemuck",
@@ -647,49 +690,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-substrate-bench"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-component",
- "aether-data",
- "aether-fs",
- "aether-kinds",
- "aether-lifecycle",
- "aether-substrate",
- "aether-trace",
- "aether-window",
- "anyhow",
- "bytemuck",
- "clap",
- "confique",
- "crossbeam-channel",
- "inventory",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "aether-substrate-bench-capture"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "aether-kinds",
- "aether-render",
- "aether-substrate",
- "aether-substrate-bench",
- "anyhow",
- "png",
- "pollster",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "wgpu",
-]
-
-[[package]]
 name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
@@ -706,6 +706,8 @@ dependencies = [
  "aether-fs",
  "aether-game",
  "aether-gemini",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
  "aether-http",
  "aether-input",
  "aether-inventory",
@@ -716,8 +718,6 @@ dependencies = [
  "aether-render",
  "aether-rpc",
  "aether-substrate",
- "aether-substrate-bench",
- "aether-substrate-bench-capture",
  "aether-tcp",
  "aether-test-fixtures-kinds",
  "aether-text",
@@ -854,12 +854,12 @@ dependencies = [
  "aether-actor",
  "aether-data",
  "aether-fs",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
  "aether-kinds",
  "aether-math",
  "aether-render",
  "aether-substrate",
- "aether-substrate-bench",
- "aether-substrate-bench-capture",
  "fontdue",
  "inventory",
  "serde",

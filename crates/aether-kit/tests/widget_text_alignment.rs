@@ -37,21 +37,21 @@
 // a pixel region.
 #![allow(clippy::suboptimal_flops)]
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
     LoadResult, NamedMail, Tick,
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_render::RenderCapability;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, require_runtime};
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
@@ -96,11 +96,11 @@ fn assets_dir() -> PathBuf {
 /// registry and return its session-scoped `font_id`. Loading it here — rather
 /// than letting the panel's `wire` kick off the load — settles the font before
 /// any draw, so no capture races the async fs-read + parse.
-fn load_font(bench: &mut SubstrateBench) -> u32 {
-    let loaded = bench
+fn load_font(harness: &mut SubstrateHarness) -> u32 {
+    let loaded = harness
         .execute(vec![(
             "font",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
@@ -116,7 +116,7 @@ fn load_font(bench: &mut SubstrateBench) -> u32 {
 /// the name `panel`, with its stack at `(PANEL_X, PANEL_Y)` and its theme
 /// pinned to the already-resident `font_id` (empty font path, so the panel
 /// does not kick off its own load) — every widget draws text with that font.
-fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], font_id: u32) {
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -127,10 +127,10 @@ fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], font_id: u32) {
         children: Vec::new(),
         owns_input: true,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -237,7 +237,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // namespace roots). All mail is addressed directly, so no input fan-out.
     let sandbox = init_save_sandbox("widget-text-alignment");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .with_actor::<TextCapability>(())
@@ -245,8 +245,8 @@ fn panel_glyphs_sit_inside_their_row_frames() {
         .namespace_roots(roots)
         .build()
         .expect("boot");
-    let font_id = load_font(&mut bench);
-    load_panel(&mut bench, &wasm, font_id);
+    let font_id = load_font(&mut harness);
+    load_panel(&mut harness, &wasm, font_id);
 
     let panel = panel_address();
     // Warm the panel: the first tick spawns + lays out the widget stack and
@@ -255,20 +255,20 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // round-trip (the `advance`) before glyphs rasterize into it. The capture
     // then draws once more, so the glyph quads reach the renderer the same
     // frame it reads back.
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("prime", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(2)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("prime", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");
 
     let rows = row_checks();
     let checks: Vec<FrameCheck> = rows.iter().map(|r| r.check.clone()).collect();
-    let captured = bench
+    let captured = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame { mails: vec![tick_to_panel()], after_mails: Vec::new(), checks, similarity: None },
             ),

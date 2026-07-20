@@ -351,7 +351,7 @@ The executable evidence is deliberately in-tree:
 
 - `crates/aether-kit/tests/terrain_workbench_scenario.rs` drives raw input
   through the real workbench, checks `WorkbenchQueryResult`, then uses
-  `SubstrateBench`, `BenchOp::capture_with_mails`, `ArtifactGuard`, and
+  `SubstrateHarness`, `HarnessOp::capture_with_mails`, `ArtifactGuard`, and
   `aether_substrate_bundle::visual::{decode_png, run_checks, target_color_stats}`
   to prove staging is bounded, discard restores the baseline, and accepted
   pixels equal the preview.

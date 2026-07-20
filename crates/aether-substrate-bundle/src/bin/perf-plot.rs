@@ -22,7 +22,7 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::process::ExitCode;
 
-use aether_substrate_bench::perf::harness::{
+use aether_harness_substrate::perf::harness::{
     CellSamples, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep_samples,
 };
 use plotters::prelude::*;
@@ -43,7 +43,7 @@ const FONT: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
 /// clearly distinct from the queued/drain/handler `BLUE`/`RED`/`GREEN`.
 const CONSTRUCT: RGBColor = RGBColor(255, 140, 0);
 
-// Dev/bench tooling: this perf-plot binary takes its run parameters from env in
+// Dev/perf tooling: this perf-plot binary takes its run parameters from env in
 // main — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {

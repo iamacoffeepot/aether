@@ -2,7 +2,7 @@
 //! iamacoffeepot/aether#1059 — drop the per-hop settlement stripe mutex).
 //!
 //! [`super::settlement_counter::SettlementCounter`] guards its
-//! `root -> CounterCell` map with a striped `Mutex`; the producer bench
+//! `root -> CounterCell` map with a striped `Mutex`; the producer harness
 //! (`settlement_counter::tests::bench_producer_hot_path`) measures
 //! ~67 ns per `Sent`+`Finished` pair under that lock versus ~4 ns on the
 //! bare [`CounterCell`] atomic. The lock guards only the *map structure*

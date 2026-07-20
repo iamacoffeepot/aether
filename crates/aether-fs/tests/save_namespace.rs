@@ -1,24 +1,24 @@
 //! `aether.fs` save-namespace round trips (ADR-0041) over a
-//! [`SubstrateBench`]: write/read, delete, list, and the `NotFound`
-//! negative — each driven through `SubstrateBench::execute` against the
+//! [`SubstrateHarness`]: write/read, delete, list, and the `NotFound`
+//! negative — each driven through `SubstrateHarness::execute` against the
 //! chassis-wired `FsCapability`.
 //!
 //! Minimal composition (issue #3764): the fs cap rides
-//! `namespace_roots` on the bench basics — no render, no wgpu, no
+//! `namespace_roots` on the harness basics — no render, no wgpu, no
 //! component host. The sandbox flows in via
-//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
+//! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation (issue 464).
 
 use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
-use aether_substrate_bench::test_helpers::{init_save_sandbox, test_namespace_roots};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, test_namespace_roots};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
 const FS_MAILBOX: &str = "aether.fs";
 const FS_NAMESPACE_SAVE: &str = "save";
 
-fn boot_bench() -> SubstrateBench {
+fn boot_bench() -> SubstrateHarness {
     let sandbox = init_save_sandbox("fs-save-namespace");
-    SubstrateBench::builder().namespace_roots(test_namespace_roots(sandbox)).build().expect("boot")
+    SubstrateHarness::builder().namespace_roots(test_namespace_roots(sandbox)).build().expect("boot")
 }
 
 /// `aether.fs.write` followed by `aether.fs.read` round-trips the
@@ -27,23 +27,23 @@ fn boot_bench() -> SubstrateBench {
 /// reply also carries the bytes verbatim.
 #[test]
 fn fs_write_then_read_round_trips_in_save_namespace() {
-    let mut bench = boot_bench();
+    let mut harness = boot_bench();
 
     let path = "fs-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
 
-    let result = bench
+    let result = harness
         .execute(vec![
             (
                 "write",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     FS_MAILBOX,
                     &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: payload.clone() },
                 ),
             ),
             (
                 "read",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     FS_MAILBOX,
                     &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
                 ),
@@ -73,28 +73,28 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
 /// `Err { NotFound }`.
 #[test]
 fn fs_delete_removes_written_file() {
-    let mut bench = boot_bench();
+    let mut harness = boot_bench();
 
     let path = "fs-delete.bin".to_owned();
     // A failed write would abort the sequence with `OpFailed`, so
     // reaching the asserts below means the write succeeded.
-    let result = bench
+    let result = harness
         .execute(vec![
             (
                 "write",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     FS_MAILBOX,
                     &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![1, 2, 3] },
                 ),
             ),
             (
                 "delete",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     FS_MAILBOX,
                     &Delete { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
                 ),
             ),
-            ("read", BenchOp::send_and_await(FS_MAILBOX, &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path })),
+            ("read", HarnessOp::send_and_await(FS_MAILBOX, &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path })),
         ])
         .expect("write + delete + read");
 
@@ -114,21 +114,21 @@ fn fs_delete_removes_written_file() {
 /// in `save` returns an entry list containing the bare filename.
 #[test]
 fn fs_list_returns_written_path() {
-    let mut bench = boot_bench();
+    let mut harness = boot_bench();
 
     let path = "probe-list.bin".to_owned();
-    let result = bench
+    let result = harness
         .execute(vec![
             (
                 "write",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     FS_MAILBOX,
                     &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![0] },
                 ),
             ),
             (
                 "list",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     FS_MAILBOX,
                     &List { namespace: FS_NAMESPACE_SAVE.to_owned(), prefix: String::new() },
                 ),
@@ -148,12 +148,12 @@ fn fs_list_returns_written_path() {
 /// `Err { NotFound }`. Negative companion to the round-trip test.
 #[test]
 fn fs_read_unknown_path_returns_not_found() {
-    let mut bench = boot_bench();
+    let mut harness = boot_bench();
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "read",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 FS_MAILBOX,
                 &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: "nonexistent-do-not-create.bin".to_owned() },
             ),

@@ -8,7 +8,7 @@
 //! naming `Boot`'s `NAMESPACE`, which the host reads to spawn and refcount the
 //! boot singleton.
 //!
-//! `Boot` broadcasts observable markers to the `SubstrateBench` observer mailbox so a
+//! `Boot` broadcasts observable markers to the `SubstrateHarness` observer mailbox so a
 //! scenario can assert on the singleton's lifecycle with `count_observed`
 //! (mirroring the `aether-test-fixtures-bundle` probe / `TickObserved`
 //! pattern):

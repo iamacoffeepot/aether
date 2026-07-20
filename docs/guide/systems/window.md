@@ -23,7 +23,7 @@ the desktop chassis already pumps — and only the desktop chassis has a window 
 all. Routing it through mail keeps both facts behind the same boundary every
 other subsystem uses: an actor mails `aether.window` exactly as it mails
 `aether.render` or `aether.fs`, and the chassis is the one party that knows
-whether a window exists and which thread may touch it. Headless and SubstrateBench
+whether a window exists and which thread may touch it. Headless and SubstrateHarness
 install a fail-fast companion. The hub does not install a window mailbox at all;
 verify the selected chassis rather than assuming every profile has the stub.
 
@@ -74,7 +74,7 @@ best-effort — the `Ok` ack means the chassis applied the calls, not that the
 window manager honored every one.)
 
 **Desktop-only, with explicit non-desktop behavior.** Only the desktop chassis owns a window.
-Headless and SubstrateBench register `aether.window` with handlers that reply `Err`
+Headless and SubstrateHarness register `aether.window` with handlers that reply `Err`
 ("unsupported on this chassis — no window peripheral") immediately. The hub
 omits the mailbox, so direct window mail there is unresolved.
 That's deliberate: a caller waiting on a window reply gets a fast, located

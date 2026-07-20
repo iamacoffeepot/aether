@@ -1,11 +1,11 @@
-//! Text-cap bench scenarios (rehomed from `aether-substrate-bundle`'s
-//! `substrate_bench_scenario/text.rs`, issue #3772): `aether.text.draw`
+//! Text-cap harness scenarios (rehomed from `aether-substrate-bundle`'s
+//! `substrate_harness_scenario/text.rs`, issue #3772): `aether.text.draw`
 //! screen-space glyphs, per-draw clip bounds, the font-metrics grab, and
 //! world-space labels, each driven through an in-process
-//! `SubstrateBench`.
+//! `SubstrateHarness`.
 //!
-//! Every bench composes exactly the caps its scenario needs (issue
-//! #3764): the render cap via `RenderBenchBuilderExt::with_render` (the
+//! Every harness composes exactly the caps its scenario needs (issue
+//! #3764): the render cap via `RenderHarnessBuilderExt::with_render` (the
 //! text cap composes render's texture / quad surface by mail and the
 //! assertions read captured frames), the text cap via
 //! `.with_actor::<TextCapability>(())`, and the `aether.fs` cap via
@@ -35,17 +35,17 @@ use std::path::{Path, PathBuf};
 
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::visual::{
+    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
+};
+use aether_harness_substrate_capture::{
+    RenderHarnessBuilderExt,
+    test_helpers::{has_wgpu_adapter, init_save_sandbox},
+};
 use aether_kinds::{CachedFontMetrics, ClipRect, NamedMail, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::visual::{
-    Image, background_top_left, bounding_box, centroid, coverage, decode_png,
-};
-use aether_substrate_bench_capture::{
-    RenderBenchBuilderExt,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox},
-};
 use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
 /// Namespace-relative path of the vendored font under the `assets` root.
@@ -54,7 +54,7 @@ const FONT_PATH: &str = "fonts/RobotoMono.ttf";
 /// The workspace's shared font-asset home:
 /// `crates/aether-substrate-bundle/assets` (which holds
 /// `fonts/RobotoMono.ttf`). Resolved from this crate's manifest dir the
-/// same way the bench helpers locate the workspace root.
+/// same way the harness helpers locate the workspace root.
 fn font_assets_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -144,7 +144,7 @@ fn text_draws_a_screen_space_string() {
     }
 
     let (frame_width, frame_height) = (128u32, 64u32);
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_actor::<TextCapability>(())
         .size(frame_width, frame_height)
@@ -153,10 +153,10 @@ fn text_draws_a_screen_space_string() {
         .expect("boot");
 
     // Load the font; the reply carries the session-scoped font_id.
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -181,14 +181,18 @@ fn text_draws_a_screen_space_string() {
     // `draw` has no reply). The advance pumps the `create_texture` reply
     // back into the text cap so its texture id is live; nothing is drawn
     // this turn.
-    bench
-        .execute(vec![("prime", BenchOp::send_mail::<DrawText>("aether.text", &draw)), ("settle", BenchOp::advance(2))])
+    harness
+        .execute(vec![
+            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &draw)),
+            ("settle", HarnessOp::advance(2)),
+        ])
         .expect("prime draw");
 
     // Now the glyphs rasterize and the quad batch reaches the renderer the
     // same tick the capture records.
     let pre = vec![envelope("aether.text", &draw)];
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -234,17 +238,17 @@ fn text_draw_clip_bounds_glyph_pixels() {
         return;
     }
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_actor::<TextCapability>(())
         .size(128, 64)
         .namespace_roots(font_namespace_roots())
         .build()
         .expect("boot");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -264,16 +268,16 @@ fn text_draw_clip_bounds_glyph_pixels() {
         space: QuadSpace::Screen,
         clip: None,
     };
-    bench
+    harness
         .execute(vec![
-            ("prime", BenchOp::send_mail::<DrawText>("aether.text", &unclipped)),
-            ("settle", BenchOp::advance(2)),
+            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &unclipped)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
 
     let outside_region = (58, 18, 18, 18);
-    let baseline = bench
-        .execute(vec![("baseline", BenchOp::capture_with_mails(vec![envelope("aether.text", &unclipped)], vec![]))])
+    let baseline = harness
+        .execute(vec![("baseline", HarnessOp::capture_with_mails(vec![envelope("aether.text", &unclipped)], vec![]))])
         .expect("capture unclipped text");
     let baseline_img =
         decode_png(baseline.captured("baseline").expect("baseline ran")).expect("decode unclipped text png");
@@ -294,8 +298,8 @@ fn text_draw_clip_bounds_glyph_pixels() {
     );
 
     let clipped = DrawText { clip: Some(ClipRect { x: 18.0, y: 12.0, width: 22.0, height: 24.0 }), ..unclipped };
-    let captured = bench
-        .execute(vec![("clipped", BenchOp::capture_with_mails(vec![envelope("aether.text", &clipped)], vec![]))])
+    let captured = harness
+        .execute(vec![("clipped", HarnessOp::capture_with_mails(vec![envelope("aether.text", &clipped)], vec![]))])
         .expect("capture clipped text");
     let img = decode_png(captured.captured("clipped").expect("clipped ran")).expect("decode text png");
     let bg = background_top_left(&img);
@@ -321,7 +325,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
 /// a consumer measures text without a per-measurement mail round trip and
 /// still matches what the cap would draw.
 ///
-/// CPU-only (no capture), but the bench still boots a render-composed
+/// CPU-only (no capture), but the harness still boots a render-composed
 /// chassis, so it skips on driverless runners like the other scenarios.
 #[test]
 fn font_metrics_grab_measures_like_the_draw_path() {
@@ -329,7 +333,7 @@ fn font_metrics_grab_measures_like_the_draw_path() {
         return;
     }
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_actor::<TextCapability>(())
         .size(64, 32)
@@ -338,10 +342,10 @@ fn font_metrics_grab_measures_like_the_draw_path() {
         .expect("boot");
 
     // Grab by path with no prior load — exercises load-on-miss.
-    let grabbed = bench
+    let grabbed = harness
         .execute(vec![(
             "grab",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &FontMetricsRequest {
                     font: FontRef::Path { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
@@ -378,7 +382,7 @@ fn font_metrics_grab_measures_like_the_draw_path() {
 /// string no longer sits at the window top-left.
 ///
 /// Two captures back-to-back — one at `origin = [0, 0]` and one at
-/// `origin = [ox, oy]` — are taken in the same bench session (font and
+/// `origin = [ox, oy]` — are taken in the same harness session (font and
 /// atlas are already live by the time the second capture fires). The
 /// centroid of the offset capture must sit further right and further down
 /// than the zero-origin centroid by at least half the applied offset,
@@ -393,7 +397,7 @@ fn text_screen_origin_shifts_centroid() {
     }
 
     let (frame_width, frame_height) = (256u32, 128u32);
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_actor::<TextCapability>(())
         .size(frame_width, frame_height)
@@ -402,10 +406,10 @@ fn text_screen_origin_shifts_centroid() {
         .expect("boot");
 
     // Load the font.
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -427,17 +431,17 @@ fn text_screen_origin_shifts_centroid() {
     };
 
     // Prime pass: lazily creates the atlas texture; nothing draws yet.
-    bench
+    harness
         .execute(vec![
-            ("prime", BenchOp::send_mail::<DrawText>("aether.text", &draw_zero)),
-            ("settle", BenchOp::advance(2)),
+            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &draw_zero)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
 
     // Capture at origin [0, 0].
     let pre_zero = vec![envelope("aether.text", &draw_zero)];
     let snap_zero =
-        bench.execute(vec![("snap0", BenchOp::capture_with_mails(pre_zero, vec![]))]).expect("capture zero-origin");
+        harness.execute(vec![("snap0", HarnessOp::capture_with_mails(pre_zero, vec![]))]).expect("capture zero-origin");
     let img_zero = decode_png(snap_zero.captured("snap0").expect("snap0 ran")).expect("decode zero-origin png");
     let bg = background_top_left(&img_zero);
     let tolerance = 5;
@@ -448,8 +452,9 @@ fn text_screen_origin_shifts_centroid() {
     let oy = (frame_height / 2) as f32;
     let draw_offset = DrawText { origin: [ox, oy], ..draw_zero };
     let pre_offset = vec![envelope("aether.text", &draw_offset)];
-    let snap_offset =
-        bench.execute(vec![("snap1", BenchOp::capture_with_mails(pre_offset, vec![]))]).expect("capture offset-origin");
+    let snap_offset = harness
+        .execute(vec![("snap1", HarnessOp::capture_with_mails(pre_offset, vec![]))])
+        .expect("capture offset-origin");
     let img_offset = decode_png(snap_offset.captured("snap1").expect("snap1 ran")).expect("decode offset-origin png");
     let shifted_center = centroid(&img_offset, bg, tolerance).expect("offset-origin frame has lit pixels");
 
@@ -495,7 +500,7 @@ fn text_draws_world_space_label() {
     }
 
     let (frame_width, frame_height) = (128u32, 96u32);
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_actor::<TextCapability>(())
         .size(frame_width, frame_height)
@@ -503,10 +508,10 @@ fn text_draws_world_space_label() {
         .build()
         .expect("boot");
 
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -556,21 +561,21 @@ fn text_draws_world_space_label() {
     // Prime: the first draw lazily creates the atlas texture and draws
     // nothing until the create_texture reply lands. Advance twice to
     // settle it so subsequent captures can render immediately.
-    bench
+    harness
         .execute(vec![
-            ("cam", BenchOp::send_mail::<ViewProjection>("aether.render", &ViewProjection { view_proj: vp_near })),
-            ("prime", BenchOp::send_mail::<DrawText>("aether.text", &draw_dist)),
-            ("settle", BenchOp::advance(2)),
+            ("cam", HarnessOp::send_mail::<ViewProjection>("aether.render", &ViewProjection { view_proj: vp_near })),
+            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &draw_dist)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
 
     let tol = 5u8;
 
     // Capture Distance label at near (d=10) and far (d=20).
-    let snap_near = bench
+    let snap_near = harness
         .execute(vec![(
             "s",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &ViewProjection { view_proj: vp_near }),
                     envelope("aether.text", &draw_dist),
@@ -582,10 +587,10 @@ fn text_draws_world_space_label() {
     let img_near = decode_png(snap_near.captured("s").expect("s ran")).expect("decode near");
     let bb_near = bounding_box(&img_near, background_top_left(&img_near), tol).expect("near frame has content");
 
-    let snap_far = bench
+    let snap_far = harness
         .execute(vec![(
             "s",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &ViewProjection { view_proj: vp_far }),
                     envelope("aether.text", &draw_dist),
@@ -610,10 +615,10 @@ fn text_draws_world_space_label() {
     );
 
     // Capture Pixels label at near and far: width should hold constant.
-    let snap_px_near = bench
+    let snap_px_near = harness
         .execute(vec![(
             "s",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &ViewProjection { view_proj: vp_near }),
                     envelope("aether.text", &draw_px),
@@ -626,10 +631,10 @@ fn text_draws_world_space_label() {
     let bb_px_near =
         bounding_box(&img_px_near, background_top_left(&img_px_near), tol).expect("px-near frame has content");
 
-    let snap_px_far = bench
+    let snap_px_far = harness
         .execute(vec![(
             "s",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &ViewProjection { view_proj: vp_far }),
                     envelope("aether.text", &draw_px),
@@ -654,10 +659,10 @@ fn text_draws_world_space_label() {
     // The Pixels-mode width at the orbit angle should be within ±30% of
     // the front-facing width — a true in-world quad would skew and widen
     // significantly.
-    let snap_orbit = bench
+    let snap_orbit = harness
         .execute(vec![(
             "s",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &ViewProjection { view_proj: vp_orbit }),
                     envelope("aether.text", &draw_px),

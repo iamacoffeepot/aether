@@ -14,7 +14,7 @@
 //! `RootManager` spawns `Ping.seq.max(1)` `Panel` siblings — from a
 //! single `receive` when `seq > 1`, covering issue iamacoffeepot/aether#2503's
 //! multi-spawn-per-receive path — and each spawned `Panel` broadcasts a
-//! `TickObserved` to the substrate-bench observer, so a scenario can confirm
+//! `TickObserved` to the substrate-harness observer, so a scenario can confirm
 //! every spawned sibling is addressable and live.
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
@@ -67,7 +67,7 @@ impl WasmActor for Panel {
         Ok(Panel)
     }
 
-    /// On `Ping`, broadcast a `TickObserved` to the substrate-bench observer
+    /// On `Ping`, broadcast a `TickObserved` to the substrate-harness observer
     /// so a scenario can confirm a spawned `Panel` is addressable and
     /// dispatches mail.
     #[handler::single]

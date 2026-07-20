@@ -1,6 +1,6 @@
 //! Shared offscreen render pipeline + the main draw pass body.
 //!
-//! Both desktop and substrate-bench use this pipeline for the bulk of
+//! Both desktop and substrate-harness use this pipeline for the bulk of
 //! their rendering: a single `(pos, color)` vertex layout, camera
 //! uniform bound at group 0, drawing into a paired offscreen color
 //! target + `Depth32Float` depth target with `LessEqual` testing.
@@ -145,7 +145,7 @@ pub fn build_main_pipeline(
 /// `extra_pipelines`: optional pipelines drawn after the main one
 /// inside the same render pass, sharing the same vertex range and
 /// camera bind group. Desktop passes a wireframe overlay pipeline
-/// here when `AETHER_WIREFRAME=overlay`; substrate-bench passes `&[]`.
+/// here when `AETHER_WIREFRAME=overlay`; substrate-harness passes `&[]`.
 ///
 /// Returns `Err(RenderError::VertexBufferOverflow)` if the frame's
 /// bytes exceed the size the vertex buffer was created with — the

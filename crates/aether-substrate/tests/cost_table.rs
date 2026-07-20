@@ -1,5 +1,5 @@
 //! iamacoffeepot/aether#1128: the per-handler cost EWMA, exercised
-//! through a real component-load lifecycle on a `SubstrateBench`.
+//! through a real component-load lifecycle on a `SubstrateHarness`.
 //!
 //! Guards the redesign invariant that `WasmTrampoline::init` seeds the
 //! per-handler cost cells from the guest's declared handler set, under
@@ -12,7 +12,7 @@
 //! a fold only records if the cache holds the cell, so a nonzero sample
 //! count after dispatch is end-to-end evidence the stamp ran.
 //!
-//! Skipped when the component wasm hasn't been pre-built (the bench
+//! Skipped when the component wasm hasn't been pre-built (the harness
 //! composes no render cap, so there is no wgpu gate).
 
 use std::fs;
@@ -21,9 +21,9 @@ use std::path::Path;
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -31,12 +31,12 @@ use aether_test_fixtures_kinds::SetRender;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent { wasm, name: Some("cost-probe".to_owned()), config: Vec::new(), export: None },
             ),
@@ -59,15 +59,15 @@ fn init_seeds_cells_and_dispatch_folds() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_probe(&mut bench, &wasm_path);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mbox = load_probe(&mut harness, &wasm_path);
 
     // At construction, before any dispatch: both declared handlers
     // (`Tick`, `SetRender`) are seeded at the neutral seed (`samples =
     // 0`) — the known-but-unrun state. If `init`'s seed had not run, the
     // table would hold no rows for this mailbox.
     {
-        let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = harness.cost_table().tail(mbox, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell seeded at init");
@@ -80,9 +80,9 @@ fn init_seeds_cells_and_dispatch_folds() {
     // stamped at construction (the redesign's load-bearing claim) and the
     // fold reached it. `SetRender` is never dispatched, so it stays at the
     // neutral seed.
-    bench.execute(vec![("advance", BenchOp::advance(3))]).expect("advance 3");
+    harness.execute(vec![("advance", HarnessOp::advance(3))]).expect("advance 3");
 
-    let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
+    let CostTailResult::Ok { rows } = harness.cost_table().tail(mbox, &CostTail { kind: None }) else {
         panic!("expected Ok");
     };
     let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell present");

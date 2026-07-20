@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
@@ -11,8 +13,6 @@ use aether_kinds::{
     MouseWheel, TextInput,
 };
 use aether_kit::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -23,16 +23,16 @@ struct LoadedActor {
 }
 
 fn load_actor<K: Kind>(
-    bench: &mut SubstrateBench,
+    harness: &mut SubstrateHarness,
     wasm_path: &Path,
     export: &str,
     name: &str,
     config: &K,
 ) -> LoadedActor {
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read wasm component"),
@@ -60,17 +60,17 @@ fn region(name: &str, target: MailboxId, x_pixels: f32, input_lanes: RegionInput
     }
 }
 
-fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> LoadedActor {
-    load_actor(bench, wasm_path, "test.editor_region_probe", name, &EditorRegionProbeConfig { name: name.to_owned() })
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> LoadedActor {
+    load_actor(harness, wasm_path, "test.editor_region_probe", name, &EditorRegionProbeConfig { name: name.to_owned() })
 }
 
-fn load_shell(bench: &mut SubstrateBench, wasm_path: &Path, regions: Vec<RegionSpec>) {
-    let _shell = load_actor(bench, wasm_path, "aether.kit.widget.editor", "editor", &EditorConfig { regions });
+fn load_shell(harness: &mut SubstrateHarness, wasm_path: &Path, regions: Vec<RegionSpec>) {
+    let _shell = load_actor(harness, wasm_path, "aether.kit.widget.editor", "editor", &EditorConfig { regions });
 }
 
-fn drain(bench: &mut SubstrateBench, actor: &LoadedActor, label: &'static str) -> DrainEditorInputsResult {
-    bench
-        .execute(vec![(label, BenchOp::send_and_await(actor.address.as_str(), &DrainEditorInputs))])
+fn drain(harness: &mut SubstrateHarness, actor: &LoadedActor, label: &'static str) -> DrainEditorInputsResult {
+    harness
+        .execute(vec![(label, HarnessOp::send_and_await(actor.address.as_str(), &DrainEditorInputs))])
         .expect("drain sequence")
         .reply::<DrainEditorInputsResult>(label)
         .expect("decode DrainEditorInputsResult")
@@ -83,18 +83,18 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     else {
         return;
     };
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(200, 100)
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
         .build()
         .expect("boot");
-    let region_a = load_probe(&mut bench, &fixtures_wasm, "region-a");
-    let region_b = load_probe(&mut bench, &fixtures_wasm, "region-b");
+    let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
+    let region_b = load_probe(&mut harness, &fixtures_wasm, "region-b");
     let mut b_lanes = RegionInputLanes::ALL;
     b_lanes.wheel = false;
     load_shell(
-        &mut bench,
+        &mut harness,
         &kit_wasm,
         vec![
             region("region-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL),
@@ -102,32 +102,32 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
         ],
     );
 
-    bench
+    harness
         .execute(vec![
-            ("press-a", BenchOp::send_mail("aether.input", &MouseButton { button: 0, x: 20.0, y: 20.0 })),
-            ("drag-b", BenchOp::send_mail("aether.input", &MouseMove { x: 140.0, y: 25.0 })),
+            ("press-a", HarnessOp::send_mail("aether.input", &MouseButton { button: 0, x: 20.0, y: 20.0 })),
+            ("drag-b", HarnessOp::send_mail("aether.input", &MouseMove { x: 140.0, y: 25.0 })),
             (
                 "release-other-b",
-                BenchOp::send_mail("aether.input", &MouseButtonRelease { button: 1, x: 140.0, y: 25.0 }),
+                HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 1, x: 140.0, y: 25.0 }),
             ),
             (
                 "release-owner-b",
-                BenchOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 140.0, y: 25.0 }),
+                HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 140.0, y: 25.0 }),
             ),
-            ("move-b", BenchOp::send_mail("aether.input", &MouseMove { x: 150.0, y: 30.0 })),
+            ("move-b", HarnessOp::send_mail("aether.input", &MouseMove { x: 150.0, y: 30.0 })),
             (
                 "release-without-owner-b",
-                BenchOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 150.0, y: 30.0 }),
+                HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 150.0, y: 30.0 }),
             ),
             (
                 "filtered-wheel-b",
-                BenchOp::send_mail("aether.input", &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 }),
+                HarnessOp::send_mail("aether.input", &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 }),
             ),
         ])
         .expect("route pointer sequence");
 
     assert_eq!(
-        drain(&mut bench, &region_a, "drain-a"),
+        drain(&mut harness, &region_a, "drain-a"),
         DrainEditorInputsResult {
             region_name: "region-a".to_owned(),
             inputs: vec![
@@ -140,7 +140,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
         },
     );
     assert_eq!(
-        drain(&mut bench, &region_b, "drain-b"),
+        drain(&mut harness, &region_b, "drain-b"),
         DrainEditorInputsResult {
             region_name: "region-b".to_owned(),
             inputs: vec![
@@ -158,55 +158,55 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     else {
         return;
     };
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(200, 100)
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
         .build()
         .expect("boot");
-    let region_a = load_probe(&mut bench, &fixtures_wasm, "focus-a");
-    let region_b = load_probe(&mut bench, &fixtures_wasm, "focus-b");
+    let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
+    let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");
     let a = region("focus-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL);
     let mut b = region("focus-b", region_b.mailbox_id, 100.0, RegionInputLanes::ALL);
     b.activation_chord =
         Some(EditorKeyChord { key_code: KEY_BACKQUOTE, shift: false, ctrl: false, alt: false, meta: false });
-    load_shell(&mut bench, &kit_wasm, vec![a, b]);
+    load_shell(&mut harness, &kit_wasm, vec![a, b]);
 
-    bench
+    harness
         .execute(vec![
-            ("focus-a", BenchOp::send_mail("aether.input", &MouseButton { button: 0, x: 20.0, y: 20.0 })),
-            ("release-a", BenchOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 20.0, y: 20.0 })),
+            ("focus-a", HarnessOp::send_mail("aether.input", &MouseButton { button: 0, x: 20.0, y: 20.0 })),
+            ("release-a", HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 20.0, y: 20.0 })),
         ])
         .expect("prime focus");
-    let _initial_a = drain(&mut bench, &region_a, "drain-initial-a");
+    let _initial_a = drain(&mut harness, &region_a, "drain-initial-a");
 
-    bench
+    harness
         .execute(vec![
-            ("key-a", BenchOp::send_mail("aether.input", &Key { code: 65 })),
-            ("text-a", BenchOp::send_mail("aether.input", &TextInput { text: "a".to_owned() })),
-            ("activate-b", BenchOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
+            ("key-a", HarnessOp::send_mail("aether.input", &Key { code: 65 })),
+            ("text-a", HarnessOp::send_mail("aether.input", &TextInput { text: "a".to_owned() })),
+            ("activate-b", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
             (
                 "ime-b",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     "aether.input",
                     &ImePreedit { text: "composition".to_owned(), cursor_begin: Some(1), cursor_end: Some(3) },
                 ),
             ),
-            ("text-b", BenchOp::send_mail("aether.input", &TextInput { text: "b".to_owned() })),
+            ("text-b", HarnessOp::send_mail("aether.input", &TextInput { text: "b".to_owned() })),
             (
                 "ctrl-b",
-                BenchOp::send_mail("aether.input", &Modifiers { shift: false, ctrl: true, alt: false, meta: false }),
+                HarnessOp::send_mail("aether.input", &Modifiers { shift: false, ctrl: true, alt: false, meta: false }),
             ),
-            ("cycle-a", BenchOp::send_mail("aether.input", &Key { code: KEY_TAB })),
-            ("cycle-release", BenchOp::send_mail("aether.input", &KeyRelease { code: KEY_TAB })),
-            ("clear-modifiers", BenchOp::send_mail("aether.input", &Modifiers::default())),
-            ("plain-tab", BenchOp::send_mail("aether.input", &Key { code: KEY_TAB })),
-            ("plain-tab-release", BenchOp::send_mail("aether.input", &KeyRelease { code: KEY_TAB })),
+            ("cycle-a", HarnessOp::send_mail("aether.input", &Key { code: KEY_TAB })),
+            ("cycle-release", HarnessOp::send_mail("aether.input", &KeyRelease { code: KEY_TAB })),
+            ("clear-modifiers", HarnessOp::send_mail("aether.input", &Modifiers::default())),
+            ("plain-tab", HarnessOp::send_mail("aether.input", &Key { code: KEY_TAB })),
+            ("plain-tab-release", HarnessOp::send_mail("aether.input", &KeyRelease { code: KEY_TAB })),
         ])
         .expect("route keyboard sequence");
 
     assert_eq!(
-        drain(&mut bench, &region_a, "drain-focus-a"),
+        drain(&mut harness, &region_a, "drain-focus-a"),
         DrainEditorInputsResult {
             region_name: "focus-a".to_owned(),
             inputs: vec![
@@ -220,7 +220,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
         },
     );
     assert_eq!(
-        drain(&mut bench, &region_b, "drain-focus-b"),
+        drain(&mut harness, &region_b, "drain-focus-b"),
         DrainEditorInputsResult {
             region_name: "focus-b".to_owned(),
             inputs: vec![

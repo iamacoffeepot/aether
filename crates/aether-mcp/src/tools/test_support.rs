@@ -243,7 +243,7 @@ pub(super) fn connect_mcp(port: u16) -> Mcp {
 }
 
 /// Hub-shape chassis with `InventoryCapability` installed and a
-/// caller-supplied descriptor registered against the bench's
+/// caller-supplied descriptor registered against the harness's
 /// `Registry` — emulating the post-`load_component` state where
 /// a component's own kind is in the substrate's vocab but not in
 /// `descriptors::all()`. Used by ADR-0091's end-to-end check that

@@ -21,7 +21,7 @@ use aether_substrate::render::{self, RenderError, encode_png, vertex_buffer_layo
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use aether_substrate_bench_capture::visual;
+use aether_harness_substrate_capture::visual;
 
 pub use render::VERTEX_BUFFER_BYTES;
 use std::iter;
@@ -361,7 +361,7 @@ impl Gpu {
         };
         // Desktop renders every frame from current producer state —
         // commit-current semantic (false). The replay-cache mode is
-        // reserved for `SubstrateBench::capture` (iamacoffeepot/aether#847).
+        // reserved for `SubstrateHarness::capture` (iamacoffeepot/aether#847).
         match self.render_handles.record_frame(&mut encoder, extra_pipelines, false) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return None,

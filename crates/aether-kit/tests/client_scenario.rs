@@ -1,6 +1,6 @@
 //! Real-TCP player client scenarios through the shipped `aether-kit` wasm.
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -14,6 +14,10 @@ use aether_component::ComponentHostCapability;
 use aether_component::component::resolve_embedded;
 use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
 use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
@@ -21,10 +25,6 @@ use aether_kit::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
     StateSummary, TickBundle,
 };
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
 use aether_tcp::{ListListeners, ListListenersResult, TcpCapability};
 
 const CAMERA_NAME: &str = "client-camera";
@@ -55,11 +55,11 @@ fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) -> MailboxId {
-    let result = bench
+fn load_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) -> MailboxId {
+    let result = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -81,11 +81,11 @@ fn load_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str
     }
 }
 
-fn drop_component(bench: &mut SubstrateBench, mailbox_id: MailboxId) {
-    let result = bench
+fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
+    let result = harness
         .execute(vec![(
             "drop",
-            BenchOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
+            HarnessOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
         )])
         .expect("drop player client");
     match result.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -182,20 +182,20 @@ fn spawn_controlled_peer(
     (event_rx, command_tx, handle)
 }
 
-fn capture_entity(bench: &mut SubstrateBench, label: &'static str) -> ColorRegionStats {
-    let captured = bench
-        .execute(vec![("settle", BenchOp::advance(3)), (label, BenchOp::capture())])
+fn capture_entity(harness: &mut SubstrateHarness, label: &'static str) -> ColorRegionStats {
+    let captured = harness
+        .execute(vec![("settle", HarnessOp::advance(3)), (label, HarnessOp::capture())])
         .expect("settle and capture client scene");
     let image = decode_png(captured.captured(label).expect("capture client frame")).expect("decode client frame");
     target_color_stats(&image, ENTITY_SRGB, ENTITY_COLOR_TOLERANCE, None)
 }
 
-fn wait_for_authoritative_entity(bench: &mut SubstrateBench, sim_address: &str) -> EntityState {
+fn wait_for_authoritative_entity(harness: &mut SubstrateHarness, sim_address: &str) -> EntityState {
     let deadline = Instant::now() + TCP_TIMEOUT;
     loop {
-        bench.execute(vec![("advance", BenchOp::advance(1))]).expect("advance player loop");
-        let poll = bench
-            .execute(vec![("poll", BenchOp::send_and_await(sim_address, &Poll { since_tick: 0 }))])
+        harness.execute(vec![("advance", HarnessOp::advance(1))]).expect("advance player loop");
+        let poll = harness
+            .execute(vec![("poll", HarnessOp::send_and_await(sim_address, &Poll { since_tick: 0 }))])
             .expect("poll TurnSim")
             .reply::<PollResult>("poll")
             .expect("decode PollResult");
@@ -207,11 +207,11 @@ fn wait_for_authoritative_entity(bench: &mut SubstrateBench, sim_address: &str) 
     }
 }
 
-fn gateway_listener_port(bench: &mut SubstrateBench) -> u16 {
+fn gateway_listener_port(harness: &mut SubstrateHarness) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let list = bench
-            .execute(vec![("list-player-listener", BenchOp::send_and_await("aether.tcp", &ListListeners::default()))])
+        let list = harness
+            .execute(vec![("list-player-listener", HarnessOp::send_and_await("aether.tcp", &ListListeners::default()))])
             .expect("list game gateway listener")
             .reply::<ListListenersResult>("list-player-listener")
             .expect("decode game gateway listener list");
@@ -245,20 +245,20 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     let server_addr = listener.local_addr().expect("controlled peer address").to_string();
     let session_identity = resolve_embedded("controlled-player-session");
     let (event_rx, command_tx, peer) = spawn_controlled_peer(listener, session_identity);
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .with_render()
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
         .with_actor::<TcpCapability>(())
         .build()
-        .expect("boot controlled client SubstrateBench");
+        .expect("boot controlled client SubstrateHarness");
 
-    load_export(&mut bench, &wasm, "aether.kit.camera", CAMERA_NAME, Vec::new());
-    bench
+    load_export(&mut harness, &wasm, "aether.kit.camera", CAMERA_NAME, Vec::new());
+    harness
         .execute(vec![(
             "camera",
-            BenchOp::send_mail(
+            HarnessOp::send_mail(
                 component_address(CAMERA_NAME),
                 &CameraSetMode {
                     name: "main".into(),
@@ -275,7 +275,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
         )])
         .expect("configure client camera");
     let client_mailbox = load_export(
-        &mut bench,
+        &mut harness,
         &wasm,
         "aether.kit.client",
         CLIENT_NAME,
@@ -297,14 +297,14 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     assert_eq!(spawn.entity_id, session_identity.0);
     assert_eq!((spawn.cell_x, spawn.cell_z), (0, 0));
     thread::sleep(Duration::from_millis(25));
-    let initial = capture_entity(&mut bench, "initial");
+    let initial = capture_entity(&mut harness, "initial");
     assert!(initial.matching > 20, "expected visible magenta marker at initial cell: {initial:?}");
 
-    bench
+    harness
         .execute(vec![
-            ("press-east", BenchOp::send_mail("aether.input", &Key { code: keycode::KEY_D })),
-            ("emit-move", BenchOp::advance(1)),
-            ("release-east", BenchOp::send_mail("aether.input", &KeyRelease { code: keycode::KEY_D })),
+            ("press-east", HarnessOp::send_mail("aether.input", &Key { code: keycode::KEY_D })),
+            ("emit-move", HarnessOp::advance(1)),
+            ("release-east", HarnessOp::send_mail("aether.input", &KeyRelease { code: keycode::KEY_D })),
         ])
         .expect("drive held east input through aether.input");
     let ControlledEvent::Move(intent) = event_rx.recv_timeout(TCP_TIMEOUT).expect("controlled MoveIntent arrives")
@@ -316,7 +316,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
 
     command_tx.send(ControlledCommand::StaleSummary).expect("ask peer for stale summary");
     thread::sleep(Duration::from_millis(25));
-    let stale = capture_entity(&mut bench, "stale");
+    let stale = capture_entity(&mut harness, "stale");
     let initial_centroid = initial.centroid.expect("initial marker centroid");
     let stale_centroid = stale.centroid.expect("stale marker centroid");
     assert!(
@@ -326,7 +326,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
 
     command_tx.send(ControlledCommand::NewerSummary).expect("ask peer for newer summary");
     thread::sleep(Duration::from_millis(25));
-    let moved = capture_entity(&mut bench, "moved");
+    let moved = capture_entity(&mut harness, "moved");
     let moved_centroid = moved.centroid.expect("moved marker centroid");
     assert!(
         moved_centroid.x > initial_centroid.x + 8.0,
@@ -334,7 +334,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     );
 
     command_tx.send(ControlledCommand::ExpectClientClose).expect("ask peer to observe client teardown");
-    drop_component(&mut bench, client_mailbox);
+    drop_component(&mut harness, client_mailbox);
     peer.join().expect("controlled peer exits cleanly");
 }
 
@@ -345,7 +345,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     };
     let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
     let sim_mailbox = resolve_embedded(SIM_NAME);
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
         .with_actor::<TcpCapability>(())
@@ -359,10 +359,10 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
             max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         })
         .build()
-        .expect("boot active gateway SubstrateBench");
-    let listener_port = gateway_listener_port(&mut bench);
+        .expect("boot active gateway SubstrateHarness");
+    let listener_port = gateway_listener_port(&mut harness);
     load_export(
-        &mut bench,
+        &mut harness,
         &wasm,
         "aether.kit.sim",
         SIM_NAME,
@@ -374,7 +374,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
         .encode_into_bytes(),
     );
     load_export(
-        &mut bench,
+        &mut harness,
         &wasm,
         "aether.kit.client",
         CLIENT_NAME,
@@ -388,7 +388,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     );
 
     let sim_address = component_address(SIM_NAME);
-    let spawned = wait_for_authoritative_entity(&mut bench, &sim_address);
+    let spawned = wait_for_authoritative_entity(&mut harness, &sim_address);
     assert_eq!(
         spawned.entity_id,
         PlayerSessionActor::resolve(GameGatewayCapability::resolve(0, ()).0, "conn-0").0,
@@ -396,17 +396,17 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     );
     assert_eq!((spawned.cell_x, spawned.cell_z), (1, 1));
 
-    bench
+    harness
         .execute(vec![
-            ("press-west", BenchOp::send_mail("aether.input", &Key { code: keycode::KEY_A })),
-            ("emit-west", BenchOp::advance(1)),
-            ("release-west", BenchOp::send_mail("aether.input", &KeyRelease { code: keycode::KEY_A })),
+            ("press-west", HarnessOp::send_mail("aether.input", &Key { code: keycode::KEY_A })),
+            ("emit-west", HarnessOp::advance(1)),
+            ("release-west", HarnessOp::send_mail("aether.input", &KeyRelease { code: keycode::KEY_A })),
         ])
         .expect("drive west input through active gateway");
 
     let deadline = Instant::now() + TCP_TIMEOUT;
     loop {
-        let entity = wait_for_authoritative_entity(&mut bench, &sim_address);
+        let entity = wait_for_authoritative_entity(&mut harness, &sim_address);
         if (entity.cell_x, entity.cell_z) == (0, 1) {
             assert_eq!(entity.entity_id, spawned.entity_id);
             break;

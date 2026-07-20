@@ -48,7 +48,7 @@ use std::env;
 use std::fs;
 use std::process::{Command, ExitCode};
 
-use aether_substrate_bench::perf::report::{
+use aether_harness_substrate::perf::report::{
     CompareConfig, LatencySection, RawSection, STICKY_MARKER, TRIAL_SCHEMA, TrialReport, compare, headline_counts,
     markdown, probe_schema,
 };
@@ -302,7 +302,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::ingest_trial;
-    use aether_substrate_bench::perf::report::{
+    use aether_harness_substrate::perf::report::{
         CellJson, CompareConfig, ComparisonReport, LatencySection, Metric, RawSection, SectionReport, TRIAL_SCHEMA,
         TrialReport, Verdict, compare,
     };

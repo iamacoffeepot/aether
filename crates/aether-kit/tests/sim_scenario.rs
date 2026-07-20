@@ -1,17 +1,17 @@
 //! Tick-native turn simulation through two real instances of the kit wasm.
 
-use aether_substrate_bench::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::require_wasm;
 use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::sim::{
     CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn,
     TrajectoryEvent, TrajectoryKind,
 };
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -38,16 +38,16 @@ fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_sim(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> String {
+fn load_sim(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> String {
     let config = SimConfig {
         fact_sink: None,
         ring_depth: 8,
         grid_bounds: GridBounds { min_cell_x: -4, max_cell_x: 4, min_cell_z: -4, max_cell_z: 4 },
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm for turn sim"),
@@ -68,9 +68,9 @@ fn load_sim(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> String 
     }
 }
 
-fn poll(bench: &mut SubstrateBench, address: &str, label: &'static str) -> PollResult {
-    bench
-        .execute(vec![(label, BenchOp::send_and_await(address, &Poll { since_tick: 0 }))])
+fn poll(harness: &mut SubstrateHarness, address: &str, label: &'static str) -> PollResult {
+    harness
+        .execute(vec![(label, HarnessOp::send_and_await(address, &Poll { since_tick: 0 }))])
         .expect("poll turn sim")
         .reply::<PollResult>(label)
         .expect("decode PollResult")
@@ -81,43 +81,43 @@ fn turn_sim_moves_in_tick_order_and_replays_byte_identically_through_real_wasm()
     let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(96, 96).with_component_host().build().expect("boot");
-    let first = load_sim(&mut bench, &wasm_path, FIRST_SIM_NAME);
-    let second = load_sim(&mut bench, &wasm_path, SECOND_SIM_NAME);
+    let mut harness = SubstrateHarness::builder().size(96, 96).with_component_host().build().expect("boot");
+    let first = load_sim(&mut harness, &wasm_path, FIRST_SIM_NAME);
+    let second = load_sim(&mut harness, &wasm_path, SECOND_SIM_NAME);
 
-    bench
+    harness
         .execute(vec![
-            ("spawn-a", BenchOp::send_mail(&first, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
-            ("spawn-b", BenchOp::send_mail(&second, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
-            ("spawn-turn", BenchOp::advance(1)),
+            ("spawn-a", HarnessOp::send_mail(&first, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
+            ("spawn-b", HarnessOp::send_mail(&second, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
+            ("spawn-turn", HarnessOp::advance(1)),
             (
                 "superseded-east-a",
-                BenchOp::send_mail(&first, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East }),
+                HarnessOp::send_mail(&first, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East }),
             ),
             (
                 "winning-north-a",
-                BenchOp::send_mail(&first, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North }),
+                HarnessOp::send_mail(&first, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North }),
             ),
             (
                 "superseded-east-b",
-                BenchOp::send_mail(&second, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East }),
+                HarnessOp::send_mail(&second, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East }),
             ),
             (
                 "winning-north-b",
-                BenchOp::send_mail(&second, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North }),
+                HarnessOp::send_mail(&second, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North }),
             ),
-            ("move-and-following-turns", BenchOp::advance(3)),
+            ("move-and-following-turns", HarnessOp::advance(3)),
         ])
         .expect("drive identical turn-sim sequences");
 
-    let first_result = poll(&mut bench, &first, "poll-a");
-    let second_result = poll(&mut bench, &second, "poll-b");
+    let first_result = poll(&mut harness, &first, "poll-a");
+    let second_result = poll(&mut harness, &second, "poll-b");
 
     assert_eq!(first_result.current_tick, 4);
     assert_eq!(
         first_result.bundles.iter().map(|bundle| bundle.tick).collect::<Vec<_>>(),
         vec![1, 2, 3, 4],
-        "one BenchOp::advance tick must produce one ordered turn bundle"
+        "one HarnessOp::advance tick must produce one ordered turn bundle"
     );
     let moved = &first_result.bundles[1];
     assert_eq!(moved.tick, 2);

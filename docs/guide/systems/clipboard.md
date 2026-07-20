@@ -25,7 +25,7 @@ The capability has two backend modes:
 - `System` uses the operating-system clipboard;
 - `InMemory` stores deterministic process-local text for tests.
 
-Desktop composes the system backend. SubstrateBench uses the in-memory backend by
+Desktop composes the system backend. SubstrateHarness uses the in-memory backend by
 default. If the desktop cannot create the OS clipboard during capability init,
 the chassis build fails; that case does not become a `get_text_result::Err`.
 A chassis without clipboard support can instead install
@@ -67,4 +67,4 @@ waits on a request that cannot complete.
 - System/in-memory runtime: `crates/aether-clipboard/src/runtime.rs`
 - Unsupported runtime: `crates/aether-clipboard/src/headless_runtime.rs`
 - Backend selection: `crates/aether-clipboard/src/config.rs`
-- Chassis installation: `crates/aether-substrate-bundle/src/{desktop,headless,substrate_bench}/`
+- Chassis installation: `crates/aether-substrate-bundle/src/{desktop,headless,substrate_harness}/`

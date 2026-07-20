@@ -243,7 +243,7 @@ impl NativeBinding {
     /// substrate exit). Capabilities authored under a [`ChassisCtx`]
     /// should prefer [`Self::from_ctx`], which inherits the chassis's
     /// aborter + spawner automatically; the explicit constructor is
-    /// for harnesses that don't go through a chassis (`SubstrateBench`
+    /// for harnesses that don't go through a chassis (`SubstrateHarness`
     /// internals) or for tests that want to substitute a custom
     /// aborter.
     pub fn new(

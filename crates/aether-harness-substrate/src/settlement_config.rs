@@ -1,5 +1,5 @@
 //! The settlement-patience knob (issue 2062), rehomed beside its
-//! primary consumer — the bench's settlement gates — by the crate
+//! primary consumer — the harness's settlement gates — by the crate
 //! extraction (issue #3765). The chassis bundle re-imports it for the
 //! teardown-cap resolution, so one knob covers both.
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 /// this.
 const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
 
-/// Settlement-patience backstop knob (issue 2062). The bench's settlement
+/// Settlement-patience backstop knob (issue 2062). The harness's settlement
 /// gates block on the settlement signal and treat this cap as a generous
 /// deadlock/livelock backstop, not the 30 s wall-clock correctness gate
 /// that false-fired under `nextest --workspace` saturation (a healthy-but-
@@ -22,7 +22,7 @@ const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
 /// `FromArgvThenEnv` impl, and the inherent `from_env` /
 /// `from_argv_then_env` shims (ADR-0090 unit g). Resolved once at gate
 /// construction and lowered via [`Self::to_cap`] to the `Duration` the
-/// bench reads.
+/// harness reads.
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_SETTLEMENT", cli_prefix = "settlement")]
 pub struct SettlementConfig {

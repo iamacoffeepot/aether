@@ -34,7 +34,7 @@
 //! several-fold, so a debug verdict would be pessimistic.
 //!
 //! Skipped when no wgpu adapter / no pre-built `ui_widget` wasm (same gate
-//! as the other bench integration tests).
+//! as the other harness integration tests).
 //!
 //! Caveats the verdict must carry: host-cached draw replay is the proposed
 //! mechanism and is not yet built, so the `cached` profile measures the
@@ -64,7 +64,7 @@
 // knobs, not cap config.
 #![allow(clippy::disallowed_methods)]
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::env;
 use std::fs;
 use std::time::Instant;
@@ -72,9 +72,9 @@ use std::time::Instant;
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries land
@@ -94,7 +94,7 @@ const FIT_WIDGET_COUNT: usize = 4;
 /// returning their mailbox ids. Each load carries a distinct name so the
 /// instances register as separate mailboxes with their own cost cells.
 fn load_widgets(
-    bench: &mut SubstrateBench,
+    harness: &mut SubstrateHarness,
     wasm: &[u8],
     count: usize,
     redraw_each_tick: bool,
@@ -103,10 +103,10 @@ fn load_widgets(
     let config = UiWidgetConfig { redraw_each_tick, quad_count }.encode_into_bytes();
     let mut ids = Vec::with_capacity(count);
     for i in 0..count {
-        let report = bench
+        let report = harness
             .execute(vec![(
                 "load",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     ComponentHostCapability::NAMESPACE,
                     &LoadComponent {
                         wasm: wasm.to_vec(),
@@ -129,17 +129,17 @@ fn load_widgets(
 /// The EWMA mean execution time of one widget's `Tick` handler, in
 /// nanoseconds — its per-frame cost. Zero if the cell is missing (it should
 /// always be seeded at load).
-fn tick_mean_nanos(bench: &SubstrateBench, mbox: MailboxId) -> u64 {
-    let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
+fn tick_mean_nanos(harness: &SubstrateHarness, mbox: MailboxId) -> u64 {
+    let CostTailResult::Ok { rows } = harness.cost_table().tail(mbox, &CostTail { kind: None }) else {
         panic!("cost tail for widget mailbox");
     };
     rows.iter().find(|r| r.kind_id == Tick::ID).map_or(0, |r| r.mean_nanos)
 }
 
 /// Mean per-widget `Tick` cost across a set of loaded widgets, in nanoseconds.
-fn widget_mean_nanos(bench: &SubstrateBench, ids: &[MailboxId]) -> u64 {
+fn widget_mean_nanos(harness: &SubstrateHarness, ids: &[MailboxId]) -> u64 {
     let loaded = u64::try_from(ids.len()).unwrap_or(0);
-    let total: u64 = ids.iter().map(|&m| tick_mean_nanos(bench, m)).sum();
+    let total: u64 = ids.iter().map(|&m| tick_mean_nanos(harness, m)).sum();
     total.checked_div(loaded).unwrap_or(0)
 }
 
@@ -218,14 +218,14 @@ fn widget_actor_per_frame_cost() {
             "cached"
         };
         for &count in &counts {
-            let mut bench =
-                SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-            let ids = load_widgets(&mut bench, &wasm, count, redraw_each_tick, quad_count);
+            let mut harness =
+                SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+            let ids = load_widgets(&mut harness, &wasm, count, redraw_each_tick, quad_count);
             let start = Instant::now();
-            bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
+            harness.execute(vec![("advance", HarnessOp::advance(ticks))]).expect("advance");
             let wall_millis = start.elapsed().as_secs_f64() * 1000.0;
 
-            let per_widget = widget_mean_nanos(&bench, &ids);
+            let per_widget = widget_mean_nanos(&harness, &ids);
             let aggregate = per_widget.saturating_mul(u64::try_from(ids.len()).unwrap_or(0));
             let affordable = FRAME_BUDGET_NANOS.checked_div(per_widget).unwrap_or(u64::MAX);
 
@@ -272,11 +272,11 @@ fn widget_cost_vs_draw_weight() {
     let mut samples: Vec<(u32, u64)> = Vec::with_capacity(weights.len());
     for &weight in &weights {
         let quads = u32::try_from(weight).unwrap_or(u32::MAX);
-        let mut bench =
-            SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-        let ids = load_widgets(&mut bench, &wasm, FIT_WIDGET_COUNT, true, quads);
-        bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
-        let per_widget = widget_mean_nanos(&bench, &ids);
+        let mut harness =
+            SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+        let ids = load_widgets(&mut harness, &wasm, FIT_WIDGET_COUNT, true, quads);
+        harness.execute(vec![("advance", HarnessOp::advance(ticks))]).expect("advance");
+        let per_widget = widget_mean_nanos(&harness, &ids);
         samples.push((quads, per_widget));
         eprintln!("{quads:>12}  {per_widget:>16}");
     }
@@ -294,18 +294,19 @@ fn widget_cost_vs_draw_weight() {
     );
 }
 
-/// Boot a fresh bench, load `count` widgets under one profile, advance `ticks`
+/// Boot a fresh harness, load `count` widgets under one profile, advance `ticks`
 /// frames timing only the advance, and return
 /// `(wall_per_frame_nanos, per_widget_tick_ewma_nanos)`. Component load is
 /// outside the timed region, so the wall-clock is steady-state per-frame cost.
 #[allow(clippy::cast_precision_loss)] // elapsed nanos → f64 for a per-frame average; exactness is not load-bearing.
 fn measure_cell(wasm: &[u8], count: usize, redraw_each_tick: bool, quad_count: u32, ticks: u32) -> (f64, u64) {
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    let ids = load_widgets(&mut bench, wasm, count, redraw_each_tick, quad_count);
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let ids = load_widgets(&mut harness, wasm, count, redraw_each_tick, quad_count);
     let start = Instant::now();
-    bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
+    harness.execute(vec![("advance", HarnessOp::advance(ticks))]).expect("advance");
     let wall_per_frame = start.elapsed().as_nanos() as f64 / f64::from(ticks);
-    (wall_per_frame, widget_mean_nanos(&bench, &ids))
+    (wall_per_frame, widget_mean_nanos(&harness, &ids))
 }
 
 /// The widget count at which the naive per-frame cost — fit linearly against
@@ -339,7 +340,7 @@ fn budget_break_even(points: &[(usize, f64)]) -> Option<u64> {
 /// without measuring them; this measurement does.
 ///
 /// The true aggregate is the wall-clock around `advance`, which in the test
-/// bench runs the whole in-process per-frame pipeline — scheduler fan-out, every
+/// harness runs the whole in-process per-frame pipeline — scheduler fan-out, every
 /// widget's `Tick` handler, the render accumulation, and the commit-current
 /// record — minus only GPU present (the offscreen target has no swapchain). The
 /// existing two fixture profiles decompose it with no internals access:

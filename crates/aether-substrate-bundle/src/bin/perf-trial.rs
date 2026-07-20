@@ -46,12 +46,12 @@
 use std::env;
 use std::process::{Command, ExitCode};
 
-use aether_substrate_bench::perf::harness::{
+use aether_harness_substrate::perf::harness::{
     Drive, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep,
 };
-use aether_substrate_bench::perf::report::TrialReport;
+use aether_harness_substrate::perf::report::TrialReport;
 
-// Dev/bench tooling: optional CI-provided git-sha override for the perf-trial
+// Dev/perf tooling: optional CI-provided git-sha override for the perf-trial
 // binary — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
 fn git_sha() -> Option<String> {
@@ -70,7 +70,7 @@ fn git_sha() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-// Dev/bench tooling: this perf-trial binary takes its run parameters from env in
+// Dev/perf tooling: this perf-trial binary takes its run parameters from env in
 // main — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {

@@ -76,7 +76,7 @@ use aether_actor::actor;
 /// The `Manifest` and `Resolve` arms read process-global tables (the
 /// link-time inventories, the runtime registry) directly with no
 /// per-cap state. The `ListKinds` arm projects the substrate's shared
-/// `Arc<Registry>`, captured in `init` from the bench / chassis mailer —
+/// `Arc<Registry>`, captured in `init` from the harness / chassis mailer —
 /// load-time registrations performed by `ComponentHostCapability` mutate
 /// the same `Arc<Registry>`, so the reply reflects whatever vocabulary
 /// the substrate currently holds without any cross-cap event channel.

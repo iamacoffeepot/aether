@@ -34,7 +34,7 @@ pub struct RenderTuningConfig {
 ///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`
-/// methods — used by the in-process substrate-bench to assert what kinds
+/// methods — used by the in-process substrate-harness to assert what kinds
 /// the cap has seen. Production chassis leave it `None` (zero
 /// overhead). Decode failures and unknown kinds don't push (the
 /// macro miss path warn-logs at the chassis-side dispatcher and
@@ -46,7 +46,7 @@ pub struct RenderTuningConfig {
 pub struct RenderConfig {
     pub vertex_buffer_bytes: usize,
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
-    /// Driver-side capture backend. Desktop and substrate-bench populate
+    /// Driver-side capture backend. Desktop and substrate-harness populate
     /// it with their `CaptureQueue` + chassis-loop wake hook;
     /// chassis without a render thread (the in-crate tests below)
     /// leave it `None` and `aether.render.capture_frame` mail

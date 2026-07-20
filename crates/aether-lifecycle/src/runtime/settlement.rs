@@ -175,7 +175,7 @@ pub fn resolve_edge(state: &LifecycleStateData, quit_pending: &mut bool) -> Kind
 #[cfg(test)]
 mod tests {
     //! Unit-level tests for the cap's decision logic. End-to-end
-    //! broadcast / advance flow is covered by the `substrate_bench`
+    //! broadcast / advance flow is covered by the `substrate_harness`
     //! frame-loop scenarios; the decision functions below carry the
     //! ADR-0082 §3 quit-flag semantics and the #1048/#1052
     //! settlement-latency gate, pinned at the unit layer.

@@ -1,6 +1,6 @@
 //! Headless boot-time autoload smoke (iamacoffeepot/aether#1529).
 //!
-//! Boots a real `HeadlessChassis` (not the substrate bench — the point is
+//! Boots a real `HeadlessChassis` (not the substrate harness — the point is
 //! the headless `build_inner` autoload drain) with a probe component
 //! queued through the bundle-pack path, **no hub and no RPC server**,
 //! and asserts the component's trampoline comes up. The component list
@@ -29,8 +29,8 @@ use aether_anthropic::AnthropicConfig;
 use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
-use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::boot_manifest_autoload;
 use aether_substrate_bundle::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};

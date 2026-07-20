@@ -27,6 +27,7 @@ use aether_component::ComponentHostConfig;
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
+use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::{HttpConfig as HttpConf, HttpServerConfig};
 use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
@@ -37,7 +38,6 @@ use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
-use aether_substrate_bench::UnsupportedSubstrateBenchCapability;
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
@@ -148,7 +148,7 @@ impl DesktopChassis {
     /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
     /// profile, the mailbox namespaces this binary links, and the
     /// `build.rs` provenance. The desktop chassis layers the audio /
-    /// render / substrate-bench / lifecycle caps plus the RPC server onto the
+    /// render / substrate-harness / lifecycle caps plus the RPC server onto the
     /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
     /// base. `--describe` prints this without opening a winit event loop —
     /// the hub can capture a desktop binary's manifest on a headless host.
@@ -159,7 +159,7 @@ impl DesktopChassis {
             <AudioCapability as Addressable>::NAMESPACE,
             <ClipboardCapability as Addressable>::NAMESPACE,
             <RenderCapability as Addressable>::NAMESPACE,
-            <UnsupportedSubstrateBenchCapability as Addressable>::NAMESPACE,
+            <UnsupportedSubstrateHarnessCapability as Addressable>::NAMESPACE,
             <LifecycleCapability as Addressable>::NAMESPACE,
             <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
@@ -511,7 +511,7 @@ impl DesktopChassis {
             .with_actor::<AudioCapability>(audio)
             .with_actor::<ClipboardCapability>(ClipboardConfig::System)
             .with_actor::<RenderCapability>(render_config)
-            .with_actor::<UnsupportedSubstrateBenchCapability>(())
+            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         let builder = maybe_with_http_server(builder, http_server);

@@ -17,7 +17,7 @@
 // Integration-test skip diagnostics intentionally surface beside test output.
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -26,6 +26,9 @@ use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::ArtifactGuard;
+use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, FrameVerdict,
     LoadComponent, LoadResult, NamedMail, Render,
@@ -36,9 +39,6 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::{RenderCapability, ViewProjection};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::ArtifactGuard;
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 const WINDOW_WIDTH: u32 = 320;
 const WINDOW_HEIGHT: u32 = 320;
@@ -199,15 +199,15 @@ impl AtlasFixture {
         self.placements[case_index]
     }
 
-    fn apply_all(&self, bench: &mut SubstrateBench, world: &str) {
-        self.apply_cases(bench, world, 0..self.cases.len());
+    fn apply_all(&self, harness: &mut SubstrateHarness, world: &str) {
+        self.apply_cases(harness, world, 0..self.cases.len());
     }
 
-    fn apply_case(&self, bench: &mut SubstrateBench, world: &str, case_index: usize) {
-        self.apply_cases(bench, world, once(case_index));
+    fn apply_case(&self, harness: &mut SubstrateHarness, world: &str, case_index: usize) {
+        self.apply_cases(harness, world, once(case_index));
     }
 
-    fn apply_cases(&self, bench: &mut SubstrateBench, world: &str, selected: impl IntoIterator<Item = usize>) {
+    fn apply_cases(&self, harness: &mut SubstrateHarness, world: &str, selected: impl IntoIterator<Item = usize>) {
         let selected: Vec<usize> = selected.into_iter().collect();
         let mut chunks = BTreeMap::<ChunkPos, AtlasChunkDraft>::new();
 
@@ -229,15 +229,15 @@ impl AtlasFixture {
         for &case_index in &selected {
             for mutation in &self.cases[case_index].mutations {
                 if let AtlasMutation::Region(region) = mutation {
-                    bench
-                        .execute(vec![("set_region", BenchOp::send_mail(world, region))])
+                    harness
+                        .execute(vec![("set_region", HarnessOp::send_mail(world, region))])
                         .expect("register atlas region");
                 }
             }
         }
         for chunk in chunks.into_values() {
-            bench
-                .execute(vec![("set_chunk", BenchOp::send_mail(world, &chunk.into_mail()))])
+            harness
+                .execute(vec![("set_chunk", HarnessOp::send_mail(world, &chunk.into_mail()))])
                 .expect("author atlas base chunk");
         }
 
@@ -247,10 +247,10 @@ impl AtlasFixture {
                 match mutation {
                     AtlasMutation::CellPoints { offset, points } => {
                         let cell = offset_cell(placement.anchor_cell, *offset);
-                        bench
+                        harness
                             .execute(vec![(
                                 "set_cell_points",
-                                BenchOp::send_mail(
+                                HarnessOp::send_mail(
                                     world,
                                     &SetCellPoints { x: cell.x, z: cell.z, points: points.clone() },
                                 ),
@@ -259,10 +259,10 @@ impl AtlasFixture {
                     }
                     AtlasMutation::CellHeights { offset, deltas } => {
                         let cell = offset_cell(placement.anchor_cell, *offset);
-                        bench
+                        harness
                             .execute(vec![(
                                 "set_cell_heights",
-                                BenchOp::send_mail(
+                                HarnessOp::send_mail(
                                     world,
                                     &SetCellHeights { x: cell.x, z: cell.z, deltas: deltas.clone() },
                                 ),
@@ -341,11 +341,11 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_kit_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str) -> MailboxId {
-    let loaded = bench
+fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str) -> MailboxId {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -493,17 +493,17 @@ fn checks_for_region(region: FrameRect) -> Vec<FrameCheck> {
 }
 
 fn capture_guarded(
-    bench: &mut SubstrateBench,
+    harness: &mut SubstrateHarness,
     world: &str,
     view_projection: ViewProjection,
     id: &str,
     expectation: &str,
     checks: Vec<FrameCheck>,
 ) -> GuardedCapture {
-    let captured = bench
+    let captured = harness
         .execute(vec![(
             "capture",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     mails: vec![envelope(RenderCapability::NAMESPACE, &view_projection), envelope(world, &Render)],
@@ -590,15 +590,15 @@ fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
 
     let fixture = AtlasFixture::new(starter_cases());
     let world = component_address("world");
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .build()
-        .expect("boot atlas bench");
-    load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
-    fixture.apply_all(&mut bench, &world);
-    bench.execute(vec![("settle", BenchOp::advance(2))]).expect("settle atlas remesh");
+        .expect("boot atlas harness");
+    load_kit_export(&mut harness, &wasm, "aether.kit.world", "world");
+    fixture.apply_all(&mut harness, &world);
+    harness.execute(vec![("settle", HarnessOp::advance(2))]).expect("settle atlas remesh");
 
     let (checks, oracles) = case_checks(&fixture);
     let expectation = format!(
@@ -606,7 +606,7 @@ fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
         fixture.legend().trim_end()
     );
     let contact = capture_guarded(
-        &mut bench,
+        &mut harness,
         &world,
         atlas_view_projection(fixture.bounds()),
         "world_case_atlas_contact_sheet",
@@ -622,15 +622,15 @@ fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
     // identical; shrinking the gutter below the mesher apron breaks this.
     let isolation_fixture = AtlasFixture::new(vec![single_label_case(), two_label_case()]);
     let isolation_world = component_address("isolation-world");
-    let mut isolation_bench = SubstrateBench::builder()
+    let mut isolation_bench = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .build()
-        .expect("boot isolation bench");
+        .expect("boot isolation harness");
     load_kit_export(&mut isolation_bench, &wasm, "aether.kit.world", "isolation-world");
     isolation_fixture.apply_case(&mut isolation_bench, &isolation_world, 0);
-    isolation_bench.execute(vec![("settle", BenchOp::advance(2))]).expect("settle isolated case");
+    isolation_bench.execute(vec![("settle", HarnessOp::advance(2))]).expect("settle isolated case");
 
     let focal_region = isolation_fixture.slot_frame_rect(isolation_fixture.placement(0));
     let isolation_view = atlas_view_projection(isolation_fixture.bounds());
@@ -643,7 +643,7 @@ fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
         checks_for_region(focal_region),
     );
     isolation_fixture.apply_case(&mut isolation_bench, &isolation_world, 1);
-    isolation_bench.execute(vec![("settle", BenchOp::advance(2))]).expect("settle populated neighbor");
+    isolation_bench.execute(vec![("settle", HarnessOp::advance(2))]).expect("settle populated neighbor");
     let neighboring = capture_guarded(
         &mut isolation_bench,
         &isolation_world,

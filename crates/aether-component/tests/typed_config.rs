@@ -1,7 +1,7 @@
 //! ADR-0090 c1 (issue 1256) integration coverage for the typed
 //! `WasmActor::Config` path. Loads the `ProbeWithConfig` actor from the
 //! `probe` bundle (issue 1994, ADR-0096) via `export: Some("test.probe_with_config")`
-//! through a [`SubstrateBench`] and asserts the wasm guest's config init path
+//! through a [`SubstrateHarness`] and asserts the wasm guest's config init path
 //! handles both empty and explicit config bytes. Issue 2878 changed the empty
 //! path from "decode error" to "boot from `Config::default()`"; the encoded
 //! config path still proves the load mail's `config` bytes reach
@@ -12,9 +12,9 @@ use std::path::Path;
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -30,14 +30,14 @@ fn typed_config_guest_without_config_bytes_uses_default() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
-    let report = bench
+    let report = harness
         .execute(vec![
             (
                 "load",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     ComponentHostCapability::NAMESPACE,
                     &LoadComponent {
                         wasm,
@@ -49,7 +49,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
             ),
             (
                 "echo",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),
@@ -89,17 +89,17 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
     let config_bytes = config.encode_into_bytes();
 
-    let report = bench
+    let report = harness
         .execute(vec![
             (
                 "load",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     ComponentHostCapability::NAMESPACE,
                     &LoadComponent {
                         wasm,
@@ -111,7 +111,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
             ),
             (
                 "echo",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),

@@ -2,7 +2,7 @@
 //!
 //! `aether.clipboard` is a request/reply peripheral, separate from the
 //! publish/subscribe `aether.input` streams. Desktop composes
-//! [`ClipboardCapability`] with the system backend, `SubstrateBench` selects its
+//! [`ClipboardCapability`] with the system backend, `SubstrateHarness` selects its
 //! deterministic in-memory backend by default, and unavailable chassis compose
 //! [`HeadlessClipboardCapability`] so both requests fail fast.
 

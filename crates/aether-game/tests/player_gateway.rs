@@ -2,7 +2,7 @@
 //!
 //! Minimal composition (issue #3764): the three-crate integration needs
 //! the component host (`TurnSim` wasm), tcp (real loopback sessions), and
-//! the active gateway on the bench basics — every assertion reads the
+//! the active gateway on the harness basics — every assertion reads the
 //! `PlayerFrame` stream off the socket, so no render cap (and no wgpu
 //! gate) is composed; the sim's frame output warn-drops harmlessly.
 
@@ -18,10 +18,10 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_component::component::resolve_embedded;
 use aether_data::{Kind, MailboxId};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_tcp::TcpCapability;
 use aether_tcp::{ListListeners, ListListenersResult};
 
@@ -30,11 +30,11 @@ const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn gateway_listener_port(bench: &mut SubstrateBench) -> u16 {
+fn gateway_listener_port(harness: &mut SubstrateHarness) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let list = bench
-            .execute(vec![("list-player-listener", BenchOp::send_and_await("aether.tcp", &ListListeners::default()))])
+        let list = harness
+            .execute(vec![("list-player-listener", HarnessOp::send_and_await("aether.tcp", &ListListeners::default()))])
             .expect("list game gateway listener")
             .reply::<ListListenersResult>("list-player-listener")
             .expect("decode game gateway listener list");
@@ -61,16 +61,16 @@ fn expected_player_session_mailbox(session_name: &str) -> MailboxId {
     PlayerSessionActor::resolve(GameGatewayCapability::resolve(0, ()).0, session_name)
 }
 
-fn load_turn_sim(bench: &mut SubstrateBench, wasm: Vec<u8>) {
+fn load_turn_sim(harness: &mut SubstrateHarness, wasm: Vec<u8>) {
     let config = SimConfig {
         fact_sink: Some(GameGatewayCapability::resolve(0, ())),
         ring_depth: 8,
         grid_bounds: GridBounds::default(),
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load-turn-sim",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -119,8 +119,8 @@ fn read_bundle_and_beacon(stream: &mut TcpStream) -> TickBundle {
     bundle
 }
 
-fn advance(bench: &mut SubstrateBench) {
-    bench.execute(vec![("advance", BenchOp::advance(1))]).expect("advance TurnSim one tick");
+fn advance(harness: &mut SubstrateHarness) {
+    harness.execute(vec![("advance", HarnessOp::advance(1))]).expect("advance TurnSim one tick");
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
         return;
     };
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_component_host()
         .with_actor::<TcpCapability>(())
         .with_actor::<GameGatewayCapability>(GameGatewayConfig {
@@ -141,9 +141,9 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
             max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         })
         .build()
-        .expect("boot active game gateway SubstrateBench");
-    let listener_port = gateway_listener_port(&mut bench);
-    load_turn_sim(&mut bench, fs::read(wasm_path).expect("read aether-kit wasm"));
+        .expect("boot active game gateway SubstrateHarness");
+    let listener_port = gateway_listener_port(&mut harness);
+    load_turn_sim(&mut harness, fs::read(wasm_path).expect("read aether-kit wasm"));
 
     let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
     first.set_read_timeout(Some(TCP_TIMEOUT)).expect("set first client timeout");
@@ -162,7 +162,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     thread::sleep(Duration::from_millis(25));
 
     let spawned = loop {
-        advance(&mut bench);
+        advance(&mut harness);
         let bundle = read_bundle_and_beacon(&mut first);
         if bundle.summary.entities.iter().any(|entity| entity.entity_id == identity.0) {
             break bundle;
@@ -188,7 +188,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     .expect("write forged MoveIntent");
     thread::sleep(Duration::from_millis(25));
     let moved = loop {
-        advance(&mut bench);
+        advance(&mut harness);
         let bundle = read_bundle_and_beacon(&mut first);
         let entity = bundle
             .summary
@@ -208,7 +208,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     )
     .expect("write non-allowlisted kind");
     thread::sleep(Duration::from_millis(25));
-    advance(&mut bench);
+    advance(&mut harness);
     let after_unknown = read_bundle_and_beacon(&mut first);
     let entity = after_unknown
         .summary

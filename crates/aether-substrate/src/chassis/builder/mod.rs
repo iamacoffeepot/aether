@@ -7,7 +7,7 @@
 //! A chassis composes passive capabilities (dispatcher-thread sinks
 //! per ADR-0070) plus exactly one [`DriverCapability`] that owns the
 //! chassis main thread. The type-state [`Builder`] enforces "exactly
-//! one driver" structurally; embedders that drive manually (`SubstrateBench`,
+//! one driver" structurally; embedders that drive manually (`SubstrateHarness`,
 //! future embedded harnesses) build a [`PassiveChassis`] via the
 //! no-driver path.
 //!

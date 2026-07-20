@@ -6,16 +6,16 @@
 //!
 //! Test-fixture component for substrate-feature scenarios. Not a
 //! demo, not exemplary — its only job is to expose substrate /
-//! substrate-bench primitives (input subscription, drop, replace, capture)
+//! substrate-harness primitives (input subscription, drop, replace, capture)
 //! to scenario assertions in a way that's easy to observe.
 //!
 //! Behaviour:
 //!
 //! - On every tick, sends `aether.test_fixture.tick_observed` to the
-//!   substrate-bench observer mailbox (`aether.substrate_bench.observer`) with
+//!   substrate-harness observer mailbox (`aether.substrate_harness.observer`) with
 //!   a monotonic counter. Lets scenarios count tick deliveries via
-//!   `SubstrateBench::count_observed` (issue 775 retired the
-//!   `BroadcastCapability` MCP fan-out; the bench now owns a private
+//!   `SubstrateHarness::count_observed` (issue 775 retired the
+//!   `BroadcastCapability` MCP fan-out; the harness now owns a private
 //!   catch-all observer mailbox for these scenario observations).
 //! - On the first tick, emits a `tracing::info!("typed_send_alive")`
 //!   that flows through the actor-aware subscriber (issue #581) →

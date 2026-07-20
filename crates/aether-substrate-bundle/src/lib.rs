@@ -9,13 +9,12 @@
 //!   thin Chassis impl post-issue-763 P5f).
 //! - `src/bin/<chassis>.rs` — minimal entry point per binary
 //!   (`aether-substrate`, `aether-substrate-headless`,
-//!   `aether-substrate-hub`, `aether-substrate-bench` —
-//!   output names preserved across the rename).
+//!   `aether-substrate-hub`, `aether-substrate-harness`).
 //!
-//! The substrate-bench chassis machinery and the in-process
-//! `SubstrateBench` harness live in the `aether-substrate-bench` crate
-//! (GPU capture support in `aether-substrate-bench-capture`); this
-//! crate keeps the `aether-substrate-bench` binary entry point.
+//! The substrate-harness chassis machinery and the in-process
+//! `SubstrateHarness` live in the `aether-harness-substrate` crate
+//! (GPU capture support in `aether-harness-substrate-capture`); this
+//! crate keeps the `aether-substrate-harness` binary entry point.
 //!
 //! The lib root re-exports a convenience surface (the most-used
 //! `aether-substrate` runtime types) so external consumers —

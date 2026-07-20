@@ -1,12 +1,12 @@
-//! Render-cap bench scenarios (rehomed from `aether-substrate-bundle`'s
-//! `substrate_bench_scenario/render.rs`, issue #3771): `capture_frame`
+//! Render-cap harness scenarios (rehomed from `aether-substrate-bundle`'s
+//! `substrate_harness_scenario/render.rs`, issue #3771): `capture_frame`
 //! pre/after mail bundles, cube projection through a camera, and the
 //! ADR-0105/ADR-0140 textured-quad + solid-quad + material surfaces,
-//! each driven through an in-process `SubstrateBench`.
+//! each driven through an in-process `SubstrateHarness`.
 //!
-//! Every bench composes exactly the caps its scenario needs (issue
+//! Every harness composes exactly the caps its scenario needs (issue
 //! #3764): all scenarios compose the render cap via
-//! `RenderBenchBuilderExt::with_render`; the two wasm-loading scenarios
+//! `RenderHarnessBuilderExt::with_render`; the two wasm-loading scenarios
 //! (probe round trip, cube projection) add `.with_component_host()`;
 //! the similarity scenario adds `.namespace_roots(...)` for the
 //! `aether.fs` cap its reference-image lookup reads through.
@@ -23,9 +23,9 @@
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
 //! gate, `save://` sandbox) live in
-//! `aether_substrate_bench_capture::test_helpers` (issues 460 + 821).
+//! `aether_harness_substrate_capture::test_helpers` (issues 460 + 821).
 //! Per issue 464, the sandbox flows in via
-//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
+//! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test`
@@ -42,6 +42,14 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::visual::{
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
+};
+use aether_harness_substrate_capture::{
+    ArtifactGuard, RenderHarnessBuilderExt, RenderHarnessExt,
+    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
+};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
     LoadResult, NamedMail, QuadScale, QuadSpace, SimilarityCheck,
@@ -54,14 +62,6 @@ use aether_render::{
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::visual::{
-    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
-};
-use aether_substrate_bench_capture::{
-    ArtifactGuard, RenderBenchBuilderExt, RenderBenchExt,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
-};
 use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -108,7 +108,7 @@ fn artifact_dir(id: &str) -> PathBuf {
         .and_then(Path::parent)
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
     let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
-    target_root.join("substrate-bench-artifacts").join(id)
+    target_root.join("substrate-harness-artifacts").join(id)
 }
 
 fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
@@ -124,22 +124,22 @@ fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool
     !rgb_close(rgba_at(img, x, y), bg, tolerance)
 }
 
-/// Load the probe into the bench via `execute`, blocking on the
+/// Load the probe into the harness via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
 /// fully-instantiated and tick-subscribed component. Returns the
 /// loaded component's `MailboxId` (the trampoline address), which
 /// the drop / replace scenarios target. Pre-Phase-4 of issue 603 the
-/// bench's `aether.control` mailbox (renamed to `aether.component` in
+/// harness's `aether.control` mailbox (renamed to `aether.component` in
 /// issue 638 phase 3) served as a single FIFO point for both load and
-/// advance; Phase 4 split advance onto `aether.substrate_bench`, so load is
+/// advance; Phase 4 split advance onto `aether.substrate_harness`, so load is
 /// no longer naturally ordered ahead of advance — `SendAndAwait`
 /// blocks on `LoadResult` before returning.
-fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -151,17 +151,17 @@ fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
     }
 }
 
-/// Load the `cube` fixture into the bench, blocking on `LoadResult`
+/// Load the `cube` fixture into the harness, blocking on `LoadResult`
 /// so the subsequent advance sees a tick-subscribed component. Mirrors
 /// `load_probe`; the cube scenario only needs the load to succeed (it
 /// captures rather than mailing the component), so the returned
 /// `MailboxId` is discarded.
-fn load_cube(bench: &mut SubstrateBench, wasm_path: &Path) {
+fn load_cube(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -207,8 +207,9 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_probe(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    load_probe(&mut harness, &wasm_path);
 
     // Capture's frame runs without a dispatched tick, so the probe
     // won't auto-tick during the captured frame. The pre-mail bundle
@@ -231,8 +232,8 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // Priming advance subscribes the probe to ticks; the
     // capture-with-mails op then dispatches the pre bundle, reads
     // back, and dispatches the after bundle — all in one frame.
-    let captured = bench
-        .execute(vec![("prime", BenchOp::advance(1)), ("snap", BenchOp::capture_with_mails(pre, after))])
+    let captured = harness
+        .execute(vec![("prime", HarnessOp::advance(1)), ("snap", HarnessOp::capture_with_mails(pre, after))])
         .expect("prime + capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -265,8 +266,8 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // Cleanup ran: probe.render is now { visible: 0 }. Advance once
     // and capture again — the next tick won't emit DrawTriangle, so
     // the frame stays at clear color.
-    let cleaned = bench
-        .execute(vec![("cleanup_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
+    let cleaned = harness
+        .execute(vec![("cleanup_advance", HarnessOp::advance(1)), ("snap2", HarnessOp::capture())])
         .expect("post-cleanup advance + capture");
     let png2 = cleaned.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleanup png");
@@ -301,15 +302,16 @@ fn cube_render_projects_centered_silhouette() {
     // 128×96 matches the fixture's `view_proj` aspect (4:3), so the
     // silhouette projects undistorted.
     let (width, height) = (128u32, 96u32);
-    let mut bench =
-        SubstrateBench::builder().size(width, height).with_render().with_component_host().build().expect("boot");
-    load_cube(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(width, height).with_render().with_component_host().build().expect("boot");
+    load_cube(&mut harness, &wasm_path);
 
     // Priming advance subscribes the cube to ticks; the next tick (run
     // inside `capture`) drives the cube's camera + geometry emission so
     // the readback sees a fully-formed frame.
-    let captured =
-        bench.execute(vec![("prime", BenchOp::advance(1)), ("snap", BenchOp::capture())]).expect("prime + capture");
+    let captured = harness
+        .execute(vec![("prime", HarnessOp::advance(1)), ("snap", HarnessOp::capture())])
+        .expect("prime + capture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -377,7 +379,7 @@ fn textured_quad_draws_screen_space_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     // 8×8 checkerboard of opaque white and opaque red — both far from the
     // dark clear color, so every magnified texel of the quad reads as lit
@@ -396,10 +398,10 @@ fn textured_quad_draws_screen_space_rect() {
         }
     }
 
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
             ),
@@ -434,7 +436,8 @@ fn textured_quad_draws_screen_space_rect() {
         },
     )];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -464,8 +467,8 @@ fn textured_quad_draws_screen_space_rect() {
     // Immediate-mode contract: with no quad resent, an advance commits
     // the empty accumulator (clearing the cache) and the next capture is
     // back at clear color.
-    let cleared = bench
-        .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
+    let cleared = harness
+        .execute(vec![("clear_advance", HarnessOp::advance(1)), ("snap2", HarnessOp::capture())])
         .expect("advance + capture");
     let png2 = cleared.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleared png");
@@ -477,11 +480,11 @@ fn textured_quad_draws_screen_space_rect() {
     );
 }
 
-fn create_observation_texture(bench: &mut SubstrateBench) -> u32 {
-    let created = bench
+fn create_observation_texture(harness: &mut SubstrateHarness) -> u32 {
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
             ),
@@ -533,8 +536,8 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
-    let texture_id = create_observation_texture(&mut bench);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let texture_id = create_observation_texture(&mut harness);
 
     let solid_clip = ClipRect { x: 2.0, y: 3.0, width: 20.0, height: 15.0 };
     let solid_quad = SolidQuad { x: 4.0, y: 5.0, width: 6.0, height: 7.0, color: Rgba::new(0.9, 0.2, 0.3, 0.8) };
@@ -572,10 +575,10 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
         ),
     ];
 
-    bench
-        .execute(vec![("commit", BenchOp::capture_with_mails(submissions, vec![]))])
+    harness
+        .execute(vec![("commit", HarnessOp::capture_with_mails(submissions, vec![]))])
         .expect("commit overlay submissions through capture");
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     assert_committed_overlay_snapshot(
         &snapshot,
         texture_id,
@@ -586,11 +589,11 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
         textured_quad,
     );
 
-    bench.execute(vec![("replay", BenchOp::capture())]).expect("idle capture replays committed overlays");
-    assert_eq!(bench.committed_overlay_snapshot().len(), 2);
+    harness.execute(vec![("replay", HarnessOp::capture())]).expect("idle capture replays committed overlays");
+    assert_eq!(harness.committed_overlay_snapshot().len(), 2);
 
-    bench.execute(vec![("clear", BenchOp::advance(1))]).expect("commit subsequent empty frame");
-    assert!(bench.committed_overlay_snapshot().is_empty());
+    harness.execute(vec![("clear", HarnessOp::advance(1))]).expect("commit subsequent empty frame");
+    assert!(harness.committed_overlay_snapshot().is_empty());
 }
 
 /// Observation follows record-time rejection, not the raw submission cache:
@@ -603,8 +606,8 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
-    let texture_id = create_observation_texture(&mut bench);
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let texture_id = create_observation_texture(&mut harness);
     let valid_quad = TexturedQuad {
         x: 16.0,
         y: 12.0,
@@ -634,10 +637,10 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         ),
         envelope("aether.render", &valid_batch),
     ];
-    let captured = bench
-        .execute(vec![("filtered", BenchOp::capture_with_mails(submissions, vec![]))])
+    let captured = harness
+        .execute(vec![("filtered", HarnessOp::capture_with_mails(submissions, vec![]))])
         .expect("capture valid and individually rejected batches");
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot[0].texture_id, valid_batch.texture_id);
     assert_eq!(snapshot[0].space, valid_batch.space);
@@ -660,10 +663,10 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         clip: None,
         quads: vec![valid_quad; over_budget_count],
     };
-    let overflow = bench
-        .execute(vec![("overflow", BenchOp::capture_with_mails(vec![envelope("aether.render", &oversized)], vec![]))])
+    let overflow = harness
+        .execute(vec![("overflow", HarnessOp::capture_with_mails(vec![envelope("aether.render", &oversized)], vec![]))])
         .expect("capture over-budget overlay pass");
-    assert!(bench.committed_overlay_snapshot().is_empty());
+    assert!(harness.committed_overlay_snapshot().is_empty());
     let overflow =
         decode_png(overflow.captured("overflow").expect("overflow capture")).expect("decode overflow capture");
     let overflow_coverage = coverage(&overflow, background_top_left(&overflow), 5);
@@ -743,14 +746,14 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let texture_size = 8u32;
     let pixels = four_quadrant_texture_pixels(texture_size);
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: texture_size, height: texture_size, format: TextureFormat::Rgba8, pixels },
             ),
@@ -784,7 +787,8 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         },
     )];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let tolerance = 20;
@@ -823,15 +827,15 @@ fn destroyed_texture_draw_drops_from_frame() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let texture_width = 8u32;
     let texture_height = 8u32;
     let pixels = vec![255u8; (texture_width * texture_height * 4) as usize];
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
             ),
@@ -864,8 +868,8 @@ fn destroyed_texture_draw_drops_from_frame() {
         )
     };
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![draw()], vec![]))])
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw()], vec![]))])
         .expect("capture with live texture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -873,11 +877,11 @@ fn destroyed_texture_draw_drops_from_frame() {
     let drawn = coverage(&img, bg, 5);
     assert!((0.08..0.22).contains(&drawn), "live texture quad coverage {drawn} fell outside the expected band");
 
-    let destroyed = bench
+    let destroyed = harness
         .execute(vec![
-            ("destroy", BenchOp::send_mail("aether.render", &DestroyTexture { texture_id })),
-            ("advance", BenchOp::advance(1)),
-            ("snap2", BenchOp::capture_with_mails(vec![draw()], vec![])),
+            ("destroy", HarnessOp::send_mail("aether.render", &DestroyTexture { texture_id })),
+            ("advance", HarnessOp::advance(1)),
+            ("snap2", HarnessOp::capture_with_mails(vec![draw()], vec![])),
         ])
         .expect("destroy texture and capture same draw next frame");
     let png2 = destroyed.captured("snap2").expect("snap2 step ran");
@@ -889,7 +893,7 @@ fn destroyed_texture_draw_drops_from_frame() {
          {destroyed_coverage}",
     );
     assert!(
-        bench.committed_overlay_snapshot().is_empty(),
+        harness.committed_overlay_snapshot().is_empty(),
         "the typed observation must reject the same missing-texture batch as the raster pass",
     );
 }
@@ -904,15 +908,15 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let texture_width = 8u32;
     let texture_height = 4u32;
     let mut pixels = vec![32u8; (texture_width * texture_height) as usize];
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture {
                     width: texture_width,
@@ -959,7 +963,8 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         ),
     ];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture r8 texture");
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture r8 texture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     assert_eq!((img.width, img.height), (frame_width, frame_height));
@@ -991,17 +996,17 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
     let pixels = vec![
         0, 0, 0, 0, 128, 128, 255, 255, //
         0, 0, 0, 0, 128, 128, 255, 255, //
         0, 0, 0, 0, 128, 128, 255, 255, //
         0, 0, 0, 0, 128, 128, 255, 255,
     ];
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: 8, height: 4, format: TextureFormat::R8, pixels },
             ),
@@ -1025,7 +1030,7 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
         },
     )];
     let captured =
-        bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture coverage material");
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture coverage material");
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode coverage material png");
     let bg = background_top_left(&img);
     let outside = rgba_at(&img, 12, 24);
@@ -1052,12 +1057,12 @@ fn textured_material_depth_tests_against_main_geometry() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
     let pixels = vec![255u8, 255, 255, 255];
-    let created = bench
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels },
             ),
@@ -1093,7 +1098,7 @@ fn textured_material_depth_tests_against_main_geometry() {
         ),
     ];
     let captured =
-        bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture textured material");
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture textured material");
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode textured material png");
     let left = rgba_at(&img, 12, 20);
     let right = rgba_at(&img, 48, 24);
@@ -1112,11 +1117,11 @@ fn coverage_material_warn_drops_non_r8_texture() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
-    let created = bench
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![255u8; 16] },
             ),
@@ -1139,7 +1144,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
         },
     )];
     let captured =
-        bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture non-r8 coverage");
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture non-r8 coverage");
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode non-r8 coverage png");
     let drawn = coverage(&img, background_top_left(&img), 5);
     assert!(drawn < 0.01, "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}");
@@ -1159,7 +1164,7 @@ fn solid_quad_draws_screen_space_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     // Known screen rect: top-left (16, 12), size 24×18.
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
@@ -1178,7 +1183,8 @@ fn solid_quad_draws_screen_space_rect() {
         },
     )];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -1202,8 +1208,8 @@ fn solid_quad_draws_screen_space_rect() {
     );
 
     // Immediate-mode clear: advance with no quad resent, next capture returns to clear color.
-    let cleared = bench
-        .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
+    let cleared = harness
+        .execute(vec![("clear_advance", HarnessOp::advance(1)), ("snap2", HarnessOp::capture())])
         .expect("advance + capture");
     let png2 = cleared.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleared png");
@@ -1224,7 +1230,7 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
     let clipped = envelope(
         "aether.render",
         &DrawSolidQuads {
@@ -1242,8 +1248,8 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
         },
     );
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![clipped, unclipped], vec![]))])
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![clipped, unclipped], vec![]))])
         .expect("capture clipped solid quads");
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped solid png");
     let bg = background_top_left(&img);
@@ -1266,11 +1272,11 @@ fn textured_quad_clip_bounds_pixels() {
     if !require_wgpu_only() {
         return;
     }
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().build().expect("boot");
-    let created = bench
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let created = harness
         .execute(vec![(
             "create",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
             ),
@@ -1300,8 +1306,8 @@ fn textured_quad_clip_bounds_pixels() {
         },
     );
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![draw], vec![]))])
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![draw], vec![]))])
         .expect("capture clipped textured quad");
     let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped textured png");
     let bg = background_top_left(&img);
@@ -1330,7 +1336,7 @@ fn capture_frame_checks_return_substrate_verdict() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     // Known screen rect: top-left (16, 12), size 24×18 — the same draw
     // `solid_quad_draws_screen_space_rect` decodes the PNG to score.
@@ -1363,10 +1369,10 @@ fn capture_frame_checks_return_substrate_verdict() {
         region: None,
     };
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
                     mails: vec![draw],
@@ -1435,14 +1441,14 @@ fn capture_frame_checks_return_substrate_verdict() {
 }
 
 /// Issue #2913 regression: a `CaptureFrame.similarity` request resolves
-/// its reference image from the `SubstrateBench`'s configured `assets`
+/// its reference image from the `SubstrateHarness`'s configured `assets`
 /// namespace root, the same way the desktop chassis wires
 /// `RenderConfig.assets_dir`. Captures a deterministic clear-color
 /// frame, stores that exact PNG under the sandbox's assets root as the
 /// reference, then requests a second capture with a `SimilarityCheck`
 /// against it. Two captures of the same unchanged scene are pixel-
 /// identical, so the score is `0.0` and the check passes — proving
-/// `SubstrateBenchChassis::build_passive` no longer leaves `assets_dir`
+/// `SubstrateHarnessChassis::build_passive` no longer leaves `assets_dir`
 /// unconditionally `None` (the bug this issue fixes; on unfixed `main`
 /// this fails at reference resolution with "no assets directory is
 /// configured").
@@ -1451,23 +1457,23 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
     if !require_wgpu_only() {
         return;
     }
-    let sandbox = init_save_sandbox("substrate-bench-render-similarity");
-    let mut bench = SubstrateBench::builder()
+    let sandbox = init_save_sandbox("substrate-harness-render-similarity");
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
 
-    let reference = bench.execute(vec![("reference", BenchOp::capture())]).expect("capture reference frame");
+    let reference = harness.execute(vec![("reference", HarnessOp::capture())]).expect("capture reference frame");
     let reference_png = reference.captured("reference").expect("reference step ran");
     let reference_path = "similarity-reference.png";
     fs::write(sandbox.join(reference_path), reference_png).expect("write reference png under the sandbox assets root");
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
                     mails: vec![],
@@ -1494,7 +1500,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
             assert_eq!(similarity_pass, Some(true), "a 0.0 score against a 0.0 threshold must pass");
         }
         CaptureFrameResult::Err { error } => panic!(
-            "capture_frame similarity replied Err (assets root not wired into SubstrateBench?): \
+            "capture_frame similarity replied Err (assets root not wired into SubstrateHarness?): \
              {error}"
         ),
     }
@@ -1516,7 +1522,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let (first_x, first_y, first_w, first_h) = (4.0f32, 4.0f32, 12.0f32, 12.0f32);
     let (second_x, second_y, second_w, second_h) = (40.0f32, 4.0f32, 12.0f32, 12.0f32);
@@ -1551,10 +1557,10 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
     let region = FrameRect { min_x: 4, min_y: 4, max_x: 15, max_y: 15 };
     let region_check = |reduction| FrameCheck { reduction, tolerance, background: None, region: Some(region) };
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
                     mails: vec![draw],
@@ -1644,7 +1650,7 @@ fn mask_stats(mask: &Image) -> MaskStats {
 }
 
 /// Issue 2914: `ArtifactGuard` closes the failure-diagnostic gap for a
-/// direct `SubstrateBench` visual assertion. Draws the same known
+/// direct `SubstrateHarness` visual assertion. Draws the same known
 /// solid-quad scene `capture_frame_checks_return_substrate_verdict`
 /// scores, then exercises the guard's full write contract against the
 /// real captured PNG and verdict:
@@ -1663,7 +1669,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         return;
     }
     let (frame_width, frame_height) = (64u32, 48u32);
-    let mut bench = SubstrateBench::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
 
     let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
     let draw = envelope(
@@ -1689,10 +1695,10 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         mk_check(FrameReduction::BoundingBox),
     ];
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame { mails: vec![draw], after_mails: vec![], checks: checks.clone(), similarity: None },
             ),

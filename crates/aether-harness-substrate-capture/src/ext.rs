@@ -1,23 +1,24 @@
-//! Seam implementations plugging the wgpu pipeline into the core bench
+//! Seam implementations plugging the wgpu pipeline into the core harness
 //! (issue #3765): [`GpuRenderExt`] chains the render cap into the
 //! chassis builder from the boot wiring, [`GpuFrameHook`] drives the
 //! per-frame draw + capture readback in the pump, and the two extension
-//! traits give the builder and the bench their render-typed surface
+//! traits give the builder and the harness their render-typed surface
 //! back (`with_render`, `committed_overlay_snapshot`).
 
 use std::any::Any;
 use std::sync::Arc;
 
 use aether_actor::Addressable;
+use aether_harness_substrate::{
+    BenchWiring, CaptureOutcome, FrameHook, RenderExt, SubstrateHarness, SubstrateHarnessBuilder,
+    SubstrateHarnessChassis,
+};
 use aether_kinds::FrameCheck;
 use aether_render::{CaptureBackend, DrawTexturedQuads, RenderCapability, RenderConfig, RenderHandles};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::mail::MailboxId;
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
-use aether_substrate_bench::{
-    BenchWiring, CaptureOutcome, FrameHook, RenderExt, SubstrateBench, SubstrateBenchBuilder, SubstrateBenchChassis,
-};
 
 use crate::gpu::Gpu;
 
@@ -27,7 +28,11 @@ use crate::gpu::Gpu;
 pub struct GpuRenderExt;
 
 impl RenderExt for GpuRenderExt {
-    fn compose(&self, wiring: &BenchWiring, builder: Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis> {
+    fn compose(
+        &self,
+        wiring: &BenchWiring,
+        builder: Builder<SubstrateHarnessChassis>,
+    ) -> Builder<SubstrateHarnessChassis> {
         builder.with_actor::<RenderCapability>(RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds: wiring.observed_kinds.clone(),
@@ -50,7 +55,7 @@ pub struct GpuFrameHook {
 
 impl GpuFrameHook {
     /// Snapshot the committed overlay batches from the latest rendered
-    /// frame — the concrete accessor `RenderBenchExt` reaches through
+    /// frame — the concrete accessor `RenderHarnessExt` reaches through
     /// [`FrameHook::as_any`].
     #[must_use]
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
@@ -83,12 +88,12 @@ impl FrameHook for GpuFrameHook {
 /// [`GpuRenderExt`]) plus the frame hook built against the booted
 /// chassis's published [`RenderHandles`] at the builder's offscreen
 /// size.
-pub trait RenderBenchBuilderExt {
+pub trait RenderHarnessBuilderExt {
     #[must_use]
     fn with_render(self) -> Self;
 }
 
-impl RenderBenchBuilderExt for SubstrateBenchBuilder {
+impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
     fn with_render(self) -> Self {
         self.render_ext(
             Box::new(GpuRenderExt),
@@ -107,9 +112,9 @@ impl RenderBenchBuilderExt for SubstrateBenchBuilder {
     }
 }
 
-/// Bench extension restoring the render-typed overlay accessor the
+/// Harness extension restoring the render-typed overlay accessor the
 /// core no longer owns.
-pub trait RenderBenchExt {
+pub trait RenderHarnessExt {
     /// Snapshot the ordered, typed overlay submissions from the latest
     /// frame committed by an `advance` or `capture` op. Solid
     /// submissions appear normalized as [`DrawTexturedQuads`] over the
@@ -121,18 +126,18 @@ pub trait RenderBenchExt {
     /// it. Returned values own their data.
     ///
     /// # Panics
-    /// Panics if the bench was built without
-    /// [`RenderBenchBuilderExt::with_render`] — there is no overlay
+    /// Panics if the harness was built without
+    /// [`RenderHarnessBuilderExt::with_render`] — there is no overlay
     /// pipeline to snapshot.
     #[must_use]
     fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads>;
 }
 
-impl RenderBenchExt for SubstrateBench {
+impl RenderHarnessExt for SubstrateHarness {
     fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
         self.frame_hook()
             .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
-            .expect("committed_overlay_snapshot requires a bench built with .with_render() (issue #3764)")
+            .expect("committed_overlay_snapshot requires a harness built with .with_render() (issue #3764)")
             .committed_overlay_snapshot()
     }
 }

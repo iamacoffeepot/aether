@@ -17,5 +17,5 @@ them into reusable camera, widget, workbench, and world behavior.
 
 Keep frame ownership explicit. Product actors may emit render/text/audio mail,
 but native callbacks and presentation remain chassis responsibilities. For
-visual changes, pair structural/SubstrateBench checks with captured evidence; for
+visual changes, pair structural/SubstrateHarness checks with captured evidence; for
 realtime audio, keep allocation and blocking work off the callback.

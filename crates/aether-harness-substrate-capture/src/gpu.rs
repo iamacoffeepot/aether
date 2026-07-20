@@ -1,4 +1,4 @@
-// Test-bench wgpu shim. ADR-0071 phase C3: pipeline + targets +
+// Test-harness wgpu shim. ADR-0071 phase C3: pipeline + targets +
 // device + queue ownership all live inside core's `RenderCapability`
 // (via `RenderGpu` + `install_gpu`). What's left in this file is the
 // thinnest reasonable wrapper: device acquisition (offscreen, no
@@ -7,16 +7,16 @@
 
 use std::sync::Arc;
 
+use aether_harness_substrate::CaptureOutcome;
 use aether_kinds::FrameCheck;
 use aether_render::{DrawTexturedQuads, RenderGpu, RenderHandles};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{RenderError, encode_png};
-use aether_substrate_bench::CaptureOutcome;
 
 use crate::visual;
 use std::iter;
 
-/// Render target format. Test-bench commits to RGBA at init since
+/// Render target format. Test-harness commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-
 /// free.
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -24,7 +24,7 @@ const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 pub struct Gpu {
     pub adapter_info: wgpu::AdapterInfo,
     /// Resolved adapter limits. Kept for diagnostics; desktop uses
-    /// the equivalent for `platform_info` which substrate-bench replies
+    /// the equivalent for `platform_info` which substrate-harness replies
     /// `Err` to.
     #[allow(dead_code)]
     pub limits: wgpu::Limits,
@@ -40,7 +40,7 @@ impl Gpu {
     ///
     /// # Panics
     /// Panics if adapter selection or device acquisition fail —
-    /// fail-fast per ADR-0063: the substrate bench can't proceed without a
+    /// fail-fast per ADR-0063: the substrate harness can't proceed without a
     /// usable offscreen wgpu pipeline, and driverless dev boxes are
     /// expected to skip the test entirely (handled at the scenario
     /// runner layer per ADR-0067).
@@ -57,7 +57,7 @@ impl Gpu {
         let limits = wgpu::Limits::default();
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("aether-substrate-bench device"),
+            label: Some("aether-harness-substrate device"),
             required_features: wgpu::Features::empty(),
             required_limits: limits.clone(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -80,10 +80,10 @@ impl Gpu {
         Self { adapter_info, limits, render_handles }
     }
 
-    /// Resize the offscreen target. Test-bench has no surface, so a
+    /// Resize the offscreen target. Test-harness has no surface, so a
     /// resize just reallocates the offscreen color + depth textures
     /// and invalidates the readback buffer.
-    #[allow(dead_code)] // wired in PR2 alongside substrate_bench.advance kinds
+    #[allow(dead_code)] // wired in PR2 alongside substrate_harness.advance kinds
     pub fn resize(&mut self, width: u32, height: u32) {
         self.render_handles.resize(width, height);
     }
@@ -101,7 +101,7 @@ impl Gpu {
     /// Draw the current accumulator's vertices into the offscreen
     /// target with the latest camera view-proj. No presentation step
     /// — desktop's swapchain blit is omitted because there's no
-    /// surface. Drives the substrate-bench's advance path; commits the
+    /// surface. Drives the substrate-harness's advance path; commits the
     /// current frame to the render cap's `last_submitted` cache so
     /// any subsequent `capture` observes the freshly-rendered state
     /// (or an empty cache, if the producer chose not to emit).
@@ -132,7 +132,7 @@ impl Gpu {
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
     ///
-    /// Drives the substrate-bench's `SubstrateBench::capture` path with
+    /// Drives the substrate-harness's `SubstrateHarness::capture` path with
     /// `dispatch_tick=false`. The render cap's `replay_cache_when_idle`
     /// flag is set so an empty live accumulator (no producer
     /// emitted, because no `Tick` was dispatched for this frame)

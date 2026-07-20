@@ -15,7 +15,7 @@
 //! (one root render sender per cluster) is issue 2659's `widget_compositing`
 //! scenario and is not duplicated.
 //!
-//! Everything observable here is typed mail + the log ring, so the bench
+//! Everything observable here is typed mail + the log ring, so the harness
 //! composes only the component host — no render target, hence no wgpu gate:
 //! the scenario skips only when the `aether_kit` wasm has not been pre-built
 //! (`require_wasm`). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip
@@ -31,6 +31,8 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_PAGE_DOWN, KEY_SPACE, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
@@ -41,8 +43,6 @@ use aether_kit::{
     ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
     WidgetChildSpec, WidgetControlState, WidgetKind,
 };
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
@@ -57,7 +57,7 @@ fn child_address(subname: &str) -> String {
 /// `aether.kit.widget.panel`) with a config that places its stack at
 /// `(10, 10)` 200px wide, no font (`font_path` empty, so no `aether.text`
 /// dependency), and the default theme.
-fn load_panel(bench: &mut SubstrateBench, wasm: &[u8]) -> String {
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -68,10 +68,10 @@ fn load_panel(bench: &mut SubstrateBench, wasm: &[u8]) -> String {
         children: Vec::new(),
         owns_input: true,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -92,8 +92,8 @@ fn load_panel(bench: &mut SubstrateBench, wasm: &[u8]) -> String {
 }
 
 /// Every log message in the panel's ring, oldest first.
-fn panel_log_messages(bench: &mut SubstrateBench) -> Vec<String> {
-    match bench.log_tail(&panel_address(), None, None) {
+fn panel_log_messages(harness: &mut SubstrateHarness) -> Vec<String> {
+    match harness.log_tail(&panel_address(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -123,8 +123,8 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 220).with_component_host().build().expect("boot");
-    let panel = load_panel(&mut bench, &wasm);
+    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    let panel = load_panel(&mut harness, &wasm);
 
     // The first tick spawns the widget stack and assigns each child its frame;
     // every later step drives one input event, settling its whole in-cluster
@@ -132,31 +132,31 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     // Each input kind is fire-and-forget (no reply), so `send_mail` — which
     // still blocks until the whole dispatched chain settles — is the op;
     // `send_and_await` would hang waiting for a reply that never comes.
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
             // Slider drag: press mid-track, drag right, release — the release
             // commits at the dragged value (x=160 → 75% of 0..255 ≈ 191). The
             // press also focuses the slider.
-            ("drag_press", BenchOp::send_mail(&panel, &press(110.0, 52.0))),
-            ("drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
-            ("drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("drag_press", HarnessOp::send_mail(&panel, &press(110.0, 52.0))),
+            ("drag_move", HarnessOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
             // Tab moves focus off the slider to the radio group; Down then
             // routes to the focused radio, moving its selection to index 1.
-            ("tab", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("radio_key", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("tab", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("radio_key", HarnessOp::send_mail(&panel, &Key { code: KEY_DOWN })),
             // A click on the third radio row (y 118..142) selects index 2.
-            ("radio_press", BenchOp::send_mail(&panel, &press(30.0, 125.0))),
-            ("radio_release", BenchOp::send_mail(&panel, &release(30.0, 125.0))),
+            ("radio_press", HarnessOp::send_mail(&panel, &press(30.0, 125.0))),
+            ("radio_release", HarnessOp::send_mail(&panel, &release(30.0, 125.0))),
             // Focus the text field (y 148..172), type into it, and commit.
-            ("text_focus", BenchOp::send_mail(&panel, &press(50.0, 160.0))),
-            ("text_focus_up", BenchOp::send_mail(&panel, &release(50.0, 160.0))),
-            ("type", BenchOp::send_mail(&panel, &TextInput { text: "hi".to_owned() })),
-            ("commit", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("text_focus", HarnessOp::send_mail(&panel, &press(50.0, 160.0))),
+            ("text_focus_up", HarnessOp::send_mail(&panel, &release(50.0, 160.0))),
+            ("type", HarnessOp::send_mail(&panel, &TextInput { text: "hi".to_owned() })),
+            ("commit", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
         ])
         .expect("input session");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
 
     assert!(
@@ -197,27 +197,27 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 220).with_component_host().build().expect("boot");
-    let panel = load_panel(&mut bench, &wasm);
+    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    let panel = load_panel(&mut harness, &wasm);
     let button = format!("{panel}/{}:button", aether_component::WasmTrampoline::NAMESPACE);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("disable_by_lineage", BenchOp::send_mail(&button, &SetWidgetState { state: unavailable })),
-            ("blocked_press", BenchOp::send_mail(&panel, &press(30.0, 190.0))),
-            ("blocked_release", BenchOp::send_mail(&panel, &release(30.0, 190.0))),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("disable_by_lineage", HarnessOp::send_mail(&button, &SetWidgetState { state: unavailable })),
+            ("blocked_press", HarnessOp::send_mail(&panel, &press(30.0, 190.0))),
+            ("blocked_release", HarnessOp::send_mail(&panel, &release(30.0, 190.0))),
             (
                 "enable_by_lineage",
-                BenchOp::send_mail(&button, &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_mail(&button, &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("allowed_press", BenchOp::send_mail(&panel, &press(30.0, 190.0))),
-            ("allowed_release", BenchOp::send_mail(&panel, &release(30.0, 190.0))),
+            ("allowed_press", HarnessOp::send_mail(&panel, &press(30.0, 190.0))),
+            ("allowed_release", HarnessOp::send_mail(&panel, &release(30.0, 190.0))),
         ])
         .expect("external inline-child lineage session");
 
-    let log = match bench.log_tail(&panel, None, None) {
+    let log = match harness.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries,
         LogTailResult::Err { error } => panic!("log_tail on the loaded panel failed: {error}"),
     };
@@ -285,7 +285,7 @@ fn text_field_spec(subname: &str, initial: &str, state: WidgetControlState) -> W
 /// Load the reference `WidgetPanel` root with an explicit `children` list (so
 /// it stacks exactly those specs rather than its built-in reference stack) at
 /// `(10, 10)` 200px wide, no font, default theme.
-fn load_panel_with(bench: &mut SubstrateBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -296,10 +296,10 @@ fn load_panel_with(bench: &mut SubstrateBench, wasm: &[u8], children: Vec<Widget
         children,
         owns_input: true,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -369,25 +369,25 @@ fn panel_stacks_declared_children_in_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 220).with_component_host().build().expect("boot");
-    load_panel_with(&mut bench, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
+    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    load_panel_with(&mut harness, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
 
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
             // First tick spawns + lays out the declared stack.
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
             // Tab from no focus lands on the first focusable child (index 0);
             // an arrow nudge on the focused slider commits + logs it.
-            ("tab_first", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("nudge_first", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("tab_first", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("nudge_first", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
             // Tab again advances to the second child; nudge + log it.
-            ("tab_second", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("nudge_second", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("tab_second", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("nudge_second", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
         ])
         .expect("declared-children session");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     let order: Vec<String> = log
         .iter()
@@ -412,36 +412,36 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 150).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(240, 150).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(&mut bench, &wasm, vec![virtual_list_spec("inventory", read_only)]);
+    load_panel_with(&mut harness, &wasm, vec![virtual_list_spec("inventory", read_only)]);
 
     let panel = panel_address();
     let list = child_address("inventory");
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("focus_read_only", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("blocked_read_only_page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
-            ("blocked_read_only_press", BenchOp::send_mail(&panel, &press(30.0, 118.0))),
-            ("blocked_read_only_release", BenchOp::send_mail(&panel, &release(30.0, 118.0))),
-            ("make_mutable", BenchOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
-            ("page_to_five", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
-            ("down_to_six", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
-            ("click_realized_top", BenchOp::send_mail(&panel, &press(30.0, 22.0))),
-            ("release_realized_top", BenchOp::send_mail(&panel, &release(30.0, 22.0))),
-            ("disable", BenchOp::send_mail(&list, &SetWidgetState { state: disabled })),
-            ("blocked_disabled_page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
-            ("blocked_disabled_press", BenchOp::send_mail(&panel, &press(30.0, 94.0))),
-            ("blocked_disabled_release", BenchOp::send_mail(&panel, &release(30.0, 94.0))),
-            ("enable", BenchOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
-            ("refocus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("page_to_seven", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("focus_read_only", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("blocked_read_only_page", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("blocked_read_only_press", HarnessOp::send_mail(&panel, &press(30.0, 118.0))),
+            ("blocked_read_only_release", HarnessOp::send_mail(&panel, &release(30.0, 118.0))),
+            ("make_mutable", HarnessOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
+            ("page_to_five", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("down_to_six", HarnessOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("click_realized_top", HarnessOp::send_mail(&panel, &press(30.0, 22.0))),
+            ("release_realized_top", HarnessOp::send_mail(&panel, &release(30.0, 22.0))),
+            ("disable", HarnessOp::send_mail(&list, &SetWidgetState { state: disabled })),
+            ("blocked_disabled_page", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("blocked_disabled_press", HarnessOp::send_mail(&panel, &press(30.0, 94.0))),
+            ("blocked_disabled_release", HarnessOp::send_mail(&panel, &release(30.0, 94.0))),
+            ("enable", HarnessOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
+            ("refocus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("page_to_seven", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
         ])
         .expect("virtual-list state and selection session");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let selected_indices: Vec<u32> = log.iter().filter_map(|message| virtual_list_selected_index(message)).collect();
     assert_eq!(
         selected_indices,
@@ -458,41 +458,41 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     );
 }
 
-fn drive_state_and_keyboard_session(bench: &mut SubstrateBench) {
+fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness) {
     let panel = panel_address();
     let value = child_address("value");
     let run = child_address("run");
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
             // Forward Tab skips the disabled first slider and focuses the
             // read-only value. Its arrow input must not mutate.
-            ("tab_value", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("blocked_nudge", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("tab_value", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("blocked_nudge", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
             // Runtime state changes preserve the value while enabling mutation.
-            ("make_mutable", BenchOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
-            ("allowed_nudge", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("make_mutable", HarnessOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
+            ("allowed_nudge", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
             // Shift+Tab wraps backward to the Button, skipping the disabled
             // first entry. Space fires on release.
-            ("shift", BenchOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
-            ("reverse_tab", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("space", BenchOp::send_mail(&panel, &Key { code: KEY_SPACE })),
-            ("space_release", BenchOp::send_mail(&panel, &KeyRelease { code: KEY_SPACE })),
+            ("shift", HarnessOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
+            ("reverse_tab", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("space", HarnessOp::send_mail(&panel, &Key { code: KEY_SPACE })),
+            ("space_release", HarnessOp::send_mail(&panel, &KeyRelease { code: KEY_SPACE })),
             // Enter fires immediately and suppresses repeated key-down mail
             // until its matching release.
-            ("enter", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("enter_repeat", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("enter_release", BenchOp::send_mail(&panel, &KeyRelease { code: KEY_ENTER })),
+            ("enter", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("enter_repeat", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("enter_release", HarnessOp::send_mail(&panel, &KeyRelease { code: KEY_ENTER })),
             // Hiding the focused button moves focus forward to the live slider;
             // no stale keyboard arm or focus remains on the button.
             (
                 "hide_button",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     &run,
                     &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
                 ),
             ),
-            ("nudge_after_hide", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("nudge_after_hide", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
         ])
         .expect("state and keyboard session");
 }
@@ -507,12 +507,12 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 140).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(240, 140).with_component_host().build().expect("boot");
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     load_panel_with(
-        &mut bench,
+        &mut harness,
         &wasm,
         vec![
             slider_spec_with_state("disabled", 40.0, disabled),
@@ -521,9 +521,9 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
         ],
     );
 
-    drive_state_and_keyboard_session(&mut bench);
+    drive_state_and_keyboard_session(&mut harness);
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     let value_changes = log
         .iter()
@@ -553,29 +553,29 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 100).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(240, 100).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(&mut bench, &wasm, vec![radio_spec("choice", read_only)]);
+    load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", read_only)]);
 
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("blocked_key", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
-            ("blocked_pointer", BenchOp::send_mail(&panel, &press(30.0, 70.0))),
-            ("blocked_pointer_release", BenchOp::send_mail(&panel, &release(30.0, 70.0))),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("focus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("blocked_key", HarnessOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("blocked_pointer", HarnessOp::send_mail(&panel, &press(30.0, 70.0))),
+            ("blocked_pointer_release", HarnessOp::send_mail(&panel, &release(30.0, 70.0))),
             (
                 "enable",
-                BenchOp::send_mail(child_address("choice"), &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_mail(child_address("choice"), &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("allowed_key", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
-            ("allowed_pointer", BenchOp::send_mail(&panel, &press(30.0, 70.0))),
-            ("allowed_pointer_release", BenchOp::send_mail(&panel, &release(30.0, 70.0))),
+            ("allowed_key", HarnessOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("allowed_pointer", HarnessOp::send_mail(&panel, &press(30.0, 70.0))),
+            ("allowed_pointer_release", HarnessOp::send_mail(&panel, &release(30.0, 70.0))),
         ])
         .expect("read-only radio session");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     let selections: Vec<u32> = log
         .iter()
@@ -590,39 +590,39 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
 }
 
 /// Arm, disable, and re-enable Button before its decisive stale release.
-fn drive_button_cancellation_session(bench: &mut SubstrateBench) {
+fn drive_button_cancellation_session(harness: &mut SubstrateHarness) {
     let run = child_address("run");
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
-    bench
+    harness
         .execute(vec![
             // Address the live child directly so focus loss cannot mask a
             // failure to clear its pointer arm on the state transition.
-            ("arm_button", BenchOp::send_mail(&run, &press(30.0, 22.0))),
-            ("disable_button", BenchOp::send_mail(&run, &SetWidgetState { state: unavailable })),
-            ("enable_button", BenchOp::send_mail(&run, &SetWidgetState { state: WidgetControlState::default() })),
-            ("stale_button_release", BenchOp::send_mail(&run, &release(30.0, 22.0))),
-            ("live_button_press", BenchOp::send_mail(&run, &press(30.0, 22.0))),
-            ("live_button_release", BenchOp::send_mail(&run, &release(30.0, 22.0))),
+            ("arm_button", HarnessOp::send_mail(&run, &press(30.0, 22.0))),
+            ("disable_button", HarnessOp::send_mail(&run, &SetWidgetState { state: unavailable })),
+            ("enable_button", HarnessOp::send_mail(&run, &SetWidgetState { state: WidgetControlState::default() })),
+            ("stale_button_release", HarnessOp::send_mail(&run, &release(30.0, 22.0))),
+            ("live_button_press", HarnessOp::send_mail(&run, &press(30.0, 22.0))),
+            ("live_button_release", HarnessOp::send_mail(&run, &release(30.0, 22.0))),
         ])
         .expect("button state cancellation session");
 }
 
-fn drive_slider_cancellation_session(bench: &mut SubstrateBench) {
+fn drive_slider_cancellation_session(harness: &mut SubstrateHarness) {
     let panel = panel_address();
     let value = child_address("value");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    bench
+    harness
         .execute(vec![
             // Read-only leaves root capture intact. Re-enable before moving;
             // only clearing Slider's own drag state prevents stale values.
-            ("begin_drag", BenchOp::send_mail(&panel, &press(60.0, 52.0))),
-            ("make_slider_read_only", BenchOp::send_mail(&value, &SetWidgetState { state: read_only })),
-            ("enable_slider", BenchOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
-            ("stale_drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
-            ("stale_drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
-            ("live_drag_press", BenchOp::send_mail(&panel, &press(110.0, 52.0))),
-            ("live_drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
-            ("live_drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("begin_drag", HarnessOp::send_mail(&panel, &press(60.0, 52.0))),
+            ("make_slider_read_only", HarnessOp::send_mail(&value, &SetWidgetState { state: read_only })),
+            ("enable_slider", HarnessOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
+            ("stale_drag_move", HarnessOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("stale_drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("live_drag_press", HarnessOp::send_mail(&panel, &press(110.0, 52.0))),
+            ("live_drag_move", HarnessOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("live_drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider state cancellation session");
 }
@@ -636,19 +636,19 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 90).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(240, 90).with_component_host().build().expect("boot");
     load_panel_with(
-        &mut bench,
+        &mut harness,
         &wasm,
         vec![button_spec("run", WidgetControlState::default()), slider_spec("value", 0.0)],
     );
 
     let panel = panel_address();
-    bench.execute(vec![("spawn", BenchOp::send_mail(&panel, &Tick))]).expect("spawn widget set");
-    drive_button_cancellation_session(&mut bench);
-    drive_slider_cancellation_session(&mut bench);
+    harness.execute(vec![("spawn", HarnessOp::send_mail(&panel, &Tick))]).expect("spawn widget set");
+    drive_button_cancellation_session(&mut harness);
+    drive_slider_cancellation_session(&mut harness);
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     let clicks = log
         .iter()
@@ -681,26 +681,26 @@ fn read_only_text_field_blocks_activation_until_enabled() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(240, 80).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(&mut bench, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
+    load_panel_with(&mut harness, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
 
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("blocked_text", BenchOp::send_mail(&panel, &TextInput { text: " mutation".to_owned() })),
-            ("blocked_enter", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("focus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("blocked_text", HarnessOp::send_mail(&panel, &TextInput { text: " mutation".to_owned() })),
+            ("blocked_enter", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
             (
                 "enable",
-                BenchOp::send_mail(child_address("locked"), &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_mail(child_address("locked"), &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("allowed_enter", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("allowed_enter", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
         ])
         .expect("read-only text activation session");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     let commits: Vec<_> = log
         .iter()

@@ -1,11 +1,17 @@
 //! Terrain proposal lifecycle and pixel identity through the real kit wasm.
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::ArtifactGuard;
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{
+    ColorRegionStats, FramePoint, Rect, decode_png, mean_absolute_error, run_checks, target_color_stats,
+};
 use aether_kinds::{
     FrameCheck, FrameCheckResult, FrameReduction, LoadComponent, LoadResult, NamedMail, Render, ReplaceComponent,
     ReplaceResult,
@@ -18,12 +24,6 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::ArtifactGuard;
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{
-    ColorRegionStats, FramePoint, Rect, decode_png, mean_absolute_error, run_checks, target_color_stats,
-};
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -48,11 +48,11 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_world(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
-    let loaded = bench
+fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -80,11 +80,11 @@ fn top_down_view_projection(center_x: f32, center_z: f32, extent: f32) -> ViewPr
     ViewProjection { view_proj: (projection * view).to_cols_array() }
 }
 
-fn capture(bench: &mut SubstrateBench, world: &str, label: &'static str) -> Vec<u8> {
-    let captured = bench
+fn capture(harness: &mut SubstrateHarness, world: &str, label: &'static str) -> Vec<u8> {
+    let captured = harness
         .execute(vec![(
             label,
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![envelope("aether.render", &top_down_view_projection(16.0, 8.0, 2.0)), envelope(world, &Render)],
                 Vec::new(),
             ),
@@ -138,13 +138,14 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(32, 32).with_render().with_component_host().build().expect("boot");
-    load_world(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(32, 32).with_render().with_component_host().build().expect("boot");
+    load_world(&mut harness, &wasm_path);
     let world = component_address();
 
     for index in 0..64 {
-        let staged_reply = bench
-            .execute(vec![("stage", BenchOp::send_and_await(&world, &empty_chunk_proposal(index)))])
+        let staged_reply = harness
+            .execute(vec![("stage", HarnessOp::send_and_await(&world, &empty_chunk_proposal(index)))])
             .expect("stage retained proposal");
         let (proposal_id, operation_result, _) =
             staged(staged_reply.reply::<ProposalResult>("stage").expect("decode staged proposal"));
@@ -152,18 +153,18 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
         assert_eq!(operation_result, ProposalOperationResult::Mutation);
     }
 
-    let rejected = bench
-        .execute(vec![("reject", BenchOp::send_and_await(&world, &empty_chunk_proposal(64)))])
+    let rejected = harness
+        .execute(vec![("reject", HarnessOp::send_and_await(&world, &empty_chunk_proposal(64)))])
         .expect("reject proposal beyond retained capacity");
     assert_eq!(
         rejected.reply::<ProposalResult>("reject").expect("decode capacity rejection"),
         ProposalResult::Rejected { error: ProposalError::StagedProposalLimitReached }
     );
 
-    let discarded = bench
+    let discarded = harness
         .execute(vec![(
             "discard",
-            BenchOp::send_and_await(&world, &DiscardProposal { proposal_id: ProposalId { value: 1 } }),
+            HarnessOp::send_and_await(&world, &DiscardProposal { proposal_id: ProposalId { value: 1 } }),
         )])
         .expect("discard retained proposal");
     assert_eq!(
@@ -171,8 +172,8 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
         ProposalResult::Discarded { proposal_id: ProposalId { value: 1 } }
     );
 
-    let restaged = bench
-        .execute(vec![("restage", BenchOp::send_and_await(&world, &empty_chunk_proposal(65)))])
+    let restaged = harness
+        .execute(vec![("restage", HarnessOp::send_and_await(&world, &empty_chunk_proposal(65)))])
         .expect("restage after discard reopens capacity");
     let (proposal_id, operation_result, _) =
         staged(restaged.reply::<ProposalResult>("restage").expect("decode restaged proposal"));
@@ -186,19 +187,19 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench =
-        SubstrateBench::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
-    let mailbox_id = load_world(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
+    let mailbox_id = load_world(&mut harness, &wasm_path);
     let world = component_address();
-    let baseline_png = capture(&mut bench, &world, "baseline");
+    let baseline_png = capture(&mut harness, &world, "baseline");
     let baseline_image = decode_png(&baseline_png).expect("decode committed baseline");
 
     let accepted_source = MarkRef { id: MarkId::new(41), revision: 3 };
     let peer_source = MarkRef { id: MarkId::new(42), revision: 1 };
-    let proposed = bench
+    let proposed = harness
         .execute(vec![
-            ("accepted", BenchOp::send_and_await(&world, &brush_proposal(accepted_source, Material::Stone, 2048))),
-            ("peer", BenchOp::send_and_await(&world, &brush_proposal(peer_source, Material::Sand, 2304))),
+            ("accepted", HarnessOp::send_and_await(&world, &brush_proposal(accepted_source, Material::Stone, 2048))),
+            ("peer", HarnessOp::send_and_await(&world, &brush_proposal(peer_source, Material::Sand, 2304))),
         ])
         .expect("stage cross-chunk proposal peers");
     let (accepted_id, accepted_operation, accepted_digest) =
@@ -215,22 +216,22 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     assert!(accepted_digest.triangle_count > 0);
     assert!(accepted_digest.changed_geometry_bounds.is_some());
     assert_eq!(
-        capture(&mut bench, &world, "still_committed"),
+        capture(&mut harness, &world, "still_committed"),
         baseline_png,
         "proposing leaves committed pixels unchanged",
     );
 
-    let preview_set = bench
+    let preview_set = harness
         .execute(vec![(
             "preview",
-            BenchOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(accepted_id) }),
+            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(accepted_id) }),
         )])
         .expect("activate proposal preview");
     assert_eq!(
         preview_set.reply::<ProposalResult>("preview").expect("decode preview result"),
         ProposalResult::PreviewSet { active_proposal_id: Some(accepted_id), digest: Some(accepted_digest.clone()) }
     );
-    let preview_png = capture(&mut bench, &world, "preview_frame");
+    let preview_png = capture(&mut harness, &world, "preview_frame");
     let preview_image = decode_png(&preview_png).expect("decode proposal preview");
     assert_eq!((preview_image.width, preview_image.height), (WIDTH, HEIGHT));
     let ColorRegionStats {
@@ -252,14 +253,14 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
         "preview visibly differs from the committed baseline in the authored region",
     );
 
-    let committed = bench
-        .execute(vec![("commit", BenchOp::send_and_await(&world, &CommitProposal { proposal_id: accepted_id }))])
+    let committed = harness
+        .execute(vec![("commit", HarnessOp::send_and_await(&world, &CommitProposal { proposal_id: accepted_id }))])
         .expect("commit accepted proposal");
     assert_eq!(
         committed.reply::<ProposalResult>("commit").expect("decode commit result"),
         ProposalResult::Committed { proposal_id: accepted_id, digest: accepted_digest }
     );
-    let committed_png = capture(&mut bench, &world, "committed_frame");
+    let committed_png = capture(&mut harness, &world, "committed_frame");
     let committed_image = decode_png(&committed_png).expect("decode committed proposal");
     let checks = vec![FrameCheck {
         reduction: FrameReduction::Coverage,
@@ -281,8 +282,8 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     assert_eq!(committed_image.rgba, preview_image.rgba);
     assert_eq!(mean_absolute_error(&committed_image, &preview_image).expect("matching dimensions"), 0.0);
 
-    let stale = bench
-        .execute(vec![("stale", BenchOp::send_and_await(&world, &CommitProposal { proposal_id: peer_id }))])
+    let stale = harness
+        .execute(vec![("stale", HarnessOp::send_and_await(&world, &CommitProposal { proposal_id: peer_id }))])
         .expect("reject stale peer");
     assert_eq!(
         stale.reply::<ProposalResult>("stale").expect("decode stale rejection"),
@@ -296,48 +297,48 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     );
 
     let discard_source = MarkRef { id: MarkId::new(43), revision: 1 };
-    let discard_staged = bench
+    let discard_staged = harness
         .execute(vec![(
             "discard_stage",
-            BenchOp::send_and_await(&world, &brush_proposal(discard_source, Material::Grass, 1792)),
+            HarnessOp::send_and_await(&world, &brush_proposal(discard_source, Material::Grass, 1792)),
         )])
         .expect("stage discard proposal");
     let (discard_id, _, _) =
         staged(discard_staged.reply::<ProposalResult>("discard_stage").expect("decode discard proposal"));
-    bench
+    harness
         .execute(vec![(
             "discard_preview",
-            BenchOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(discard_id) }),
+            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(discard_id) }),
         )])
         .expect("preview discard proposal");
-    let discarded = bench
-        .execute(vec![("discard", BenchOp::send_and_await(&world, &DiscardProposal { proposal_id: discard_id }))])
+    let discarded = harness
+        .execute(vec![("discard", HarnessOp::send_and_await(&world, &DiscardProposal { proposal_id: discard_id }))])
         .expect("discard proposal");
     assert_eq!(
         discarded.reply::<ProposalResult>("discard").expect("decode discard result"),
         ProposalResult::Discarded { proposal_id: discard_id }
     );
-    assert_eq!(capture(&mut bench, &world, "after_discard"), committed_png);
+    assert_eq!(capture(&mut harness, &world, "after_discard"), committed_png);
 
     let replacement_source = MarkRef { id: MarkId::new(44), revision: 1 };
-    let replacement_staged = bench
+    let replacement_staged = harness
         .execute(vec![(
             "replacement_stage",
-            BenchOp::send_and_await(&world, &brush_proposal(replacement_source, Material::Sand, 2048)),
+            HarnessOp::send_and_await(&world, &brush_proposal(replacement_source, Material::Sand, 2048)),
         )])
         .expect("stage replacement proposal");
     let (replacement_id, _, _) =
         staged(replacement_staged.reply::<ProposalResult>("replacement_stage").expect("decode replacement proposal"));
-    bench
+    harness
         .execute(vec![(
             "replacement_preview",
-            BenchOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
+            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
         )])
         .expect("activate replacement preview");
-    let replaced = bench
+    let replaced = harness
         .execute(vec![(
             "replace",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id,
@@ -353,20 +354,20 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace world: {error}"),
     }
-    let old_id = bench
+    let old_id = harness
         .execute(vec![(
             "old_id",
-            BenchOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
+            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
         )])
         .expect("query old proposal before new allocation");
     assert_eq!(
         old_id.reply::<ProposalResult>("old_id").expect("decode old-id rejection"),
         ProposalResult::Rejected { error: ProposalError::UnknownProposal { proposal_id: replacement_id } }
     );
-    bench
-        .execute(vec![("settle_replacement_frame", BenchOp::advance(1))])
+    harness
+        .execute(vec![("settle_replacement_frame", HarnessOp::advance(1))])
         .expect("commit one empty frame from the fresh component session");
-    let replacement_png = capture(&mut bench, &world, "after_replace");
+    let replacement_png = capture(&mut harness, &world, "after_replace");
     let replacement_image = decode_png(&replacement_png).expect("decode post-replacement frame");
     assert_eq!(
         replacement_image.rgba, baseline_image.rgba,

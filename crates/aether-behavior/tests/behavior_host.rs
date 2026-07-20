@@ -14,7 +14,7 @@
 //! broadcast sink `count_observed` watches. Each phase reads the ring with a
 //! `since` cursor so one phase's entries never bleed into another's assertions.
 //!
-//! Minimal composition (issue #3764): the component host on the bench basics —
+//! Minimal composition (issue #3764): the component host on the harness basics —
 //! every assertion reads the log ring, so no render cap (and no wgpu gate) is
 //! composed; the widgets' draw mail warn-drops harmlessly. Skipped when the
 //! `behavior`-feature kit wasm / the fixture script wasm has not been pre-built
@@ -25,12 +25,12 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
 use aether_kit::widget::{BehaviorHostSpec, ScriptRef};
 use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use serde::{Deserialize, Serialize};
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
@@ -80,7 +80,7 @@ fn host_address() -> String {
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider
 /// over `0..=255`, its initial script inline. The host spawns the wrapped
 /// slider in `wire`, so the first tick brings the whole slot up.
-fn load_panel_with_host(bench: &mut SubstrateBench, kit_wasm: &[u8], script: Vec<u8>) {
+fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script: Vec<u8>) {
     let wrapped_config = SliderConfig {
         min: 0.0,
         max: 255.0,
@@ -114,10 +114,10 @@ fn load_panel_with_host(bench: &mut SubstrateBench, kit_wasm: &[u8], script: Vec
         }],
         owns_input: true,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: kit_wasm.to_vec(),
@@ -151,18 +151,18 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 /// `0..=255` slider commits a raw value well above `CAP`, so a working
 /// interpose clamps it. Each drag rides its own `execute` call, so the labels
 /// need only be unique within the batch.
-fn drag(panel: &str) -> Vec<(&'static str, BenchOp)> {
+fn drag(panel: &str) -> Vec<(&'static str, HarnessOp)> {
     vec![
-        ("press", BenchOp::send_mail(panel, &press(110.0, 22.0))),
-        ("move", BenchOp::send_mail(panel, &MouseMove { x: 200.0, y: 22.0 })),
-        ("release", BenchOp::send_mail(panel, &release(200.0, 22.0))),
+        ("press", HarnessOp::send_mail(panel, &press(110.0, 22.0))),
+        ("move", HarnessOp::send_mail(panel, &MouseMove { x: 200.0, y: 22.0 })),
+        ("release", HarnessOp::send_mail(panel, &release(200.0, 22.0))),
     ]
 }
 
 /// Read the panel's log ring from `since`, returning the new messages plus the
 /// next cursor so a later phase reads only its own entries.
-fn read_panel_log(bench: &mut SubstrateBench, since: Option<u64>) -> (Vec<String>, u64) {
-    match bench.log_tail(&panel_address(), since, None) {
+fn read_panel_log(harness: &mut SubstrateHarness, since: Option<u64>) -> (Vec<String>, u64) {
+    match harness.log_tail(&panel_address(), since, None) {
         LogTailResult::Ok { entries, next_since, .. } => (entries.into_iter().map(|e| e.message).collect(), next_since),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -199,10 +199,10 @@ fn emitted_counts(messages: &[String]) -> Vec<u32> {
 
 /// Swap the running script for `bytes` via `aether.behavior.set_script`,
 /// asserting the host replies `LoadScriptResult::Ok`.
-fn swap_script(bench: &mut SubstrateBench, label: &str, bytes: Vec<u8>) {
+fn swap_script(harness: &mut SubstrateHarness, label: &str, bytes: Vec<u8>) {
     let host = host_address();
-    let swapped = bench
-        .execute(vec![(label, BenchOp::send_and_await(&host, &SetScript { bytes }))])
+    let swapped = harness
+        .execute(vec![(label, HarnessOp::send_and_await(&host, &SetScript { bytes }))])
         .unwrap_or_else(|error| panic!("{label} swap: {error:?}"));
     match swapped.reply::<LoadScriptResult>(label).expect("decode LoadScriptResult") {
         LoadScriptResult::Ok { .. } => {}
@@ -236,16 +236,16 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let v2 = fs::read(&v2_path).expect("read intercept_slider_v2 wasm");
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
 
-    let mut bench = SubstrateBench::builder().with_component_host().build().expect("boot");
-    load_panel_with_host(&mut bench, &kit_wasm, intercept);
+    let mut harness = SubstrateHarness::builder().with_component_host().build().expect("boot");
+    load_panel_with_host(&mut harness, &kit_wasm, intercept);
     let panel = panel_address();
 
     // First tick spawns the host, which spawns + frames the wrapped slider.
     // Then S1/S2/S3: one drag through the `intercept_slider` script.
-    let mut ops = vec![("spawn", BenchOp::send_mail(&panel, &Tick))];
+    let mut ops = vec![("spawn", HarnessOp::send_mail(&panel, &Tick))];
     ops.extend(drag(&panel));
-    bench.execute(ops).expect("spawn + S1 drag");
-    let (phase1, cursor) = read_panel_log(&mut bench, None);
+    harness.execute(ops).expect("spawn + S1 drag");
+    let (phase1, cursor) = read_panel_log(&mut harness, None);
     let joined1 = phase1.join("\n");
 
     // S1 — the intercept mutates and forwards: the committed value reaching the
@@ -280,9 +280,9 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // drive another change. The carried `count` continues to 2 (not reset to
     // 1), and the carried `cap` (20, not v2's fresh 1000 default) still clamps.
     // Catches the `state_save` → `state_load` carry across the swap seam.
-    swap_script(&mut bench, "swap_v2", v2);
-    bench.execute(drag(&panel)).expect("S4 drag after swap");
-    let (phase2, cursor) = read_panel_log(&mut bench, Some(cursor));
+    swap_script(&mut harness, "swap_v2", v2);
+    harness.execute(drag(&panel)).expect("S4 drag after swap");
+    let (phase2, cursor) = read_panel_log(&mut harness, Some(cursor));
     let joined2 = phase2.join("\n");
     assert!(
         emitted_counts(&phase2).contains(&2),
@@ -301,9 +301,9 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // untransformed value (> cap) rather than the lane wedging. Catches
     // integration-level fail-open — a trap wedging the lane, not the filter
     // call #2687's host-unit already drives directly.
-    swap_script(&mut bench, "swap_trap", trap);
-    bench.execute(drag(&panel)).expect("S5 drag after trap swap");
-    let (phase3, _) = read_panel_log(&mut bench, Some(cursor));
+    swap_script(&mut harness, "swap_trap", trap);
+    harness.execute(drag(&panel)).expect("S5 drag after trap swap");
+    let (phase3, _) = read_panel_log(&mut harness, Some(cursor));
     let joined3 = phase3.join("\n");
     let committed_trap = committed_values(&phase3);
     assert!(

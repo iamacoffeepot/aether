@@ -19,7 +19,7 @@ use aether_substrate::mail::outbound::HubOutbound;
 /// on the render thread); the handler resolves the request, parks
 /// it on `queue`, and the chassis main loop reads from there on
 /// the next redraw. `wake` nudges that loop — desktop fires an
-/// `EventLoopProxy<UserEvent>::Capture`; substrate-bench sends on its
+/// `EventLoopProxy<UserEvent>::Capture`; substrate-harness sends on its
 /// `EventSender`.
 ///
 /// `outbound` is the cap's reply edge for the inline-failure

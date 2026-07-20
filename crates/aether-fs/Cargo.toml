@@ -46,9 +46,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # The cap unit tests boot a chassis through the `aether_substrate::testing`
 # fixture, enabled by the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The save-namespace integration test boots the in-process bench harness
+# The save-namespace integration test boots the in-process harness harness
 # and drives the chassis-wired `FsCapability` through `execute`.
-aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so it cannot see that `clap` and `confique` are used only

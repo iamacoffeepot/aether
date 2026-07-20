@@ -1,14 +1,14 @@
-//! `aether.substrate_bench` cap on the substrate-bench chassis (issue 603 Phase 4).
+//! `aether.substrate_harness` cap on the substrate-harness chassis (issue 603 Phase 4).
 //!
-//! Test-bench is the only chassis that drives ticks via mail rather
-//! than a frame loop — `aether.substrate_bench.advance { ticks }` runs N
+//! Test-harness is the only chassis that drives ticks via mail rather
+//! than a frame loop — `aether.substrate_harness.advance { ticks }` runs N
 //! cycles and replies once they complete. The cap claims the
-//! `aether.substrate_bench` mailbox and dispatches `Advance` by pushing a
+//! `aether.substrate_harness` mailbox and dispatches `Advance` by pushing a
 //! `ChassisEvent::Advance` onto the embedder's event channel; the
 //! embedder's `run_frame` loop processes the event and replies via
 //! outbound when the requested ticks finish.
 //!
-//! Companion: [`UnsupportedSubstrateBenchCapability`](super::unsupported_cap::UnsupportedSubstrateBenchCapability)
+//! Companion: [`UnsupportedSubstrateHarnessCapability`](super::unsupported_cap::UnsupportedSubstrateHarnessCapability)
 //! claims the same mailbox on desktop / headless and replies `Err` so
 //! agents fail fast. Mirrors the pattern from
 //! `RenderCapability` / `HeadlessRenderCapability`.
@@ -28,22 +28,22 @@ use aether_kinds::Advance;
 // root.
 use crate::events::EventSender;
 
-/// Configuration for [`SubstrateBenchCapability`]. Carries the
+/// Configuration for [`SubstrateHarnessCapability`]. Carries the
 /// `EventSender` the embedder loop reads on, so the handler can hand
 /// the embedder a request + reply target. Always-on at file root — it
 /// names no `aether_substrate` type.
-pub struct SubstrateBenchCapConfig {
+pub struct SubstrateHarnessCapConfig {
     pub events: EventSender,
 }
 
-/// `aether.substrate_bench` cap **identity** (ADR-0122 identity/runtime
+/// `aether.substrate_harness` cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable`
 /// (`NAMESPACE`, `Resolver`), the per-handler `HandlesKind` markers, and
 /// the name-inventory entry, all emitted always-on by `#[actor]`. The
-/// state-bearing runtime (`SubstrateBenchCapabilityState`, which holds the
+/// state-bearing runtime (`SubstrateHarnessCapabilityState`, which holds the
 /// `aether_substrate`-typed `HubOutbound`) lives behind the one
 /// `feature = "runtime"` gate.
-pub struct SubstrateBenchCapability;
+pub struct SubstrateHarnessCapability;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the
 // macro divides what it emits). Everything that names an
@@ -57,25 +57,25 @@ use aether_actor::actor;
 use runtime::*;
 
 #[actor(singleton)]
-impl NativeActor for SubstrateBenchCapability {
-    type State = SubstrateBenchCapabilityState;
+impl NativeActor for SubstrateHarnessCapability {
+    type State = SubstrateHarnessCapabilityState;
 
-    type Config = SubstrateBenchCapConfig;
+    type Config = SubstrateHarnessCapConfig;
 
-    const NAMESPACE: &'static str = "aether.substrate_bench";
+    const NAMESPACE: &'static str = "aether.substrate_harness";
 
     fn init(
-        config: SubstrateBenchCapConfig,
+        config: SubstrateHarnessCapConfig,
         ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<SubstrateBenchCapabilityState, BootError> {
+    ) -> Result<SubstrateHarnessCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
             BootError::Other(Box::new(io::Error::other(
                 "HubOutbound must be wired on Mailer before \
-                 SubstrateBenchCapability::init (substrate-bench attaches its loopback before \
+                 SubstrateHarnessCapability::init (substrate-harness attaches its loopback before \
                  the Builder chain)",
             )))
         })?;
-        Ok(SubstrateBenchCapabilityState { events: config.events, outbound })
+        Ok(SubstrateHarnessCapabilityState { events: config.events, outbound })
     }
 
     /// Push `ChassisEvent::Advance` onto the embedder loop. If the
@@ -87,14 +87,14 @@ impl NativeActor for SubstrateBenchCapability {
         if state.events.send(ChassisEvent::Advance { reply_to: sender, ticks: mail.ticks }).is_err() {
             state.outbound.send_reply(
                 sender,
-                &AdvanceResult::Err { error: "substrate-bench chassis shutting down — advance aborted".to_owned() },
+                &AdvanceResult::Err { error: "substrate-harness chassis shutting down — advance aborted".to_owned() },
             );
         }
     }
 }
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `SubstrateBenchCapabilityState`) — gated once here. The `#[actor] impl`
+// `SubstrateHarnessCapabilityState`) — gated once here. The `#[actor] impl`
 // above reaches it through the `use runtime::*` glob, so the items the
 // impl names are re-exported with `pub use`.
 #[cfg(feature = "runtime")]
@@ -109,12 +109,12 @@ mod runtime {
     pub use aether_substrate::mail::outbound::HubOutbound;
     pub use std::io;
 
-    /// `aether.substrate_bench` runtime state (ADR-0122 split). Holds the
+    /// `aether.substrate_harness` runtime state (ADR-0122 split). Holds the
     /// embedder event channel the handler pushes onto plus the
     /// `HubOutbound` it replies through when the channel is gone. The
     /// dispatcher holds this as the cap's state; the addressing identity
-    /// is the distinct ZST `SubstrateBenchCapability`.
-    pub struct SubstrateBenchCapabilityState {
+    /// is the distinct ZST `SubstrateHarnessCapability`.
+    pub struct SubstrateHarnessCapabilityState {
         pub(super) events: EventSender,
         pub(super) outbound: Arc<HubOutbound>,
     }

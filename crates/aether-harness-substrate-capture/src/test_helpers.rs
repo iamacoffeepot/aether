@@ -1,15 +1,15 @@
-//! GPU-gated test helpers for visual bench scenarios (issue #3765).
+//! GPU-gated test helpers for visual harness scenarios (issue #3765).
 //! The wasm-locating half lives in
-//! `aether_substrate_bench::test_helpers` (`require_wasm` and friends);
+//! `aether_harness_substrate::test_helpers` (`require_wasm` and friends);
 //! this module adds the wgpu adapter probe in front of it for scenarios
-//! whose bench composes render.
+//! whose harness composes render.
 
 use std::env;
 use std::path::PathBuf;
 
 // Union surface: re-export the core (GPU-free) helpers so a visual test
 // imports its whole helper set from one module.
-pub use aether_substrate_bench::test_helpers::{
+pub use aether_harness_substrate::test_helpers::{
     init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
 };
 
