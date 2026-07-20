@@ -556,7 +556,7 @@ fn route_mail(
             // the envelope up. Adding a bracket here would
             // double-count `Finished` and fire settlement
             // prematurely (surfaced by
-            // `aether-substrate-bundle::rpc_engine_routing` as
+            // the rpc engine-routing suite as
             // ReplyEnd before ReplyEvent). Synchronous handlers live
             // on the [`MailboxEntry::Inline`] arm below — they get
             // the bracket because nothing downstream owns it.

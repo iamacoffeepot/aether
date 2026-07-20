@@ -141,7 +141,7 @@ The derive emits `<Name>Overlay` (here `HttpOverlay`) with an `into_layer()`
 method. For a field on an existing struct whose overlay is already flattened into
 a chassis CLI, the new field rides the existing overlay automatically — confirm
 your struct's overlay is reached. `HttpOverlay` is re-exported from
-`crates/aether-substrate-bundle/src/cli.rs` and flattened into `CommonOverlay`:
+`crates/aether-chassis/src/cli.rs` and flattened into `CommonOverlay`:
 
 ```rust
 #[command(flatten)]
@@ -151,7 +151,7 @@ pub http: HttpOverlay,
 `CommonOverlay` is in turn flattened into `DesktopCli` and `HeadlessCli`, so both
 full-stack chassis expose the flag. Each chassis loads its sectioned TOML file once,
 then resolves the overlay against the subsystem's explicit section in
-`from_env_with_argv` (`crates/aether-substrate-bundle/src/{desktop,headless}/chassis.rs`):
+`from_env_with_argv` (`crates/aether-chassis-{desktop,headless}/src/chassis.rs`):
 
 ```rust
 let config_file = load_chassis_config(config)?;
@@ -192,13 +192,13 @@ declarations and prints every knob's env key, resolved value, source, default,
 and doc, then exits before boot:
 
 ```sh
-cargo run -p aether-substrate-bundle --bin aether-substrate-headless -- --print-config
+cargo run -p aether-chassis-headless --bin aether-substrate-headless -- --print-config
 ```
 
 Your new field appears with its default. This command is the discovery surface:
 the binaries exit before loading a selected TOML file, so use it to confirm that
 the declaration is registered, not to test a `[http]` override. The dump is rendered by
-`chassis_config_dump()` in `crates/aether-substrate-bundle/src/chassis_common.rs`,
+`chassis_config_dump()` in `crates/aether-chassis/src/boot.rs`,
 which walks `chassis_registry()`. That registry lists `&HttpConfigLayer::META`, so
 a field on an existing struct shows up with no extra wiring — the META walk is the
 discovery source of truth. If your knob is missing from the dump, the field isn't
@@ -222,10 +222,10 @@ If the knob doesn't belong on any existing struct, you're declaring a new
 
 - **Register its layer META for discovery.** Add `&YourConfigLayer::META` to the
   `METAS` slice in `chassis_registry()`
-  (`crates/aether-substrate-bundle/src/chassis_common.rs`) so the `--print-config` dump
+  (`crates/aether-chassis/src/boot.rs`) so the `--print-config` dump
   and the unknown-key sweep (`chassis_known_keys`) both see its knobs.
 - **Flatten its overlay into a chassis CLI.** Re-export `YourOverlay` in
-  `crates/aether-substrate-bundle/src/cli.rs` and `#[command(flatten)]` it into
+  `crates/aether-chassis/src/cli.rs` and `#[command(flatten)]` it into
   `CommonOverlay` (or a per-chassis root).
 - **Choose and wire a stable TOML section.** Pick the explicit section name that
   belongs to the subsystem, then call

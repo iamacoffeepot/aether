@@ -71,7 +71,7 @@ project replies.
 | Guest SDK | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
-| Process profiles | `aether-substrate-bundle` | desktop/headless/hub/substrate-harness composition, packaging, perf |
+| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition over one shared layer; packaging in `aether-chassis-bundle` |
 | Product actors | `aether-kit`, `aether-mesh` | camera, UI, world/terrain, sim, geometry authoring |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Build/test tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, bundles, compatibility fixtures, fuzz targets |
@@ -89,7 +89,7 @@ a working actor. Some unsupported surfaces deliberately install a fail-fast
 fallback so requests resolve with errors rather than hang.
 
 Ask the live engine with `describe_handlers`/`describe_kinds`, or inspect the
-specific builder under `aether-substrate-bundle/src/<chassis>`.
+specific builder in its `aether-chassis-<chassis>` crate.
 
 ## Architecture change discipline
 

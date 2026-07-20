@@ -66,7 +66,7 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
-    ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, SetRender,
+    ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender,
     TextInputObserved, TickObserved,
 };
 
@@ -112,7 +112,7 @@ impl WasmActor for Probe {
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
         ctx.send_to_named::<TickObserved>(
-            SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME,
+            SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
             &TickObserved { count: self.tick_count },
         );
         if self.tick_count == 1 {
@@ -138,7 +138,7 @@ impl WasmActor for Probe {
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        ctx.send_to_named::<KeyObserved>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &KeyObserved { code: key.code });
+        ctx.send_to_named::<KeyObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &KeyObserved { code: key.code });
     }
 
     /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,
@@ -152,7 +152,7 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         ctx.send_to_named::<TextInputObserved>(
-            SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME,
+            SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
             &TextInputObserved { text: input.text },
         );
     }

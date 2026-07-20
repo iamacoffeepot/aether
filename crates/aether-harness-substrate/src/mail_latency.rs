@@ -10,7 +10,7 @@
 //! Run the latency table on demand (it is `#[ignore]`d — zero CI cost):
 //!
 //! ```text
-//! cargo test -p aether-substrate-bundle --release lifecycle_latency_observe \
+//! cargo test -p aether-harness-substrate --release lifecycle_latency_observe \
 //!     -- --ignored --nocapture
 //! ```
 //!
@@ -195,7 +195,7 @@ fn assert_settled(rx: &crossbeam_channel::Receiver<()>, gate: &str) {
 /// `mail_hop_profile`.
 ///
 /// ```text
-/// cargo test -p aether-substrate-bundle --release mail_saturation_profile --no-run
+/// cargo test -p aether-harness-substrate --release mail_saturation_profile --no-run
 /// samply record --rate 4000 --unstable-presymbolicate --save-only -o /tmp/sat.json.gz -- \
 ///     <bin> mail_saturation_profile --ignored --nocapture --test-threads=1
 /// ```
@@ -752,7 +752,7 @@ fn lifecycle_latency_observe() {
 /// adapter. Run release:
 ///
 /// ```text
-/// cargo test -p aether-substrate-bundle --release \
+/// cargo test -p aether-harness-substrate --release \
 ///     settlement_detection_latency -- --ignored --nocapture
 /// ```
 #[test]

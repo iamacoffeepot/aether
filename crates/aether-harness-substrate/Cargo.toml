@@ -15,7 +15,7 @@ license.workspace = true
 
 # The `runtime` feature exists solely to drive the `#[actor]` split
 # path's hardcoded `feature = "runtime"` gate on the harness cap pair
-# (mirrors aether-substrate-bundle); the harness itself is
+# (mirrors the chassis crates); the harness itself is
 # unconditionally runtime-shaped.
 [features]
 default = ["runtime"]

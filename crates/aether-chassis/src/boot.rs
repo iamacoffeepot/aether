@@ -357,7 +357,7 @@ use aether_harness_substrate::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 pub use aether_harness_substrate::{SettlementConfig, SettlementConfigLayer};
 
 /// Render-size knob for the standalone substrate-harness binary
-/// (`AETHER_SUBSTRATE_BENCH_SIZE=WxH`). Mirrors the single-field
+/// (`AETHER_SUBSTRATE_HARNESS_SIZE=WxH`). Mirrors the single-field
 /// `SettlementConfig` shape: a `#[derive(aether_substrate::Config)]`
 /// struct resolved `from_env()` and lowered to `(u32, u32)` by
 /// [`Self::to_size`]. Lives binary-side (issue #3765) — the in-process
@@ -366,12 +366,12 @@ pub use aether_harness_substrate::{SettlementConfig, SettlementConfigLayer};
 /// The explicit `env =` pin is belt-and-suspenders against a future field
 /// rename, matching how `ActorRingConfig` pins its historical keys.
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_SUBSTRATE_BENCH", cli_prefix = "substrate-harness")]
+#[config(env_prefix = "AETHER_SUBSTRATE_HARNESS", cli_prefix = "substrate-harness")]
 pub struct RenderSizeConfig {
-    /// `AETHER_SUBSTRATE_BENCH_SIZE=WxH` render dimensions for the offscreen
+    /// `AETHER_SUBSTRATE_HARNESS_SIZE=WxH` render dimensions for the offscreen
     /// wgpu surface. Falls back to `800x600` on missing/unparseable input
     /// with a warn log (default `None`).
-    #[config(env = "AETHER_SUBSTRATE_BENCH_SIZE")]
+    #[config(env = "AETHER_SUBSTRATE_HARNESS_SIZE")]
     pub size: Option<String>,
 }
 
@@ -392,7 +392,7 @@ impl RenderSizeConfig {
                     tracing::warn!(
                         target: "aether_substrate::boot",
                         value = %raw,
-                        "AETHER_SUBSTRATE_BENCH_SIZE unparseable — falling back to default",
+                        "AETHER_SUBSTRATE_HARNESS_SIZE unparseable — falling back to default",
                     );
                     (DEFAULT_WIDTH, DEFAULT_HEIGHT)
                 }
@@ -401,7 +401,7 @@ impl RenderSizeConfig {
             tracing::warn!(
                 target: "aether_substrate::boot",
                 value = %raw,
-                "AETHER_SUBSTRATE_BENCH_SIZE missing 'x' separator — falling back to default",
+                "AETHER_SUBSTRATE_HARNESS_SIZE missing 'x' separator — falling back to default",
             );
             (DEFAULT_WIDTH, DEFAULT_HEIGHT)
         }

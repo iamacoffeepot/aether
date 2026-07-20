@@ -374,7 +374,7 @@ impl OwnedDispatch {
     /// consumer is calling `Mailer::record_finished` for this
     /// `mail_id`; placed adjacent to every such call so the two cannot
     /// drift. No-op in release (no guard field). `pub` because the
-    /// desktop window drain (`aether-substrate-bundle`) is a hand-rolled
+    /// desktop window drain (`aether-chassis-desktop`) is a hand-rolled
     /// out-of-crate consumer that must discharge its envelopes.
     #[inline]
     pub fn discharge(&self) {

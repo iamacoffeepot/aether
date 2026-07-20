@@ -52,7 +52,7 @@ Do not soften a finding because the plan is well written, because it cites an AD
 Weigh the stamped `size:*` against the plan's crate reach without re-reading `CLAUDE.md`. The workspace's crates and their layering:
 
 - **Infrastructure (non-actor):** `aether-data` (universal data layer — typed-ids, wire identity, the `Kind`/`Schema` traits, encode/decode; proc macros in `aether-data-derive`), which `aether-codec` (JSON ↔ wire bytes + stream framing) and `aether-kinds` (substrate kind vocabulary) build on; `aether-math` (`Vec2/3/4`, `Mat4`, `Quat`, `Aabb`). Everything that describes typed bytes depends on `aether-data`.
-- **Runtime + chassis (ADR-0073):** `aether-substrate` (shared runtime) and `aether-capabilities` (native capabilities); all four chassis (`desktop` / `headless` / `hub` / `test_bench`) plus the hub library live in `aether-substrate-bundle`.
+- **Runtime + chassis (ADR-0073):** `aether-substrate` (shared runtime) and the per-cap `aether-<cap>` crates (native capabilities); each chassis lives in its own `aether-chassis-*` crate over the shared `aether-chassis` composition layer.
 - **Guest/actor SDK:** `aether-actor` (the `Actor` / `WasmActor` traits, `Mailbox`, `WasmCtx`, `#[actor]`, `export!`; proc macros in `aether-actor-derive`).
 - **Reference + tooling:** `aether-kit` (reference components — camera, mesh, terra), `aether-mesh` (DSL mesh authoring), `aether-mcp` (out-of-process RPC/MCP harness), `aether-tunnel` (stable MCP front).
 

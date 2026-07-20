@@ -1,7 +1,7 @@
 //! Bake build provenance into the `bloomery` binary so its `--describe`
 //! manifest (ADR-0115) can report the source revision, build profile, and
 //! target triple without a runtime git / cargo probe. The bin reads these back
-//! via `env!`. Mirrors `aether-substrate-bundle`'s provenance block.
+//! via `env!`. Mirrors `aether-chassis`'s provenance block.
 //!
 //! - `AETHER_GIT_SHA` — `git rev-parse --short HEAD`, or `"unknown"` when the
 //!   binary is built outside a git checkout (a published crate, a tarball). The

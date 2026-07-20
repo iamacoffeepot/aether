@@ -864,19 +864,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-substrate-bundle"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-chassis",
- "aether-chassis-desktop",
- "aether-chassis-headless",
- "aether-component",
- "aether-substrate",
- "anyhow",
- "tracing",
-]
-
-[[package]]
 name = "aether-tcp"
 version = "0.3.0-alpha"
 dependencies = [

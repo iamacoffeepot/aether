@@ -29,7 +29,7 @@ runtime state.
 
 ## The four chassis profiles
 
-`aether-substrate-bundle` assembles the shared runtime into purpose-specific
+The `aether-chassis-*` crates assemble the shared runtime into purpose-specific
 profiles. The exact capability set is code and feature dependent, so treat this
 table as intent rather than a hardcoded manifest.
 
@@ -41,7 +41,7 @@ table as intent rather than a hardcoded manifest.
 | Substrate harness | `aether-harness-substrate` | deterministic in-process operations and test evidence |
 
 Their builders live under
-`crates/aether-substrate-bundle/src/{desktop,headless,hub,substrate_harness}`. Shared
+`crates/aether-chassis-{desktop,headless,hub,harness}`. Shared
 runtime mechanism remains in `aether-substrate`; each shared native actor
 remains in its own `aether-<capability>` crate.
 
@@ -129,7 +129,7 @@ autoload or packaging behavior.
 ## Implementation and decisions
 
 - Shared chassis traits and frame loop: `crates/aether-substrate/src/chassis/`
-- Process composition: `crates/aether-substrate-bundle/src/`
+- Process composition: `crates/aether-chassis/src/` + the per-chassis crates
 - Fleet, proxy, and stores: `crates/aether-engine/src/`
 - Framed RPC: `crates/aether-rpc/src/`
 - MCP translation: `crates/aether-mcp/src/`

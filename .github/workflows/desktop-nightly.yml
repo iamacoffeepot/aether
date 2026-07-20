@@ -38,7 +38,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test -p aether-substrate-bundle --all-targets
+      - run: cargo test -p aether-chassis-desktop -p aether-chassis-headless -p aether-chassis-hub -p aether-chassis-harness -p aether-chassis-bundle --all-targets
 
       # File one triage issue per OS and comment subsequent failures on it
       # rather than filing duplicates — mirrors fuzz-nightly.yml's idiom.

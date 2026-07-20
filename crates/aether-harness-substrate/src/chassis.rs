@@ -60,7 +60,7 @@ pub const WORKERS: usize = 2;
 /// handlers with `Received`/`Finished`, closing the gap and
 /// letting us retire the actor-shaped workaround — one fewer
 /// thread per `SubstrateHarness`.
-pub const SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
+pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
 
 /// ADR-0071 marker type for the substrate-harness chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<SubstrateHarnessChassis>`]
@@ -375,7 +375,7 @@ impl SubstrateHarnessChassis {
         if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
             boot.registry.register_inline(
-                SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME,
+                SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
                 Arc::new(move |dispatch: MailDispatch<'_>| {
                     if dispatch.kind_name.is_empty() {
                         return;

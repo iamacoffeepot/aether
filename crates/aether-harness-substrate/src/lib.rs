@@ -2,7 +2,7 @@
 //!
 //! Two driver modes share [`chassis::SubstrateHarnessChassis`]:
 //!
-//! - **Binary (`aether-substrate-bundle`'s `src/bin/substrate-harness.rs`)**
+//! - **Binary (`aether-chassis-harness`'s `src/bin/substrate-harness.rs`)**
 //!   — runs the chassis events loop on the main thread blocking on
 //!   `events_rx.recv()`. Driven by the `aether-mcp` harness through the
 //!   forward-model RPC (the substrate hosts `RpcServerCapability`).

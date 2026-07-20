@@ -7,7 +7,7 @@ as their responsibility requires.
 product actors and reusable UI/gameplay pieces       aether-kit
 native services and their public mail contracts      aether-<capability> crates
 guest actor and behavior authoring SDKs               aether-actor, aether-behavior
-process profiles, binaries, substrate harness, packaging     aether-substrate-bundle
+process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 mail runtime, wasm host, scheduler, chassis traits    aether-substrate
 wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
 operator bridge                                       aether-mcp
@@ -53,7 +53,10 @@ compares these with native capabilities.
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-engine`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
 | `aether-anthropic`, `aether-gemini`, `aether-contentgen` | the two content-gen provider caps and the adapter/staging/transport layer they share |
-| `aether-substrate-bundle` | desktop, headless, hub, and substrate-harness chassis; autoload; bundle packing; performance binaries |
+| `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, bundle-pack format |
+| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` | one crate per chassis binary |
+| `aether-chassis-bundle` | standalone bundle binaries with the component pack embedded at build time |
+| `aether-harness-perf` | performance trial / compare / plot binaries |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches |
 
 The substrate is mechanism. A capability is policy and I/O represented as an
@@ -108,7 +111,7 @@ uses the nightly fuzzing toolchain.
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Add a reusable guest actor | `aether-kit` or a new component crate | `aether-actor`, export/cardinality rules |
-| Change a process profile | `aether-substrate-bundle/src/<chassis>` | config layers, linked capabilities, packaging |
+| Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |
 | Change a wire shape | owning kind plus `aether-data`/`aether-codec` | compatibility fixtures and any RPC framing |
 
 Start with `rg` across callers and tests. Crate boundaries communicate intent,

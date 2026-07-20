@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// (ADR-0090 §4): the log-filter knob (`log_install::LOG_KNOBS`) and
 /// the three panic-hook knobs (`panic_hook::PANIC_KNOBS`), concatenated
 /// element-by-element (mirrors `scheduler::SCHEDULER_KNOBS`'s `const`
-/// concat shape) so the aggregate stays a `const`. `aether-substrate-bundle`
+/// concat shape) so the aggregate stays a `const`. The chassis crates
 /// folds this into `chassis_registry()` alongside `SCHEDULER_KNOBS`.
 pub const RUNTIME_KNOBS: &[KnobRecord] =
     &[log_install::LOG_KNOBS[0], panic_hook::PANIC_KNOBS[0], panic_hook::PANIC_KNOBS[1], panic_hook::PANIC_KNOBS[2]];

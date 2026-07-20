@@ -1268,7 +1268,7 @@ pub fn component_wasm_path(stem: &str) -> PathBuf {
 /// manifest classification / skip-or-panic guard. The wire round-trip
 /// and the cold-start/reply backstops themselves are exercised by the
 /// booted `FleetHarness` scenarios (`fleetharness_spawn`, `fleetharness_mail`,
-/// … in `aether-substrate-bundle`).
+/// … in the per-cap crates: `aether-engine`, `aether-rpc`, …).
 #[cfg(test)]
 mod tests {
     use std::io::{Error as IoError, ErrorKind};

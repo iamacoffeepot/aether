@@ -10,7 +10,6 @@ members = [
     "crates/aether-chassis-hub",
     "crates/aether-harness-substrate",
     "crates/aether-harness-substrate-capture",
-    "crates/aether-substrate-bundle",
     "crates/aether-codec",
     "crates/aether-data",
     "crates/aether-kinds",
@@ -82,7 +81,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Chassis-binary argv parsing (ADR-0090 unit d, issue 1258). One
-# consumer today (`aether-substrate-bundle`); workspaced so future CLI
+# consumer today (`aether-chassis`); workspaced so future CLI
 # surfaces reach for the same major.
 clap = { version = "4", features = ["derive"] }
 # Property-based testing (issue 1561). Dev-only on the two hand-rolled

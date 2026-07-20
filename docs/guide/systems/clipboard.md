@@ -67,4 +67,4 @@ waits on a request that cannot complete.
 - System/in-memory runtime: `crates/aether-clipboard/src/runtime.rs`
 - Unsupported runtime: `crates/aether-clipboard/src/headless_runtime.rs`
 - Backend selection: `crates/aether-clipboard/src/config.rs`
-- Chassis installation: `crates/aether-substrate-bundle/src/{desktop,headless,substrate_harness}/`
+- Chassis installation: `crates/aether-chassis-{desktop,headless,harness}/`

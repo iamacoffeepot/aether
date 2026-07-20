@@ -8,7 +8,7 @@
 // `EngineToHub` enum variants inline; this module replaces that with
 // seven high-level methods on an `EgressBackend` trait. The substrate
 // no longer constructs hub frames; the translation lives in
-// `aether-substrate-bundle::hub`'s `HubProtocolBackend` (ADR-0073).
+// the hub chassis's `HubProtocolBackend` (ADR-0073).
 //
 // Identity types (`SessionToken`, `EngineId`) live in `aether-data`
 // (ADR-0071 phase 7c) so the substrate describes egress targets

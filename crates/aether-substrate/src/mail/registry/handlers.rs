@@ -110,7 +110,7 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// hand-rolled `impl InboxHandler for MyType` is supported for caps
 /// that want to bundle the channel sender with handler state.
 ///
-/// [`SubstrateHarness::send_bytes`]: ../../../aether_substrate_bundle/substrate_harness/struct.SubstrateHarness.html#method.send_bytes
+/// [`SubstrateHarness::send_bytes`]: ../../../aether_harness_substrate/struct.SubstrateHarness.html#method.send_bytes
 pub trait InboxHandler: Send + Sync + 'static {
     fn enqueue(&self, dispatch: OwnedDispatch);
 }

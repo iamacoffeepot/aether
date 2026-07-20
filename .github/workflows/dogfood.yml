@@ -397,7 +397,7 @@ jobs:
       # store when it exists — so build it first and a render brief can spawn it
       # by selector under Xvfb with no extra plumbing.
       - name: Build the desktop chassis (for render briefs)
-        run: cargo build --release -p aether-substrate-bundle --bin aether-substrate
+        run: cargo build --release -p aether-chassis-desktop --bin aether-substrate
 
       # Xvfb up BEFORE the tunnel: the tunnel forks the hub, the hub forks
       # substrates, and the desktop chassis inherits DISPLAY through that chain.

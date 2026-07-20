@@ -891,7 +891,7 @@ mod control_plane {
     }
 
     /// Build a [`CaptureFrameResult`] from the raw GPU `render_and_capture`
-    /// result shape. Every capture handler in `aether-substrate-bundle`
+    /// result shape. Every capture handler in the chassis crates
     /// (substrate-harness inline, in-process harness, desktop driver) needs this
     /// same `Ok((png, verdict, score, pass)) → Ok { … }` /
     /// `Err(error) → Err { error }` flip. `verdict` is `None` when the

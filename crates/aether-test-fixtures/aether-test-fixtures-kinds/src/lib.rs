@@ -18,10 +18,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bytemuck::{Pod, Zeroable};
 
-/// Mirror of `aether_substrate_bundle::substrate_harness::SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME`.
+/// Mirror of `aether_harness_substrate::SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME`.
 /// Inlined here so wasm guests don't pull the bundle (`std`-bound)
 /// into the FFI build.
-pub const SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
+pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
 
 /// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the harness's
