@@ -60,6 +60,28 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_substrate::testing` fixture, enabled by the substrate
 # `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The tcp fleet-load test (`tests/fleetbench_tcp_load.rs`) boots the
+# real-process hub → RPC → forked-headless stack through `FleetBench`,
+# resolved via `dist/manifest.json` (`cargo xtask dist` first).
+aether-fleet-bench = { path = "../aether-fleet-bench" }
+# The load probe's driver/snapshot kinds (`ConfigureTcpLoadProbe`,
+# `TcpLoadSnapshot`, …) the test sends and decodes.
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+# The tcp_load_probe wasm the test loads by stem
+# (`aether_test_fixtures_bundle.wasm`, issue #3766): declared so the wasm
+# coupling is cargo-visible even though nothing links the host rlib.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+# `aether_codec::frame::max_frame_size` bounds the test's frame bodies
+# against the active `AETHER_MAX_FRAME_SIZE` cap.
+aether-codec = { path = "../aether-codec" }
+# The load test serializes its diagnostic metrics report
+# (`target/fleetbench-metrics/tcp-load.json`).
+serde_json = { workspace = true }
+
+# The probe wasm coupling above is load-by-stem only — no source import —
+# so the source-scanning unused-deps gate cannot see it.
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true

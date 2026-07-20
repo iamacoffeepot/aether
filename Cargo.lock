@@ -734,10 +734,14 @@ dependencies = [
  "aether-actor",
  "aether-codec",
  "aether-data",
+ "aether-fleet-bench",
  "aether-kinds",
  "aether-substrate",
+ "aether-test-fixtures-bundle",
+ "aether-test-fixtures-kinds",
  "inventory",
  "serde",
+ "serde_json",
  "tracing",
 ]
 
