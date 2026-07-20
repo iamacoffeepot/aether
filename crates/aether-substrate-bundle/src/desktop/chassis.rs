@@ -22,7 +22,6 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
-use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     ComponentHostConfig, HttpServerConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
@@ -33,6 +32,7 @@ use aether_gemini::GeminiConfig;
 use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
+use aether_lifecycle::LifecycleCapability;
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderTuningConfig};
 use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -232,7 +232,7 @@ pub struct DesktopEnv {
     /// Force-complete deadline (ms) for a pending lifecycle advance's
     /// `Settled` (issue 1048). Resolved from
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via `ChassisBootConfig`;
-    /// default [`aether_capabilities::LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`].
+    /// default [`aether_lifecycle::LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`].
     pub lifecycle_advance_timeout_millis: u64,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin

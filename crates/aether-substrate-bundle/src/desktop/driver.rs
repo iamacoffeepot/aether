@@ -1042,8 +1042,7 @@ impl DriverCapability for DesktopDriverCapability {
         // the lifecycle cap's own id (its NAMESPACE) at construction time —
         // ctx-less, no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
-        let lifecycle_mailbox =
-            mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE);
+        let lifecycle_mailbox = mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         // iamacoffeepot/aether#1489: install the SIGINT/SIGTERM →

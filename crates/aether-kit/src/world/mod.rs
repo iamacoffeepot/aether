@@ -65,12 +65,12 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use aether_actor::{
     ActorInitError, Manual, OutboundReply, ReplyMode, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
+use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::component::ComponentHostWasmExt;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::{ComponentHostCapability, LifecycleCapability};
 use aether_data::Source;
 use aether_fs::{FsCapability, Read, ReadResult};
 use aether_kinds::Render;
+use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_render::{DrawTriangle, RenderCapability};
 use serde::{Deserialize, Serialize};
 

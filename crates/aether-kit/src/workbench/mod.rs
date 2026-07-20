@@ -13,10 +13,10 @@ pub use viewport::{TerrainViewport, TerrainViewportConfig};
 use alloc::{format, string::String, vec, vec::Vec};
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, RequestId, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::Tick;
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use serde::{Deserialize, Serialize};
 
 use crate::console::{ConsoleCommandOutput, ConsoleOverlay};

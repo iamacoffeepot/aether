@@ -36,10 +36,10 @@ mod kinds;
 pub use kinds::*;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_fs::{FsCapability, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Rgb, Vec3};
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 use aether_render::{DrawTriangle, RenderCapability, Vertex};

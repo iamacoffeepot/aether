@@ -22,9 +22,9 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_kinds::{Ping, Pong, Tick};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 

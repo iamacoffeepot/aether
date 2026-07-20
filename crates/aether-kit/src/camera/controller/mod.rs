@@ -49,11 +49,11 @@ pub use kinds::*;
 use core::f32::consts::FRAC_PI_3;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::component::ComponentHostWasmExt;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::{ComponentHostCapability, LifecycleCapability};
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
+use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{TAU, Vec2, Vec3};
 
 use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};

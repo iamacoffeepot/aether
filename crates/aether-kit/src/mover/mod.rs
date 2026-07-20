@@ -55,10 +55,10 @@ pub use kinds::*;
 use core::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button};
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 

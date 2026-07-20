@@ -30,9 +30,9 @@
 use core::f32::consts::FRAC_PI_4;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::LifecycleCapability;
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_kinds::Tick;
+use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 

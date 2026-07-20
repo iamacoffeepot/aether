@@ -26,9 +26,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_capabilities::LifecycleCapability;
 use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
 use aether_kinds::LifecycleAdvance;
+use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};

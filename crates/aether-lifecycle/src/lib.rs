@@ -30,6 +30,20 @@
 //!    otherwise `next` — and replies
 //!    [`LifecycleAdvanceComplete`](aether_kinds::LifecycleAdvanceComplete)
 //!    to the chassis loop that issued the advance.
+//!
+//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3749) as a
+//! leaf per-cap crate of the arc that dissolves the capabilities
+//! monolith. Owns the lifecycle graph ([`LifecycleGraphData`] + its
+//! typestate builder), the [`LifecycleConfig`] init config, the
+//! [`LifecycleCapability`] identity + its subscriber-table / settlement
+//! runtime (`runtime`), and the send-side [`LifecycleMailboxExt`] facade.
+//! It is a pure leaf — no other capability depends on it, so capabilities
+//! keeps no `aether-lifecycle` dependency (no facade).
+//!
+//! The `aether.lifecycle.*` mail kinds ([`LifecycleAdvance`], the
+//! subscribe family, the stage-signal ZSTs) stay in `aether-kinds`: they
+//! are substrate protocol vocabulary many actors address rather than a
+//! cap-internal detail, so this crate only references them.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the

@@ -38,10 +38,10 @@ name = "aether-actor"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor-derive",
- "aether-capabilities",
  "aether-data",
  "aether-input",
  "aether-kinds",
+ "aether-lifecycle",
  "aether-math",
  "aether-render",
  "bytemuck",
@@ -410,6 +410,7 @@ dependencies = [
  "aether-fs",
  "aether-input",
  "aether-kinds",
+ "aether-lifecycle",
  "aether-math",
  "aether-mesh",
  "aether-render",
@@ -417,6 +418,18 @@ dependencies = [
  "aether-text",
  "inventory",
  "serde",
+ "tracing",
+]
+
+[[package]]
+name = "aether-lifecycle"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
  "tracing",
 ]
 
@@ -554,6 +567,7 @@ dependencies = [
  "aether-inventory",
  "aether-kinds",
  "aether-kit",
+ "aether-lifecycle",
  "aether-math",
  "aether-render",
  "aether-rpc",
@@ -613,6 +627,7 @@ dependencies = [
  "aether-fs",
  "aether-input",
  "aether-kinds",
+ "aether-lifecycle",
  "aether-math",
  "aether-render",
  "aether-test-fixtures-kinds",

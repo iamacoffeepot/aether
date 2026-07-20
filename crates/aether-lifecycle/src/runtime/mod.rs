@@ -478,7 +478,7 @@ impl NativeActor for LifecycleCapability {
             if !state.pending_timed_out() {
                 let pending = state.pending.as_ref().expect("pending.is_some() checked above");
                 tracing::warn!(
-                    target: "aether_capabilities::lifecycle",
+                    target: "aether_lifecycle",
                     current = ?state.current_state,
                     pending_root = ?pending.root,
                     pending_for_millis = pending.started.elapsed().as_millis(),
@@ -700,7 +700,7 @@ mod tests {
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
         use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
 
-        use crate::lifecycle::LifecycleMailboxExt;
+        use crate::LifecycleMailboxExt;
         use aether_substrate::testing::fresh_substrate;
 
         let (registry, mailer) = fresh_substrate();
