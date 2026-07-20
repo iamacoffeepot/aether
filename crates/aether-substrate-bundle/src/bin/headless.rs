@@ -8,9 +8,9 @@
 // (ADR-0090 §4 / e2).
 #![allow(clippy::print_stdout)]
 
+use aether_chassis::chassis_config_dump;
+use aether_chassis::cli::HeadlessCli;
 use aether_substrate::Chassis;
-use aether_substrate_bundle::chassis_config_dump;
-use aether_substrate_bundle::cli::HeadlessCli;
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 use clap::Parser as _;
 

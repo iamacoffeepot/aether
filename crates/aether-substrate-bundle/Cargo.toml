@@ -78,6 +78,11 @@ runtime = []
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
+# The shared chassis-composition layer (issue #3809): boot fragments,
+# fleet-wide config registry, CLI roots, autoload, and the bundle-pack
+# format the standalone bins decode (build.rs compiles the same source
+# in via `#[path]`).
+aether-chassis = { path = "../aether-chassis" }
 # The substrate-harness crates + the GPU capture half (issue #3765): the
 # `aether-substrate-harness` binary composes through them, and the
 # resident scenario tests link both.
@@ -141,10 +146,6 @@ aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — the chassis wires
 # `FsCapability` + resolves `NamespaceRoots`, so it needs the fs runtime (default).
 aether-fs = { path = "../aether-fs" }
-# The `aether.inventory` cap (extracted from capabilities, #3725) — every
-# chassis mounts `InventoryCapability` via `with_common_caps`, so it needs the
-# runtime half (the `Arc<Registry>` projection state).
-aether-inventory = { path = "../aether-inventory", features = ["runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
@@ -153,11 +154,6 @@ aether-kinds = { path = "../aether-kinds" }
 # structs; each chassis bin calls `<Cli>::parse()` and threads the
 # resolved overlays through `*Env::from_env_with_argv(cli)`.
 clap = { workspace = true }
-# Each overlay assembles a partial `<*ConfigLayer as confique::Config>::Layer`;
-# the cap's `from_argv_then_env` then preloads it into the confique
-# builder ahead of `.env()`. Direct dep so cli.rs can name the
-# `confique::Layer` trait without reaching through another crate.
-confique = { workspace = true }
 # Catch-all error type for chassis main()s + build_passive that
 # bridge BootError / wasmtime / io faults purely to bubble up.
 # Same crate as `wasmtime::Result` re-exports (issue #571).
@@ -183,7 +179,6 @@ serde = { workspace = true, features = ["derive", "std"] }
 # Trial reports + comparison output are JSON (perf tooling, #1077).
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
-toml = { workspace = true }
 wgpu = { workspace = true }
 winit = "0.30.13"
 
@@ -209,27 +204,12 @@ serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-# Harness Phase 3 substrate-feature scenarios (issue 430). Tests
-# boot a `SubstrateHarness` and load the fixture component wasm to exercise
-# input subscription, drop_component, etc. The shared `Kind`
-# definitions the tests decode + assert against live in the
-# `aether-test-fixtures-kinds` rlib; the wasm bodies are separate
-# component crates discovered structurally and loaded by stem. The
-# harness's own integration tests reach the visual/PNG helpers +
-# `test_helpers` module through `crate::substrate_harness::{visual,
-# test_helpers}` directly (post-issue-821, formerly via
-# `aether-scenario`).
-# Length-prefix frame helpers (`aether_codec::frame::{read_frame,
-# write_frame}`) used by the RPC engine-routing + FleetHarness integration
-# tests; no `src/` consumer, so it rides dev-dependencies only.
-aether-codec = { path = "../aether-codec" }
 # iamacoffeepot/aether#3767: the `FleetHarness` harness the fleet scenario
 # suites (`tests/fleetharness_*.rs`, `replace_drop_reply_routing.rs`) boot —
 # extracted from `tests/fleetharness/mod.rs` into its own test-support crate.
 # It locates the forked headless chassis through `dist/manifest.json`
 # (`cargo xtask dist` first), no longer via `CARGO_BIN_EXE_*`.
 aether-harness-fleet = { path = "../aether-harness-fleet" }
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
 # iamacoffeepot/aether#2517: the RPC engine-routing / engines-cap / FleetHarness
 # integration tests boot a passive chassis through the canonical
 # `aether_substrate::testing::TestChassis`, enabled by the substrate
@@ -241,25 +221,6 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # API, which needs `wasmtime::{Engine, Linker, Module}` in scope to build the
 # host engine + linker. Same workspace pin `aether-substrate` links against.
 wasmtime = { workspace = true }
-# iamacoffeepot/aether#1472: the FleetHarness Transform-DAG test builds a
-# descriptor with `output_kind_id == Vec4::ID` and casts the observer's
-# surfaced 16 bytes back to a `Vec4` for the `M·v` assertion, so it names
-# `aether_math::Vec4` directly.
-aether-math = { path = "../aether-math" }
-# iamacoffeepot/aether#1037: the cap-registry replace test swaps the
-# probe wasm for the camera wasm (a distinct handler set) and asserts
-# the registry reflects the new accept-set. The camera folded into
-# `aether-kit` as a non-entry export (issue 1996), so the kind types
-# (`aether_kit::camera::CameraCreate`, etc.) come from kit. The crate's
-# `export!()` FFI emission is wasm32-only and inert in a host rlib, so
-# a plain host dep pulls in the kind types for their `::ID`s at no cost.
-aether-kit = { path = "../aether-kit" }
-# iamacoffeepot/aether#1057: the mail-latency harness (`substrate_harness::mail_latency`)
-# subscribes to per-root `Settled` notifications to wait for injected
-# trace trees to drain; naming the settlement `Receiver<()>` returned by
-# `SettlementRegistry::subscribe_settlement` needs crossbeam-channel in
-# direct scope. Test-only.
-crossbeam-channel = "0.5"
 
 [lints]
 workspace = true

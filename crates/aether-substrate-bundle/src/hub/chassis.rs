@@ -25,12 +25,12 @@ use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, val
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
-use crate::chassis_common::{
+use crate::hub::DEFAULT_RPC_PORT;
+use aether_chassis::boot::{
     ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config, resolve_env_with_file,
     resolve_teardown_cap_with_file, resolve_with_file,
 };
-use crate::cli::HubCli;
-use crate::hub::DEFAULT_RPC_PORT;
+use aether_chassis::cli::HubCli;
 use std::thread;
 
 /// ADR-0071 marker for the hub chassis. Carries no fields — the
@@ -55,7 +55,7 @@ impl HubChassis {
     /// it links the trace dispatcher, the engines cap, and the RPC server,
     /// not the full-stack cap set — so it lists those three directly
     /// rather than through the full-stack
-    /// [`common_cap_namespaces`](crate::common_cap_namespaces) base.
+    /// [`common_cap_namespaces`](aether_chassis::common_cap_namespaces) base.
     #[must_use]
     pub fn describe_manifest() -> BinaryManifest {
         let caps = vec![
@@ -63,7 +63,7 @@ impl HubChassis {
             <EngineServer as Addressable>::NAMESPACE,
             <RpcServerCapability as Addressable>::NAMESPACE,
         ];
-        crate::binary_manifest(Self::PROFILE, caps)
+        aether_chassis::binary_manifest(Self::PROFILE, caps)
     }
 }
 

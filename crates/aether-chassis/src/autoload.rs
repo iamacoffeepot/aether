@@ -137,7 +137,8 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
 /// Build the `aether.component.load` mail that auto-loads `component`,
 /// addressed to the `aether.component` mailbox the same way the hub's
 /// `load_component` and the substrate harness do.
-pub(crate) fn autoload_mail(component: AutoloadComponent) -> Mail {
+#[must_use]
+pub fn autoload_mail(component: AutoloadComponent) -> Mail {
     let payload = LoadComponent {
         wasm: component.wasm,
         name: component.name,

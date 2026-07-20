@@ -63,8 +63,6 @@ mod input;
 mod lifecycle;
 mod shutdown;
 
-pub use config::{WindowConfig, WindowConfigLayer, WindowOverlay, parse_window_mode_env};
-
 /// Cumulative patience cap for the per-frame settlement gates (advance +
 /// capture pre-mail). The per-round budget is `frame_loop::DRAIN_BUDGET`
 /// (the log cadence); a starved-but-healthy chain resolves before this

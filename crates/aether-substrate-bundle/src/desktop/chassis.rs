@@ -41,15 +41,17 @@ use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
-use super::driver::{DesktopDriverCapability, WindowConfig};
-use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
-use crate::chassis_common::{
+use aether_chassis::WindowConfig;
+
+use super::driver::DesktopDriverCapability;
+use crate::hub;
+use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
+use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
     maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
     resolve_with_file, with_common_caps,
 };
-use crate::cli::{CommonOverlay, DesktopCli};
-use crate::hub;
+use aether_chassis::cli::{CommonOverlay, DesktopCli};
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -149,12 +151,12 @@ impl DesktopChassis {
     /// profile, the mailbox namespaces this binary links, and the
     /// `build.rs` provenance. The desktop chassis layers the audio /
     /// render / substrate-harness / lifecycle caps plus the RPC server onto the
-    /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
+    /// shared [`common_cap_namespaces`](aether_chassis::common_cap_namespaces)
     /// base. `--describe` prints this without opening a winit event loop —
     /// the hub can capture a desktop binary's manifest on a headless host.
     #[must_use]
     pub fn describe_manifest() -> BinaryManifest {
-        let mut caps = crate::common_cap_namespaces();
+        let mut caps = aether_chassis::common_cap_namespaces();
         caps.extend([
             <AudioCapability as Addressable>::NAMESPACE,
             <ClipboardCapability as Addressable>::NAMESPACE,
@@ -163,7 +165,7 @@ impl DesktopChassis {
             <LifecycleCapability as Addressable>::NAMESPACE,
             <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
-        crate::binary_manifest(Self::PROFILE, caps)
+        aether_chassis::binary_manifest(Self::PROFILE, caps)
     }
 }
 

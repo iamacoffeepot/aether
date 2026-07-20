@@ -1,0 +1,63 @@
+[package]
+name = "aether-chassis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The shared chassis-composition layer (issue #3809): the boot fragments,
+# fleet-wide config registry, CLI roots, boot-time component autoload,
+# and the standalone-bundle pack format that every chassis crate builds
+# on. Sits above the cap crates (they all depend on `aether-substrate`,
+# so this layer cannot live there — it would cycle) and below the
+# per-chassis crates.
+
+# Mirrors the chassis bundle's `runtime` convention (ADR-0122): the cap
+# crates' substrate-typed halves compile only under their `runtime`
+# features, and this crate composes those halves, so it is default-on
+# and has no transport-only face.
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-substrate = { path = "../aether-substrate", features = ["render"] }
+# The boot fragments compose every common cap and the config registry
+# names each cap's derived `*ConfigLayer::META`, so the runtime-gated
+# crates arrive with their runtime faces (same set the chassis bundle
+# linked before the extraction).
+aether-http = { path = "../aether-http" }
+aether-component = { path = "../aether-component" }
+aether-lifecycle = { path = "../aether-lifecycle" }
+aether-input = { path = "../aether-input" }
+aether-rpc = { path = "../aether-rpc" }
+aether-engine = { path = "../aether-engine" }
+aether-render = { path = "../aether-render", features = ["runtime"] }
+aether-tcp = { path = "../aether-tcp" }
+aether-game = { path = "../aether-game" }
+aether-text = { path = "../aether-text", features = ["runtime"] }
+aether-audio = { path = "../aether-audio", features = ["runtime"] }
+aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
+aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
+aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
+aether-trace = { path = "../aether-trace", features = ["runtime"] }
+aether-fs = { path = "../aether-fs" }
+aether-inventory = { path = "../aether-inventory", features = ["runtime"] }
+# The settlement-patience config layer rides the harness crate; the
+# fleet-wide registry names its `META` like every other layer.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# CLI roots (ADR-0090 unit d): clap Parser structs + per-cap overlay
+# flattening; each overlay assembles a partial confique Layer.
+clap = { workspace = true }
+confique = { workspace = true }
+# The bundle-pack format (encode + decode) and the boot manifest are
+# serde-shaped; the sectioned chassis config file is TOML.
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+[lints]
+workspace = true

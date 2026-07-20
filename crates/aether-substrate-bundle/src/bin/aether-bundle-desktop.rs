@@ -9,10 +9,10 @@
 
 use anyhow::Context as _;
 
+use aether_chassis::autoload::expand_replicas;
+use aether_chassis::bundle_pack::decode_pack;
+use aether_chassis::parse_window_mode_env;
 use aether_substrate::Chassis;
-use aether_substrate_bundle::autoload::expand_replicas;
-use aether_substrate_bundle::bundle_pack::decode_pack;
-use aether_substrate_bundle::desktop::driver::parse_window_mode_env;
 use aether_substrate_bundle::desktop::{DesktopChassis, DesktopEnv};
 
 /// The component pack, embedded at build time. `build.rs` stages it

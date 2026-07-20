@@ -48,9 +48,9 @@ pub use aether_gemini::GeminiOverlay;
 pub use aether_http::HttpOverlay;
 pub use aether_http::HttpServerOverlay;
 
-pub use crate::chassis_common::ChassisBootOverlay;
-pub use crate::desktop::driver::WindowOverlay;
-pub use crate::headless::driver::TickOverlay;
+pub use crate::boot::ChassisBootOverlay;
+pub use crate::tick::TickOverlay;
+pub use crate::window::WindowOverlay;
 
 /// Argv overlay shared by every full-stack chassis (desktop +
 /// headless). Captures every cap whose config layer is the same on

@@ -10,9 +10,9 @@
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
 
-use aether_substrate_bundle::cli::HubCli;
+use aether_chassis::cli::HubCli;
+use aether_chassis::hub_config_dump;
 use aether_substrate_bundle::hub::{Chassis, HubChassis, HubEnv};
-use aether_substrate_bundle::hub_config_dump;
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {

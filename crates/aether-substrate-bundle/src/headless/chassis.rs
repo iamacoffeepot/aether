@@ -39,15 +39,17 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_window::HeadlessWindowCapability;
 
-use super::driver::{HeadlessTimerDriverCapability, TickConfig};
-use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
-use crate::chassis_common::{
+use aether_chassis::TickConfig;
+
+use super::driver::HeadlessTimerDriverCapability;
+use crate::hub;
+use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
+use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
     maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
     resolve_with_file, tick_only_lifecycle_config, with_common_caps,
 };
-use crate::cli::{CommonOverlay, HeadlessCli};
-use crate::hub;
+use aether_chassis::cli::{CommonOverlay, HeadlessCli};
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
@@ -75,12 +77,12 @@ impl HeadlessChassis {
     /// profile, the mailbox namespaces this binary links, and the
     /// `build.rs` provenance. The headless chassis layers the renderer /
     /// window / substrate-harness / lifecycle caps plus the RPC server onto the
-    /// shared [`common_cap_namespaces`](crate::common_cap_namespaces)
+    /// shared [`common_cap_namespaces`](aether_chassis::common_cap_namespaces)
     /// base — a hub-forked fleet engine always boots its RPC server, so it
     /// is part of the headless capability surface.
     #[must_use]
     pub fn describe_manifest() -> BinaryManifest {
-        let mut caps = crate::common_cap_namespaces();
+        let mut caps = aether_chassis::common_cap_namespaces();
         caps.extend([
             <HeadlessRenderCapability as Addressable>::NAMESPACE,
             <HeadlessClipboardCapability as Addressable>::NAMESPACE,
@@ -89,7 +91,7 @@ impl HeadlessChassis {
             <LifecycleCapability as Addressable>::NAMESPACE,
             <RpcServerCapability as Addressable>::NAMESPACE,
         ]);
-        crate::binary_manifest(Self::PROFILE, caps)
+        aether_chassis::binary_manifest(Self::PROFILE, caps)
     }
 }
 

@@ -9,9 +9,9 @@
 // (ADR-0090 §4 / e2).
 #![allow(clippy::print_stdout)]
 
+use aether_chassis::chassis_config_dump;
+use aether_chassis::cli::DesktopCli;
 use aether_substrate::Chassis;
-use aether_substrate_bundle::chassis_config_dump;
-use aether_substrate_bundle::cli::DesktopCli;
 use aether_substrate_bundle::desktop::{DesktopChassis, DesktopEnv};
 use clap::Parser as _;
 
