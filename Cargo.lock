@@ -536,15 +536,21 @@ name = "aether-render"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-data",
  "aether-kinds",
  "aether-math",
  "aether-substrate",
+ "aether-substrate-bench",
+ "aether-substrate-bench-capture",
+ "aether-test-fixtures-bundle",
+ "aether-test-fixtures-kinds",
  "bytemuck",
  "clap",
  "confique",
  "inventory",
  "serde",
+ "serde_json",
  "tracing",
  "wgpu",
 ]
