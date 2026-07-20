@@ -53,7 +53,7 @@ mod tests {
             );
             eprintln!(
                 "skipping: probe.wasm not built; \
-                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples`",
+                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures-bundle`",
             );
             return;
         };
@@ -128,7 +128,7 @@ mod tests {
             );
             eprintln!(
                 "skipping: probe.wasm not built; \
-                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures --examples`",
+                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures-bundle`",
             );
             return;
         };

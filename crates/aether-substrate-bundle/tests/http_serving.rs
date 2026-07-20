@@ -24,6 +24,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -82,49 +83,138 @@ fn body_after_head(response: &[u8]) -> &[u8] {
     response.windows(4).position(|w| w == b"\r\n\r\n").map_or(&[][..], |i| &response[i + 4..])
 }
 
+/// Why a chunked body failed to reassemble. Every variant is a framing
+/// defect, distinct from a body that terminated early but legally — that
+/// one reassembles fine and is compared by the caller.
+#[derive(Debug)]
+enum DechunkError {
+    /// A chunk-size line that isn't hex. Separating this from the
+    /// legitimate `0` terminator is the point: treating it as `0` ends
+    /// reassembly and reports a malformed body as a short one.
+    UnparsableSize { line: Vec<u8> },
+    /// A chunk whose declared length runs past the bytes actually present
+    /// — the response was cut mid-chunk.
+    TruncatedChunk { declared: usize, available: usize },
+    /// The body ran out before the zero-length terminating chunk. Covers an
+    /// empty body and a tail carrying no chunk header at all, both of which
+    /// would otherwise reassemble into a plausible-looking short payload.
+    Unterminated { reassembled: usize, trailing: Vec<u8> },
+}
+
+impl fmt::Display for DechunkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnparsableSize { line } => {
+                write!(f, "unparsable chunk-size line {:?}", String::from_utf8_lossy(line))
+            }
+            Self::TruncatedChunk { declared, available } => {
+                write!(f, "chunk declares {declared} bytes but only {available} remain")
+            }
+            Self::Unterminated { reassembled, trailing } => write!(
+                f,
+                "body ended after {reassembled} reassembled bytes with no terminating chunk; trailing {:?}",
+                String::from_utf8_lossy(trailing),
+            ),
+        }
+    }
+}
+
 /// Reassemble a chunked transfer-encoding body into its payload, stopping at
 /// the zero-length terminating chunk.
-fn dechunk(body: &[u8]) -> Vec<u8> {
+///
+/// A body this cannot parse is an error rather than a short read: the caller
+/// decides whether that is fatal (an assertion site) or expected (a poll loop
+/// still waiting on asynchronous route registration). The terminating chunk
+/// is required, so an empty or header-less body is an error too rather than a
+/// successful reassembly of nothing.
+fn dechunk(body: &[u8]) -> Result<Vec<u8>, DechunkError> {
     let mut pos = 0;
     let mut out = Vec::new();
-    while pos < body.len() {
-        let Some(crlf) = (pos..body.len().saturating_sub(1)).find(|&i| body[i] == b'\r' && body[i + 1] == b'\n') else {
-            break;
+    loop {
+        let unterminated = |out: &Vec<u8>| DechunkError::Unterminated {
+            reassembled: out.len(),
+            trailing: body[pos.min(body.len())..].to_vec(),
         };
-        let size = from_utf8(&body[pos..crlf]).ok().and_then(|s| usize::from_str_radix(s.trim(), 16).ok()).unwrap_or(0);
+        if pos >= body.len() {
+            return Err(unterminated(&out));
+        }
+        let Some(crlf) = (pos..body.len().saturating_sub(1)).find(|&i| body[i] == b'\r' && body[i + 1] == b'\n') else {
+            return Err(unterminated(&out));
+        };
+        let line = &body[pos..crlf];
+        let Some(size) = from_utf8(line).ok().and_then(|s| usize::from_str_radix(s.trim(), 16).ok()) else {
+            return Err(DechunkError::UnparsableSize { line: line.to_vec() });
+        };
         pos = crlf + 2;
-        if size == 0 || pos + size > body.len() {
-            break;
+        if size == 0 {
+            return Ok(out);
+        }
+        if pos + size > body.len() {
+            return Err(DechunkError::TruncatedChunk { declared: size, available: body.len() - pos });
         }
         out.extend_from_slice(&body[pos..pos + size]);
         pos += size + 2;
     }
-    out
 }
 
-/// Write the raw HTTP/1.1 `request` to `port` on loopback, read until
-/// EOF (the cap sends `Connection: close`), and return the raw response
-/// bytes. Mirrors the helper used in the `http_server.rs` cap unit tests.
-fn round_trip(port: u16, request: &[u8]) -> Vec<u8> {
+/// How long `round_trip` waits for the server to finish a response before
+/// giving up on the read.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One HTTP exchange: the bytes read, plus how the read ended.
+struct Exchange {
+    bytes: Vec<u8>,
+    /// The read stopped at [`READ_TIMEOUT`] rather than at the server's
+    /// EOF, so the response is however much arrived before the deadline —
+    /// not a complete short response.
+    timed_out: bool,
+}
+
+impl Exchange {
+    /// The response bytes, asserting the server actually closed the
+    /// connection. A timeout means it never finished the response, which is
+    /// a defect in the code under test rather than a shorter body to
+    /// compare against — so it fails here, naming itself, instead of
+    /// surfacing downstream as a content mismatch.
+    fn complete(self) -> Vec<u8> {
+        assert!(
+            !self.timed_out,
+            "read timed out after {}s with {} bytes and no EOF; server never finished the response: {:?}",
+            READ_TIMEOUT.as_secs(),
+            self.bytes.len(),
+            String::from_utf8_lossy(&self.bytes),
+        );
+        self.bytes
+    }
+}
+
+/// Write the raw HTTP/1.1 `request` to `port` on loopback, read until EOF
+/// (the cap sends `Connection: close`) or [`READ_TIMEOUT`], and return the
+/// raw response bytes alongside which of the two ended the read. Mirrors
+/// the helper used in the `http_server.rs` cap unit tests.
+fn round_trip(port: u16, request: &[u8]) -> Exchange {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
+    stream.set_read_timeout(Some(READ_TIMEOUT)).expect("set_read_timeout");
     stream.write_all(request).expect("write request");
     stream.flush().expect("flush request");
 
     let mut response = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut timed_out = false;
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => response.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                timed_out = true;
                 break;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            // A reset peer is still an end-of-response, not a deadline miss.
             Err(_) => break,
         }
     }
-    response
+    Exchange { bytes: response, timed_out }
 }
 
 /// RFC 6455 opcodes the websocket e2e client uses.
@@ -231,7 +321,7 @@ mod tests {
             eprintln!(
                 "skipping: http_handler.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown \
-                 -p aether-test-fixtures --examples`",
+                 -p aether-test-fixtures-bundle`",
             );
             return;
         };
@@ -306,7 +396,8 @@ mod tests {
         );
 
         // GET / → 200 with body "hello from aether"
-        let root_response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let root_response =
+            round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").complete();
         let root_str = String::from_utf8_lossy(&root_response);
         assert!(root_str.starts_with("HTTP/1.1 200 "), "GET / should reply 200, got: {root_str:?}");
         assert!(
@@ -316,7 +407,8 @@ mod tests {
 
         // GET /missing → 200, echoing the path (a non-root path serves
         // success, not a 404 trap).
-        let miss_response = round_trip(port, b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let miss_response =
+            round_trip(port, b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").complete();
         let miss_str = String::from_utf8_lossy(&miss_response);
         assert!(miss_str.starts_with("HTTP/1.1 200 "), "GET /missing should reply 200, got: {miss_str:?}");
         assert!(miss_str.contains("/missing"), "GET /missing body should echo the request path, got: {miss_str:?}");
@@ -340,7 +432,7 @@ mod tests {
             eprintln!(
                 "skipping: http_handler.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown \
-                 -p aether-test-fixtures --examples`",
+                 -p aether-test-fixtures-bundle`",
             );
             return;
         };
@@ -408,12 +500,13 @@ mod tests {
         // it live before the assertions rather than racing the registration.
         poll_body_contains(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", "chunk-");
 
-        let response = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let response =
+            round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").complete();
         let head = String::from_utf8_lossy(&response);
         assert!(head.starts_with("HTTP/1.1 200 "), "GET /stream should reply 200, got: {head:?}");
         assert!(head.contains("Transfer-Encoding: chunked"), "streamed response should be chunked, got: {head:?}");
 
-        let reassembled = dechunk(body_after_head(&response));
+        let reassembled = dechunk(body_after_head(&response)).expect("reassemble the streamed body");
         let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(|i| format!("chunk-{i}\n").into_bytes()).collect();
         assert_eq!(reassembled, expected, "reassembled stream body: {:?}", String::from_utf8_lossy(&reassembled));
     }
@@ -443,7 +536,7 @@ mod tests {
             eprintln!(
                 "skipping: http_handler.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown \
-                 -p aether-test-fixtures --examples`",
+                 -p aether-test-fixtures-bundle`",
             );
             return;
         };
@@ -516,11 +609,11 @@ mod tests {
         let request = b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let response = round_trip(port, request);
+            let response = round_trip(port, request).bytes;
             let head = String::from_utf8_lossy(&response);
             if head.starts_with("HTTP/1.1 200 ")
                 && head.contains("Transfer-Encoding: chunked")
-                && dechunk(body_after_head(&response)) == expected
+                && dechunk(body_after_head(&response)).is_ok_and(|body| body == expected)
             {
                 break;
             }
@@ -559,7 +652,7 @@ mod tests {
             eprintln!(
                 "skipping: http_handler.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown \
-                 -p aether-test-fixtures --examples`",
+                 -p aether-test-fixtures-bundle`",
             );
             return;
         };
@@ -753,7 +846,7 @@ mod tests {
     fn poll_body_contains(port: u16, request: &[u8], expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let response = round_trip(port, request);
+            let response = round_trip(port, request).bytes;
             let text = String::from_utf8_lossy(&response);
             if text.split_once("\r\n\r\n").is_some_and(|(_, body)| body.contains(expected)) {
                 return;
@@ -785,7 +878,7 @@ mod tests {
             eprintln!(
                 "skipping: http_handler.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown \
-                 -p aether-test-fixtures --examples`",
+                 -p aether-test-fixtures-bundle`",
             );
             return;
         };
@@ -883,7 +976,7 @@ mod tests {
             drop_body.len(),
             drop_body,
         );
-        let drop_response = round_trip(port, drop_request.as_bytes());
+        let drop_response = round_trip(port, drop_request.as_bytes()).complete();
         let drop_str = String::from_utf8_lossy(&drop_response);
         assert!(
             drop_str.starts_with("HTTP/1.1 200 ") && drop_str.contains("dropping"),
