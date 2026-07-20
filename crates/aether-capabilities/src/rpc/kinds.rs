@@ -19,7 +19,7 @@ pub struct RpcInboundReady {}
 /// `aether.rpc.route` — ask the engines cap (`aether.engine`) to
 /// relay one mail to a *specific* engine's substrate. Issue 763 P5a.
 ///
-/// The engine-addressed sibling of [`ForwardEnvelope`]: where
+/// The engine-addressed sibling of `ForwardEnvelope`: where
 /// `ForwardEnvelope` already names a proxy and only needs the
 /// substrate-local `mailbox` + `kind` + `payload`, `RouteEnvelope`
 /// also carries the `engine_id`, because the sender (the hub's
@@ -41,7 +41,7 @@ pub struct RouteEnvelope {
 /// `aether.rpc.call_settled` — a per-engine proxy's signal that
 /// a forwarded RPC call has run to completion. Issue 763 P5a.
 ///
-/// When the proxy relays a [`ForwardEnvelope`] as an RPC `Call`,
+/// When the proxy relays a `ForwardEnvelope` as an RPC `Call`,
 /// the substrate eventually answers with a wire `ReplyEnd`. The
 /// proxy lifts that terminal frame into this kind and pushes it
 /// back to whoever opened the call (correlation preserved) — the
