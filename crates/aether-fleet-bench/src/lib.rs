@@ -1,6 +1,7 @@
 //! `FleetBench` — a real-process E2E test-support harness over the
-//! hub/RPC path (issue 1451). Where [`SubstrateBench`](aether_substrate_bench)
-//! drives the substrate in-process over a loopback channel, `FleetBench`
+//! hub/RPC path (issue 1451). Where `SubstrateBench`
+//! (`aether-substrate-bench`'s in-process harness) drives the substrate
+//! over a loopback channel, `FleetBench`
 //! drives the *actual* hub → RPC → forked-headless-substrate stack: it
 //! boots a hub-shaped passive chassis (`RpcServerCapability` +
 //! `EngineServer` + `TraceDispatchCapability`), connects a raw-frame
@@ -11,23 +12,28 @@
 //! MCP-JSON front and carry the regressions an agent hits when driving
 //! a live engine.
 //!
-//! It is a `tests/` support module (pulled into each scenario file via
-//! `mod fleetbench;`), not a crate and not a lib module — the bundle
-//! keeps tokio out of its production build, so `FleetBench` is sync and
-//! raw-frame: the same wire protocol `aether-mcp` speaks, with the
-//! async/JSON front stripped.
-//!
-//! Each scenario binary uses a subset of the API, so the module carries
-//! a crate-wide `dead_code` allow — a method unused by one binary is
-//! exercised by another.
+//! `FleetBench` is sync and raw-frame — the same wire protocol
+//! `aether-mcp` speaks, with the async/JSON front stripped — so the
+//! harness pulls no tokio into any consumer's dev graph. Scenario suites
+//! take it as a dev-dependency; the forked headless chassis binary and
+//! the component wasm both resolve through `dist/manifest.json`, the
+//! tree `cargo xtask dist` packages (see [`headless_bin_path`] and
+//! [`read_component_wasm`]).
 
-#![allow(dead_code)]
+// Matching `aether_substrate::testing`: test-support harness — the returned
+// values are always consumed by the calling scenario, and the panics on wire /
+// decode failures are themselves the test assertions.
+#![allow(clippy::must_use_candidate, clippy::missing_panics_doc)]
 // The manifest-presence guard emits its skip diagnostic via stderr so
 // `cargo test` surfaces "skipping: ..." alongside `test ... ok` (issue
-// 891), matching `headless_autoload.rs`.
+// 891), matching `headless_autoload.rs`; the slow-gate re-arm loop logs
+// its heartbeat the same way.
 #![allow(clippy::print_stderr)]
-// The same guard reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness
-// knob, not cap config.
+// The harness reads its process-level test knobs (AETHER_REQUIRE_RUNTIME,
+// the AETHER_FLEETBENCH_* budgets, AETHER_FLEET_BENCH_HEADLESS_BIN)
+// straight from the environment — test-harness tuning, not cap config —
+// and hand-hashes wire mailbox paths (`mailbox_id_from_path`), the
+// sanctioned wire-`Call`-forwarding use.
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
@@ -143,8 +149,8 @@ fn poll_budget() -> Duration {
     cap_from_secs(env_secs("AETHER_FLEETBENCH_POLL_SECS", DEFAULT_POLL_SECS))
 }
 
-/// Poll `predicate` every [`POLL_INTERVAL`] until it returns `true` or
-/// the [`poll_budget`] elapses; returns whether it became true. Replaces
+/// Poll `predicate` every `POLL_INTERVAL` until it returns `true` or
+/// the `AETHER_FLEETBENCH_POLL_SECS` budget elapses; returns whether it became true. Replaces
 /// the per-test `for _ in 0..N { … sleep }` loops whose fixed iteration
 /// counts flake under CI contention: the budget is wall-clock and
 /// generous, so a starved fork that registers late still passes, while a
@@ -205,13 +211,17 @@ pub struct CallRecord {
 }
 
 /// The `dist/manifest.json` slice `FleetBench` reads: the wasm component
-/// map (`stem → components/<stem>.wasm`, relative to `dist/`). A
-/// `Deserialize` view rather than a mirror of xtask's `Serialize`
-/// `Manifest` — serde ignores the manifest's other fields (`target`,
-/// `profile`, `chassis`), so this stays robust to manifest growth.
+/// map (`stem → components/<stem>.wasm`) and the chassis bin map
+/// (`name → bin/<name>`), both relative to `dist/`. A `Deserialize` view
+/// rather than a mirror of xtask's `Serialize` `Manifest` — serde
+/// ignores the manifest's other fields (`target`, `profile`), so this
+/// stays robust to manifest growth. `chassis` defaults empty so a
+/// component-only manifest still classifies its component stems.
 #[derive(serde::Deserialize)]
 struct ManifestView {
     components: BTreeMap<String, String>,
+    #[serde(default)]
+    chassis: BTreeMap<String, String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -316,8 +326,8 @@ impl FleetBench {
     /// Shared spawn body: pin the headless bin by content hash, fork it
     /// through the engines cap, optionally injecting a boot manifest path.
     fn spawn_headless_inner(&mut self, boot_manifest: Option<String>) -> EngineId {
-        let headless = env!("CARGO_BIN_EXE_aether-substrate-headless");
-        let hash = match self.upload_binary(headless, Some("headless")) {
+        let headless = headless_bin_path();
+        let hash = match self.upload_binary(&headless.to_string_lossy(), Some("headless")) {
             UploadBinaryResult::Ok { hash, .. } => hash,
             UploadBinaryResult::Err { error } => panic!("spawn_headless upload failed: {error}"),
         };
@@ -578,10 +588,10 @@ impl FleetBench {
         }
     }
 
-    /// Terminate `engine` through the asserting [`call`](Self::call)
+    /// Terminate `engine` through the asserting `call`
     /// path — the agent-facing `terminate_substrate`, distinct from the
     /// `Drop`-only best-effort
-    /// [`terminate_quietly`](Self::terminate_quietly). The engines cap
+    /// `terminate_quietly`. The engines cap
     /// removes the fleet entry synchronously before it replies, so a
     /// follow-up [`list_engines`](Self::list_engines) reflects the
     /// eviction with no heartbeat-eviction wait. Drops `engine` from the
@@ -893,7 +903,7 @@ impl FleetBench {
     /// [`MailId`] every dispatched envelope inherited plus the reply
     /// envelopes collected across the settlement window. Mirrors
     /// `aether-mcp`'s `send_mail_traced`, minus the round-2 trace-tree
-    /// stitch: Tier-A asserts settlement (the [`call`](Self::call) read
+    /// stitch: Tier-A asserts settlement (the `call` read
     /// already spans it — the server holds the wire `Call` open until
     /// chain settlement) and the collected replies, not the
     /// reconstructed tree.
@@ -903,7 +913,7 @@ impl FleetBench {
     /// handler replies before the dispatched children run), so it is
     /// split off and decoded for the `root`, and the trailing events are
     /// the dispatched mail's correlated replies. Panics on an
-    /// `Err`/undecodable ack, mirroring [`single_reply`].
+    /// `Err`/undecodable ack, mirroring `single_reply`.
     pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<MailEnvelope>)
     where
         K: Kind + Serialize,
@@ -1020,10 +1030,73 @@ fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
 }
 
 /// Workspace `dist/` directory: `CARGO_MANIFEST_DIR`
-/// (`crates/aether-substrate-bundle`) up two levels to the workspace
+/// (`crates/aether-fleet-bench`) up two levels to the workspace
 /// root, then `dist/`.
 fn dist_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist")
+}
+
+/// The chassis bin `FleetBench` forks — the `dist/manifest.json` chassis
+/// key and the `dist/bin/` filename `cargo xtask dist` packages.
+const HEADLESS_BIN: &str = "aether-substrate-headless";
+
+/// Env override for [`headless_bin_path`]: an explicit path to a
+/// prebuilt headless chassis binary, bypassing the dist manifest — for
+/// pointing the harness at a fresh `target/` build without re-running
+/// `cargo xtask dist`.
+pub const HEADLESS_BIN_ENV: &str = "AETHER_FLEET_BENCH_HEADLESS_BIN";
+
+/// Classify a raw `dist/manifest.json` for the presence of chassis bin
+/// `bin` — the chassis-map twin of [`classify_dist_manifest`], reusing
+/// the same classification (a bin name absent from the chassis map — a
+/// `--no-bins` dist — classifies as [`DistManifestClassification::MissingStem`]).
+pub fn classify_dist_chassis(raw: &str, bin: &str) -> DistManifestClassification {
+    let manifest: ManifestView = match serde_json::from_str(raw) {
+        Ok(manifest) => manifest,
+        Err(_) => return DistManifestClassification::Unparseable,
+    };
+    manifest.chassis.get(bin).cloned().map_or(DistManifestClassification::MissingStem, |relative_path| {
+        DistManifestClassification::Available { relative_path }
+    })
+}
+
+/// The `aether-substrate-headless` binary [`FleetBench::spawn_headless`]
+/// forks: the [`HEADLESS_BIN_ENV`] override when set, else the chassis
+/// entry in `dist/manifest.json` resolved under `dist/` — the tree
+/// `cargo xtask dist` packages. `CARGO_BIN_EXE_*` is not an option here:
+/// it only resolves inside the package that defines the binary, and this
+/// harness is a crate any scenario suite can dev-dep.
+///
+/// # Panics
+/// Panics with a `cargo xtask dist` hint when neither resolves — the
+/// harness cannot fork a chassis it cannot locate, so the failure is
+/// loud and actionable rather than a skip (mirroring the
+/// `AETHER_REQUIRE_RUNTIME` strict style of the wasm-side guard).
+pub fn headless_bin_path() -> PathBuf {
+    if let Ok(path) = env::var(HEADLESS_BIN_ENV) {
+        return PathBuf::from(path);
+    }
+    let dist = dist_dir();
+    let manifest_path = dist.join("manifest.json");
+    let unavailable = |detail: &str| -> ! {
+        panic!(
+            "headless chassis binary {HEADLESS_BIN:?} unavailable via {}; {detail}; run `cargo xtask dist` to build \
+             the chassis bins + manifest, or point {HEADLESS_BIN_ENV} at a prebuilt binary",
+            manifest_path.display(),
+        )
+    };
+    let raw = match fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == ErrorKind::NotFound => unavailable("manifest is absent"),
+        Err(e) => unavailable(&format!("manifest is unreadable ({e})")),
+    };
+    match classify_dist_chassis(&raw, HEADLESS_BIN) {
+        DistManifestClassification::Available { relative_path } => dist.join(relative_path),
+        DistManifestClassification::MissingStem => {
+            unavailable("bin is missing from the manifest's chassis map (a `--no-bins` dist?)")
+        }
+        DistManifestClassification::Unparseable => unavailable("manifest does not parse as dist metadata"),
+    }
 }
 
 pub fn classify_dist_manifest(raw: &str, stem: &str) -> DistManifestClassification {
@@ -1173,4 +1246,120 @@ pub fn read_component_wasm(stem: &str) -> Vec<u8> {
 /// missing.
 pub fn component_wasm_path(stem: &str) -> PathBuf {
     component_wasm_path_result(stem).unwrap_or_else(|message| panic!("{message}"))
+}
+
+/// Unit tests over the harness-owned pure helpers: the latency-budget
+/// decisions the re-arm read loop owns (issue 2064) and the dist
+/// manifest classification / skip-or-panic guard. The wire round-trip
+/// and the cold-start/reply backstops themselves are exercised by the
+/// booted `FleetBench` scenarios (`fleetbench_spawn`, `fleetbench_mail`,
+/// … in `aether-substrate-bundle`).
+#[cfg(test)]
+mod tests {
+    use std::io::{Error as IoError, ErrorKind};
+    use std::path::Path;
+    use std::time::Duration;
+
+    use aether_codec::frame::FrameError;
+
+    use crate::{
+        DistComponentGuardOutcome, DistManifestClassification, HEADLESS_BIN, cap_from_secs, classify_dist_chassis,
+        classify_dist_manifest, dist_component_guard_outcome, is_rearm_timeout,
+    };
+
+    #[test]
+    fn cap_from_secs_maps_seconds_and_zero_sentinel() {
+        // The only logic here: seconds → `Duration`, with `0` as the
+        // "wait forever" sentinel (the gate's `elapsed >= cap` never trips).
+        assert_eq!(cap_from_secs(0), Duration::MAX, "0 → wait forever");
+        assert_eq!(cap_from_secs(60), Duration::from_mins(1));
+        assert_eq!(cap_from_secs(300), Duration::from_mins(5));
+    }
+
+    #[test]
+    fn rearm_timeout_classification() {
+        // A timed-out blocking read re-arms; both platform spellings count.
+        assert!(is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::WouldBlock))));
+        assert!(is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::TimedOut))));
+        // A genuine failure does not re-arm — it propagates as an error.
+        assert!(!is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::UnexpectedEof))));
+        assert!(!is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::ConnectionReset))));
+    }
+
+    #[test]
+    fn manifest_with_bundle_stem_is_available() {
+        let manifest = r#"{
+            "components": {
+                "aether_test_fixtures_bundle": "components/aether_test_fixtures_bundle.wasm"
+            }
+        }"#;
+        assert!(matches!(
+            classify_dist_manifest(manifest, "aether_test_fixtures_bundle"),
+            DistManifestClassification::Available { .. }
+        ));
+    }
+
+    #[test]
+    fn manifest_missing_bundle_stem_is_classified() {
+        let manifest = r#"{
+            "components": {
+                "aether_kit": "components/aether_kit.wasm"
+            }
+        }"#;
+        assert_eq!(
+            classify_dist_manifest(manifest, "aether_test_fixtures_bundle"),
+            DistManifestClassification::MissingStem,
+        );
+    }
+
+    #[test]
+    fn manifest_chassis_map_classifies_headless_bin() {
+        // The chassis-map twin of the component classification: the
+        // headless entry resolves to its `bin/` relative path, and a
+        // `--no-bins` manifest (empty or absent chassis map) classifies
+        // as missing rather than panicking at parse.
+        let with_bins = r#"{
+            "components": {},
+            "chassis": {
+                "aether-substrate-headless": "bin/aether-substrate-headless"
+            }
+        }"#;
+        assert_eq!(
+            classify_dist_chassis(with_bins, HEADLESS_BIN),
+            DistManifestClassification::Available { relative_path: "bin/aether-substrate-headless".to_owned() },
+        );
+        let no_bins = r#"{ "components": {}, "chassis": {} }"#;
+        assert_eq!(classify_dist_chassis(no_bins, HEADLESS_BIN), DistManifestClassification::MissingStem);
+        let chassis_absent = r#"{ "components": {} }"#;
+        assert_eq!(classify_dist_chassis(chassis_absent, HEADLESS_BIN), DistManifestClassification::MissingStem);
+    }
+
+    #[test]
+    fn missing_stem_skips_locally_and_panics_when_runtime_is_required() {
+        let manifest_path = Path::new("/tmp/dist/manifest.json");
+        let local = dist_component_guard_outcome(
+            "aether_test_fixtures_bundle",
+            manifest_path,
+            &DistManifestClassification::MissingStem,
+            false,
+        );
+        let required = dist_component_guard_outcome(
+            "aether_test_fixtures_bundle",
+            manifest_path,
+            &DistManifestClassification::MissingStem,
+            true,
+        );
+
+        let DistComponentGuardOutcome::Skip(skip_message) = local else {
+            panic!("missing stem should skip locally");
+        };
+        let DistComponentGuardOutcome::RequireRuntime(panic_message) = required else {
+            panic!("missing stem should require runtime under AETHER_REQUIRE_RUNTIME");
+        };
+        assert_eq!(skip_message, panic_message);
+        assert!(skip_message.contains("aether_test_fixtures_bundle"));
+        assert!(skip_message.contains("/tmp/dist/manifest.json"));
+        assert!(skip_message.contains("cargo xtask dist"));
+        assert!(skip_message.contains("remove generated `dist/`"));
+    }
 }

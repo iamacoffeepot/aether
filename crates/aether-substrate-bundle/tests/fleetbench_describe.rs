@@ -5,13 +5,11 @@
 //! boot-manifest-loaded component introspectable without a prior
 //! aether-mcp-side `load_component`.
 
-mod fleetbench;
-
 mod tests {
     use aether_data::Kind;
     use aether_kinds::{DescribeComponent, DescribeComponentResult, Key, Tick};
 
-    use crate::fleetbench::{FleetBench, dist_component_available};
+    use aether_fleet_bench::{FleetBench, dist_component_available};
 
     /// Load the `probe` component, then send `aether.component.describe`
     /// addressed by the lineage name `load` hands back and assert the reply

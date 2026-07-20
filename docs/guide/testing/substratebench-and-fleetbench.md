@@ -97,10 +97,13 @@ rasterization.
 
 ## FleetBench topology
 
-`FleetBench` is test support under `crates/aether-substrate-bundle/tests/`. It
+`FleetBench` is the `aether-fleet-bench` test-support crate, taken as a
+dev-dependency by the fleet scenario suites. It
 starts a real hub, connects over the production RPC framing, and can fork actual
-child substrate binaries. It exercises the same boundary an MCP coordinator
-uses without requiring an interactive MCP session.
+child substrate binaries — the headless chassis resolves through
+`dist/manifest.json` (run `cargo xtask dist` first, or set
+`AETHER_FLEET_BENCH_HEADLESS_BIN`). It exercises the same boundary an MCP
+coordinator uses without requiring an interactive MCP session.
 
 Use it for:
 
@@ -148,7 +151,7 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 
 - Public SubstrateBench API: `crates/aether-substrate-bench/src/`
 - Scenario examples: `crates/aether-substrate-bundle/tests/substrate_bench_scenario/`
-- FleetBench harness: `crates/aether-substrate-bundle/tests/fleetbench/mod.rs`
+- FleetBench harness: `crates/aether-fleet-bench/src/lib.rs`
 - Fleet scenarios: `crates/aether-substrate-bundle/tests/fleetbench_*.rs`
 - Fixtures: `crates/aether-test-fixtures/`
 - Decisions: ADR-0067 and the subsystem ADR for the behavior under test

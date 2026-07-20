@@ -223,6 +223,12 @@ serde_json = { workspace = true }
 # write_frame}`) used by the RPC engine-routing + FleetBench integration
 # tests; no `src/` consumer, so it rides dev-dependencies only.
 aether-codec = { path = "../aether-codec" }
+# iamacoffeepot/aether#3767: the `FleetBench` harness the fleet scenario
+# suites (`tests/fleetbench_*.rs`, `replace_drop_reply_routing.rs`) boot —
+# extracted from `tests/fleetbench/mod.rs` into its own test-support crate.
+# It locates the forked headless chassis through `dist/manifest.json`
+# (`cargo xtask dist` first), no longer via `CARGO_BIN_EXE_*`.
+aether-fleet-bench = { path = "../aether-fleet-bench" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
 # iamacoffeepot/aether#2517: the RPC engine-routing / engines-cap / FleetBench
 # integration tests boot a passive chassis through the canonical

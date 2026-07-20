@@ -9,14 +9,12 @@
 //! closed (discarded). `load_component` is unaffected — the cap answers
 //! it inline, streaming the reply home before settlement.
 
-mod fleetbench;
-
 mod tests {
     use aether_data::Kind;
     use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
     use aether_rpc::MailEnvelope;
 
-    use crate::fleetbench::{FleetBench, dist_component_available, read_component_wasm};
+    use aether_fleet_bench::{FleetBench, dist_component_available, read_component_wasm};
 
     /// Load the `probe` component, then drive a `ReplaceComponent`
     /// and a `DropComponent` to its cap over the real wire and assert

@@ -5,8 +5,6 @@
 //! load + replace by selector, and bring a component up from a boot manifest
 //! of selectors. Headless: no GPU, no pixel readback.
 
-mod fleetbench;
-
 mod tests {
     use std::collections::BTreeSet;
     use std::env;
@@ -23,7 +21,7 @@ mod tests {
     };
     use aether_test_fixtures_kinds::ProbeConfig;
 
-    use crate::fleetbench::{
+    use aether_fleet_bench::{
         FleetBench, allocate_store_root_for_test, component_wasm_path, dist_component_available, poll_until,
     };
 

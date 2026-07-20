@@ -27,14 +27,12 @@
 //! cells here distinguish the directions and the resolved sources, which is
 //! what the wire layer can witness.
 
-mod fleetbench;
-
 mod tests {
     use aether_data::Kind;
     use aether_kinds::{LogEntry, LogTailResult};
     use aether_test_fixtures_kinds::{CollectMatrix, MatrixReport, RunMatrix};
 
-    use crate::fleetbench::{FleetBench, dist_component_available};
+    use aether_fleet_bench::{FleetBench, dist_component_available};
 
     /// Drive the full cluster-addressing matrix over the wire and assert
     /// every cell: in-cluster delivery + the source each recipient read,

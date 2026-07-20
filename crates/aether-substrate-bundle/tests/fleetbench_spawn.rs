@@ -2,10 +2,8 @@
 //! real `aether-substrate-headless` through the hub's engines cap, then
 //! confirm the hub registered it in the supervised fleet.
 
-mod fleetbench;
-
 mod tests {
-    use crate::fleetbench::FleetBench;
+    use aether_fleet_bench::FleetBench;
 
     /// Spawn a headless substrate and assert it shows up in
     /// `ListEngines` with a fresh heartbeat — the real-process

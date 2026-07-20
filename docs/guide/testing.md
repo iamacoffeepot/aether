@@ -135,7 +135,7 @@ Once a test clears the bar, the harness follows from what it checks. Engine-inte
 and visual correctness goes to **SubstrateBench** (`aether-substrate-bench`)
 with a concrete assertion (`captured`, `reply`, `count_observed`); behavior over the
 wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
-**FleetBench** (`crates/aether-substrate-bundle/tests/fleetbench/`). FleetBench is
+**FleetBench** (the `aether-fleet-bench` crate). FleetBench is
 headless, so any rendered-output assertion has to be SubstrateBench, and any
 externally-addressable-over-the-wire assertion has to be FleetBench.
 
