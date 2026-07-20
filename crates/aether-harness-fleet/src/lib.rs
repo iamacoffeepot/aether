@@ -1076,12 +1076,27 @@ pub fn headless_bin_path() -> PathBuf {
     if let Ok(path) = env::var(HEADLESS_BIN_ENV) {
         return PathBuf::from(path);
     }
+    chassis_bin_path(HEADLESS_BIN)
+}
+
+/// Resolve any chassis binary by its `dist/manifest.json` chassis-map
+/// name (issue #3812) — the general form [`headless_bin_path`] wraps.
+/// A test that needs a chassis binary other than the forked headless
+/// engine (e.g. the hub store's distinct-second-upload subject) resolves
+/// it here instead of `CARGO_BIN_EXE_*`, which only resolves inside the
+/// package that defines the binary.
+///
+/// # Panics
+/// Panics with a `cargo xtask dist` hint when the manifest or the bin
+/// entry is missing — the caller cannot proceed without the binary, so
+/// the failure is loud and actionable rather than a skip.
+pub fn chassis_bin_path(bin: &str) -> PathBuf {
     let dist = dist_dir();
     let manifest_path = dist.join("manifest.json");
     let unavailable = |detail: &str| -> ! {
         panic!(
-            "headless chassis binary {HEADLESS_BIN:?} unavailable via {}; {detail}; run `cargo xtask dist` to build \
-             the chassis bins + manifest, or point {HEADLESS_BIN_ENV} at a prebuilt binary",
+            "chassis binary {bin:?} unavailable via {}; {detail}; run `cargo xtask dist` to build the chassis bins + \
+             manifest",
             manifest_path.display(),
         )
     };
@@ -1090,7 +1105,7 @@ pub fn headless_bin_path() -> PathBuf {
         Err(e) if e.kind() == ErrorKind::NotFound => unavailable("manifest is absent"),
         Err(e) => unavailable(&format!("manifest is unreadable ({e})")),
     };
-    match classify_dist_chassis(&raw, HEADLESS_BIN) {
+    match classify_dist_chassis(&raw, bin) {
         DistManifestClassification::Available { relative_path } => dist.join(relative_path),
         DistManifestClassification::MissingStem => {
             unavailable("bin is missing from the manifest's chassis map (a `--no-bins` dist?)")

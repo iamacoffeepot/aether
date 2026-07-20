@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::desktop::chassis::UserEvent;
+use crate::chassis::UserEvent;
 
 /// Install a SIGINT/SIGTERM → graceful-shutdown bridge for the desktop
 /// chassis (iamacoffeepot/aether#1489). On the first delivered signal it

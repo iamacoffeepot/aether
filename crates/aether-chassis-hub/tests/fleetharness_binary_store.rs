@@ -15,8 +15,8 @@ mod tests {
     #[test]
     fn fleetharness_uploads_lists_and_dedups_a_real_binary() {
         let mut harness = FleetHarness::start();
-        // The headless bin moved to `aether-chassis-headless` (#3811), so
-        // `CARGO_BIN_EXE_*` no longer resolves here; take the same
+        // Both chassis bins live in their own crates now (#3811/#3812),
+        // so `CARGO_BIN_EXE_*` cannot resolve them here; take the same
         // dist-manifest path `FleetHarness` forks engines from.
         let headless = aether_harness_fleet::headless_bin_path();
         let headless = headless.to_str().expect("dist headless path is utf-8");
@@ -32,7 +32,8 @@ mod tests {
             UploadBinaryResult::Err { error } => panic!("upload_binary failed: {error}"),
         };
 
-        let desktop = env!("CARGO_BIN_EXE_aether-substrate");
+        let desktop = aether_harness_fleet::chassis_bin_path("aether-substrate");
+        let desktop = desktop.to_str().expect("dist desktop path is utf-8");
         let unnamed_hash = match harness.upload_binary(desktop, None) {
             UploadBinaryResult::Ok { hash, name } => {
                 assert!(name.is_none(), "the historical fixture is deliberately unnamed");

@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Multi-binary chassis crate. Holds the desktop and substrate-harness
-# chassis source as submodules (`src/<chassis>/`). Each
-# chassis produces a binary via `src/bin/<chassis>.rs`. The shared
-# substrate runtime stays in `aether-substrate`; this crate is the
-# per-deployment chassis layer.
+# Chassis-binary residue crate: the substrate-harness chassis entry
+# point plus the standalone bundle and perf bins. The desktop, headless,
+# and hub chassis live in their own aether-chassis-* crates; the shared
+# substrate runtime stays in `aether-substrate`.
 #
 # The in-process `SubstrateHarness` API lives in the
 # `aether-harness-substrate` crate; this crate only carries the
@@ -16,10 +15,6 @@ license.workspace = true
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-name = "aether-substrate"
-path = "src/bin/desktop.rs"
 
 [[bin]]
 name = "aether-substrate-harness"
@@ -79,15 +74,12 @@ aether-chassis = { path = "../aether-chassis" }
 # until the bundle machinery gets its own crate (#3815) — a husk-uses-
 # leaf dep that dies with that cut.
 aether-chassis-headless = { path = "../aether-chassis-headless" }
+aether-chassis-desktop = { path = "../aether-chassis-desktop" }
 # The substrate-harness crates + the GPU capture half (issue #3765): the
 # `aether-substrate-harness` binary composes through them, and the
 # resident scenario tests link both.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-# iamacoffeepot/aether#3758: the http caps were extracted to `aether-http`;
-# every chassis installs `HttpCapability` + `HttpServerCapability` and the
-# CLI re-exports their clap overlays, so the bundle takes the runtime face.
-aether-http = { path = "../aether-http" }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`. Every chassis installs `ComponentHostCapability` with
 # its wasmtime-typed `ComponentHostConfig` and the scenario tests build
@@ -101,10 +93,6 @@ aether-lifecycle = { path = "../aether-lifecycle" }
 # iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
 # every chassis composes `InputCapability` + `InputConfig`.
 aether-input = { path = "../aether-input" }
-# iamacoffeepot/aether#3735: the rpc transport and the engines cap were
-# extracted to `aether-rpc` / `aether-engine`; every chassis binds the RPC
-# server and the hub additionally boots `EngineServer`.
-aether-rpc = { path = "../aether-rpc" }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
 # the chassis bundle needs its wgpu runtime half (RenderCapability / RenderGpu /
 # RenderHandles / RenderTuningConfigLayer for the desktop + substrate-harness drivers).
@@ -120,37 +108,18 @@ aether-game = { path = "../aether-game" }
 # the chassis bundle wires `TextCapability`, so it needs the runtime half
 # (fontdue TTF parse / rasterize + the substrate-side runtime).
 aether-text = { path = "../aether-text", features = ["runtime"] }
-# iamacoffeepot/aether#3723: the audio cap was extracted to `aether-audio`;
-# the desktop chassis wires `AudioCapability` (cpal synth) + resolves
-# `AudioConfig` / `AudioConfigLayer` / `AudioOverlay`, so it needs the runtime half.
-aether-audio = { path = "../aether-audio", features = ["runtime"] }
-# iamacoffeepot/aether#3705: the content-gen provider cluster was extracted to
-# the `aether-contentgen` (shared layer) + `aether-anthropic` + `aether-gemini`
-# crates; every chassis wires `AnthropicCapability` / `GeminiCapability` and
-# resolves their configs + `ContentGenConfig`, so it needs each crate's runtime
-# half.
-aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
-aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
-aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
-aether-window = { path = "../aether-window", features = ["runtime"] }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — the chassis wires
 # `FsCapability` + resolves `NamespaceRoots`, so it needs the fs runtime (default).
 aether-fs = { path = "../aether-fs" }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
-# Chassis-binary argv parsing (ADR-0090 unit d, issue 1258). The
-# `cli` module declares per-chassis Parser roots and per-cap overlay
-# structs; each chassis bin calls `<Cli>::parse()` and threads the
-# resolved overlays through `*Env::from_env_with_argv(cli)`.
-clap = { workspace = true }
 # Catch-all error type for chassis main()s + build_passive that
 # bridge BootError / wasmtime / io faults purely to bubble up.
 # Same crate as `wasmtime::Result` re-exports (issue #571).
 anyhow = { workspace = true }
 png = { workspace = true }
-pollster = "0.4.0"
 # iamacoffeepot/aether#1155: distribution-plot rendering for the
 # `perf-plot` bin. `ab_glyph` keeps fonts pure-Rust (no font-kit / system
 # freetype — headless-CI friendly); we render to an RGB buffer and encode
@@ -171,7 +140,6 @@ serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 wgpu = { workspace = true }
-winit = "0.30.13"
 
 # Hub chassis blocks on a SIGINT/SIGTERM signal in
 # `HubServerDriverRunning::run`. Tokio retired alongside the embedded
@@ -181,12 +149,6 @@ winit = "0.30.13"
 # signal-hook is Unix-only; the Windows fallback rides `ctrlc` for
 # Ctrl-C only (matches the pre-tokio-retirement behavior, which also
 # distinguished SIGINT/SIGTERM only on Unix).
-[target.'cfg(unix)'.dependencies]
-signal-hook = "0.4"
-
-[target.'cfg(windows)'.dependencies]
-ctrlc = "3"
-
 [build-dependencies]
 # `build.rs` parses the `AETHER_BUNDLE_MANIFEST` JSON and encodes the
 # bundle pack through `src/bundle_pack.rs` (compiled in via `#[path]`,

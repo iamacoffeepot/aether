@@ -110,6 +110,13 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-chassis-headless) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The hub chassis crate's binary-store proof (relocated from the
+# bundle, #3812) forks real chassis binaries for `--describe` capture —
+# same fork-contention class, same 180s wall-clock backstop.
+[[profile.ci.overrides]]
+filter = "package(=aether-chassis-hub) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The rehomed tcp fleet-load test (`fleetharness_tcp_load`, #3780) forks a
 # real debug `aether-substrate-headless` process through `FleetHarness` and
 # then churns real loopback listeners/sessions on top — the same
