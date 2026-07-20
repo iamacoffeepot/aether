@@ -9,7 +9,7 @@
 //!
 //! The bins (`src/bin/perf-trial.rs`, `src/bin/perf-compare.rs`) are
 //! thin shells over these; the logic lives here so it is in-crate
-//! (reaching `SubstrateBench`'s `pub(crate)` drive methods) and unit-testable.
+//! (reaching `SubstrateHarness`'s `pub(crate)` drive methods) and unit-testable.
 
 pub mod harness;
 pub mod report;

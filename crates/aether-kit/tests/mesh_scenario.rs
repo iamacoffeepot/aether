@@ -1,4 +1,4 @@
-//! Mesh-viewer scenario tests. Each test boots a `SubstrateBench`, loads
+//! Mesh-viewer scenario tests. Each test boots a `SubstrateHarness`, loads
 //! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `mesh_viewer`
 //! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
@@ -16,19 +16,19 @@
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
 //! gate, `save://` sandbox) live in
-//! `aether_substrate_bench_capture::test_helpers` (issues 460 +
+//! `aether_harness_substrate_capture::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox is plumbed via
-//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
+//! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
-use aether_kit::mesh::LoadMesh;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
-use aether_substrate_bench_capture::test_helpers::{
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::{
     init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
-use aether_substrate_bench_capture::visual::{decode_png, differs_from_background};
+use aether_harness_substrate_capture::visual::{decode_png, differs_from_background};
+use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
+use aether_kit::mesh::LoadMesh;
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
@@ -66,17 +66,17 @@ f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 
-/// Load `aether-kit`'s pre-built wasm into the bench, selecting the
+/// Load `aether-kit`'s pre-built wasm into the harness, selecting the
 /// `mesh_viewer` export (ADR-0096; the kit is defaultless per ADR-0138, so
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
-fn load_viewer(bench: &mut SubstrateBench, wasm_path: &Path) {
+fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -96,12 +96,12 @@ fn load_viewer(bench: &mut SubstrateBench, wasm_path: &Path) {
 /// Assert that `aether.draw_triangle` was observed at least once.
 /// Surfaces the observed-kinds list on failure so a typo or missing
 /// subscription is debuggable.
-fn assert_draw_triangle_observed(bench: &SubstrateBench) {
-    let observed = bench.count_observed("aether.draw_triangle");
+fn assert_draw_triangle_observed(harness: &SubstrateHarness) {
+    let observed = harness.count_observed("aether.draw_triangle");
     assert!(
         observed >= 1,
         "expected ≥1 aether.draw_triangle observed; got {observed}; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -118,30 +118,30 @@ fn dsl_box_loads_and_renders() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_viewer(&mut bench, &wasm_path);
+    load_viewer(&mut harness, &wasm_path);
 
     // Priming tick triggers the load; the read reply lands on a later
     // tick, so a handful of post-load ticks populate the cache and
     // emit several render-sink frames before the capture.
-    let result = bench
+    let result = harness
         .execute(vec![
-            ("prime", BenchOp::advance(1)),
-            ("load_mesh", BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
-            ("post", BenchOp::advance(5)),
-            ("snap", BenchOp::capture()),
+            ("prime", HarnessOp::advance(1)),
+            ("load_mesh", HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
+            ("post", HarnessOp::advance(5)),
+            ("snap", HarnessOp::capture()),
         ])
         .expect("prime + load + advance + capture");
 
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
-    assert_draw_triangle_observed(&bench);
+    assert_draw_triangle_observed(&harness);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
@@ -157,27 +157,27 @@ fn obj_quad_loads_and_renders() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_viewer(&mut bench, &wasm_path);
+    load_viewer(&mut harness, &wasm_path);
 
-    let result = bench
+    let result = harness
         .execute(vec![
-            ("prime", BenchOp::advance(1)),
-            ("load_mesh", BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
-            ("post", BenchOp::advance(5)),
-            ("snap", BenchOp::capture()),
+            ("prime", HarnessOp::advance(1)),
+            ("load_mesh", HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
+            ("post", HarnessOp::advance(5)),
+            ("snap", HarnessOp::capture()),
         ])
         .expect("prime + load + advance + capture");
 
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
-    assert_draw_triangle_observed(&bench);
+    assert_draw_triangle_observed(&harness);
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
@@ -196,40 +196,40 @@ fn parse_failure_keeps_prior_mesh() {
     let good = write_fixture("good.dsl", BOX_DSL);
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_viewer(&mut bench, &wasm_path);
+    load_viewer(&mut harness, &wasm_path);
 
-    bench
+    harness
         .execute(vec![
-            ("prime", BenchOp::advance(1)),
+            ("prime", HarnessOp::advance(1)),
             (
                 "load_good",
-                BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: good }),
+                HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: good }),
             ),
-            ("post_good", BenchOp::advance(5)),
+            ("post_good", HarnessOp::advance(5)),
         ])
         .expect("prime + good load");
 
     // Baseline: the good mesh is publishing.
-    assert_draw_triangle_observed(&bench);
+    assert_draw_triangle_observed(&harness);
 
     // Now hand the viewer something it can't parse, then capture. The
     // cached triangle list should be intact — the frame still has
     // non-clear-color geometry.
-    let result = bench
+    let result = harness
         .execute(vec![
             (
                 "load_bad",
-                BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: bad }),
+                HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: bad }),
             ),
-            ("post_bad", BenchOp::advance(5)),
-            ("snap", BenchOp::capture()),
+            ("post_bad", HarnessOp::advance(5)),
+            ("snap", HarnessOp::capture()),
         ])
         .expect("bad load + capture");
     let png = result.captured("snap").expect("snap step ran");
@@ -251,19 +251,19 @@ fn good_dsl_load_replies_ok() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("reply_good.dsl", BOX_DSL);
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_viewer(&mut bench, &wasm_path);
+    load_viewer(&mut harness, &wasm_path);
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "load_mesh",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 component_address(),
                 &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
             ),
@@ -290,19 +290,19 @@ fn bad_dsl_load_replies_err() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("reply_bad.dsl", BAD_DSL);
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_viewer(&mut bench, &wasm_path);
+    load_viewer(&mut harness, &wasm_path);
 
-    let result = bench
+    let result = harness
         .execute(vec![(
             "load_mesh",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 component_address(),
                 &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
             ),
@@ -328,24 +328,24 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     let dsl_path = write_fixture("overlap_first.dsl", BOX_DSL);
     let obj_path = write_fixture("overlap_second.obj", QUAD_OBJ);
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_viewer(&mut bench, &wasm_path);
+    load_viewer(&mut harness, &wasm_path);
 
-    let first = bench
+    let first = harness
         .send_deferred(&component_address(), &LoadMesh { namespace: "save".to_owned(), path: dsl_path.clone() })
         .expect("enqueue first mesh load");
-    let second = bench
+    let second = harness
         .send_deferred(&component_address(), &LoadMesh { namespace: "save".to_owned(), path: obj_path.clone() })
         .expect("enqueue second mesh load");
 
-    let second_reply = bench.await_deferred::<MeshLoadResult>(second).expect("second load replies");
-    let first_reply = bench.await_deferred::<MeshLoadResult>(first).expect("first load replies");
+    let second_reply = harness.await_deferred::<MeshLoadResult>(second).expect("second load replies");
+    let first_reply = harness.await_deferred::<MeshLoadResult>(first).expect("first load replies");
 
     assert!(first_reply.ok, "first DSL load should succeed: {:?}", first_reply.error);
     assert!(second_reply.ok, "second OBJ load should succeed: {:?}", second_reply.error);

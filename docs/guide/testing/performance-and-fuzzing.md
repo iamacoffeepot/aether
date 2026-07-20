@@ -93,7 +93,7 @@ has a plausible performance effect.
 
 `actor_cost` exposes per-handler execution-cost estimates in a running engine.
 Use it to find a hot mailbox or handler before reaching for a broad benchmark.
-Then reproduce the mechanism in SubstrateBench/perf with enough control to compare.
+Then reproduce the mechanism in SubstrateHarness/perf with enough control to compare.
 
 Actor cost includes behavior-script work inside `BehaviorHost`; it is not a
 script-level profile. Network/device callbacks may spend time off dispatcher and

@@ -11,9 +11,9 @@
 
 use std::fs;
 
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
     TagSpawnQuery, TagSpawnReport,
@@ -35,7 +35,7 @@ use aether_test_fixtures_kinds as _;
 /// `on_rehydrate` reconstructs the child by type and restores its count —
 /// so the post-replace query reads 2, not the fresh-`init` 0. Reload is
 /// engine-internal correctness (dehydrate → composite → rehydrate
-/// reconstruct), which is `SubstrateBench`'s lane; #1916's `FleetBench` already
+/// reconstruct), which is `SubstrateHarness`'s lane; #1916's `FleetBench` already
 /// proved the over-the-wire child addressing, so this doesn't re-prove it.
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
@@ -53,17 +53,17 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // the `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
     // its mailbox id for the replace. The name override keeps the registered
     // lineage address stable so the existing `parent_addr` / `child_addr`
     // strings remain valid.
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -82,11 +82,11 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // Bump the *child's* counter to 2 (mail demuxed to the child's alias),
     // then read it back. `send_mail` is fire-and-settle, so the bumps land
     // before the query.
-    let pre = bench
+    let pre = harness
         .execute(vec![
-            ("bump_a", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("bump_b", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -99,10 +99,10 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // The old instance's `on_dehydrate` composites the child's state; the
     // new instance's `on_rehydrate` reconstructs the child and restores it.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -116,8 +116,8 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // Query the reconstructed child's alias: the count must still be 2.
     // A 0 here means the child vanished across the reload (its state lost,
     // or it booted fresh) — the regression ADR-0114 §5 closes.
-    let post = bench
-        .execute(vec![("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery))])
+    let post = harness
+        .execute(vec![("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -157,15 +157,15 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // it under the `Named("tagged")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:tagged");
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineTagParent`, capturing its mailbox id for the replace. The
     // name override keeps the lineage address stable so `child_addr` is valid.
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -185,12 +185,12 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // generated resolver rejected it with `UnknownActorTag` (never spawned,
     // never panicked). (2) The known-tag child is live and stateful — bump
     // it to 2 through its own alias and read it back.
-    let pre = bench
+    let pre = harness
         .execute(vec![
-            ("tag_report", BenchOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery)),
-            ("bump_a", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("bump_b", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery)),
+            ("tag_report", HarnessOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery)),
+            ("bump_a", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery)),
         ])
         .expect("tag report + bump + query sequence");
     assert_eq!(
@@ -208,10 +208,10 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // The tag-spawned child's state must reconstruct — its type tag is in the
     // same export! set the reconstruct arm walks.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -222,8 +222,8 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    let post = bench
-        .execute(vec![("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery))])
+    let post = harness
+        .execute(vec![("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -247,7 +247,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
 /// *parent* answers and the chain **settles**. A `SettlementTimeout` on
 /// the post-teardown probe would be the leak this verb exists to prevent.
 /// Teardown settlement is engine-internal (membrane fallthrough → parent
-/// dispatch tail → `record_finished`), `SubstrateBench`'s lane; #1916's
+/// dispatch tail → `record_finished`), `SubstrateHarness`'s lane; #1916's
 /// `FleetBench` already proved over-the-wire inline addressing.
 #[test]
 fn despawn_inline_child_settles_orphan_mail_via_parent() {
@@ -265,7 +265,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineDespawnParent` from the `inline_child` bundle, then probe
@@ -273,11 +273,11 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // answers with the child marker, and the chain settles. The name override
     // keeps the registered lineage address stable so `parent_addr` / `child_addr`
     // remain valid.
-    let live = bench
+    let live = harness
         .execute(vec![
             (
                 "load",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     "aether.component",
                     &LoadComponent {
                         wasm,
@@ -287,7 +287,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
                     },
                 ),
             ),
-            ("probe", BenchOp::send_and_await(child_addr.as_str(), &InlineProbe)),
+            ("probe", HarnessOp::send_and_await(child_addr.as_str(), &InlineProbe)),
         ])
         .expect("load + live-probe sequence");
     match live.reply::<LoadResult>("load").expect("decode LoadResult") {
@@ -304,10 +304,10 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // then probe the *same* alias again. The kept alias routes the orphaned
     // probe to the parent's dispatch tail, so it settles (a SettlementTimeout
     // here would be the leak this verb prevents) and the *parent* answers.
-    let post = bench
+    let post = harness
         .execute(vec![
-            ("despawn", BenchOp::send_mail::<DespawnChild>(parent_addr.as_str(), &DespawnChild)),
-            ("probe", BenchOp::send_and_await(child_addr.as_str(), &InlineProbe)),
+            ("despawn", HarnessOp::send_mail::<DespawnChild>(parent_addr.as_str(), &DespawnChild)),
+            ("probe", HarnessOp::send_and_await(child_addr.as_str(), &InlineProbe)),
         ])
         .expect("despawn + post-teardown probe must settle, not SettlementTimeout");
     assert_eq!(

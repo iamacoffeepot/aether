@@ -172,7 +172,7 @@ follow the neighboring chassis pattern deliberately.
 If a public mailbox exists conceptually but a chassis cannot provide the
 resource, prefer an explicit unsupported actor that replies with the ordinary
 error shape. Examples include headless render/window/clipboard companions and
-the substrate-bench unsupported marker.
+the substrate-harness unsupported marker.
 
 Do not create a stub for fire-and-forget traffic unless it produces useful
 diagnostics and avoids misleading success. The goal is bounded failure, not
@@ -184,9 +184,9 @@ pretend capability.
 |---|---|
 | kind/schema/validation | unit tests beside `kinds.rs`/validator |
 | state machine/adapter mapping | runtime unit tests with a fake adapter |
-| actor mail/reply/settlement | focused SubstrateBench test |
+| actor mail/reply/settlement | focused SubstrateHarness test |
 | marker/runtime feature split | `cargo build -p <cap> --no-default-features` |
-| chassis composition/resource | chassis/SubstrateBench integration test |
+| chassis composition/resource | chassis/SubstrateHarness integration test |
 | hub/process routing | FleetBench |
 
 Shared RPC test echo code currently lives under

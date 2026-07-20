@@ -20,7 +20,7 @@
 //!
 //! The `Chassis` trait (ADR-0035, redefined by ADR-0071) is universal
 //! but intentionally narrow: `const PROFILE` (the chassis's stable
-//! identifier — `"desktop"`, `"headless"`, `"hub"`, `"substrate-bench"`),
+//! identifier — `"desktop"`, `"headless"`, `"hub"`, `"substrate-harness"`),
 //! `type Driver: DriverCapability` (the capability that owns the main
 //! thread), `type Env` (resolved-config bag), and
 //! `fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError>`.

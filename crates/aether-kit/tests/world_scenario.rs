@@ -2,7 +2,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 //! World-stamp acceptance coverage through the real wasm component and
-//! `SubstrateBench` render path. The host tests pin scalar area math and chunk-border
+//! `SubstrateHarness` render path. The host tests pin scalar area math and chunk-border
 //! remeshing; this test proves a compact `stamp_hexagon` mail reaches the
 //! handler and produces the expected smooth scalar-contour silhouette.
 //!
@@ -10,12 +10,17 @@
 //! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1` so either condition is a
 //! hard failure there.
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
+};
 use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
 use aether_kit::mark::{MarkId, MarkRef};
 use aether_kit::world::{
@@ -24,11 +29,6 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{
-    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
-};
 
 const COMPONENT_NAME: &str = "world";
 const WIDTH: u32 = 128;
@@ -72,12 +72,12 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_world(bench: &mut SubstrateBench, wasm_path: &Path) {
+fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -133,18 +133,18 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench =
-        SubstrateBench::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
-    load_world(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
+    load_world(&mut harness, &wasm_path);
     let world = component_address();
 
     // Eight meters from the origin keeps the shape in chunk (0,0). This
     // non-lattice radius is shown close enough that one subcell spans several
     // pixels, making a binary staircase distinguishable from scalar coverage.
-    bench
+    harness
         .execute(vec![(
             "stamp",
-            BenchOp::send_mail(
+            HarnessOp::send_mail(
                 world.as_str(),
                 &StampHexagon {
                     center: WorldPoint::new(2048, 2048),
@@ -155,10 +155,10 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
         )])
         .expect("stamp hexagon");
 
-    let captured = bench
+    let captured = harness
         .execute(vec![(
             "capture",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &top_down_view_projection(8.0, 8.0, 1.5)),
                     envelope(world.as_str(), &Render),
@@ -217,17 +217,17 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench =
-        SubstrateBench::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
-    load_world(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
+    load_world(&mut harness, &wasm_path);
     let world = component_address();
     let edge_brush_source = MarkRef { id: MarkId::new(14), revision: 1 };
     let huge_automaton_source = MarkRef { id: MarkId::new(15), revision: 1 };
-    let rejected = bench
+    let rejected = harness
         .execute(vec![
             (
                 "edge_brush",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     world.as_str(),
                     &ApplyBrush {
                         source: edge_brush_source,
@@ -243,7 +243,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
             ),
             (
                 "huge_automaton",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     world.as_str(),
                     &RunAutomaton {
                         source: huge_automaton_source,
@@ -269,10 +269,10 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     // rejection leaked mutation into the usable coordinate domain.
     let brush_source = MarkRef { id: MarkId::new(11), revision: 4 };
 
-    let brushed = bench
+    let brushed = harness
         .execute(vec![(
             "brush",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 world.as_str(),
                 &ApplyBrush {
                     source: brush_source,
@@ -299,10 +299,10 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
         },
     );
 
-    let brush_capture = bench
+    let brush_capture = harness
         .execute(vec![(
             "brush_capture",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &top_down_view_projection(3.25, 4.25, 1.5)),
                     envelope(world.as_str(), &Render),
@@ -324,10 +324,10 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     assert_material_color(&brush_image, brush_bounds, STONE_SRGB, "stone brush");
 
     let automaton_source = MarkRef { id: MarkId::new(12), revision: 2 };
-    let grown = bench
+    let grown = harness
         .execute(vec![(
             "automaton",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 world.as_str(),
                 &RunAutomaton {
                     source: automaton_source,
@@ -350,10 +350,10 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
         },
     );
 
-    let automaton_capture = bench
+    let automaton_capture = harness
         .execute(vec![(
             "automaton_capture",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &top_down_view_projection(8.5, 8.5, 2.5)),
                     envelope(world.as_str(), &Render),
@@ -375,10 +375,10 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     assert_material_color(&automaton_image, automaton_bounds, GRASS_SRGB, "grass automaton");
 
     let limited_source = MarkRef { id: MarkId::new(13), revision: 9 };
-    let limited = bench
+    let limited = harness
         .execute(vec![(
             "limited",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 world.as_str(),
                 &RunAutomaton {
                     source: limited_source,
@@ -402,10 +402,10 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
         },
     );
 
-    let limited_capture = bench
+    let limited_capture = harness
         .execute(vec![(
             "limited_capture",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![
                     envelope("aether.render", &top_down_view_projection(13.0, 8.5, 2.0)),
                     envelope(world.as_str(), &Render),
@@ -438,9 +438,9 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench =
-        SubstrateBench::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
-    load_world(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(WIDTH, HEIGHT).with_render().with_component_host().build().expect("boot");
+    load_world(&mut harness, &wasm_path);
     let world = component_address();
 
     // A four-by-four grass plateau over a wider solid grass annulus. The low
@@ -463,10 +463,10 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
             height[index] = 256;
         }
     }
-    bench
+    harness
         .execute(vec![(
             "plateau",
-            BenchOp::send_mail(
+            HarnessOp::send_mail(
                 world.as_str(),
                 &SetChunk {
                     chunk_x: 0,
@@ -486,10 +486,10 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
         .expect("author plateau");
 
     let (view_projection, matrix) = oblique_view_projection();
-    let captured = bench
+    let captured = harness
         .execute(vec![(
             "capture",
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![envelope("aether.render", &view_projection), envelope(world.as_str(), &Render)],
                 Vec::new(),
             ),

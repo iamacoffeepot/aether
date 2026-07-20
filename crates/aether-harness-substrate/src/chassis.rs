@@ -1,11 +1,11 @@
-//! Test-bench chassis (ADR-0067) — `SubstrateBenchChassis` marker,
-//! `SubstrateBenchEnv` config, and the `SubstrateBenchChassis::build_passive`
+//! Test-harness chassis (ADR-0067) — `SubstrateHarnessChassis` marker,
+//! `SubstrateHarnessEnv` config, and the `SubstrateHarnessChassis::build_passive`
 //! entry point.
 //!
 //! Issue 603 retired the `chassis_handler` closure: capture rides
 //! `RenderCapability` (Phase 2), window-kind mail through
 //! `HeadlessWindowCapability` (Phase 3, fail-fast), advance through
-//! `SubstrateBenchCapability` claiming `aether.substrate_bench` (Phase 4), and
+//! `SubstrateHarnessCapability` claiming `aether.substrate_harness` (Phase 4), and
 //! `aether.control.platform_info` was deleted entirely (Phase 4).
 
 use std::any::Any;
@@ -27,7 +27,7 @@ use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, 
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
-use super::cap::{SubstrateBenchCapConfig, SubstrateBenchCapability};
+use super::cap::{SubstrateHarnessCapConfig, SubstrateHarnessCapability};
 use super::events::{ChassisEvent, EventSender};
 use aether_lifecycle::{LifecycleConfig, frame_lifecycle_config};
 use aether_substrate::mail::registry::MailDispatch;
@@ -38,65 +38,65 @@ use std::io;
 /// hub-protocol wire for compatibility).
 pub const WORKERS: usize = 2;
 
-/// Test-bench observability mailbox. Scenarios that want to assert
+/// Test-harness observability mailbox. Scenarios that want to assert
 /// on component-emitted kinds (the probe's
 /// `aether.test_fixture.tick_observed`, for example) target this
-/// name with `ctx.send_to_named`; the substrate-bench chassis registers
+/// name with `ctx.send_to_named`; the substrate-harness chassis registers
 /// a synchronous-handler closure under this namespace via
 /// `Registry::register_inline` (see `build_passive`) and the
-/// closure records each kind name in `SubstrateBenchEnv::observed_kinds`.
+/// closure records each kind name in `SubstrateHarnessEnv::observed_kinds`.
 /// Only registered when `observed_kinds` is `Some` (binaries pass
 /// `None` for zero overhead — mail to this mailbox warn-drops in
 /// that mode).
 ///
 /// Pre-iamacoffeepot/aether#838 this rode a full `NativeActor`
-/// (`SubstrateBenchObserverCapability`) specifically because synchronous
+/// (`SubstrateHarnessObserverCapability`) specifically because synchronous
 /// closures leaked `in_flight` and prevented chains from settling
-/// — the bench's Tick settlement gate would otherwise wait the
+/// — the harness's Tick settlement gate would otherwise wait the
 /// full 5 s timeout per tick when a probe component routed
 /// observation mail here. iamacoffeepot/aether#840 added the
 /// `MailboxEntry::Inline` variant (renamed `MailboxEntry::Sink` ->
 /// `Inline` in iamacoffeepot/aether#842) which brackets sync
 /// handlers with `Received`/`Finished`, closing the gap and
 /// letting us retire the actor-shaped workaround — one fewer
-/// thread per `SubstrateBench`.
-pub const SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_bench.observer";
+/// thread per `SubstrateHarness`.
+pub const SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
 
-/// ADR-0071 marker type for the substrate-bench chassis. Carries no
-/// fields — the chassis instance is the [`PassiveChassis<SubstrateBenchChassis>`]
-/// returned by [`Self::build_passive`]. Test-bench is the embedder-
+/// ADR-0071 marker type for the substrate-harness chassis. Carries no
+/// fields — the chassis instance is the [`PassiveChassis<SubstrateHarnessChassis>`]
+/// returned by [`Self::build_passive`]. Test-harness is the embedder-
 /// driven (no-driver) chassis: the binary's `main()` and the
-/// in-process [`super::SubstrateBench`] both build through this and drive
+/// in-process [`super::SubstrateHarness`] both build through this and drive
 /// their own event loops on top.
-pub struct SubstrateBenchChassis;
+pub struct SubstrateHarnessChassis;
 
-impl Chassis for SubstrateBenchChassis {
-    const PROFILE: &'static str = "substrate-bench";
-    /// Phantom driver — substrate-bench is passive (the embedder is the
+impl Chassis for SubstrateHarnessChassis {
+    const PROFILE: &'static str = "substrate-harness";
+    /// Phantom driver — substrate-harness is passive (the embedder is the
     /// driver). Declaring [`NeverDriver`] satisfies the trait bound;
-    /// the value is never instantiated because `SubstrateBench`'s build
+    /// the value is never instantiated because `SubstrateHarness`'s build
     /// path goes through `Builder::<_>::build_passive`.
     type Driver = NeverDriver;
-    type Env = SubstrateBenchEnv;
+    type Env = SubstrateHarnessEnv;
 
-    /// Inert by design — substrate-bench is a passive chassis. Callers
+    /// Inert by design — substrate-harness is a passive chassis. Callers
     /// that try to drive it through the trait method get an error
-    /// pointing at [`SubstrateBenchChassis::build_passive`], which is
+    /// pointing at [`SubstrateHarnessChassis::build_passive`], which is
     /// the actual entry point. The trait method exists so
-    /// `Builder<SubstrateBenchChassis, _>` can still parameterise over
+    /// `Builder<SubstrateHarnessChassis, _>` can still parameterise over
     /// `Chassis` per ADR-0071.
     fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         Err(BootError::Other(Box::new(io::Error::other(
-            "SubstrateBenchChassis has no driver; use SubstrateBenchChassis::build_passive(env) instead \
-             (the binary main() loops on events_rx; the in-process SubstrateBench dispatches per-call)",
+            "SubstrateHarnessChassis has no driver; use SubstrateHarnessChassis::build_passive(env) instead \
+             (the binary main() loops on events_rx; the in-process SubstrateHarness dispatches per-call)",
         ))))
     }
 }
 
 /// A deferred `Builder::with_actor` application: the embedder names the
 /// cap type and captures its config; the chassis applies the closure
-/// after the bench basics so composition order stays chassis-owned.
-pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis> + Send>;
+/// after the harness basics so composition order stays chassis-owned.
+pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateHarnessChassis>) -> Builder<SubstrateHarnessChassis> + Send>;
 
 /// PNG bytes, optional [`FrameVerdict`], optional similarity score, and
 /// optional similarity pass a capture produces. The verdict is `Some`
@@ -105,11 +105,11 @@ pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateBenchChassis>) -> Builder<S
 /// `reference` (iamacoffeepot/aether#1780).
 pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
 
-/// Frame-pump seam for GPU render support (issue #3765). The core bench
+/// Frame-pump seam for GPU render support (issue #3765). The core harness
 /// owns the advance/capture pump but no render types; a hook (the
-/// `GpuFrameHook` in `aether-substrate-bench-capture`) supplies the
+/// `GpuFrameHook` in `aether-harness-substrate-capture`) supplies the
 /// per-frame draw, the capture readback, and the render mailbox the
-/// capture request routes to. A bench without a hook skips the draw on
+/// capture request routes to. A harness without a hook skips the draw on
 /// advance and replies `Err` to captures.
 pub trait FrameHook: Send {
     /// Draw the current accumulator into the offscreen target — the
@@ -143,21 +143,25 @@ pub struct BenchWiring {
 
 /// Chassis-composition half of the render seam (issue #3765): given the
 /// boot wiring, chain the render cap onto the [`Builder`]. Implemented
-/// by `aether-substrate-bench-capture`'s `GpuRenderExt`; the core calls
+/// by `aether-harness-substrate-capture`'s `GpuRenderExt`; the core calls
 /// it in the render slot of the cap chain.
 pub trait RenderExt: Send {
-    fn compose(&self, wiring: &BenchWiring, builder: Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis>;
+    fn compose(
+        &self,
+        wiring: &BenchWiring,
+        builder: Builder<SubstrateHarnessChassis>,
+    ) -> Builder<SubstrateHarnessChassis>;
 }
 
-/// Bag of resolved configs the substrate-bench chassis takes at build
+/// Bag of resolved configs the substrate-harness chassis takes at build
 /// time. Constructed by the embedder — the binary's `main()` reads
-/// env vars; the in-process [`super::SubstrateBench`] takes builder
-/// args. `events_tx` is captured into the substrate-bench cap's config;
-/// the matching `events_rx` rides on [`SubstrateBenchBuild`] for the
+/// env vars; the in-process [`super::SubstrateHarness`] takes builder
+/// args. `events_tx` is captured into the substrate-harness cap's config;
+/// the matching `events_rx` rides on [`SubstrateHarnessBuild`] for the
 /// embedder to drive.
-pub struct SubstrateBenchEnv {
+pub struct SubstrateHarnessEnv {
     /// Substrate identity for the hub `Hello` handshake (e.g.
-    /// `"substrate-bench"`). Used by both binary and in-process API.
+    /// `"substrate-harness"`). Used by both binary and in-process API.
     pub name: String,
     /// Substrate version for the hub `Hello`. Typically
     /// `env!("CARGO_PKG_VERSION")` from the binary; in-process API
@@ -168,7 +172,7 @@ pub struct SubstrateBenchEnv {
     pub workers: usize,
     /// Override for the scheduler worker-pool size (`PoolConfig::workers`).
     /// `None` keeps `PoolConfig::default` (`available_parallelism() - 1`,
-    /// min 1) — the behaviour every `SubstrateBench` had before
+    /// min 1) — the behaviour every `SubstrateHarness` had before
     /// iamacoffeepot/aether#1057.
     /// The mail-latency harness sets this to sweep pool size, since the
     /// pool-default dispatch model makes worker count the dominant
@@ -176,11 +180,11 @@ pub struct SubstrateBenchEnv {
     pub pool_workers: Option<usize>,
     /// Issue 1990: per-actor ring capacities (`ActorLogRing` /
     /// `ActorTraceRing`). `RingCapacities::default()` keeps the
-    /// `aether-actor` const caps; a `SubstrateBench` eviction test pins a small
-    /// trace cap to observe `truncated_before`. Per-bench, no process env.
+    /// `aether-actor` const caps; a `SubstrateHarness` eviction test pins a small
+    /// trace cap to observe `truncated_before`. Per-harness, no process env.
     pub ring_caps: RingCapacities,
     /// Issue 2485: scheduler hot-path tuning. `SchedulerTuning::default()`
-    /// keeps the built-in scheduler literals / adaptive knobs. Per-bench,
+    /// keeps the built-in scheduler literals / adaptive knobs. Per-harness,
     /// no process env.
     pub scheduler_tuning: SchedulerTuning,
     /// Optional observation log: when `Some`, both render and
@@ -189,8 +193,8 @@ pub struct SubstrateBenchEnv {
     /// binary passes `None` for zero overhead.
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Sender side of the chassis event channel. Cloned into the
-    /// `SubstrateBenchCapability` config + render's capture-wake closure;
-    /// the matching receiver rides on [`SubstrateBenchBuild`].
+    /// `SubstrateHarnessCapability` config + render's capture-wake closure;
+    /// the matching receiver rides on [`SubstrateHarnessBuild`].
     pub events_tx: EventSender,
     /// Capture-handoff slot the render cap writes into; the
     /// embedder's frame loop drains it on each `RedrawRequested`-
@@ -215,46 +219,46 @@ pub struct SubstrateBenchEnv {
     /// wasm skip the cap entirely.
     pub component_host: bool,
     /// Caller-supplied capability composition, applied to the chassis
-    /// [`Builder`] after the bench basics (trace dispatch, the bench cap,
-    /// lifecycle, headless window) in push order. The bench gives the
+    /// [`Builder`] after the harness basics (trace dispatch, the harness cap,
+    /// lifecycle, headless window) in push order. The harness gives the
     /// basics; each embedder composes exactly the caps its scenario
     /// needs (issue #3764).
     pub compose: Vec<ComposeFn>,
     /// Issue #2509: cumulative patience for the instanced-actor teardown
-    /// close-done gate. The in-process `SubstrateBench` resolves this from the
+    /// close-done gate. The in-process `SubstrateHarness` resolves this from the
     /// same `SettlementConfig` (`AETHER_SETTLEMENT_CAP_SECS`) knob its
     /// settlement-await loops read (honoring a programmatic
-    /// `SubstrateBench::settlement_cap` override), so a scenario's teardown
+    /// `SubstrateHarness::settlement_cap` override), so a scenario's teardown
     /// gate uses the same patience as its settlement gates.
     pub teardown_cap: Duration,
 }
 
-/// Output of [`SubstrateBenchChassis::build_passive`]. Bundles the
-/// `PassiveChassis<SubstrateBenchChassis>` (holding the booted Log +
+/// Output of [`SubstrateHarnessChassis::build_passive`]. Bundles the
+/// `PassiveChassis<SubstrateHarnessChassis>` (holding the booted Log +
 /// Render passives via `chassis_builder` typed lookup) with the
 /// substrate handles the embedder needs to drive its event loop —
 /// queue, outbound, kind ids, render accumulator handles.
 ///
 /// `boot` is exposed so the embedder can attach an egress backend
-/// for reply correlation (the in-process `SubstrateBench` wires a
+/// for reply correlation (the in-process `SubstrateHarness` wires a
 /// `RecordingBackend` for this), read substrate-level handles
 /// (`registry`, `queue`, `outbound`), and own the lifetime guard the
 /// scheduler joins against on shutdown.
 ///
 /// The embedder owns the matching `EventReceiver` for whichever
-/// `EventSender` it passed into [`SubstrateBenchEnv`]; the build does
+/// `EventSender` it passed into [`SubstrateHarnessEnv`]; the build does
 /// not need to thread it through.
-pub struct SubstrateBenchBuild {
-    pub passive: PassiveChassis<SubstrateBenchChassis>,
+pub struct SubstrateHarnessBuild {
+    pub passive: PassiveChassis<SubstrateHarnessChassis>,
     pub boot: SubstrateBoot,
     pub kind_tick: KindId,
 }
 
-impl SubstrateBenchChassis {
-    /// Build the substrate-bench chassis: stand up substrate-core
+impl SubstrateHarnessChassis {
+    /// Build the substrate-harness chassis: stand up substrate-core
     /// internals via [`SubstrateBoot::builder`], boot the standard
-    /// passives + `SubstrateBenchCapability` via the `chassis_builder`
-    /// [`Builder`], and return a [`SubstrateBenchBuild`] the embedder
+    /// passives + `SubstrateHarnessCapability` via the `chassis_builder`
+    /// [`Builder`], and return a [`SubstrateHarnessBuild`] the embedder
     /// takes ownership of. The embedder is responsible for any
     /// further capability adds (io with whatever failure semantics
     /// it wants), GPU creation, egress-backend attach, and driving
@@ -267,8 +271,8 @@ impl SubstrateBenchChassis {
     /// `aether_kinds::descriptors::all()`, so a missing entry indicates
     /// a substrate-build bug.
     #[allow(clippy::too_many_lines)] // PR 3b growth from lifecycle graph + relay wiring.
-    pub fn build_passive(env: SubstrateBenchEnv) -> anyhow::Result<SubstrateBenchBuild> {
-        let SubstrateBenchEnv {
+    pub fn build_passive(env: SubstrateHarnessEnv) -> anyhow::Result<SubstrateHarnessBuild> {
+        let SubstrateHarnessEnv {
             name,
             version,
             workers,
@@ -310,18 +314,18 @@ impl SubstrateBenchChassis {
             capture_wake: Arc::new(move || {
                 events_for_render
                     .send(ChassisEvent::CaptureRequested)
-                    .map_err(|_| "substrate-bench chassis shutting down — capture aborted")
+                    .map_err(|_| "substrate-harness chassis shutting down — capture aborted")
             }),
             observed_kinds: observed_kinds.clone(),
             assets_dir,
             outbound: Arc::clone(&boot.outbound),
         };
 
-        // Phase 4: advance lands on `SubstrateBenchCapability` claiming
-        // `aether.substrate_bench`. The cap pushes `ChassisEvent::Advance`
+        // Phase 4: advance lands on `SubstrateHarnessCapability` claiming
+        // `aether.substrate_harness`. The cap pushes `ChassisEvent::Advance`
         // onto the embedder loop just like the retired
         // `chassis_handler` closure did.
-        let substrate_bench_cap_config = SubstrateBenchCapConfig { events: events_tx.clone() };
+        let substrate_harness_cap_config = SubstrateHarnessCapConfig { events: events_tx.clone() };
 
         // Pre-validate fs roots if supplied. Pre-validation
         // mirrors what `LocalFileAdapter::new` does inside
@@ -344,7 +348,7 @@ impl SubstrateBenchChassis {
                     tracing::warn!(
                         target: "aether_substrate::fs",
                         error = %e,
-                        "io cap boot skipped in SubstrateBench (root pre-validation failed; expected on systems without writable default roots)",
+                        "io cap boot skipped in SubstrateHarness (root pre-validation failed; expected on systems without writable default roots)",
                     );
                     None
                 }
@@ -354,9 +358,9 @@ impl SubstrateBenchChassis {
 
         // Issue 775: scenarios that want to assert on component-
         // emitted kinds register a synchronous catch-all observer
-        // closure under `aether.substrate_bench.observer`. The closure
+        // closure under `aether.substrate_harness.observer`. The closure
         // body records each inbound mail's kind name into the shared
-        // `observed_kinds` vec; the binary (`bin/substrate-bench.rs`)
+        // `observed_kinds` vec; the binary (`bin/substrate-harness.rs`)
         // passes `observed_kinds: None` and skips registration —
         // mail to the observer mailbox warn-drops in that mode.
         //
@@ -367,7 +371,7 @@ impl SubstrateBenchChassis {
         // this rode a full NativeActor specifically because closure
         // arms leaked settlement; now that `Inline` participates in
         // ADR-0080 §6 we get the same correctness with one fewer
-        // thread per SubstrateBench.
+        // thread per SubstrateHarness.
         if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
             boot.registry.register_inline(
@@ -384,13 +388,13 @@ impl SubstrateBenchChassis {
             );
         }
 
-        // ADR-0082 §1 / PR 3b: substrate-bench uses the shared frame
+        // ADR-0082 §1 / PR 3b: substrate-harness uses the shared frame
         // lifecycle graph. The embedder pushes `LifecycleAdvance` via
-        // SubstrateBench's own pumping logic; the driver broadcasts Tick
+        // SubstrateHarness's own pumping logic; the driver broadcasts Tick
         // to the stage subscriber set.
         //
-        // Issue #3764: the fixed chain below is the bench basics — trace
-        // dispatch, the bench cap, lifecycle, and the fail-fast headless
+        // Issue #3764: the fixed chain below is the harness basics — trace
+        // dispatch, the harness cap, lifecycle, and the fail-fast headless
         // window. Everything else is embedder-composed: the render cap
         // and component host ride env flags (they need boot-internal
         // wiring), fs rides pre-validated roots, and arbitrary caps
@@ -417,7 +421,7 @@ impl SubstrateBenchChassis {
         }
         builder = builder
             .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<SubstrateBenchCapability>(substrate_bench_cap_config)
+            .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config)
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT));
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
@@ -429,6 +433,6 @@ impl SubstrateBenchChassis {
         // sender is released.
         drop(events_tx);
 
-        Ok(SubstrateBenchBuild { passive, boot, kind_tick })
+        Ok(SubstrateHarnessBuild { passive, boot, kind_tick })
     }
 }

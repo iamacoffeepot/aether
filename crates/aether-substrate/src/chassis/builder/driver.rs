@@ -56,7 +56,7 @@ pub trait DriverRunning: 'static {
     fn run(self: Box<Self>) -> Result<(), RunError>;
 }
 
-/// Phantom [`DriverCapability`] for passive chassis (substrate-bench, future
+/// Phantom [`DriverCapability`] for passive chassis (substrate-harness, future
 /// embedder-driven chassis kinds). The [`Chassis`](crate::chassis::Chassis)
 /// trait requires `type Driver: DriverCapability`; passive chassis
 /// declare this as their driver to satisfy the bound, but the value is

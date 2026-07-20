@@ -1,7 +1,7 @@
 //! iamacoffeepot/aether#1037: the queryable capability registry,
-//! exercised through a real component-load lifecycle on a `SubstrateBench`.
+//! exercised through a real component-load lifecycle on a `SubstrateHarness`.
 //!
-//! Each test boots a `SubstrateBench`, loads (and where relevant replaces /
+//! Each test boots a `SubstrateHarness`, loads (and where relevant replaces /
 //! drops) a component, and asks the substrate's `CapabilityRegistry`
 //! whether a mailbox `accepts(kind)` and `has_fallback`. The registry
 //! is the prerequisite for the DAG validator's dispatchability check
@@ -10,7 +10,7 @@
 //! reply-kind resolution.
 //!
 //! Skipped when the component wasm hasn't been pre-built (the wasm-load
-//! tests only — the bench composes no render cap, so there is no wgpu
+//! tests only — the harness composes no render cap, so there is no wgpu
 //! gate). CI builds every discovered component crate and sets
 //! `AETHER_REQUIRE_RUNTIME=1` so a missing pre-build is loud.
 
@@ -24,10 +24,10 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_fs::{FsCapability, Write};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult, Tick};
 use aether_kit::camera::CameraCreate;
-use aether_substrate_bench::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::SetRender;
 use std::fs;
 
@@ -36,12 +36,12 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_named(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> MailboxId {
+fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
             ),
@@ -61,9 +61,9 @@ fn cap_registry_reports_accepted_kinds() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut bench, &wasm_path, "probe");
-    let caps = bench.capability_registry();
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mbox = load_named(&mut harness, &wasm_path, "probe");
+    let caps = harness.capability_registry();
 
     assert!(caps.accepts(mbox, Tick::ID), "probe should accept its declared Tick handler");
     assert!(caps.accepts(mbox, SetRender::ID), "probe should accept its declared SetRender handler");
@@ -79,9 +79,9 @@ fn cap_registry_reports_fallback() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut bench, &wasm_path, "strict");
-    let caps = bench.capability_registry();
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mbox = load_named(&mut harness, &wasm_path, "strict");
+    let caps = harness.capability_registry();
 
     assert!(!caps.has_fallback(mbox), "probe is a strict receiver; has_fallback must be false");
     // No fallback ⇒ unknown kinds are rejected, not swallowed.
@@ -103,21 +103,21 @@ fn cap_registry_updates_on_replace() {
     let Some(kit_path) = require_wasm("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut bench, &probe_path, "swappable");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mbox = load_named(&mut harness, &probe_path, "swappable");
 
     // Pre-replace: probe accepts SetRender, rejects CameraCreate.
     {
-        let caps = bench.capability_registry();
+        let caps = harness.capability_registry();
         assert!(caps.accepts(mbox, SetRender::ID));
         assert!(!caps.accepts(mbox, CameraCreate::ID));
     }
 
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
                 &ReplaceComponent {
                     mailbox_id: mbox,
@@ -138,7 +138,7 @@ fn cap_registry_updates_on_replace() {
     }
 
     // Post-replace: the camera's accept-set wins.
-    let caps = bench.capability_registry();
+    let caps = harness.capability_registry();
     assert!(
         caps.accepts(mbox, CameraCreate::ID),
         "camera should accept its declared CameraCreate handler after replace",
@@ -158,14 +158,14 @@ fn cap_registry_clears_on_drop() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut bench, &wasm_path, "victim");
-    assert!(bench.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mbox = load_named(&mut harness, &wasm_path, "victim");
+    assert!(harness.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
-    let dropped = bench
+    let dropped = harness
         .execute(vec![(
             "drop",
-            BenchOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id: mbox }),
+            HarnessOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id: mbox }),
         )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -173,7 +173,7 @@ fn cap_registry_clears_on_drop() {
         DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
-    let caps = bench.capability_registry();
+    let caps = harness.capability_registry();
     assert!(!caps.accepts(mbox, Tick::ID), "dropped component's mailbox must accept nothing");
     assert!(!caps.has_fallback(mbox));
 }
@@ -185,11 +185,11 @@ fn cap_registry_clears_on_drop() {
 fn cap_registry_covers_native_cap() {
     // The fs cap rides `namespace_roots` alone — no wasm, no other caps.
     let sandbox = init_save_sandbox("cap-registry-fs");
-    let bench =
-        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let harness =
+        SubstrateHarness::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let fs_mbox = mailbox_id_from_name(FsCapability::NAMESPACE);
-    let caps = bench.capability_registry();
+    let caps = harness.capability_registry();
     assert!(caps.accepts(fs_mbox, Write::ID), "the native aether.fs cap should accept its declared Write handler");
     // A native cap with no `#[fallback]` rejects undeclared kinds.
     assert!(

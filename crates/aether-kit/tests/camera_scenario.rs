@@ -1,11 +1,11 @@
-//! Camera scenario tests. Each test boots a `SubstrateBench`, loads
+//! Camera scenario tests. Each test boots a `SubstrateHarness`, loads
 //! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `camera` export
 //! (ADR-0096), drives the `CameraComponent` through its
 //! `aether.kit.camera.*` mail surface, and asserts mail-flow / render
-//! survivability via direct `SubstrateBench` assertions (post-issue-821:
+//! survivability via direct `SubstrateHarness` assertions (post-issue-821:
 //! the `aether-scenario` Script/Step vocabulary retired in favour of
-//! calling the bench methods directly).
+//! calling the harness methods directly).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
@@ -16,17 +16,17 @@
 //!   builds the wasm before invoking `cargo test`.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate) live in `aether_substrate_bench_capture::test_helpers`
+//! gate) live in `aether_harness_substrate_capture::test_helpers`
 //! (issues 460 + 821).
 
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{decode_png, not_all_black};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
 use aether_render::ViewProjection;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{decode_png, not_all_black};
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
@@ -56,17 +56,17 @@ fn component_address() -> String {
     format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
 }
 
-/// Load `aether-kit`'s pre-built wasm into the bench, selecting the
+/// Load `aether-kit`'s pre-built wasm into the harness, selecting the
 /// `camera` export (ADR-0096; the kit is defaultless per ADR-0138, so
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
-fn load_camera(bench: &mut SubstrateBench, wasm_path: &Path) {
+fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -89,13 +89,15 @@ fn camera_component_lifecycle() {
         return;
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_camera(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    load_camera(&mut harness, &wasm_path);
 
     // A few ticks lets the component finish init, run on_tick, and
     // let the renderer cycle.
-    let result =
-        bench.execute(vec![("advance", BenchOp::advance(5)), ("snap", BenchOp::capture())]).expect("advance + capture");
+    let result = harness
+        .execute(vec![("advance", HarnessOp::advance(5)), ("snap", HarnessOp::capture())])
+        .expect("advance + capture");
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     not_all_black(&img).expect("camera scene should not be all black");
@@ -106,7 +108,7 @@ fn camera_component_lifecycle() {
 /// even though the eye does not move. This is the load-bearing flow for
 /// camera matrices reaching the GPU; if it regresses, every scene goes
 /// back to identity-projection until someone notices visually.
-/// `count_observed` queries the bench's chassis-cap observation log for
+/// `count_observed` queries the harness's chassis-cap observation log for
 /// the kind name.
 #[test]
 fn camera_default_static_publishes_view_proj() {
@@ -114,19 +116,20 @@ fn camera_default_static_publishes_view_proj() {
         return;
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_camera(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    load_camera(&mut harness, &wasm_path);
 
     // Five ticks: enough for init + a handful of publishes to surface
     // on the camera sink. The component publishes on every tick after
     // init, so any non-zero count proves the path is alive.
-    bench.execute(vec![("advance", BenchOp::advance(5))]).expect("advance");
+    harness.execute(vec![("advance", HarnessOp::advance(5))]).expect("advance");
 
-    let observed = bench.count_observed(ViewProjection::NAME);
+    let observed = harness.count_observed(ViewProjection::NAME);
     assert!(
         observed >= 1,
         "expected ≥1 aether.view_projection observed; got {observed}; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -144,16 +147,17 @@ fn camera_destroy_main_keeps_substrate_alive() {
         return;
     };
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_camera(&mut bench, &wasm_path);
+    let mut harness =
+        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    load_camera(&mut harness, &wasm_path);
 
-    bench.execute(vec![("pre", BenchOp::advance(2))]).expect("pre-destroy advance");
+    harness.execute(vec![("pre", HarnessOp::advance(2))]).expect("pre-destroy advance");
     // Baseline: default orbit was publishing before destroy.
-    let pre_destroy = bench.count_observed(ViewProjection::NAME);
+    let pre_destroy = harness.count_observed(ViewProjection::NAME);
     assert!(
         pre_destroy >= 1,
         "expected ≥1 aether.view_projection before destroy; got {pre_destroy}; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 
     // Drop the only camera the component was bootstrapped with (agents
@@ -165,11 +169,11 @@ fn camera_destroy_main_keeps_substrate_alive() {
     // the active camera was removed. If the component panicked or the
     // substrate wedged, capture would fail or the frame would be
     // all-black.
-    let result = bench
+    let result = harness
         .execute(vec![
-            ("destroy", BenchOp::send_mail(component_address(), &CameraDestroy { name: "main".to_owned() })),
-            ("post", BenchOp::advance(5)),
-            ("snap", BenchOp::capture()),
+            ("destroy", HarnessOp::send_mail(component_address(), &CameraDestroy { name: "main".to_owned() })),
+            ("post", HarnessOp::advance(5)),
+            ("snap", HarnessOp::capture()),
         ])
         .expect("destroy + advance + capture");
     let png = result.captured("snap").expect("snap step ran");

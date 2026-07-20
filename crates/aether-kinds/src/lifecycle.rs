@@ -47,7 +47,7 @@ pub struct InitComponents;
 /// Lifecycle stage broadcast — render stage (ADR-0082 §1). Fires every
 /// frame after the whole [`Tick`] chain has settled (ADR-0080 §6) on
 /// chassis that declare a render state in their lifecycle graph (today:
-/// desktop and `substrate_bench`). Render-producing actors compute their
+/// desktop and `substrate_harness`). Render-producing actors compute their
 /// per-frame state on [`Tick`] and submit it to `aether.render` here, on
 /// `Render` — so a submission integrates the fully-settled cross-actor
 /// state of the frame rather than racing other actors' Tick handlers.

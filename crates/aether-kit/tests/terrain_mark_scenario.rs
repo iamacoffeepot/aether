@@ -1,12 +1,18 @@
 //! Terrain picking and MarkBook-projected overlays through the real kit wasm.
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::f32::consts::FRAC_PI_3;
 use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::visual::{Rect, decode_png, run_checks, target_color_stats};
+use aether_harness_substrate_capture::{
+    ArtifactGuard,
+    test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
+};
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, FrameCheck, FrameCheckResult, FrameReduction, LoadComponent,
     LoadResult, NamedMail, Render,
@@ -22,12 +28,6 @@ use aether_kit::world::{
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::visual::{Rect, decode_png, run_checks, target_color_stats};
-use aether_substrate_bench_capture::{
-    ArtifactGuard,
-    test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
-};
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -59,11 +59,11 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_export(bench: &mut SubstrateBench, wasm_path: &Path, export: &str, name: &str) {
-    let loaded = bench
+fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, export: &str, name: &str) {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -103,11 +103,11 @@ fn terrain_ray_from_screen_pixel(eye: Vec3, target: Vec3, pixel_x: f32, pixel_y:
     }
 }
 
-fn capture(bench: &mut SubstrateBench, world: &str, label: &str) -> Vec<u8> {
-    let captured = bench
+fn capture(harness: &mut SubstrateHarness, world: &str, label: &str) -> Vec<u8> {
+    let captured = harness
         .execute(vec![(
             label,
-            BenchOp::capture_with_mails(
+            HarnessOp::capture_with_mails(
                 vec![envelope("aether.render", &top_down_view_projection()), envelope(world, &Render)],
                 Vec::new(),
             ),
@@ -116,9 +116,9 @@ fn capture(bench: &mut SubstrateBench, world: &str, label: &str) -> Vec<u8> {
     captured.captured(label).expect("capture bytes").to_vec()
 }
 
-fn create_mark(bench: &mut SubstrateBench, marks: &str, label: &str, geometry: MarkGeometry) -> MarkRef {
-    let created = bench
-        .execute(vec![(label, BenchOp::send_and_await(marks, &MarkCreate { geometry, label: label.to_owned() }))])
+fn create_mark(harness: &mut SubstrateHarness, marks: &str, label: &str, geometry: MarkGeometry) -> MarkRef {
+    let created = harness
+        .execute(vec![(label, HarnessOp::send_and_await(marks, &MarkCreate { geometry, label: label.to_owned() }))])
         .expect("create mark");
     match created.reply::<MarkCreateResult>(label).expect("decode MarkCreateResult") {
         MarkCreateResult::Created { reference } => reference,
@@ -156,22 +156,25 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     authored_water.insert_chunk(ChunkPos { x: 0, z: 0 }, water_chunk);
     fs::write(sandbox.join(water_world_path), authored_water.to_bytes()).expect("write authored water world fixture");
 
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .size(WIDTH, HEIGHT)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    load_export(&mut bench, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME);
-    load_export(&mut bench, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME);
+    load_export(&mut harness, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME);
+    load_export(&mut harness, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME);
     let marks = component_address(MARK_COMPONENT_NAME);
     let world = component_address(WORLD_COMPONENT_NAME);
 
-    bench
+    harness
         .execute(vec![(
             "load-water-world",
-            BenchOp::send_mail(&world, &WorldLoad { namespace: "save".to_owned(), path: water_world_path.to_owned() }),
+            HarnessOp::send_mail(
+                &world,
+                &WorldLoad { namespace: "save".to_owned(), path: water_world_path.to_owned() },
+            ),
         )])
         .expect("load authored water world");
     let water_ray = TerrainRay {
@@ -181,8 +184,8 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     };
     let mut water_hit = None;
     for _ in 0..16 {
-        let picked = bench
-            .execute(vec![("pick-water", BenchOp::send_and_await(&world, &PickTerrain { ray: water_ray }))])
+        let picked = harness
+            .execute(vec![("pick-water", HarnessOp::send_and_await(&world, &PickTerrain { ray: water_ray }))])
             .expect("pick authored water plane");
         if let PickTerrainResult::Hit { hit } =
             picked.reply::<PickTerrainResult>("pick-water").expect("decode water PickTerrainResult")
@@ -200,10 +203,10 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         "pick resolves the registered water plane rather than its -1m lakebed: {water_hit:?}",
     );
 
-    let described = bench
+    let described = harness
         .execute(vec![(
             "describe-world",
-            BenchOp::send_and_await("aether.component", &DescribeComponent { name: world.clone() }),
+            HarnessOp::send_and_await("aether.component", &DescribeComponent { name: world.clone() }),
         )])
         .expect("describe loaded world component");
     let capabilities =
@@ -236,11 +239,11 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     let mut water_plane = vec![0; CELLS_PER_CHUNK_AREA];
     water_plane[water_cell_index] = 1;
 
-    bench
+    harness
         .execute(vec![
             (
                 "chunk",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     &world,
                     &SetChunk {
                         chunk_x: 0,
@@ -259,17 +262,17 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
             ),
             (
                 "relief",
-                BenchOp::send_mail(&world, &SetCellHeights { x: 2, z: 2, deltas: vec![128; SUBCELLS_PER_CELL] }),
+                HarnessOp::send_mail(&world, &SetCellHeights { x: 2, z: 2, deltas: vec![128; SUBCELLS_PER_CELL] }),
             ),
         ])
         .expect("author non-flat terrain");
 
     let pick_eye = Vec3::new(2.5, 5.0, 5.5);
     let pick_target = Vec3::new(2.5, 0.5, 2.5);
-    let picked = bench
+    let picked = harness
         .execute(vec![(
             "pick",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 &world,
                 &PickTerrain {
                     ray: terrain_ray_from_screen_pixel(pick_eye, pick_target, WIDTH_F32 * 0.5, HEIGHT_F32 * 0.5),
@@ -284,22 +287,22 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     assert!((hit.position.y_meters - 0.5).abs() < 0.001, "pick follows authored relief rather than flat y=0: {hit:?}");
     assert_eq!(hit.surface.mark_point, WorldPoint::new(640, 640));
 
-    let point = create_mark(&mut bench, &marks, "point", MarkGeometry::Point(hit.surface.mark_point));
+    let point = create_mark(&mut harness, &marks, "point", MarkGeometry::Point(hit.surface.mark_point));
     let path = create_mark(
-        &mut bench,
+        &mut harness,
         &marks,
         "path",
         MarkGeometry::Path(vec![WorldPoint::new(1024, 512), WorldPoint::new(1280, 512)]),
     );
     let area = create_mark(
-        &mut bench,
+        &mut harness,
         &marks,
         "area",
         MarkGeometry::Area(vec![WorldPoint::new(1536, 768), WorldPoint::new(1792, 768), WorldPoint::new(1664, 1024)]),
     );
 
-    let enabled = bench
-        .execute(vec![("enable", BenchOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
+    let enabled = harness
+        .execute(vec![("enable", HarnessOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
         .expect("enable overlay");
     assert_eq!(
         enabled.reply::<SetMarkOverlayVisibilityResult>("enable").expect("decode visibility result"),
@@ -307,8 +310,8 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     );
     let mut synchronized_result = None;
     for _ in 0..16 {
-        let synchronized = bench
-            .execute(vec![("sync", BenchOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
+        let synchronized = harness
+            .execute(vec![("sync", HarnessOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
             .expect("poll synchronized overlay");
         let result = synchronized
             .reply::<SetMarkOverlayVisibilityResult>("sync")
@@ -323,15 +326,18 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         Some(SetMarkOverlayVisibilityResult { visible: true, synchronized: true }),
         "the correlated MarkList reply settles within a bounded poll",
     );
-    let selected = bench
-        .execute(vec![("select", BenchOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }))])
+    let selected = harness
+        .execute(vec![(
+            "select",
+            HarnessOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }),
+        )])
         .expect("select exact point revision");
     assert_eq!(
         selected.reply::<SetMarkOverlaySelectionResult>("select").expect("decode selection result"),
         SetMarkOverlaySelectionResult::Selected { reference: point }
     );
 
-    let before_png = capture(&mut bench, &world, "before");
+    let before_png = capture(&mut harness, &world, "before");
     let before_image = decode_png(&before_png).expect("decode initial overlay");
     assert_eq!((before_image.width, before_image.height), (WIDTH, HEIGHT));
     let checks = overlay_checks();
@@ -354,16 +360,16 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     assert!(path_before.matching >= 4, "path ribbon: {path_before:?}");
     assert!(area_before.matching >= 4, "area perimeter: {area_before:?}");
 
-    let mutated = bench
+    let mutated = harness
         .execute(vec![
             (
                 "update",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     &marks,
                     &MarkUpdate { id: point.id, geometry: None, label: Some("updated".to_owned()) },
                 ),
             ),
-            ("delete", BenchOp::send_and_await(&marks, &MarkDelete { id: area.id })),
+            ("delete", HarnessOp::send_and_await(&marks, &MarkDelete { id: area.id })),
         ])
         .expect("update point and delete area");
     let point_v2 = MarkRef { id: point.id, revision: 2 };
@@ -376,15 +382,15 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         MarkDeleteResult::Deleted { reference: area }
     );
 
-    bench
-        .execute(vec![("refresh", BenchOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
+    harness
+        .execute(vec![("refresh", HarnessOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
         .expect("refresh mutated MarkBook projection");
     let mut stale_result = None;
     for _ in 0..16 {
-        let stale = bench
+        let stale = harness
             .execute(vec![(
                 "stale",
-                BenchOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }),
+                HarnessOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }),
             )])
             .expect("poll old selected revision");
         let result = stale.reply::<SetMarkOverlaySelectionResult>("stale").expect("decode stale selection result");
@@ -399,7 +405,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         "the refreshed projection classifies the old revision within a bounded poll",
     );
 
-    let after_png = capture(&mut bench, &world, "after");
+    let after_png = capture(&mut harness, &world, "after");
     let after_image = decode_png(&after_png).expect("decode refreshed overlay");
     let checks = overlay_checks();
     let verdict = run_checks(after_image.rgba.clone(), after_image.width, after_image.height, &checks);

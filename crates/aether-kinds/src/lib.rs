@@ -822,7 +822,7 @@ mod control_plane {
     /// RGBA the PNG is built from — the de-padded, swizzled frame the
     /// render thread maps before the PNG encode (ADR-0105 capture path,
     /// iamacoffeepot/aether#1777). Each entry names one
-    /// `substrate_bench::visual` reduction plus its lit/background partition
+    /// `substrate_harness::visual` reduction plus its lit/background partition
     /// params; the results ride back on `CaptureFrameResult::Ok.verdict`.
     /// Empty means "PNG only, no verdict" — the prior behaviour.
     ///
@@ -892,7 +892,7 @@ mod control_plane {
 
     /// Build a [`CaptureFrameResult`] from the raw GPU `render_and_capture`
     /// result shape. Every capture handler in `aether-substrate-bundle`
-    /// (substrate-bench inline, in-process bench, desktop driver) needs this
+    /// (substrate-harness inline, in-process harness, desktop driver) needs this
     /// same `Ok((png, verdict, score, pass)) → Ok { … }` /
     /// `Err(error) → Err { error }` flip. `verdict` is `None` when the
     /// request carried no `checks`; `similarity_score` / `similarity_pass`
@@ -910,7 +910,7 @@ mod control_plane {
     }
 
     /// One reduction requested in a [`CaptureFrame::checks`] list. The
-    /// `reduction` names which `substrate_bench::visual` check to run;
+    /// `reduction` names which `substrate_harness::visual` check to run;
     /// `tolerance` is the per-channel threshold that partitions pixels
     /// into the lit/background mask the silhouette reductions share; and
     /// `background` pins the reference RGB — `None` falls back to the
@@ -934,7 +934,7 @@ mod control_plane {
         pub region: Option<FrameRect>,
     }
 
-    /// Which `substrate_bench::visual` reduction a [`FrameCheck`] runs. The
+    /// Which `substrate_harness::visual` reduction a [`FrameCheck`] runs. The
     /// names mirror the public reduction functions one-for-one.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FrameReduction {
@@ -980,7 +980,7 @@ mod control_plane {
     }
 
     /// Inclusive axis-aligned pixel extent of a lit region — the wire
-    /// mirror of `substrate_bench::visual::Rect`. `min`/`max` are the smallest
+    /// mirror of `substrate_harness::visual::Rect`. `min`/`max` are the smallest
     /// and largest lit column (`x`) and row (`y`); a single lit pixel
     /// yields `min == max`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1636,13 +1636,13 @@ mod control_plane {
     // trunk crate; that crate was later folded into `aether-kit`
     // (`aether-kit::mesh`), which is its home now.
 
-    /// `aether.substrate_bench.advance` — request the substrate-bench chassis
+    /// `aether.substrate_harness.advance` — request the substrate-harness chassis
     /// step the world forward by `ticks` Tick events. Each tick
     /// dispatches a `Tick` mail to every subscriber, drains the
     /// resulting mail to quiescence, and renders one frame. Replies
     /// with `AdvanceResult` once all ticks have completed.
     ///
-    /// The substrate-bench chassis is event-driven (ADR-0067): without
+    /// The substrate-harness chassis is event-driven (ADR-0067): without
     /// an `advance` request the world doesn't tick at all. Smoke
     /// scripts pair this with `capture_frame` to drive deterministic
     /// "send mail → step N → capture" cycles. Other chassis reply
@@ -1651,7 +1651,7 @@ mod control_plane {
     ///
     /// Reply: `AdvanceResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.substrate_bench.advance")]
+    #[kind(name = "aether.substrate_harness.advance")]
     pub struct Advance {
         pub ticks: u32,
     }
@@ -1663,7 +1663,7 @@ mod control_plane {
     /// carries a free-form reason: chassis doesn't support advance,
     /// dispatcher wedged mid-advance, etc.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.substrate_bench.advance_result")]
+    #[kind(name = "aether.substrate_harness.advance_result")]
     pub enum AdvanceResult {
         Ok { ticks_completed: u32 },
         Err { error: String },

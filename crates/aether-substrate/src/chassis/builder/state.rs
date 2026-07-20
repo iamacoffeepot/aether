@@ -51,7 +51,7 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
 
 /// Default worker-pool size for the passive ([`Builder::build_passive`])
 /// build path when no explicit [`Builder::with_workers`] override is set.
-/// Small on purpose: the passive path is the test / `SubstrateBench` embedder
+/// Small on purpose: the passive path is the test / `SubstrateHarness` embedder
 /// path (no production callers), and a near-full `available_parallelism()`
 /// pool per test over-subscribes nextest's `num_cpus`-wide run. See
 /// [`Builder::build_passive`] for the full rationale
@@ -90,7 +90,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// Issue 1990: per-actor ring capacities (`ActorLogRing` /
     /// `ActorTraceRing`). Production chassis mains populate this from the
     /// `ActorRingConfig` derive-`Config` knob (env `AETHER_ACTOR_*`);
-    /// tests / `SubstrateBench` leave it [`RingCapacities::default`]. Threaded
+    /// tests / `SubstrateHarness` leave it [`RingCapacities::default`]. Threaded
     /// into the `Spawner` (instanced spawns) + the cap-claim slot path
     /// (singleton caps) + the chassis-host trace ring at boot.
     ring_caps: RingCapacities,
@@ -98,7 +98,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// process-global immediately before `Pool::start` in `boot_passives`.
     /// Production chassis mains populate this from the bundle-side
     /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`);
-    /// tests / `SubstrateBench` leave it [`SchedulerTuning::default`].
+    /// tests / `SubstrateHarness` leave it [`SchedulerTuning::default`].
     scheduler_tuning: SchedulerTuning,
     /// Issue #2509: cumulative patience the instanced-actor teardown
     /// close-done gate (`Spawner::shutdown_instanced`) waits before
@@ -108,7 +108,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// is never false-fired. Production chassis mains populate this from
     /// the same `AETHER_SETTLEMENT_CAP_SECS` knob the settlement gates
     /// read (via `SettlementConfig::to_cap`, including its `0 → MAX`
-    /// sentinel); tests / `SubstrateBench` inherit the default.
+    /// sentinel); tests / `SubstrateHarness` inherit the default.
     teardown_cap: Duration,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
@@ -171,11 +171,11 @@ impl<C: Chassis> Builder<C, NoDriver> {
 
     /// No-driver build path. Boots every passive in declaration order
     /// and returns a [`PassiveChassis`] whose embedder is responsible
-    /// for driving the loop manually (`SubstrateBench`).
+    /// for driving the loop manually (`SubstrateHarness`).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
         // The passive (manually-driven) path has no production callers —
         // every chassis main goes through `.driver(_).build()`. It is the
-        // build path for `SubstrateBench` and the hundreds of substrate-booting
+        // build path for `SubstrateHarness` and the hundreds of substrate-booting
         // unit tests. Inheriting `PoolConfig::default()`'s
         // `available_parallelism() - 1` here means each such test spawns a
         // near-full worker pool; under nextest's `num_cpus`-wide run that is

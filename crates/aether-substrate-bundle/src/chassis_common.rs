@@ -7,8 +7,8 @@
 //! pulls the shared scaffolding out so each chassis declares only
 //! the parts that genuinely differ.
 //!
-//! The hub and substrate-bench chassis don't share this base (hub is a
-//! minimal RPC-only chassis, substrate-bench drives a loopback), so the
+//! The hub and substrate-harness chassis don't share this base (hub is a
+//! minimal RPC-only chassis, substrate-harness drives a loopback), so the
 //! helper module stays scoped to the two full-stack chassis.
 
 use std::env;
@@ -350,23 +350,23 @@ impl SchedulerTuningConfig {
 }
 
 // Issue #3765: `SettlementConfig` (the `AETHER_SETTLEMENT_CAP_SECS`
-// knob) rehomed to `aether-substrate-bench`, its primary consumer; the
+// knob) rehomed to `aether-harness-substrate`, its primary consumer; the
 // chassis teardown resolution below reads the same knob through the
 // re-import.
-use aether_substrate_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-pub use aether_substrate_bench::{SettlementConfig, SettlementConfigLayer};
+use aether_harness_substrate::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
+pub use aether_harness_substrate::{SettlementConfig, SettlementConfigLayer};
 
-/// Render-size knob for the standalone substrate-bench binary
+/// Render-size knob for the standalone substrate-harness binary
 /// (`AETHER_SUBSTRATE_BENCH_SIZE=WxH`). Mirrors the single-field
 /// `SettlementConfig` shape: a `#[derive(aether_substrate::Config)]`
 /// struct resolved `from_env()` and lowered to `(u32, u32)` by
 /// [`Self::to_size`]. Lives binary-side (issue #3765) — the in-process
-/// bench sizes through its builder, not process env.
+/// harness sizes through its builder, not process env.
 ///
 /// The explicit `env =` pin is belt-and-suspenders against a future field
 /// rename, matching how `ActorRingConfig` pins its historical keys.
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_SUBSTRATE_BENCH", cli_prefix = "substrate-bench")]
+#[config(env_prefix = "AETHER_SUBSTRATE_BENCH", cli_prefix = "substrate-harness")]
 pub struct RenderSizeConfig {
     /// `AETHER_SUBSTRATE_BENCH_SIZE=WxH` render dimensions for the offscreen
     /// wgpu surface. Falls back to `800x600` on missing/unparseable input
@@ -615,13 +615,13 @@ pub fn hub_config_dump() -> String {
 /// (ADR-0082 PR 3b): a `Tick` self-loop with a `Quit` escape to a
 /// `Shutdown` terminal. Components subscribe the `Tick` stage directly
 /// on `aether.lifecycle` (ADR-0082 §7/§11), so the config wires no
-/// initial subscribers. Desktop and `substrate_bench` run the three-stage
+/// initial subscribers. Desktop and `substrate_harness` run the three-stage
 /// `Tick → Render → Present` graph from `frame_lifecycle_config()`
 /// below instead.
 ///
 /// `advance_timeout_millis` is the resolved value from
 /// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
-/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the substrate-bench).
+/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the substrate-harness).
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,

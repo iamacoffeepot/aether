@@ -1,6 +1,6 @@
 //! Image-widget end-to-end acceptance (issue 2917).
 //!
-//! The current `SubstrateBench` creates consumer-owned textures, drives one image
+//! The current `SubstrateHarness` creates consumer-owned textures, drives one image
 //! child through every fit and control state by its public inline lineage, and
 //! reads exact typed committed-overlay geometry plus a bounded raster probe.
 
@@ -8,11 +8,14 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bench_capture::{RenderBenchBuilderExt, RenderBenchExt};
+use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{Image, Rect, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
 use aether_kit::{
     ImageConfig, ImageFit, PanelConfig, SetWidgetState, Theme, WidgetChildSpec, WidgetControlState, WidgetKind,
@@ -22,9 +25,6 @@ use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat,
     TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{Image, Rect, decode_png, target_color_stats};
 
 const PANEL_X: f32 = 8.0;
 const PANEL_Y: f32 = 9.0;
@@ -45,11 +45,11 @@ fn second_texture_pixels() -> Vec<u8> {
     ]
 }
 
-fn create_texture(bench: &mut SubstrateBench, label: &'static str, pixels: Vec<u8>) -> u32 {
-    let created = bench
+fn create_texture(harness: &mut SubstrateHarness, label: &'static str, pixels: Vec<u8>) -> u32 {
+    let created = harness
         .execute(vec![(
             label,
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels },
             ),
@@ -77,7 +77,7 @@ fn image_config(texture_id: u32, fit: ImageFit, state: WidgetControlState) -> Im
     }
 }
 
-fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], config: &ImageConfig) -> String {
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig) -> String {
     let panel_config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -94,10 +94,10 @@ fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], config: &ImageConfig) -> 
         }],
         owns_input: true,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -118,9 +118,9 @@ fn tick_to(panel: &str) -> NamedMail {
     NamedMail { recipient_name: panel.to_owned(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
 }
 
-fn capture(bench: &mut SubstrateBench, panel: &str) -> Image {
-    let captured = bench
-        .execute(vec![("capture", BenchOp::capture_with_mails(vec![tick_to(panel)], Vec::new()))])
+fn capture(harness: &mut SubstrateHarness, panel: &str) -> Image {
+    let captured = harness
+        .execute(vec![("capture", HarnessOp::capture_with_mails(vec![tick_to(panel)], Vec::new()))])
         .expect("capture image panel");
     decode_png(captured.captured("capture").expect("capture bytes")).expect("decode image capture")
 }
@@ -147,17 +147,18 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder().size(48, 40).with_render().with_component_host().build().expect("boot");
-    let first_texture_id = create_texture(&mut bench, "first_texture", first_texture_pixels());
-    let second_texture_id = create_texture(&mut bench, "second_texture", second_texture_pixels());
+    let mut harness =
+        SubstrateHarness::builder().size(48, 40).with_render().with_component_host().build().expect("boot");
+    let first_texture_id = create_texture(&mut harness, "first_texture", first_texture_pixels());
+    let second_texture_id = create_texture(&mut harness, "second_texture", second_texture_pixels());
     let tint = Rgba::WHITE;
     let panel =
-        load_panel(&mut bench, &wasm, &image_config(first_texture_id, ImageFit::Fill, WidgetControlState::default()));
+        load_panel(&mut harness, &wasm, &image_config(first_texture_id, ImageFit::Fill, WidgetControlState::default()));
     let image = format!("{panel}/{}:image", aether_component::WasmTrampoline::NAMESPACE);
 
-    let fill_pixels = capture(&mut bench, &panel);
+    let fill_pixels = capture(&mut harness, &panel);
     assert_image_batch(
-        &bench.committed_overlay_snapshot(),
+        &harness.committed_overlay_snapshot(),
         first_texture_id,
         RenderTexturedQuad {
             x: PANEL_X,
@@ -205,14 +206,14 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
             },
         ),
     ] {
-        bench
+        harness
             .execute(vec![(
                 "reconfigure_fit",
-                BenchOp::send_mail(&image, &image_config(first_texture_id, fit, WidgetControlState::default())),
+                HarnessOp::send_mail(&image, &image_config(first_texture_id, fit, WidgetControlState::default())),
             )])
             .expect("reconfigure image fit");
-        let _ = capture(&mut bench, &panel);
-        assert_image_batch(&bench.committed_overlay_snapshot(), first_texture_id, expected);
+        let _ = capture(&mut harness, &panel);
+        assert_image_batch(&harness.committed_overlay_snapshot(), first_texture_id, expected);
     }
 
     let natural = ImageConfig {
@@ -221,12 +222,12 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         fit: ImageFit::Natural,
         ..image_config(first_texture_id, ImageFit::Natural, WidgetControlState::default())
     };
-    bench
-        .execute(vec![("reconfigure_natural", BenchOp::send_mail(&image, &natural))])
+    harness
+        .execute(vec![("reconfigure_natural", HarnessOp::send_mail(&image, &natural))])
         .expect("configure oversized natural image");
-    let _ = capture(&mut bench, &panel);
+    let _ = capture(&mut harness, &panel);
     assert_image_batch(
-        &bench.committed_overlay_snapshot(),
+        &harness.committed_overlay_snapshot(),
         first_texture_id,
         RenderTexturedQuad {
             x: PANEL_X - 10.0,
@@ -242,19 +243,21 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     );
 
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
-    bench.execute(vec![("hide", BenchOp::send_mail(&image, &SetWidgetState { state: hidden }))]).expect("hide image");
-    let _ = capture(&mut bench, &panel);
-    let hidden_snapshot = bench.committed_overlay_snapshot();
+    harness
+        .execute(vec![("hide", HarnessOp::send_mail(&image, &SetWidgetState { state: hidden }))])
+        .expect("hide image");
+    let _ = capture(&mut harness, &panel);
+    let hidden_snapshot = harness.committed_overlay_snapshot();
     assert_eq!(hidden_snapshot.len(), 1, "hidden image leaves only panel chrome");
     assert_eq!(hidden_snapshot[0].texture_id, WHITE_TEXTURE_ID);
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
-    bench
-        .execute(vec![("disable", BenchOp::send_mail(&image, &SetWidgetState { state: disabled }))])
+    harness
+        .execute(vec![("disable", HarnessOp::send_mail(&image, &SetWidgetState { state: disabled }))])
         .expect("disable image");
-    let _ = capture(&mut bench, &panel);
+    let _ = capture(&mut harness, &panel);
     assert_image_batch(
-        &bench.committed_overlay_snapshot(),
+        &harness.committed_overlay_snapshot(),
         first_texture_id,
         RenderTexturedQuad {
             x: PANEL_X - 10.0,
@@ -278,9 +281,11 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         theme: theme(),
         state: WidgetControlState::default(),
     };
-    bench.execute(vec![("replace", BenchOp::send_mail(&image, &replacement))]).expect("replace image config in place");
-    let _ = capture(&mut bench, &panel);
-    let replacement_snapshot = bench.committed_overlay_snapshot();
+    harness
+        .execute(vec![("replace", HarnessOp::send_mail(&image, &replacement))])
+        .expect("replace image config in place");
+    let _ = capture(&mut harness, &panel);
+    let replacement_snapshot = harness.committed_overlay_snapshot();
     assert!(
         replacement_snapshot.iter().all(|batch| batch.texture_id != first_texture_id),
         "replacement frame must not retain the old texture batch",
@@ -301,10 +306,13 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         },
     );
 
-    bench
+    harness
         .execute(vec![
-            ("destroy_first", BenchOp::send_mail("aether.render", &DestroyTexture { texture_id: first_texture_id })),
-            ("destroy_second", BenchOp::send_mail("aether.render", &DestroyTexture { texture_id: second_texture_id })),
+            ("destroy_first", HarnessOp::send_mail("aether.render", &DestroyTexture { texture_id: first_texture_id })),
+            (
+                "destroy_second",
+                HarnessOp::send_mail("aether.render", &DestroyTexture { texture_id: second_texture_id }),
+            ),
         ])
         .expect("consumer destroys borrowed image textures after the last capture");
 }

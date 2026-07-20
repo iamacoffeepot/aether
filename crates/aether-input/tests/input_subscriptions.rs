@@ -1,11 +1,11 @@
-//! ADR-0021 publish/subscribe round-trip via [`SubstrateBench`]. Loads
+//! ADR-0021 publish/subscribe round-trip via [`SubstrateHarness`]. Loads
 //! `aether-test-fixtures`'s `probe` cdylib into a real chassis and exercises
 //! `aether.input.subscribe` / `aether.input.unsubscribe` and the
 //! `aether.component.drop` lifecycle's effect on the input subscriber
 //! set. Tracked under issue 648.
 //!
 //! Minimal composition (issue #3764): the component host (probe wasm)
-//! plus the input cap on the bench basics — no render, no wgpu gate.
+//! plus the input cap on the harness basics — no render, no wgpu gate.
 //! The probe wasm must be pre-built (`require_wasm` skips otherwise;
 //! `AETHER_REQUIRE_RUNTIME=1` turns the skip into a hard failure).
 //!
@@ -15,37 +15,37 @@
 //! unsubscribe / drop-clears contract is exercised here against a
 //! genuine input stream. The probe subscribes `Key` in `wire` and
 //! broadcasts a `key_observed` per dispatch; Tick-via-lifecycle delivery
-//! is covered by the `substrate_bench` frame-loop scenarios.
+//! is covered by the `substrate_harness` frame-loop scenarios.
 
 use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId};
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_input::{InputCapability, InputConfig, SubscribeInputResult, UnsubscribeInput};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
 
-fn boot_bench() -> SubstrateBench {
-    SubstrateBench::builder()
+fn boot_bench() -> SubstrateHarness {
+    SubstrateHarness::builder()
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
         .build()
         .expect("boot")
 }
 
-fn load_probe_named(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) -> MailboxId {
+fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
             ),
@@ -60,20 +60,20 @@ fn load_probe_named(bench: &mut SubstrateBench, wasm_path: &Path, name: &str) ->
 /// Inject `count` synthetic `Key` presses to `aether.input`. The input
 /// cap fans each out to every `Key` subscriber; `execute` blocks on
 /// settlement, so the `key_observed` broadcasts have landed by return.
-fn send_keys(bench: &mut SubstrateBench, count: usize) {
+fn send_keys(harness: &mut SubstrateHarness, count: usize) {
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
-    let steps: Vec<(&str, BenchOp)> = labels
+    let steps: Vec<(&str, HarnessOp)> = labels
         .iter()
-        .map(|label| (label.as_str(), BenchOp::send_mail("aether.input", &Key { code: KEY_CODE })))
+        .map(|label| (label.as_str(), HarnessOp::send_mail("aether.input", &Key { code: KEY_CODE })))
         .collect();
-    bench.execute(steps).expect("key send sequence");
+    harness.execute(steps).expect("key send sequence");
 }
 
-fn unsubscribe(bench: &mut SubstrateBench, kind: KindId, mailbox: MailboxId) {
-    let result = bench
+fn unsubscribe(harness: &mut SubstrateHarness, kind: KindId, mailbox: MailboxId) {
+    let result = harness
         .execute(vec![(
             "unsub",
-            BenchOp::send_and_await(InputCapability::NAMESPACE, &UnsubscribeInput { kind, mailbox }),
+            HarnessOp::send_and_await(InputCapability::NAMESPACE, &UnsubscribeInput { kind, mailbox }),
         )])
         .expect("unsubscribe sequence");
     match result.reply::<SubscribeInputResult>("unsub").expect("decode SubscribeInputResult") {
@@ -82,11 +82,11 @@ fn unsubscribe(bench: &mut SubstrateBench, kind: KindId, mailbox: MailboxId) {
     }
 }
 
-fn drop_component(bench: &mut SubstrateBench, mailbox_id: MailboxId) {
-    let result = bench
+fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
+    let result = harness
         .execute(vec![(
             "drop",
-            BenchOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
+            HarnessOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
         )])
         .expect("drop sequence");
     match result.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -103,13 +103,13 @@ fn empty_subscribers_means_no_delivery() {
     if require_wasm("aether_test_fixtures_bundle").is_none() {
         return;
     }
-    let mut bench = boot_bench();
-    send_keys(&mut bench, 2);
+    let mut harness = boot_bench();
+    send_keys(&mut harness, 2);
     assert_eq!(
-        bench.count_observed(KeyObserved::NAME),
+        harness.count_observed(KeyObserved::NAME),
         0,
         "no probe loaded but key_observed was broadcast; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -124,16 +124,16 @@ fn subscribed_component_receives_published_text_input() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = boot_bench();
-    let _mbox = load_probe_named(&mut bench, &wasm_path, "typist");
-    let baseline = bench.count_observed(TextInputObserved::NAME);
+    let mut harness = boot_bench();
+    let _mbox = load_probe_named(&mut harness, &wasm_path, "typist");
+    let baseline = harness.count_observed(TextInputObserved::NAME);
 
-    bench
-        .execute(vec![("text", BenchOp::send_mail("aether.input", &TextInput { text: "hi".to_owned() }))])
+    harness
+        .execute(vec![("text", HarnessOp::send_mail("aether.input", &TextInput { text: "hi".to_owned() }))])
         .expect("text send sequence");
 
-    let delta = bench.count_observed(TextInputObserved::NAME) - baseline;
-    assert_eq!(delta, 1, "expected 1 text_input_observed broadcast; observed kinds: {:?}", bench.observed_kinds());
+    let delta = harness.count_observed(TextInputObserved::NAME) - baseline;
+    assert_eq!(delta, 1, "expected 1 text_input_observed broadcast; observed kinds: {:?}", harness.observed_kinds());
 }
 
 /// One subscribed probe broadcasts once per injected key.
@@ -142,13 +142,13 @@ fn subscribed_component_receives_published_keys() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = boot_bench();
-    let _mbox = load_probe_named(&mut bench, &wasm_path, "listener");
-    let baseline = bench.count_observed(KeyObserved::NAME);
+    let mut harness = boot_bench();
+    let _mbox = load_probe_named(&mut harness, &wasm_path, "listener");
+    let baseline = harness.count_observed(KeyObserved::NAME);
 
-    send_keys(&mut bench, 3);
-    let delta = bench.count_observed(KeyObserved::NAME) - baseline;
-    assert_eq!(delta, 3, "expected 3 key_observed broadcasts; observed kinds: {:?}", bench.observed_kinds());
+    send_keys(&mut harness, 3);
+    let delta = harness.count_observed(KeyObserved::NAME) - baseline;
+    assert_eq!(delta, 3, "expected 3 key_observed broadcasts; observed kinds: {:?}", harness.observed_kinds());
 }
 
 /// Two independently-loaded probes each subscribe their own mailbox
@@ -159,18 +159,18 @@ fn two_subscribers_each_receive_every_key() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = boot_bench();
-    let _mbox_a = load_probe_named(&mut bench, &wasm_path, "a");
-    let _mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
-    let baseline = bench.count_observed(KeyObserved::NAME);
+    let mut harness = boot_bench();
+    let _mbox_a = load_probe_named(&mut harness, &wasm_path, "a");
+    let _mbox_b = load_probe_named(&mut harness, &wasm_path, "b");
+    let baseline = harness.count_observed(KeyObserved::NAME);
 
-    send_keys(&mut bench, 2);
-    let delta = bench.count_observed(KeyObserved::NAME) - baseline;
+    send_keys(&mut harness, 2);
+    let delta = harness.count_observed(KeyObserved::NAME) - baseline;
     assert_eq!(
         delta,
         4,
         "2 subscribers × 2 keys should yield 4 broadcasts; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -182,26 +182,26 @@ fn unsubscribe_stops_delivery() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = boot_bench();
-    let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
-    let baseline = bench.count_observed(KeyObserved::NAME);
+    let mut harness = boot_bench();
+    let mbox = load_probe_named(&mut harness, &wasm_path, "listener");
+    let baseline = harness.count_observed(KeyObserved::NAME);
 
-    send_keys(&mut bench, 1);
+    send_keys(&mut harness, 1);
     assert_eq!(
-        bench.count_observed(KeyObserved::NAME) - baseline,
+        harness.count_observed(KeyObserved::NAME) - baseline,
         1,
         "expected 1 broadcast in the pre-unsubscribe window; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
-    let pre_unsub = bench.count_observed(KeyObserved::NAME);
+    let pre_unsub = harness.count_observed(KeyObserved::NAME);
 
-    unsubscribe(&mut bench, Key::ID, mbox);
-    send_keys(&mut bench, 2);
+    unsubscribe(&mut harness, Key::ID, mbox);
+    send_keys(&mut harness, 2);
     assert_eq!(
-        bench.count_observed(KeyObserved::NAME),
+        harness.count_observed(KeyObserved::NAME),
         pre_unsub,
         "key_observed climbed after unsubscribe; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -214,25 +214,25 @@ fn drop_clears_subscriptions() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = boot_bench();
-    let mbox = load_probe_named(&mut bench, &wasm_path, "victim");
-    let baseline = bench.count_observed(KeyObserved::NAME);
+    let mut harness = boot_bench();
+    let mbox = load_probe_named(&mut harness, &wasm_path, "victim");
+    let baseline = harness.count_observed(KeyObserved::NAME);
 
-    send_keys(&mut bench, 1);
+    send_keys(&mut harness, 1);
     assert_eq!(
-        bench.count_observed(KeyObserved::NAME) - baseline,
+        harness.count_observed(KeyObserved::NAME) - baseline,
         1,
         "expected 1 broadcast in the pre-drop window; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
-    let pre_drop = bench.count_observed(KeyObserved::NAME);
+    let pre_drop = harness.count_observed(KeyObserved::NAME);
 
-    drop_component(&mut bench, mbox);
-    send_keys(&mut bench, 2);
+    drop_component(&mut harness, mbox);
+    send_keys(&mut harness, 2);
     assert_eq!(
-        bench.count_observed(KeyObserved::NAME),
+        harness.count_observed(KeyObserved::NAME),
         pre_drop,
         "key_observed climbed after drop; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }

@@ -1,6 +1,6 @@
 //! Shared offscreen render path for chassis that draw (issue 421).
 //!
-//! `aether-substrate-desktop` and `aether-substrate-bench` both
+//! `aether-substrate-desktop` and `aether-harness-substrate` both
 //! own a wgpu pipeline that draws `(pos, color)` triangles into an
 //! offscreen color + depth target and (optionally) reads back a PNG
 //! capture. ADR-0067 acknowledged the duplication; this module is

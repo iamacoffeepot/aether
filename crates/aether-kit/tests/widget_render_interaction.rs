@@ -1,6 +1,6 @@
 //! Widget render + interaction acceptance suite (issue 2674).
 //!
-//! The widget tier already has two `SubstrateBench` scenarios, and between them they
+//! The widget tier already has two `SubstrateHarness` scenarios, and between them they
 //! leave the *rendered placement* of the real widgets — driven by real
 //! synthetic input — untested. `widget_compositing` pixel-asserts abstract
 //! colored quads with no real widget, no font, and no input; `widget_set`
@@ -21,7 +21,7 @@
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure. Rendered
-//! output can only be asserted on the GPU path, so this is correctly `SubstrateBench`
+//! output can only be asserted on the GPU path, so this is correctly `SubstrateHarness`
 //! (`FleetBench` is headless).
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test` surfaces
@@ -39,7 +39,7 @@
 // paths — the recipient-name resolution surface the interaction drives.
 #![allow(clippy::disallowed_methods)]
 
-use aether_substrate_bench_capture::{RenderBenchBuilderExt, RenderBenchExt};
+use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +47,12 @@ use aether_actor::Addressable;
 use aether_clipboard::{ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_fs::NamespaceRoots;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::{
+    ArtifactGuard,
+    test_helpers::{init_save_sandbox, require_runtime},
+    visual::{Image, decode_png},
+};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
@@ -67,12 +73,6 @@ use aether_kit::{
 use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::{
-    ArtifactGuard,
-    test_helpers::{init_save_sandbox, require_runtime},
-    visual::{Image, decode_png},
-};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
@@ -150,10 +150,10 @@ fn assets_dir() -> PathBuf {
 /// `aether.input` fan-out the suite drives, `aether.text` glyph rasterization
 /// (fonts fetched via `aether.fs`, composed from the roots), and the
 /// deterministic in-memory clipboard the copy/cut/paste scenarios read back.
-fn build_bench() -> SubstrateBench {
+fn build_bench() -> SubstrateHarness {
     let sandbox = init_save_sandbox("widget-render-interaction");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    SubstrateBench::builder()
+    SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
@@ -169,11 +169,11 @@ fn build_bench() -> SubstrateBench {
 /// registry and return its session-scoped `font_id`. Loading it here — rather
 /// than letting the panel's `wire` kick off the load — settles the font before
 /// any draw, so no capture races the async fs-read + parse.
-fn load_font(bench: &mut SubstrateBench) -> u32 {
-    let loaded = bench
+fn load_font(harness: &mut SubstrateHarness) -> u32 {
+    let loaded = harness
         .execute(vec![(
             "font",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
@@ -188,11 +188,11 @@ fn load_font(bench: &mut SubstrateBench) -> u32 {
 /// Grab `RobotoMono`'s resolved metric table (the same one the field measures
 /// against) so the test can compute expected pixel boundaries for pointer
 /// placement and caret geometry.
-fn load_metrics(bench: &mut SubstrateBench, font_id: u32) -> CachedFontMetrics {
-    let got = bench
+fn load_metrics(harness: &mut SubstrateHarness, font_id: u32) -> CachedFontMetrics {
+    let got = harness
         .execute(vec![(
             "metrics",
-            BenchOp::send_and_await("aether.text", &FontMetricsRequest { font: FontRef::Id(font_id) }),
+            HarnessOp::send_and_await("aether.text", &FontMetricsRequest { font: FontRef::Id(font_id) }),
         )])
         .expect("font_metrics sequence");
     match got.reply::<FontMetricsResult>("metrics").expect("decode FontMetricsResult") {
@@ -206,21 +206,21 @@ fn load_metrics(bench: &mut SubstrateBench, font_id: u32) -> CachedFontMetrics {
 /// theme pinned to the already-resident `font_id` (empty font path, so the
 /// panel does not kick off its own load). Every widget draws text with that
 /// font.
-fn load_panel(bench: &mut SubstrateBench, wasm: &[u8], font_id: u32) -> MailboxId {
-    load_panel_with_children(bench, wasm, font_id, Vec::new())
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> MailboxId {
+    load_panel_with_children(harness, wasm, font_id, Vec::new())
 }
 
 fn load_panel_with_children(
-    bench: &mut SubstrateBench,
+    harness: &mut SubstrateHarness,
     wasm: &[u8],
     font_id: u32,
     children: Vec<WidgetChildSpec>,
 ) -> MailboxId {
-    load_panel_with_children_and_ownership(bench, wasm, font_id, children, true)
+    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true)
 }
 
 fn load_panel_with_children_and_ownership(
-    bench: &mut SubstrateBench,
+    harness: &mut SubstrateHarness,
     wasm: &[u8],
     font_id: u32,
     children: Vec<WidgetChildSpec>,
@@ -236,10 +236,10 @@ fn load_panel_with_children_and_ownership(
         children,
         owns_input,
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -264,11 +264,11 @@ struct LoadedProbe {
     address: String,
 }
 
-fn load_editor_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> LoadedProbe {
-    let loaded = bench
+fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> LoadedProbe {
+    let loaded = harness
         .execute(vec![(
             "load-region-probe",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read fixture wasm"),
@@ -285,7 +285,7 @@ fn load_editor_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> LoadedProb
     }
 }
 
-fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], panel: MailboxId, probe: MailboxId) {
+fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: MailboxId, probe: MailboxId) {
     let probe_lanes = RegionInputLanes {
         pointer_press: true,
         pointer_release: true,
@@ -322,10 +322,10 @@ fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], panel: MailboxId, 
             },
         ],
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load-editor-shell",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -342,9 +342,9 @@ fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], panel: MailboxId, 
     }
 }
 
-fn drain_editor_probe(bench: &mut SubstrateBench, probe: &LoadedProbe) -> DrainEditorInputsResult {
-    bench
-        .execute(vec![("drain-editor-probe", BenchOp::send_and_await(probe.address.as_str(), &DrainEditorInputs))])
+fn drain_editor_probe(harness: &mut SubstrateHarness, probe: &LoadedProbe) -> DrainEditorInputsResult {
+    harness
+        .execute(vec![("drain-editor-probe", HarnessOp::send_and_await(probe.address.as_str(), &DrainEditorInputs))])
         .expect("drain editor region probe")
         .reply::<DrainEditorInputsResult>("drain-editor-probe")
         .expect("decode DrainEditorInputsResult")
@@ -355,25 +355,25 @@ fn drain_editor_probe(bench: &mut SubstrateBench, probe: &LoadedProbe) -> DrainE
 /// creates its atlas texture, whose `create_texture` reply has to round-trip
 /// before glyphs rasterize into it), and the `advance` settles that
 /// round-trip — so the first real capture draws with glyphs resident.
-fn boot_panel(bench: &mut SubstrateBench, wasm: &[u8]) {
-    let font_id = load_font(bench);
-    load_panel(bench, wasm, font_id);
-    warm_panel(bench);
+fn boot_panel(harness: &mut SubstrateHarness, wasm: &[u8]) {
+    let font_id = load_font(harness);
+    load_panel(harness, wasm, font_id);
+    warm_panel(harness);
 }
 
-fn boot_panel_with_children(bench: &mut SubstrateBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
-    let font_id = load_font(bench);
-    load_panel_with_children(bench, wasm, font_id, children);
-    warm_panel(bench);
+fn boot_panel_with_children(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+    let font_id = load_font(harness);
+    load_panel_with_children(harness, wasm, font_id, children);
+    warm_panel(harness);
 }
 
-fn warm_panel(bench: &mut SubstrateBench) {
+fn warm_panel(harness: &mut SubstrateHarness) {
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("prime", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(2)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("prime", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");
 }
@@ -744,19 +744,19 @@ fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32
     );
 }
 
-fn assert_stationary_hover_survives_focus_traversal(bench: &mut SubstrateBench, panel: &str, hover_y: f32) {
+fn assert_stationary_hover_survives_focus_traversal(harness: &mut SubstrateHarness, panel: &str, hover_y: f32) {
     // Focus is independent from hover: Tab to the hovered button and away
     // again without moving the pointer. The button must remain hovered because
     // only a root-issued HoverLost may clear that fact.
-    bench
+    harness
         .execute(vec![
-            ("focus_hovered_button", BenchOp::send_mail(panel, &Key { code: KEY_TAB })),
-            ("focus_away_without_motion", BenchOp::send_mail(panel, &Key { code: KEY_TAB })),
-            ("capture_stationary_hover", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+            ("focus_hovered_button", HarnessOp::send_mail(panel, &Key { code: KEY_TAB })),
+            ("focus_away_without_motion", HarnessOp::send_mail(panel, &Key { code: KEY_TAB })),
+            ("capture_stationary_hover", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("stationary hover survives focus traversal");
     assert_eq!(
-        solid_for(&bench.committed_overlay_snapshot(), &row_clip(hover_y)).quads[0].tint,
+        solid_for(&harness.committed_overlay_snapshot(), &row_clip(hover_y)).quads[0].tint,
         Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover),
         "Tab focus changes must not clear root-owned hover while the pointer stays still",
     );
@@ -776,11 +776,11 @@ fn check(reduction: FrameReduction, region: FrameRect, background: [u8; 3], tole
 
 /// Capture one frame (redrawing the panel via a `Tick` in `mails`) with the
 /// requested region checks and return the settled verdict, in check order.
-fn capture(bench: &mut SubstrateBench, checks: Vec<FrameCheck>) -> FrameVerdict {
-    let captured = bench
+fn capture(harness: &mut SubstrateHarness, checks: Vec<FrameCheck>) -> FrameVerdict {
+    let captured = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame { mails: vec![tick_to_panel()], after_mails: Vec::new(), checks, similarity: None },
             ),
@@ -799,11 +799,16 @@ struct GuardedCapture {
 
 /// Capture a scored frame while keeping its exact PNG and check masks alive
 /// as failure-only diagnostics for every assertion in the caller's scope.
-fn capture_guarded(bench: &mut SubstrateBench, id: &str, expectation: &str, checks: Vec<FrameCheck>) -> GuardedCapture {
-    let captured = bench
+fn capture_guarded(
+    harness: &mut SubstrateHarness,
+    id: &str,
+    expectation: &str,
+    checks: Vec<FrameCheck>,
+) -> GuardedCapture {
+    let captured = harness
         .execute(vec![(
             "snap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     mails: vec![tick_to_panel()],
@@ -844,8 +849,8 @@ fn bounding_box(result: &FrameCheckResult) -> Option<FrameRect> {
 
 /// Every log message in the panel's ring, oldest first — the value-up
 /// observation surface (`widget_set`'s idiom).
-fn panel_log_messages(bench: &mut SubstrateBench) -> Vec<String> {
-    match bench.log_tail(&panel_address(), None, None) {
+fn panel_log_messages(harness: &mut SubstrateHarness) -> Vec<String> {
+    match harness.log_tail(&panel_address(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -868,9 +873,9 @@ fn reads_yellow(pixel: [u8; 3]) -> bool {
     pixel[0] > 150 && pixel[1] > 150 && pixel[2] < 150
 }
 
-fn clipboard_text(bench: &mut SubstrateBench) -> String {
-    let result = bench
-        .execute(vec![("clipboard", BenchOp::send_and_await(ClipboardCapability::NAMESPACE, &GetClipboardText))])
+fn clipboard_text(harness: &mut SubstrateHarness) -> String {
+    let result = harness
+        .execute(vec![("clipboard", HarnessOp::send_and_await(ClipboardCapability::NAMESPACE, &GetClipboardText))])
         .expect("read deterministic clipboard");
     match result.reply::<GetClipboardTextResult>("clipboard").expect("decode clipboard reply") {
         GetClipboardTextResult::Ok { text } => text,
@@ -990,8 +995,8 @@ fn panel_renders_every_text_row_inside_its_frame() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
     let rows = text_rows();
     let right = PANEL_X + PANEL_WIDTH;
@@ -1024,7 +1029,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
         ])
         .collect();
 
-    let verdict = capture(&mut bench, checks);
+    let verdict = capture(&mut harness, checks);
     assert_eq!(verdict.results.len(), rows.len() + 2, "one result per requested check");
 
     for (row, result) in rows.iter().zip(&verdict.results) {
@@ -1060,15 +1065,15 @@ fn slider_drag_renders_fill_at_track_fraction() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("drag_press", BenchOp::send_mail(&panel, &press(110.0, 52.0))),
-            ("drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
-            ("drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("drag_press", HarnessOp::send_mail(&panel, &press(110.0, 52.0))),
+            ("drag_move", HarnessOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider drag");
 
@@ -1080,8 +1085,10 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let track_height = (ROW_HEIGHT * 0.35).clamp(4.0, ROW_HEIGHT);
     let track_top = slider_top + (ROW_HEIGHT - track_height) * 0.5;
     let region = rect(PANEL_X + BORDER + 1.0, track_top, PANEL_X + PANEL_WIDTH - BORDER, track_top + track_height);
-    let verdict =
-        capture(&mut bench, vec![check(FrameReduction::BoundingBox, region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE)]);
+    let verdict = capture(
+        &mut harness,
+        vec![check(FrameReduction::BoundingBox, region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE)],
+    );
 
     let bbox = bounding_box(&verdict.results[0]).expect("the drag should render a non-empty fill");
     // The fill starts at the track's left (`local x = 0`); its right edge is the
@@ -1105,41 +1112,41 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
         return;
     };
     let kit_wasm = fs::read(&kit_wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    let font_id = load_font(&mut bench);
+    let mut harness = build_bench();
+    let font_id = load_font(&mut harness);
     let panel = load_panel_with_children_and_ownership(
-        &mut bench,
+        &mut harness,
         &kit_wasm,
         font_id,
         vec![text_field_child("field", "abcd")],
         false,
     );
-    warm_panel(&mut bench);
-    let probe = load_editor_probe(&mut bench, &fixtures_wasm_path);
-    load_editor_shell(&mut bench, &kit_wasm, panel, probe.mailbox_id);
+    warm_panel(&mut harness);
+    let probe = load_editor_probe(&mut harness, &fixtures_wasm_path);
+    load_editor_shell(&mut harness, &kit_wasm, panel, probe.mailbox_id);
 
     // The press begins in the panel editor region. Motion and release cross
     // x=120 into the peer region, but the shell's first-press ownership keeps
     // the complete drag addressed to the panel. Selecting all of `abcd`, then
     // typing `Z`, distinguishes capture (`Z`) from a lost drag (`Zabcd`).
-    bench
+    harness
         .execute(vec![
-            ("press", BenchOp::send_mail("aether.input", &press(PANEL_X + PAD, PANEL_Y + 12.0))),
-            ("cross-region-drag", BenchOp::send_mail("aether.input", &MouseMove { x: 150.0, y: PANEL_Y + 12.0 })),
-            ("cross-region-release", BenchOp::send_mail("aether.input", &release(150.0, PANEL_Y + 12.0))),
-            ("replace-selection", BenchOp::send_mail("aether.input", &TextInput { text: "Z".to_owned() })),
-            ("commit", BenchOp::send_mail("aether.input", &Key { code: KEY_ENTER })),
+            ("press", HarnessOp::send_mail("aether.input", &press(PANEL_X + PAD, PANEL_Y + 12.0))),
+            ("cross-region-drag", HarnessOp::send_mail("aether.input", &MouseMove { x: 150.0, y: PANEL_Y + 12.0 })),
+            ("cross-region-release", HarnessOp::send_mail("aether.input", &release(150.0, PANEL_Y + 12.0))),
+            ("replace-selection", HarnessOp::send_mail("aether.input", &TextInput { text: "Z".to_owned() })),
+            ("commit", HarnessOp::send_mail("aether.input", &Key { code: KEY_ENTER })),
         ])
         .expect("route real panel drag through editor shell");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|message| message.contains("widget text committed") && message.contains("text=Z")),
         "cross-region drag must select the complete initial value before replacement; log was:\n{joined}",
     );
     assert_eq!(
-        drain_editor_probe(&mut bench, &probe),
+        drain_editor_probe(&mut harness, &probe),
         DrainEditorInputsResult { region_name: "region-b".to_owned(), inputs: Vec::new() },
         "the peer region must not steal motion or release from the press owner",
     );
@@ -1156,16 +1163,16 @@ fn radio_click_moves_marker_into_clicked_row() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
     // The panel seeds the radio at index 0; click the third option row (y in
     // [118, 142)) to move the selection to index 2.
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("radio_press", BenchOp::send_mail(&panel, &press(30.0, 125.0))),
-            ("radio_release", BenchOp::send_mail(&panel, &release(30.0, 125.0))),
+            ("radio_press", HarnessOp::send_mail(&panel, &press(30.0, 125.0))),
+            ("radio_release", HarnessOp::send_mail(&panel, &release(30.0, 125.0))),
         ])
         .expect("radio click");
 
@@ -1188,7 +1195,7 @@ fn radio_click_moves_marker_into_clicked_row() {
             )
         })
         .collect();
-    let verdict = capture(&mut bench, checks);
+    let verdict = capture(&mut harness, checks);
 
     let fractions: Vec<f32> = verdict.results.iter().map(coverage).collect();
     eprintln!("radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}", fractions[0], fractions[1], fractions[2]);
@@ -1217,8 +1224,8 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
     // The field's glyph region: its interior, inset past the focus-ring border
     // (the field draws a border + caret while focused, both accent; the inset
@@ -1238,23 +1245,25 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     let panel = panel_address();
     // Focus the field and type; a follow-up tick + advance rasterizes any new
     // glyph ('x' is unseen) into the atlas before the measuring capture.
-    bench
+    harness
         .execute(vec![
-            ("focus", BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
-            ("focus_up", BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
-            ("type", BenchOp::send_mail(&panel, &TextInput { text: "hix".to_owned() })),
-            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(2)),
+            ("focus", HarnessOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
+            ("focus_up", HarnessOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
+            ("type", HarnessOp::send_mail(&panel, &TextInput { text: "hix".to_owned() })),
+            ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("focus + type");
 
-    let typed = capture(&mut bench, glyph_check());
+    let typed = capture(&mut harness, glyph_check());
     let typed_box = bounding_box(&typed.results[0]).expect("typed text should render glyphs");
     let typed_right = typed_box.max_x as f32;
 
-    bench.execute(vec![("backspace", BenchOp::send_mail(&panel, &Key { code: KEY_BACKSPACE }))]).expect("backspace");
+    harness
+        .execute(vec![("backspace", HarnessOp::send_mail(&panel, &Key { code: KEY_BACKSPACE }))])
+        .expect("backspace");
 
-    let deleted = capture(&mut bench, glyph_check());
+    let deleted = capture(&mut harness, glyph_check());
     let deleted_right =
         bounding_box(&deleted.results[0]).expect("the field still shows \"hi\" after one backspace").max_x as f32;
 
@@ -1274,9 +1283,9 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
          — the neutralized-editing-key class",
     );
 
-    bench.execute(vec![("commit", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
+    harness.execute(vec![("commit", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|m| m.contains("widget text committed") && m.contains("text=hi")),
@@ -1298,8 +1307,8 @@ fn button_press_renders_pressed_state_and_reports_click() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
     // Score a glyph-free strip of the button fill (its "Apply" label is
     // left-aligned at `x = pad`, so the right portion is pure accent), inset
@@ -1314,14 +1323,14 @@ fn button_press_renders_pressed_state_and_reports_click() {
     );
     let fill_check = || vec![check(FrameReduction::Coverage, fill_region, ACCENT_FILL_SRGB, DARKEN_TOLERANCE)];
 
-    let baseline_cov = coverage(&capture(&mut bench, fill_check()).results[0]);
+    let baseline_cov = coverage(&capture(&mut harness, fill_check()).results[0]);
 
     let panel = panel_address();
     let button_x = PANEL_X + PANEL_WIDTH * 0.5;
     let button_y = button_top + ROW_HEIGHT * 0.5;
-    bench.execute(vec![("press", BenchOp::send_mail(&panel, &press(button_x, button_y)))]).expect("button press");
+    harness.execute(vec![("press", HarnessOp::send_mail(&panel, &press(button_x, button_y)))]).expect("button press");
 
-    let pressed_cov = coverage(&capture(&mut bench, fill_check()).results[0]);
+    let pressed_cov = coverage(&capture(&mut harness, fill_check()).results[0]);
     eprintln!("button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}");
     assert!(
         baseline_cov < 0.1,
@@ -1334,9 +1343,11 @@ fn button_press_renders_pressed_state_and_reports_click() {
          {pressed_cov:.3} — the pressed-state-not-rendered class",
     );
 
-    bench.execute(vec![("release", BenchOp::send_mail(&panel, &release(button_x, button_y)))]).expect("button release");
+    harness
+        .execute(vec![("release", HarnessOp::send_mail(&panel, &release(button_x, button_y)))])
+        .expect("button release");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|m| m.contains("widget button clicked")),
@@ -1356,8 +1367,8 @@ fn focus_ring_follows_tab() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
     // The ring is a 2px accent border; probe the top edge band of a widget's
     // frame, where only the ring can light up (the slider's fill sits lower in
@@ -1370,13 +1381,13 @@ fn focus_ring_follows_tab() {
 
     let panel = panel_address();
     // Tab from no focus lands on the first focusable widget — the slider.
-    bench.execute(vec![("tab1", BenchOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("first tab");
-    let on_slider = coverage(&capture(&mut bench, slider_edge()).results[0]);
+    harness.execute(vec![("tab1", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("first tab");
+    let on_slider = coverage(&capture(&mut harness, slider_edge()).results[0]);
 
     // Tab again advances focus to the radio group.
-    bench.execute(vec![("tab2", BenchOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("second tab");
+    harness.execute(vec![("tab2", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("second tab");
     let verdict = capture(
-        &mut bench,
+        &mut harness,
         vec![
             check(FrameReduction::Coverage, top_edge(slider_top), SURFACE_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::Coverage, top_edge(radio_top), SURFACE_SRGB, PARTITION_TOLERANCE),
@@ -1418,20 +1429,20 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
+    let mut harness = build_bench();
 
-    let font_id = load_font(&mut bench);
-    let metrics = load_metrics(&mut bench, font_id);
-    load_panel(&mut bench, &wasm, font_id);
+    let font_id = load_font(&mut harness);
+    let metrics = load_metrics(&mut harness, font_id);
+    load_panel(&mut harness, &wasm, font_id);
     let panel = panel_address();
     // Warm up: spawn + prime the atlas, and give the field's own single-flight
     // metrics request the extra ticks it needs to round-trip and install before
     // the measured interactions.
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("prime", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(4)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("prime", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(4)),
         ])
         .expect("warm-up");
 
@@ -1441,13 +1452,13 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     let typed_text = "abécd";
 
     // Focus the field, type a value with a multibyte scalar, and rasterize it.
-    bench
+    harness
         .execute(vec![
-            ("focus", BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
-            ("focus_up", BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
-            ("type", BenchOp::send_mail(&panel, &TextInput { text: typed_text.to_owned() })),
-            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(2)),
+            ("focus", HarnessOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
+            ("focus_up", HarnessOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
+            ("type", HarnessOp::send_mail(&panel, &TextInput { text: typed_text.to_owned() })),
+            ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("focus + type");
 
@@ -1475,7 +1486,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
             .map(|region| check(FrameReduction::Coverage, region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE))
             .collect()
     };
-    let typed_cells = capture(&mut bench, cell_checks());
+    let typed_cells = capture(&mut harness, cell_checks());
     let typed_first = coverage(&typed_cells.results[0]);
     let typed_exclusion = coverage(&typed_cells.results[1]);
 
@@ -1483,17 +1494,17 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // Shift-extend two characters right to select "cd". If the click takes the
     // approximate path it starts after `c` and selects only `d`, so the first
     // expected cell and final committed value both fail.
-    bench
+    harness
         .execute(vec![
-            ("place", BenchOp::send_mail(&panel, &press(boundary_x, click_y))),
-            ("place_up", BenchOp::send_mail(&panel, &release(boundary_x, click_y))),
-            ("shift", BenchOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
-            ("extend1", BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
-            ("extend2", BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
+            ("place", HarnessOp::send_mail(&panel, &press(boundary_x, click_y))),
+            ("place_up", HarnessOp::send_mail(&panel, &release(boundary_x, click_y))),
+            ("shift", HarnessOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
+            ("extend1", HarnessOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
+            ("extend2", HarnessOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
         ])
         .expect("measured place + Shift-extend");
 
-    let selected_cells = capture(&mut bench, cell_checks());
+    let selected_cells = capture(&mut harness, cell_checks());
     let selected_first = coverage(&selected_cells.results[0]);
     let selected_exclusion_coverage = coverage(&selected_cells.results[1]);
     eprintln!(
@@ -1515,17 +1526,17 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // first, two-byte `ü`. The cursor-span band must fill only the first preedit
     // cell, while the whole two-cell preedit receives an underline at this
     // measured selection position.
-    bench
+    harness
         .execute(vec![
             (
                 "preedit",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     &panel,
                     &ImePreedit { text: "üx".to_owned(), cursor_begin: Some(0), cursor_end: Some(2) },
                 ),
             ),
-            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(2)),
+            ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("ime preedit");
 
@@ -1534,7 +1545,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     let underline_exclusion =
         rect(after_five_x + 1.0, underline_y, after_five_x + (after_four_x - boundary_x) - 1.0, underline_y + 2.0);
     let composition = capture(
-        &mut bench,
+        &mut harness,
         vec![
             check(FrameReduction::Coverage, selected_first_cell, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::Coverage, second_selected_cell, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
@@ -1563,11 +1574,11 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
 
     // Commit replacement text (clears the composition and replaces `cd`), then
     // measure the caret at the end of the non-ASCII result `abéZ`.
-    bench
+    harness
         .execute(vec![
-            ("commit_text", BenchOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
-            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(2)),
+            ("commit_text", HarnessOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
+            ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("commit replacement text");
 
@@ -1577,7 +1588,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     let final_caret_exclusion =
         rect(final_caret_x + 3.0, text_top + PAD, final_caret_x + 6.0, text_top + ROW_HEIGHT - PAD);
     let final_verdict = capture(
-        &mut bench,
+        &mut harness,
         vec![
             check(FrameReduction::Coverage, final_caret, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::Coverage, final_caret_exclusion, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
@@ -1595,9 +1606,9 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
          {caret_coverage:.3}, neighboring coverage was {caret_exclusion:.3}",
     );
 
-    bench.execute(vec![("commit", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
+    harness.execute(vec![("commit", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
@@ -1620,17 +1631,17 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
+    let mut harness = build_bench();
 
-    let font_id = load_font(&mut bench);
-    let metrics = load_metrics(&mut bench, font_id);
-    load_panel_with_children(&mut bench, &wasm, font_id, vec![text_area_child("notes", 2, font_id)]);
+    let font_id = load_font(&mut harness);
+    let metrics = load_metrics(&mut harness, font_id);
+    load_panel_with_children(&mut harness, &wasm, font_id, vec![text_area_child("notes", 2, font_id)]);
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            ("prime", BenchOp::send_mail(&panel, &Tick)),
-            ("settle", BenchOp::advance(4)),
+            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("prime", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle", HarnessOp::advance(4)),
         ])
         .expect("warm text area and measured font");
 
@@ -1642,21 +1653,21 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
 
     // Build five lines with the control's plain-Enter policy. The final caret
     // forces a two-row viewport to show only `last` and `tail`.
-    bench
+    harness
         .execute(vec![
-            ("focus", BenchOp::send_mail(&panel, &press(content_x, PANEL_Y + 10.0))),
-            ("focus_up", BenchOp::send_mail(&panel, &release(content_x, PANEL_Y + 10.0))),
-            ("line0", BenchOp::send_mail(&panel, &TextInput { text: "imx".to_owned() })),
-            ("enter0", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line1", BenchOp::send_mail(&panel, &TextInput { text: "é".to_owned() })),
-            ("enter1", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line2", BenchOp::send_mail(&panel, &TextInput { text: "short".to_owned() })),
-            ("enter2", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line3", BenchOp::send_mail(&panel, &TextInput { text: "last".to_owned() })),
-            ("enter3", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line4", BenchOp::send_mail(&panel, &TextInput { text: "tail".to_owned() })),
-            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
-            ("settle_glyphs", BenchOp::advance(2)),
+            ("focus", HarnessOp::send_mail(&panel, &press(content_x, PANEL_Y + 10.0))),
+            ("focus_up", HarnessOp::send_mail(&panel, &release(content_x, PANEL_Y + 10.0))),
+            ("line0", HarnessOp::send_mail(&panel, &TextInput { text: "imx".to_owned() })),
+            ("enter0", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line1", HarnessOp::send_mail(&panel, &TextInput { text: "é".to_owned() })),
+            ("enter1", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line2", HarnessOp::send_mail(&panel, &TextInput { text: "short".to_owned() })),
+            ("enter2", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line3", HarnessOp::send_mail(&panel, &TextInput { text: "last".to_owned() })),
+            ("enter3", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line4", HarnessOp::send_mail(&panel, &TextInput { text: "tail".to_owned() })),
+            ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle_glyphs", HarnessOp::advance(2)),
         ])
         .expect("type five text-area lines");
 
@@ -1664,14 +1675,14 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     // point back to the same measured x on `last`; Down and Up again exercise
     // both directions while leaving the same cross-newline selection active.
     let after_three_x = content_x + metrics.caret_x("tail", 3, size);
-    bench
+    harness
         .execute(vec![
-            ("place", BenchOp::send_mail(&panel, &press(after_three_x, PANEL_Y + row_height + 10.0))),
-            ("place_up", BenchOp::send_mail(&panel, &release(after_three_x, PANEL_Y + row_height + 10.0))),
-            ("shift", BenchOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
-            ("up", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
-            ("down", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
-            ("up_again", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("place", HarnessOp::send_mail(&panel, &press(after_three_x, PANEL_Y + row_height + 10.0))),
+            ("place_up", HarnessOp::send_mail(&panel, &release(after_three_x, PANEL_Y + row_height + 10.0))),
+            ("shift", HarnessOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
+            ("up", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("down", HarnessOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("up_again", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
         ])
         .expect("measured multiline selection");
 
@@ -1705,7 +1716,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         ),
     ];
     let selected = capture_guarded(
-        &mut bench,
+        &mut harness,
         "text-area-multiline-selection",
         "the selected final character of `last` and first three characters of `tail` fill two measured row bands",
         selection_checks,
@@ -1717,7 +1728,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     );
 
     {
-        let snapshot = bench.committed_overlay_snapshot();
+        let snapshot = harness.committed_overlay_snapshot();
         let solid = solid_for(&snapshot, &area_clip);
         assert_eq!(
             solid.quads.len(),
@@ -1764,17 +1775,17 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     // Replace the cross-newline selection visually with a non-ASCII preedit.
     // The displayed document now has one final line, so its measured cursor
     // span and underline occupy row zero of the retained whole-line viewport.
-    bench
+    harness
         .execute(vec![
             (
                 "preedit",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     &panel,
                     &ImePreedit { text: "üx".to_owned(), cursor_begin: Some(0), cursor_end: Some(2) },
                 ),
             ),
-            ("rasterize_preedit", BenchOp::send_mail(&panel, &Tick)),
-            ("settle_preedit", BenchOp::advance(2)),
+            ("rasterize_preedit", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle_preedit", HarnessOp::advance(2)),
         ])
         .expect("multiline IME preedit");
 
@@ -1802,7 +1813,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         ),
     ];
     let composed = capture_guarded(
-        &mut bench,
+        &mut harness,
         "text-area-multiline-preedit",
         "the non-collapsed IME cursor fills `ü` and the underline spans measured `üx`",
         composition_checks,
@@ -1814,7 +1825,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     );
 
     {
-        let snapshot = bench.committed_overlay_snapshot();
+        let snapshot = harness.committed_overlay_snapshot();
         let solid = solid_for(&snapshot, &area_clip);
         assert_eq!(
             solid.quads.len(),
@@ -1835,15 +1846,15 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
 
     // Committed input replaces the selected `t\ntai`; Ctrl+Enter emits the
     // value upward without inserting another newline.
-    bench
+    harness
         .execute(vec![
-            ("commit_preedit", BenchOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
-            ("ctrl", BenchOp::send_mail(&panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("commit_area", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("commit_preedit", HarnessOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
+            ("ctrl", HarnessOp::send_mail(&panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("commit_area", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
         ])
         .expect("commit multiline replacement");
 
-    let log = panel_log_messages(&mut bench);
+    let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|message| { message.contains("widget text committed") && message.contains("lasZl") }),
@@ -1860,32 +1871,32 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
+    let mut harness = build_bench();
 
-    boot_panel_with_children(&mut bench, &wasm, control_state_children());
+    boot_panel_with_children(&mut harness, &wasm, control_state_children());
 
     let panel = panel_address();
     let slider_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
     let hover_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
-    bench
+    harness
         .execute(vec![
             // Focus skips hidden + disabled and lands on the invalid slider.
-            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("focus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
             // Exercise sibling→sibling hover before settling on the button.
             (
                 "hover_slider",
-                BenchOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 }),
+                HarnessOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 }),
             ),
             (
                 "hover_button",
-                BenchOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 }),
+                HarnessOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 }),
             ),
-            ("capture", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+            ("capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("state snapshot");
 
-    assert_initial_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
-    assert_stationary_hover_survives_focus_traversal(&mut bench, &panel, hover_y);
+    assert_initial_control_snapshot(&harness.committed_overlay_snapshot(), slider_y, hover_y);
+    assert_stationary_hover_survives_focus_traversal(&mut harness, &panel, hover_y);
 
     // Moving to empty clears hover; runtime mail reveals the hidden slot and
     // changes the slider's validation role without changing either value.
@@ -1893,101 +1904,104 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         validation: WidgetValidation::Warning { message: "check value".to_owned() },
         ..WidgetControlState::default()
     };
-    bench
+    harness
         .execute(vec![
             (
                 "hover_empty",
-                BenchOp::send_mail(&panel, &MouseMove { x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseMove { x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 },
+                ),
             ),
             (
                 "show_hidden",
-                BenchOp::send_mail(child_address("hidden"), &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_mail(child_address("hidden"), &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("warn_value", BenchOp::send_mail(child_address("value"), &SetWidgetState { state: warning })),
-            ("capture_updated", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+            ("warn_value", HarnessOp::send_mail(child_address("value"), &SetWidgetState { state: warning })),
+            ("capture_updated", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("runtime state update snapshot");
 
-    assert_updated_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
+    assert_updated_control_snapshot(&harness.committed_overlay_snapshot(), slider_y, hover_y);
 }
 
-fn drive_toggle_and_segmented(bench: &mut SubstrateBench, panel: &str) {
+fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: &str) {
     let toggle_y = PANEL_Y + ROW_HEIGHT * 0.5;
     let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
     let segment_y = segment_top + ROW_HEIGHT * 0.5;
     let segment_width = PANEL_WIDTH / 3.0;
-    bench
+    harness
         .execute(vec![
-            ("toggle_press", BenchOp::send_mail(panel, &press(PANEL_X + 12.0, toggle_y))),
-            ("toggle_release", BenchOp::send_mail(panel, &release(PANEL_X + 12.0, toggle_y))),
-            ("space_press", BenchOp::send_mail(panel, &Key { code: KEY_SPACE })),
-            ("space_release", BenchOp::send_mail(panel, &KeyRelease { code: KEY_SPACE })),
-            ("enter_press", BenchOp::send_mail(panel, &Key { code: KEY_ENTER })),
-            ("enter_release", BenchOp::send_mail(panel, &KeyRelease { code: KEY_ENTER })),
+            ("toggle_press", HarnessOp::send_mail(panel, &press(PANEL_X + 12.0, toggle_y))),
+            ("toggle_release", HarnessOp::send_mail(panel, &release(PANEL_X + 12.0, toggle_y))),
+            ("space_press", HarnessOp::send_mail(panel, &Key { code: KEY_SPACE })),
+            ("space_release", HarnessOp::send_mail(panel, &KeyRelease { code: KEY_SPACE })),
+            ("enter_press", HarnessOp::send_mail(panel, &Key { code: KEY_ENTER })),
+            ("enter_release", HarnessOp::send_mail(panel, &KeyRelease { code: KEY_ENTER })),
         ])
         .expect("toggle pointer and keyboard activation");
     let middle_x = PANEL_X + segment_width * 1.5;
-    bench
+    harness
         .execute(vec![
-            ("segment_press", BenchOp::send_mail(panel, &press(middle_x, segment_y))),
-            ("segment_release", BenchOp::send_mail(panel, &release(middle_x, segment_y))),
-            ("segment_right", BenchOp::send_mail(panel, &Key { code: KEY_RIGHT })),
-            ("segment_left", BenchOp::send_mail(panel, &Key { code: KEY_LEFT })),
+            ("segment_press", HarnessOp::send_mail(panel, &press(middle_x, segment_y))),
+            ("segment_release", HarnessOp::send_mail(panel, &release(middle_x, segment_y))),
+            ("segment_right", HarnessOp::send_mail(panel, &Key { code: KEY_RIGHT })),
+            ("segment_left", HarnessOp::send_mail(panel, &Key { code: KEY_LEFT })),
         ])
         .expect("segmented pointer and arrow selection");
 }
 
-fn drive_numeric_lifecycle(bench: &mut SubstrateBench, panel: &str) {
+fn drive_numeric_lifecycle(harness: &mut SubstrateHarness, panel: &str) {
     let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0 + ROW_HEIGHT * 0.5;
-    bench
+    harness
         .execute(vec![
-            ("numeric_press", BenchOp::send_mail(panel, &press(PANEL_X + PAD + 4.0, numeric_y))),
-            ("numeric_release", BenchOp::send_mail(panel, &release(PANEL_X + PAD + 4.0, numeric_y))),
-            ("ctrl_on", BenchOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("select_all", BenchOp::send_mail(panel, &Key { code: KEY_A })),
-            ("ctrl_off", BenchOp::send_mail(panel, &Modifiers::default())),
-            ("type_numeric", BenchOp::send_mail(panel, &TextInput { text: "12.4".to_owned() })),
-            ("move_left", BenchOp::send_mail(panel, &Key { code: KEY_LEFT })),
-            ("backspace", BenchOp::send_mail(panel, &Key { code: KEY_BACKSPACE })),
-            ("replace_decimal", BenchOp::send_mail(panel, &TextInput { text: ".".to_owned() })),
-            ("commit_numeric", BenchOp::send_mail(panel, &Key { code: KEY_ENTER })),
-            ("step_up", BenchOp::send_mail(panel, &Key { code: KEY_UP })),
-            ("step_down", BenchOp::send_mail(panel, &Key { code: KEY_DOWN })),
-            ("clipboard_ctrl_on", BenchOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("clipboard_select", BenchOp::send_mail(panel, &Key { code: KEY_A })),
-            ("copy", BenchOp::send_mail(panel, &Key { code: KEY_C })),
+            ("numeric_press", HarnessOp::send_mail(panel, &press(PANEL_X + PAD + 4.0, numeric_y))),
+            ("numeric_release", HarnessOp::send_mail(panel, &release(PANEL_X + PAD + 4.0, numeric_y))),
+            ("ctrl_on", HarnessOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("select_all", HarnessOp::send_mail(panel, &Key { code: KEY_A })),
+            ("ctrl_off", HarnessOp::send_mail(panel, &Modifiers::default())),
+            ("type_numeric", HarnessOp::send_mail(panel, &TextInput { text: "12.4".to_owned() })),
+            ("move_left", HarnessOp::send_mail(panel, &Key { code: KEY_LEFT })),
+            ("backspace", HarnessOp::send_mail(panel, &Key { code: KEY_BACKSPACE })),
+            ("replace_decimal", HarnessOp::send_mail(panel, &TextInput { text: ".".to_owned() })),
+            ("commit_numeric", HarnessOp::send_mail(panel, &Key { code: KEY_ENTER })),
+            ("step_up", HarnessOp::send_mail(panel, &Key { code: KEY_UP })),
+            ("step_down", HarnessOp::send_mail(panel, &Key { code: KEY_DOWN })),
+            ("clipboard_ctrl_on", HarnessOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("clipboard_select", HarnessOp::send_mail(panel, &Key { code: KEY_A })),
+            ("copy", HarnessOp::send_mail(panel, &Key { code: KEY_C })),
         ])
         .expect("numeric typed, step, and copy lifecycle");
-    assert_eq!(clipboard_text(bench), "12.5", "Ctrl+C copies the selected canonical buffer");
-    bench
+    assert_eq!(clipboard_text(harness), "12.5", "Ctrl+C copies the selected canonical buffer");
+    harness
         .execute(vec![
-            ("cut", BenchOp::send_mail(panel, &Key { code: KEY_X })),
-            ("paste", BenchOp::send_mail(panel, &Key { code: KEY_V })),
-            ("clipboard_ctrl_off", BenchOp::send_mail(panel, &Modifiers::default())),
+            ("cut", HarnessOp::send_mail(panel, &Key { code: KEY_X })),
+            ("paste", HarnessOp::send_mail(panel, &Key { code: KEY_V })),
+            ("clipboard_ctrl_off", HarnessOp::send_mail(panel, &Modifiers::default())),
         ])
         .expect("numeric cut and paste lifecycle");
 }
 
-fn drive_blur_and_blocked_states(bench: &mut SubstrateBench, panel: &str) {
+fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: &str) {
     let segment_width = PANEL_WIDTH / 3.0;
     let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0 + ROW_HEIGHT * 0.5;
     let readonly_y = PANEL_Y + (ROW_HEIGHT + GAP) * 4.0 + ROW_HEIGHT * 0.5;
-    bench
+    harness
         .execute(vec![
-            ("invalid_ctrl_on", BenchOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("invalid_select", BenchOp::send_mail(panel, &Key { code: KEY_A })),
-            ("invalid_ctrl_off", BenchOp::send_mail(panel, &Modifiers::default())),
-            ("invalid_text", BenchOp::send_mail(panel, &TextInput { text: "-".to_owned() })),
-            ("blur_press", BenchOp::send_mail(panel, &press(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0))),
+            ("invalid_ctrl_on", HarnessOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("invalid_select", HarnessOp::send_mail(panel, &Key { code: KEY_A })),
+            ("invalid_ctrl_off", HarnessOp::send_mail(panel, &Modifiers::default())),
+            ("invalid_text", HarnessOp::send_mail(panel, &TextInput { text: "-".to_owned() })),
+            ("blur_press", HarnessOp::send_mail(panel, &press(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0))),
             (
                 "blur_release",
-                BenchOp::send_mail(panel, &release(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
+                HarnessOp::send_mail(panel, &release(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
             ),
-            ("disabled_press", BenchOp::send_mail(panel, &press(PANEL_X + 12.0, disabled_y))),
-            ("disabled_release", BenchOp::send_mail(panel, &release(PANEL_X + 12.0, disabled_y))),
-            ("readonly_press", BenchOp::send_mail(panel, &press(PANEL_X + segment_width * 2.5, readonly_y))),
-            ("readonly_release", BenchOp::send_mail(panel, &release(PANEL_X + segment_width * 2.5, readonly_y))),
-            ("readonly_right", BenchOp::send_mail(panel, &Key { code: KEY_RIGHT })),
+            ("disabled_press", HarnessOp::send_mail(panel, &press(PANEL_X + 12.0, disabled_y))),
+            ("disabled_release", HarnessOp::send_mail(panel, &release(PANEL_X + 12.0, disabled_y))),
+            ("readonly_press", HarnessOp::send_mail(panel, &press(PANEL_X + segment_width * 2.5, readonly_y))),
+            ("readonly_release", HarnessOp::send_mail(panel, &release(PANEL_X + segment_width * 2.5, readonly_y))),
+            ("readonly_right", HarnessOp::send_mail(panel, &Key { code: KEY_RIGHT })),
         ])
         .expect("blur and blocked state mutations");
 }
@@ -2052,7 +2066,7 @@ fn assert_advanced_control_logs(logs: &[String]) {
     );
 }
 
-fn assert_advanced_control_raster(bench: &mut SubstrateBench) {
+fn assert_advanced_control_raster(harness: &mut SubstrateHarness) {
     let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
     let segment_width = PANEL_WIDTH / 3.0;
     let numeric_top = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
@@ -2070,7 +2084,7 @@ fn assert_advanced_control_raster(bench: &mut SubstrateBench) {
     );
     let numeric_text = rect(PANEL_X + PAD, numeric_top + 2.0, PANEL_X + 70.0, numeric_top + ROW_HEIGHT - 2.0);
     let verdict = capture(
-        bench,
+        harness,
         vec![
             check(FrameReduction::Coverage, selected_band, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::Coverage, unselected_band, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
@@ -2086,7 +2100,7 @@ fn assert_advanced_control_raster(bench: &mut SubstrateBench) {
     );
     assert!(bounding_box(&verdict.results[2]).is_some(), "canonical numeric text must remain raster-visible");
 
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     assert_advanced_control_snapshot(&snapshot);
     let numeric_clip = row_clip(numeric_top);
     let numeric_glyphs: usize = snapshot
@@ -2106,15 +2120,15 @@ fn toggle_segmented_and_numeric_complete_the_real_panel_contract() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel_with_children(&mut bench, &wasm, advanced_control_children());
+    let mut harness = build_bench();
+    boot_panel_with_children(&mut harness, &wasm, advanced_control_children());
 
     let panel = panel_address();
-    drive_toggle_and_segmented(&mut bench, &panel);
-    drive_numeric_lifecycle(&mut bench, &panel);
-    drive_blur_and_blocked_states(&mut bench, &panel);
-    assert_advanced_control_logs(&panel_log_messages(&mut bench));
-    assert_advanced_control_raster(&mut bench);
+    drive_toggle_and_segmented(&mut harness, &panel);
+    drive_numeric_lifecycle(&mut harness, &panel);
+    drive_blur_and_blocked_states(&mut harness, &panel);
+    assert_advanced_control_logs(&panel_log_messages(&mut harness));
+    assert_advanced_control_raster(&mut harness);
 }
 
 #[test]
@@ -2123,14 +2137,14 @@ fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel(&mut bench, &wasm);
+    let mut harness = build_bench();
+    boot_panel(&mut harness, &wasm);
 
-    bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
+    harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("capture resident clipped glyphs");
     let expected = ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT };
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     let label_batches: Vec<_> = snapshot
         .iter()
         .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected))
@@ -2189,22 +2203,22 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
         inner,
     );
 
-    let mut bench = build_bench();
-    let font_id = load_font(&mut bench);
-    load_panel_with_children(&mut bench, &wasm, font_id, vec![outer]);
-    warm_panel(&mut bench);
+    let mut harness = build_bench();
+    let font_id = load_font(&mut harness);
+    load_panel_with_children(&mut harness, &wasm, font_id, vec![outer]);
+    warm_panel(&mut harness);
     let panel = panel_address();
-    bench
+    harness
         .execute(vec![
-            ("relay_theme", BenchOp::send_mail(&panel, &SetTheme { theme: Theme { font_id, ..Theme::DEFAULT } })),
-            ("prime_relayed_glyph", BenchOp::send_mail(&panel, &Tick)),
-            ("settle_relayed_glyph", BenchOp::advance(2)),
-            ("capture_relayed_glyph", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+            ("relay_theme", HarnessOp::send_mail(&panel, &SetTheme { theme: Theme { font_id, ..Theme::DEFAULT } })),
+            ("prime_relayed_glyph", HarnessOp::send_mail(&panel, &Tick)),
+            ("settle_relayed_glyph", HarnessOp::advance(2)),
+            ("capture_relayed_glyph", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("relay theme through both scroll actors and capture the nested label");
 
     let expected = ClipRect { x: PANEL_X, y: PANEL_Y, width: 80.0, height: ROW_HEIGHT };
-    let snapshot = bench.committed_overlay_snapshot();
+    let snapshot = harness.committed_overlay_snapshot();
     let glyph_batches: Vec<_> = snapshot
         .iter()
         .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected))
@@ -2269,24 +2283,27 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     );
     let button = button_child("captor", "Hold", WidgetControlState::default());
 
-    let mut bench = build_bench();
-    boot_panel_with_children(&mut bench, &wasm, vec![outer, button, side]);
+    let mut harness = build_bench();
+    boot_panel_with_children(&mut harness, &wasm, vec![outer, button, side]);
     let panel = panel_address();
 
     // The button row is y=46..70. Hold its left-button capture, then wheel at
     // y=20 over the outer viewport. Wheel ownership must use its independent
     // hit table and reach inner-first despite the unrelated capture.
-    bench
+    harness
         .execute(vec![
-            ("capture_button", BenchOp::send_mail(&panel, &press(20.0, 55.0))),
-            ("inner_only", BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 })),
+            ("capture_button", HarnessOp::send_mail(&panel, &press(20.0, 55.0))),
+            (
+                "inner_only",
+                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 }),
+            ),
             (
                 "split_inner_outer",
-                BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 }),
             ),
             (
                 "terminal_residual",
-                BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 }),
             ),
         ])
         .expect("nested wheel routing while button capture is held");
@@ -2297,7 +2314,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     let inner_address = child_address("inner");
     let outer_id = mailbox_id_from_path(&outer_address).0;
     let inner_id = mailbox_id_from_path(&inner_address).0;
-    let first_log = panel_log_messages(&mut bench);
+    let first_log = panel_log_messages(&mut harness);
     let outcomes: Vec<_> = first_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
     assert_eq!(outcomes.len(), 5, "inner-only, split, and pinned requests emit 1 + 2 + 2 typed outcomes: {outcomes:?}");
     assert_eq!(log_u64(outcomes[0], "container"), Some(inner_id));
@@ -2329,8 +2346,8 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     // At the pinned y offsets, the yellow third stripe lands at framebuffer
     // y=16 and is clipped to the outer 40×30 viewport at (10,10). Score the
     // actual captured pixels on all four sides, not just retained geometry.
-    let captured = bench
-        .execute(vec![("pinned_pixels", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
+    let captured = harness
+        .execute(vec![("pinned_pixels", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("capture pinned nested scroll");
     let image = decode_png(captured.captured("pinned_pixels").expect("pinned capture bytes"))
         .expect("decode pinned nested scroll capture");
@@ -2348,21 +2365,24 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     // Reverse through both bounds, then exercise x independently and move the
     // wheel cursor to a sibling viewport. Exact typed outcomes prove residuals
     // are already in content-space and never negated a second time.
-    bench
+    harness
         .execute(vec![
-            ("reverse_both", BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 })),
+            (
+                "reverse_both",
+                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 }),
+            ),
             (
                 "horizontal_independent",
-                BenchOp::send_mail(&panel, &MouseWheel { delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 }),
             ),
             (
                 "sibling_viewport",
-                BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 }),
+                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 }),
             ),
         ])
         .expect("reverse, independent axis, and sibling scroll routing");
 
-    let final_log = panel_log_messages(&mut bench);
+    let final_log = panel_log_messages(&mut harness);
     let final_outcomes: Vec<_> = final_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
     assert_eq!(final_outcomes.len(), 10, "all outcome events remain observable");
     assert_eq!(log_u64(final_outcomes[5], "container"), Some(inner_id));
@@ -2391,7 +2411,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
 
 /// A real panel carrying 200 items must keep the committed overlay bounded to
 /// five fixed rows while paging, tail clamping, shared state overlays, and
-/// hidden absence all remain observable through the current `SubstrateBench` APIs.
+/// hidden absence all remain observable through the current `SubstrateHarness` APIs.
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive bounded-window/state/render acceptance run
 fn virtual_list_bounds_realization_and_renders_selection_state() {
@@ -2399,13 +2419,13 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    boot_panel_with_children(&mut bench, &wasm, vec![virtual_list_child("inventory", WidgetControlState::default())]);
+    let mut harness = build_bench();
+    boot_panel_with_children(&mut harness, &wasm, vec![virtual_list_child("inventory", WidgetControlState::default())]);
 
-    bench
-        .execute(vec![("initial", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
+    harness
+        .execute(vec![("initial", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("initial virtual-list capture");
-    let initial = bench.committed_overlay_snapshot();
+    let initial = harness.committed_overlay_snapshot();
     assert_virtual_list_rows(&initial, 0, Theme::DEFAULT.accent, 0);
     assert_five_virtual_list_glyph_rows(&initial);
 
@@ -2415,15 +2435,15 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         validation: WidgetValidation::Warning { message: "check selection".to_owned() },
         ..WidgetControlState::default()
     };
-    bench
+    harness
         .execute(vec![
-            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("focus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("page", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
             (
                 "hover_selected",
-                BenchOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 }),
+                HarnessOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 }),
             ),
-            ("warn", BenchOp::send_mail(&list, &SetWidgetState { state: warning })),
+            ("warn", HarnessOp::send_mail(&list, &SetWidgetState { state: warning })),
         ])
         .expect("page and shared-state session");
 
@@ -2436,7 +2456,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     let outside_below =
         rect(PANEL_X, PANEL_Y + ROW_HEIGHT * 5.0 + 2.0, PANEL_X + PANEL_WIDTH, PANEL_Y + ROW_HEIGHT * 5.0 + 12.0);
     let paged_verdict = capture(
-        &mut bench,
+        &mut harness,
         vec![
             check(FrameReduction::Coverage, selected_interior, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
             check(FrameReduction::Coverage, outside_below, CLEAR_SRGB, PARTITION_TOLERANCE),
@@ -2451,7 +2471,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         "no virtual-list row may raster below the fixed five-row viewport",
     );
 
-    let paged = bench.committed_overlay_snapshot();
+    let paged = harness.committed_overlay_snapshot();
     assert_virtual_list_rows(&paged, 4, Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover), 8);
     assert_five_virtual_list_glyph_rows(&paged);
     let paged_solids = solid_for(&paged, &virtual_list_clip());
@@ -2465,22 +2485,22 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     );
 
     for _ in 0..45 {
-        bench
-            .execute(vec![("tail_page", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN }))])
+        harness
+            .execute(vec![("tail_page", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN }))])
             .expect("page toward virtual-list tail");
     }
-    let selection_events_before_noop = panel_log_messages(&mut bench)
+    let selection_events_before_noop = panel_log_messages(&mut harness)
         .iter()
         .filter(|message| message.contains("widget virtual list selected"))
         .count();
-    bench
+    harness
         .execute(vec![
-            ("tail_noop_one", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
-            ("tail_noop_two", BenchOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
-            ("tail_capture", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+            ("tail_noop_one", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("tail_noop_two", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("tail_capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("tail clamp and capture");
-    let tail_log = panel_log_messages(&mut bench);
+    let tail_log = panel_log_messages(&mut harness);
     let selection_events_after_noop =
         tail_log.iter().filter(|message| message.contains("widget virtual list selected")).count();
     assert_eq!(
@@ -2496,16 +2516,16 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         "paging must reach and attribute the final item; log was:\n{}",
         tail_log.join("\n"),
     );
-    let tail = bench.committed_overlay_snapshot();
+    let tail = harness.committed_overlay_snapshot();
     assert_virtual_list_rows(&tail, 4, Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover), 8);
     assert_five_virtual_list_glyph_rows(&tail);
 
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
-    bench
-        .execute(vec![("hide", BenchOp::send_mail(&list, &SetWidgetState { state: hidden }))])
+    harness
+        .execute(vec![("hide", HarnessOp::send_mail(&list, &SetWidgetState { state: hidden }))])
         .expect("hide virtual list");
     let hidden_verdict = capture(
-        &mut bench,
+        &mut harness,
         vec![check(
             FrameReduction::Coverage,
             rect(PANEL_X, PANEL_Y, PANEL_X + PANEL_WIDTH, PANEL_Y + ROW_HEIGHT * 5.0),
@@ -2517,7 +2537,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         coverage(&hidden_verdict.results[0]) < 0.02,
         "hidden collect should leave only the panel's surface backdrop",
     );
-    let hidden_snapshot = bench.committed_overlay_snapshot();
+    let hidden_snapshot = harness.committed_overlay_snapshot();
     let clip = virtual_list_clip();
     assert!(
         hidden_snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&clip)),

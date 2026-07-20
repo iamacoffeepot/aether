@@ -67,9 +67,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_substrate::testing` fixture, enabled by the substrate
 # `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The player-gateway acceptance test boots the in-process bench harness
+# The player-gateway acceptance test boots the in-process harness harness
 # with the component host + tcp + active gateway composed.
-aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 # The acceptance test drives kit's TurnSim: its intent/fact kinds +
 # `SimConfig` come from the host rlib, and the sim wasm is loaded by stem
 # (`aether_kit`, built by `cargo xtask dist`).

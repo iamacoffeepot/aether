@@ -1,6 +1,6 @@
 //! Console render + activation acceptance tests.
 //!
-//! These tests load the real `aether.kit.console` actor into a `SubstrateBench`,
+//! These tests load the real `aether.kit.console` actor into a `SubstrateHarness`,
 //! drive its typed input path, and assert rendered output through frame
 //! reductions. The desktop driver has a unit tripwire for the physical
 //! `Backquote` mapping; this suite proves the engine key code actually opens
@@ -14,13 +14,15 @@
 // "skipping: ..." alongside `test ... ok`.
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
 use aether_fs::NamespaceRoots;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
@@ -31,8 +33,6 @@ use aether_kit::{
     ConsoleCommandOutput, ConsoleConfig, EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec,
 };
 use aether_render::RenderCapability;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::{init_save_sandbox, require_runtime};
 use aether_text::TextCapability;
 
 const WINDOW_WIDTH: u32 = 320;
@@ -48,11 +48,11 @@ fn assets_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
-fn build_bench() -> SubstrateBench {
+fn build_bench() -> SubstrateHarness {
     build_bench_with_assets(assets_dir(), "console-render-interaction")
 }
 
-fn build_bench_without_assets_root() -> SubstrateBench {
+fn build_bench_without_assets_root() -> SubstrateHarness {
     let sandbox = init_save_sandbox("console-render-interaction-no-assets");
     let assets = sandbox.join("empty-assets");
     fs::create_dir_all(&assets).expect("create empty assets root");
@@ -63,10 +63,10 @@ fn build_bench_without_assets_root() -> SubstrateBench {
 /// overlay text through `aether.text` (fonts fetched via `aether.fs`, which
 /// composes from the namespace roots); one scenario drives the toggle key
 /// through the real `aether.input` fan-out.
-fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateBench {
+fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateHarness {
     let sandbox = init_save_sandbox(sandbox_name);
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets, config: sandbox.to_path_buf() };
-    SubstrateBench::builder()
+    SubstrateHarness::builder()
         .with_render()
         .with_component_host()
         .with_actor::<InputCapability>(InputConfig::default())
@@ -86,15 +86,15 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_console(bench: &mut SubstrateBench, wasm: &[u8]) -> MailboxId {
-    load_console_with_config(bench, wasm, &ConsoleConfig::default())
+fn load_console(harness: &mut SubstrateHarness, wasm: &[u8]) -> MailboxId {
+    load_console_with_config(harness, wasm, &ConsoleConfig::default())
 }
 
-fn load_console_with_config(bench: &mut SubstrateBench, wasm: &[u8], config: &ConsoleConfig) -> MailboxId {
-    let loaded = bench
+fn load_console_with_config(harness: &mut SubstrateHarness, wasm: &[u8], config: &ConsoleConfig) -> MailboxId {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -114,7 +114,7 @@ fn load_console_with_config(bench: &mut SubstrateBench, wasm: &[u8], config: &Co
     }
 }
 
-fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], target: MailboxId) {
+fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], target: MailboxId) {
     let config = EditorConfig {
         regions: vec![RegionSpec {
             name: "console".to_owned(),
@@ -131,10 +131,10 @@ fn load_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], target: MailboxId)
             }),
         }],
     };
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load-editor",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -155,19 +155,24 @@ fn top_band() -> FrameRect {
     FrameRect { min_x: 0, min_y: 0, max_x: WINDOW_WIDTH - 1, max_y: 96 }
 }
 
-fn top_band_coverage(bench: &mut SubstrateBench, label: &'static str) -> f32 {
-    coverage_in_region(bench, label, top_band(), CLEAR_SRGB)
+fn top_band_coverage(harness: &mut SubstrateHarness, label: &'static str) -> f32 {
+    coverage_in_region(harness, label, top_band(), CLEAR_SRGB)
 }
 
 fn history_text_band() -> FrameRect {
     FrameRect { min_x: 8, min_y: 20, max_x: WINDOW_WIDTH - 8, max_y: 72 }
 }
 
-fn coverage_in_region(bench: &mut SubstrateBench, label: &'static str, region: FrameRect, background: [u8; 3]) -> f32 {
-    let captured = bench
+fn coverage_in_region(
+    harness: &mut SubstrateHarness,
+    label: &'static str,
+    region: FrameRect,
+    background: [u8; 3],
+) -> f32 {
+    let captured = harness
         .execute(vec![(
             label,
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     mails: vec![envelope(&console_address(), &Tick)],
@@ -196,11 +201,11 @@ fn coverage_in_region(bench: &mut SubstrateBench, label: &'static str, region: F
     }
 }
 
-fn history_text_differs_from_panel(bench: &mut SubstrateBench, label: &'static str) -> bool {
-    let captured = bench
+fn history_text_differs_from_panel(harness: &mut SubstrateHarness, label: &'static str) -> bool {
+    let captured = harness
         .execute(vec![(
             label,
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     mails: vec![envelope(&console_address(), &Tick)],
@@ -235,24 +240,24 @@ fn backquote_key_opens_console_overlay() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
-    load_console(&mut bench, &wasm);
+    let mut harness = build_bench();
+    load_console(&mut harness, &wasm);
 
-    bench
+    harness
         .execute(vec![(
             "size",
-            BenchOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            HarnessOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
         )])
         .expect("window size");
 
-    let closed = top_band_coverage(&mut bench, "closed");
+    let closed = top_band_coverage(&mut harness, "closed");
     assert!(closed < 0.01, "closed console should leave the top band at clear color; coverage={closed:.3}");
 
-    bench
-        .execute(vec![("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE }))])
+    harness
+        .execute(vec![("toggle", HarnessOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE }))])
         .expect("toggle key");
 
-    let open = top_band_coverage(&mut bench, "open");
+    let open = top_band_coverage(&mut harness, "open");
     assert!(open > 0.90, "backquote should open the console and cover the top band; coverage={open:.3}");
 }
 
@@ -262,27 +267,27 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench();
+    let mut harness = build_bench();
     let console =
-        load_console_with_config(&mut bench, &wasm, &ConsoleConfig { owns_input: false, ..ConsoleConfig::default() });
+        load_console_with_config(&mut harness, &wasm, &ConsoleConfig { owns_input: false, ..ConsoleConfig::default() });
 
-    bench
+    harness
         .execute(vec![
             (
                 "size-direct-fanout",
-                BenchOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
             ),
-            ("unrouted-toggle", BenchOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
+            ("unrouted-toggle", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
         ])
         .expect("direct fanout before editor shell");
-    let closed = top_band_coverage(&mut bench, "owns-input-disabled");
+    let closed = top_band_coverage(&mut harness, "owns-input-disabled");
     assert!(closed < 0.01, "console must not self-subscribe to interactive input; coverage={closed:.3}");
 
-    load_editor_shell(&mut bench, &wasm, console);
-    bench
-        .execute(vec![("routed-toggle", BenchOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE }))])
+    load_editor_shell(&mut harness, &wasm, console);
+    harness
+        .execute(vec![("routed-toggle", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE }))])
         .expect("toggle through editor shell");
-    let open = top_band_coverage(&mut bench, "editor-routed");
+    let open = top_band_coverage(&mut harness, "editor-routed");
     assert!(open > 0.90, "editor shell should forward backquote exactly once; coverage={open:.3}");
 }
 
@@ -292,24 +297,27 @@ fn markdown_command_output_renders_into_history_band() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = build_bench_without_assets_root();
-    load_console(&mut bench, &wasm);
+    let mut harness = build_bench_without_assets_root();
+    load_console(&mut harness, &wasm);
 
-    bench
+    harness
         .execute(vec![
-            ("size", BenchOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
-            ("settle", BenchOp::advance(8)),
-            ("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
+            (
+                "size",
+                HarnessOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            ),
+            ("settle", HarnessOp::advance(8)),
+            ("toggle", HarnessOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
         ])
         .expect("open console");
 
-    let empty = history_text_differs_from_panel(&mut bench, "empty-history");
+    let empty = history_text_differs_from_panel(&mut harness, "empty-history");
     assert!(!empty, "empty history band should match the panel background");
 
-    bench
+    harness
         .execute(vec![(
             "markdown-output",
-            BenchOp::send_mail(
+            HarnessOp::send_mail(
                 console_address(),
                 &ConsoleCommandOutput {
                     command: String::from("diagnostics"),
@@ -320,7 +328,7 @@ fn markdown_command_output_renders_into_history_band() {
         )])
         .expect("send markdown output");
 
-    let rendered = history_text_differs_from_panel(&mut bench, "rendered-history");
+    let rendered = history_text_differs_from_panel(&mut harness, "rendered-history");
     assert!(rendered, "markdown output should add visible text/background pixels to the history band");
 }
 
@@ -335,17 +343,20 @@ fn configured_font_override_renders_into_history_band() {
         font_path: String::from("fonts/RobotoMono.ttf"),
         ..ConsoleConfig::default()
     };
-    let mut bench = build_bench();
-    load_console_with_config(&mut bench, &wasm, &config);
+    let mut harness = build_bench();
+    load_console_with_config(&mut harness, &wasm, &config);
 
-    bench
+    harness
         .execute(vec![
-            ("size", BenchOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
-            ("settle", BenchOp::advance(8)),
-            ("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
+            (
+                "size",
+                HarnessOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            ),
+            ("settle", HarnessOp::advance(8)),
+            ("toggle", HarnessOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
             (
                 "output",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     console_address(),
                     &ConsoleCommandOutput {
                         command: String::from("override"),
@@ -357,6 +368,6 @@ fn configured_font_override_renders_into_history_band() {
         ])
         .expect("open console with configured font");
 
-    let rendered = history_text_differs_from_panel(&mut bench, "override-rendered-history");
+    let rendered = history_text_differs_from_panel(&mut harness, "override-rendered-history");
     assert!(rendered, "configured font override should render visible text into the history band");
 }

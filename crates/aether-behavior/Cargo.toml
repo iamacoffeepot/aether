@@ -58,10 +58,10 @@ tracing = { workspace = true, default-features = false, optional = true }
 # / manifest fixtures). Behavior-script fixtures compiled from Rust are
 # #2688's; these are tiny WAT modules parsed inline, no build wiring.
 wat = "1"
-# The behavior-host end-to-end gate (issue 2688) boots the in-process bench
+# The behavior-host end-to-end gate (issue 2688) boots the in-process harness
 # harness with the component host composed and drives the panel/host/slider
 # cluster through `execute`.
-aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 # The gate builds the panel/slider/behavior-host configs from kit's widget
 # vocabulary and loads the `behavior`-feature kit wasm by stem
 # (`aether_kit_behavior`, built by `cargo xtask dist`).

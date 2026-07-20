@@ -1,4 +1,4 @@
-//! `SubstrateBench` actor-log reader proof (issue 1856): load the `probe` fixture,
+//! `SubstrateHarness` actor-log reader proof (issue 1856): load the `probe` fixture,
 //! advance one tick to fire its first-tick `tracing::info!`, tail its per-actor
 //! `ActorLogRing` (ADR-0081) for the `typed_send_alive` info entry, then walk
 //! the `since` cursor to confirm it does not re-yield the seen entry.
@@ -14,9 +14,9 @@ mod tests {
     use std::time::Duration;
 
     use aether_actor::Addressable;
+    use aether_harness_substrate::test_helpers::require_wasm;
+    use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
-    use aether_substrate_bench::test_helpers::require_wasm;
-    use aether_substrate_bench::{BenchOp, SubstrateBench};
 
     const PROBE_NAME: &str = "probe";
 
@@ -35,22 +35,22 @@ mod tests {
     const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
     /// Load `probe`, advance one tick, poll its lineage address with
-    /// `SubstrateBench::log_tail` until the `typed_send_alive` info entry appears,
+    /// `SubstrateHarness::log_tail` until the `typed_send_alive` info entry appears,
     /// then re-query past the returned cursor and assert it is not
     /// re-yielded — the in-process counterpart to
     /// `fleetbench_actor_logs_surface_the_probe_first_tick_entry`.
     #[test]
-    fn substrate_bench_actor_logs_surface_the_probe_first_tick_entry() {
+    fn substrate_harness_actor_logs_surface_the_probe_first_tick_entry() {
         let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
             return;
         };
-        let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+        let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
-        let loaded = bench
+        let loaded = harness
             .execute(vec![(
                 "load",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     "aether.component",
                     &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
                 ),
@@ -61,13 +61,13 @@ mod tests {
             LoadResult::Err { error } => panic!("load_component: {error}"),
         }
 
-        bench.execute(vec![("tick", BenchOp::advance(1))]).expect("advance one tick");
+        harness.execute(vec![("tick", HarnessOp::advance(1))]).expect("advance one tick");
 
         let addr = probe_address();
         let mut last_reply = None;
         let mut found = None;
         for _ in 0..POLL_ATTEMPTS {
-            let reply = bench.log_tail(&addr, None, None);
+            let reply = harness.log_tail(&addr, None, None);
             if let LogTailResult::Ok { ref entries, next_since, .. } = reply
                 && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
@@ -89,7 +89,7 @@ mod tests {
 
         // Walk the cursor: a re-query past `next_since` must not re-yield
         // the entry we already consumed.
-        match bench.log_tail(&addr, Some(next_since), None) {
+        match harness.log_tail(&addr, Some(next_since), None) {
             LogTailResult::Ok { entries, .. } => assert!(
                 entries.iter().all(|e| e.sequence != entry.sequence),
                 "the `since` cursor should not re-yield the already-seen entry \

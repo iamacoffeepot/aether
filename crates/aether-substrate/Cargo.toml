@@ -6,7 +6,7 @@ license.workspace = true
 
 # ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
 # manifest, registry, control-plane dispatch, hub client) for the
-# substrate. Powers every chassis (desktop, headless, hub, substrate-bench)
+# substrate. Powers every chassis (desktop, headless, hub, substrate-harness)
 # from `aether-substrate-bundle`. Winit + pollster stay bundle-side;
 # wgpu + png are gated behind the optional `render` feature so
 # chassis that don't render (headless, hub) skip the wgpu/png
@@ -116,16 +116,16 @@ bytemuck = { workspace = true, features = ["derive"] }
 # (push / open-append-seal / release / reclaim) checked against a shadow
 # model after every op. Lives in `mod heavy`. Dev-only.
 proptest.workspace = true
-# iamacoffeepot/aether#3770: the substrate-owned bench tests (cap_registry,
-# cost_table, substrate_bench_logs) rehomed here from
-# aether-substrate-bundle. They boot the in-process `SubstrateBench`
-# harness (issue #3765) — a dev-dep cycle (the bench depends on
+# iamacoffeepot/aether#3770: the substrate-owned harness tests (cap_registry,
+# cost_table, substrate_harness_logs) rehomed here from
+# aether-substrate-bundle. They boot the in-process `SubstrateHarness`
+# harness (issue #3765) — a dev-dep cycle (the harness depends on
 # aether-substrate), which cargo allows; aether-kit's bundle dev-dep was
 # the standing precedent.
-aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 # iamacoffeepot/aether#3781: the fleet actor-log tail test
 # (`fleetbench_logs`, ActorLogRing tail + since cursor over RPC) rehomed
-# here next to the SubstrateBench-side log test — same ring, both
+# here next to the SubstrateHarness-side log test — same ring, both
 # transports. Drives the real hub → RPC → forked-headless stack; another
 # permitted test-target dev-dep cycle back through the bundle.
 aether-fleet-bench = { path = "../aether-fleet-bench" }

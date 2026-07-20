@@ -1,20 +1,20 @@
 [package]
-name = "aether-substrate-bench"
+name = "aether-harness-substrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `SubstrateBench` — the in-process bench harness (ADR-0067, issue #3765).
-# Boots a substrate-bench chassis (basics only: trace dispatch, the bench
+# `SubstrateHarness` — the in-process harness harness (ADR-0067, issue #3765).
+# Boots a substrate-harness chassis (basics only: trace dispatch, the harness
 # cap, lifecycle, fail-fast headless window, the observer mailbox) over a
 # `RecordingBackend` loopback; each test composes the caps its scenario
 # needs via the builder (issue #3764). Render/GPU capture support is the
-# sibling `aether-substrate-bench-capture` crate behind the
+# sibling `aether-harness-substrate-capture` crate behind the
 # `FrameHook`/`RenderExt` seam, so a non-visual consumer's dependency
 # closure never carries aether-render or wgpu.
 
 # The `runtime` feature exists solely to drive the `#[actor]` split
-# path's hardcoded `feature = "runtime"` gate on the bench cap pair
+# path's hardcoded `feature = "runtime"` gate on the harness cap pair
 # (mirrors aether-substrate-bundle); the harness itself is
 # unconditionally runtime-shaped.
 [features]

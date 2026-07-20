@@ -65,9 +65,9 @@ inventory = { workspace = true }
 # iamacoffeepot/aether#3769: the component scenario tests (load / replace /
 # drop lifecycle, module boot, inline children, typed config, guest ctx
 # surface) rehomed here from aether-substrate-bundle. They boot the
-# in-process `SubstrateBench` harness (issue #3765) with
+# in-process `SubstrateHarness` harness (issue #3765) with
 # `.with_component_host()` — non-visual, so no capture-crate edge.
-aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 # iamacoffeepot/aether#3776: the component fleet tests (load / replace /
 # describe over the wire, the hub component store, and replace/drop reply
 # routing) rehomed here from aether-substrate-bundle. They drive the real

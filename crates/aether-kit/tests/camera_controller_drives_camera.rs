@@ -13,7 +13,7 @@
 //! the released frame matches the pan frame (the zero-mail-idle invariant, end
 //! to end). The controller's per-tick integration math is pinned by its own
 //! unit tests; this is the composition-and-motion proof the harness split
-//! routes to `SubstrateBench`.
+//! routes to `SubstrateHarness`.
 //!
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
@@ -23,19 +23,19 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
 use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowSize};
 use aether_kit::SetChunk;
 use aether_kit::camera::controller::ControllerConfig;
 use aether_kit::world::Material;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 
 /// Capture surface — a 4:3 frame the camera's aspect matches once the
 /// `WindowSize` below lands.
@@ -66,11 +66,11 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
 /// Load one `aether_kit` export under `name` with optional init-config bytes,
 /// blocking on `LoadResult` so the component is instantiated and subscribed
 /// before the next op.
-fn load_kit_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) {
-    let loaded = bench
+fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -124,10 +124,10 @@ fn split_chunk() -> SetChunk {
 /// projection: the camera's `Render` publishes its (controller-driven)
 /// `view_proj`, the world-view's `Render` replays the painted ground under it,
 /// both into the accumulator right before the GPU readback.
-fn capture_scene(bench: &mut SubstrateBench, camera: &str, world: &str, label: &'static str) -> Vec<u8> {
+fn capture_scene(harness: &mut SubstrateHarness, camera: &str, world: &str, label: &'static str) -> Vec<u8> {
     let pre = vec![envelope(camera, &Render), envelope(world, &Render)];
     let captured =
-        bench.execute(vec![(label, BenchOp::capture_with_mails(pre, Vec::new()))]).expect("capture-with-mails");
+        harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, Vec::new()))]).expect("capture-with-mails");
     captured.captured(label).expect("capture step ran").to_vec()
 }
 
@@ -148,7 +148,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     // Composition: GPU captures + kit wasm loads; every Key / WindowSize is
     // mailed straight to a component mailbox, so no input fan-out cap.
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
@@ -161,48 +161,51 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     let camera = component_address("aether.kit.camera");
     let controller = component_address("controller");
 
-    load_kit_export(&mut bench, &wasm, "aether.kit.world", "world", Vec::new());
-    load_kit_export(&mut bench, &wasm, "aether.kit.camera", "aether.kit.camera", Vec::new());
+    load_kit_export(&mut harness, &wasm, "aether.kit.world", "world", Vec::new());
+    load_kit_export(&mut harness, &wasm, "aether.kit.camera", "aether.kit.camera", Vec::new());
     // Default config drives the camera's boot `"main"` orbit camera — the
     // documented baseline. Loaded last so the camera instance exists when the
     // controller's `wire()` seed mail arrives.
     let config = ControllerConfig::default().encode_into_bytes();
-    load_kit_export(&mut bench, &wasm, "aether.kit.camera-controller", "controller", config);
+    load_kit_export(&mut harness, &wasm, "aether.kit.camera-controller", "controller", config);
 
     // Paint the split chunk and feed the camera a real window aspect, then
     // settle the seed + subscriptions before the first capture.
-    bench
+    harness
         .execute(vec![
-            ("paint", BenchOp::send_mail(world.as_str(), &split_chunk())),
-            ("aspect", BenchOp::send_mail(camera.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
-            ("settle", BenchOp::advance(2)),
+            ("paint", HarnessOp::send_mail(world.as_str(), &split_chunk())),
+            (
+                "aspect",
+                HarnessOp::send_mail(camera.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            ),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("paint + settle");
 
-    let seeded = capture_scene(&mut bench, &camera, &world, "seeded");
+    let seeded = capture_scene(&mut harness, &camera, &world, "seeded");
 
     // Hold D (no release): each tick the controller pans the orbit target east
     // into the chunk and mails the delta to the camera. 48 ticks at the default
     // 0.15 m/tick pan walks the target ~7 m across the 16 m chunk.
-    bench
+    harness
         .execute(vec![
-            ("press_d", BenchOp::send_mail(controller.as_str(), &Key { code: KEY_D })),
-            ("pan", BenchOp::advance(48)),
+            ("press_d", HarnessOp::send_mail(controller.as_str(), &Key { code: KEY_D })),
+            ("pan", HarnessOp::advance(48)),
         ])
         .expect("hold D + pan");
 
-    let panned = capture_scene(&mut bench, &camera, &world, "panned");
+    let panned = capture_scene(&mut harness, &camera, &world, "panned");
 
     // Release D and advance: with no key held the controller emits no mail, so
     // the camera pose is frozen and the view stops moving.
-    bench
+    harness
         .execute(vec![
-            ("release_d", BenchOp::send_mail(controller.as_str(), &KeyRelease { code: KEY_D })),
-            ("idle", BenchOp::advance(48)),
+            ("release_d", HarnessOp::send_mail(controller.as_str(), &KeyRelease { code: KEY_D })),
+            ("idle", HarnessOp::advance(48)),
         ])
         .expect("release D + idle");
 
-    let idle = capture_scene(&mut bench, &camera, &world, "idle");
+    let idle = capture_scene(&mut harness, &camera, &world, "idle");
 
     let seeded_img = decode_png(&seeded).expect("decode seeded png");
     let panned_img = decode_png(&panned).expect("decode panned png");

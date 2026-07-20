@@ -1,5 +1,5 @@
 //! Test-fixture component that renders a solid unit cube through a
-//! fixed camera, so a `SubstrateBench` capture scenario can assert the
+//! fixed camera, so a `SubstrateHarness` capture scenario can assert the
 //! full render pipeline end-to-end: camera + `view_proj` + world-space
 //! geometry + depth test + GPU readback (issue 1454).
 //!
@@ -41,7 +41,7 @@ use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 const HALF: f32 = 0.5;
 
 /// Aspect ratio the `view_proj` is built for. The cube scenario boots
-/// the bench at 128×96, so a 4:3 aspect keeps the projected silhouette
+/// the harness at 128×96, so a 4:3 aspect keeps the projected silhouette
 /// undistorted. A small mismatch with the real frame only scales the
 /// silhouette slightly; the capture asserts leave margin for it.
 const ASPECT: f32 = 128.0 / 96.0;

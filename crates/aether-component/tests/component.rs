@@ -2,7 +2,7 @@
 //! load + list, multi-actor export selection (ADR-0096 / ADR-0138),
 //! runtime sibling spawn (ADR-0097), drop, and `replace_component` with
 //! its dehydrate / rehydrate state carry (ADR-0022 / ADR-0101 /
-//! ADR-0113), each driven through a [`SubstrateBench`] composed with
+//! ADR-0113), each driven through a [`SubstrateHarness`] composed with
 //! just the component host.
 //!
 //! Skipped when the fixture's wasm hasn't been built — `require_wasm`
@@ -15,12 +15,12 @@ use std::fs;
 use std::path::Path;
 
 use aether_data::MailboxId;
+use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
     DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, Ping, ReplaceComponent,
     ReplaceResult,
 };
-use aether_substrate_bench::test_helpers::require_wasm;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -43,20 +43,20 @@ fn probe_address() -> String {
     format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
 }
 
-/// The kind the probe broadcasts to the bench observer once per tick.
+/// The kind the probe broadcasts to the harness observer once per tick.
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
-/// Load the probe into the bench via `execute`, blocking on the
+/// Load the probe into the harness via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
 /// fully-instantiated and tick-subscribed component. Returns the
 /// loaded component's `MailboxId` (the trampoline address), which
 /// the drop / replace scenarios target.
-fn load_probe(bench: &mut SubstrateBench, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -79,11 +79,11 @@ fn list_components_reports_loaded_probe_lineage() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    load_probe(&mut bench, &wasm_path);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    load_probe(&mut harness, &wasm_path);
 
-    let listed = bench
-        .execute(vec![("list", BenchOp::send_and_await("aether.component", &ListComponents {}))])
+    let listed = harness
+        .execute(vec![("list", HarnessOp::send_and_await("aether.component", &ListComponents {}))])
         .expect("list sequence");
     let result = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult");
     assert!(
@@ -102,16 +102,16 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    load_probe(&mut bench, &wasm_path);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    load_probe(&mut harness, &wasm_path);
 
-    bench.execute(vec![("advance", BenchOp::advance(5))]).expect("advance 5");
+    harness.execute(vec![("advance", HarnessOp::advance(5))]).expect("advance 5");
     assert_eq!(
-        bench.count_observed(TICK_OBSERVED),
+        harness.count_observed(TICK_OBSERVED),
         5,
         "expected exactly 5 tick_observed broadcasts after advance(5); \
          observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -128,12 +128,12 @@ fn multi_actor_module_loads_entry_export() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -175,12 +175,12 @@ fn multi_actor_module_loads_selected_export() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -216,12 +216,12 @@ fn multi_actor_unknown_export_errors() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("ui.does_not_exist".to_owned()) },
             ),
@@ -251,15 +251,15 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_defaultless") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Bare load (no selector): a defaultless module rejects it, naming its
     // exports so the caller can pick one.
-    let bare = bench
+    let bare = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
             ),
@@ -278,10 +278,10 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
     }
 
     // Named load: selecting an export by its NAMESPACE resolves as usual.
-    let named = bench
+    let named = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -311,7 +311,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
 /// spawn; the spawned `Panel` registers at
 /// `aether.embedded:0` (Counter discriminator — a flat segment, no type
 /// prefix), and pinging *it* makes it broadcast a `TickObserved` to the
-/// bench observer — proving the spawned sibling is addressable and
+/// harness observer — proving the spawned sibling is addressable and
 /// dispatches. The fire-and-settle send blocks until the whole tree
 /// (including the spawned trampoline's init) drains, so the panel is
 /// registered before the second send routes.
@@ -320,12 +320,12 @@ fn multi_actor_sibling_spawn() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -350,21 +350,21 @@ fn multi_actor_sibling_spawn() {
     // the lineage fold of that path, not `hash("…trampoline:0")`.
     // The Counter discriminator is a flat segment ("0") — no type prefix.
     let panel_name = format!("{root_name}/aether.embedded:0");
-    bench
+    harness
         .execute(vec![
             // RootManager spawns a Panel sibling (Counter → 0).
-            ("spawn", BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 })),
+            ("spawn", HarnessOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 })),
             // The spawned Panel broadcasts TickObserved when pinged.
-            ("ping_panel", BenchOp::send_mail::<Ping>(panel_name.as_str(), &Ping { seq: 1 })),
+            ("ping_panel", HarnessOp::send_mail::<Ping>(panel_name.as_str(), &Ping { seq: 1 })),
         ])
         .expect("spawn + ping sequence");
 
     assert_eq!(
-        bench.count_observed(TICK_OBSERVED),
+        harness.count_observed(TICK_OBSERVED),
         1,
         "the spawned Panel (0) should have dispatched its ping and broadcast once; \
          observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -382,12 +382,12 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.ui.root".to_owned()) },
             ),
@@ -403,22 +403,22 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
     // order, so the two staged within one receive predict "0" then "1".
     let panel_0 = format!("{root_name}/aether.embedded:0");
     let panel_1 = format!("{root_name}/aether.embedded:1");
-    bench
+    harness
         .execute(vec![
             // RootManager spawns two Panel siblings (Counter 0 and 1)
             // from this one Ping receive.
-            ("spawn_two", BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 2 })),
-            ("ping_panel_0", BenchOp::send_mail::<Ping>(panel_0.as_str(), &Ping { seq: 1 })),
-            ("ping_panel_1", BenchOp::send_mail::<Ping>(panel_1.as_str(), &Ping { seq: 1 })),
+            ("spawn_two", HarnessOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 2 })),
+            ("ping_panel_0", HarnessOp::send_mail::<Ping>(panel_0.as_str(), &Ping { seq: 1 })),
+            ("ping_panel_1", HarnessOp::send_mail::<Ping>(panel_1.as_str(), &Ping { seq: 1 })),
         ])
         .expect("spawn-twice + ping-both sequence");
 
     assert_eq!(
-        bench.count_observed(TICK_OBSERVED),
+        harness.count_observed(TICK_OBSERVED),
         2,
         "both siblings staged in the one receive should have spawned and broadcast; \
          observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -431,37 +431,40 @@ fn drop_component_silences_tick_echoes() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let probe_mbox = load_probe(&mut bench, &wasm_path);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let probe_mbox = load_probe(&mut harness, &wasm_path);
 
-    bench.execute(vec![("warm", BenchOp::advance(3))]).expect("pre-drop advance");
+    harness.execute(vec![("warm", HarnessOp::advance(3))]).expect("pre-drop advance");
     assert_eq!(
-        bench.count_observed(TICK_OBSERVED),
+        harness.count_observed(TICK_OBSERVED),
         3,
         "expected 3 tick_observed before drop; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 
     // Phase 4 split advance off `aether.component` (formerly
     // `aether.control`), so the drop mail no longer naturally orders
     // ahead of the next advance. `SendAndAwait` blocks on `DropResult`
     // so the probe's mailbox is fully gone before the next advance.
-    let dropped = bench
-        .execute(vec![("drop", BenchOp::send_and_await("aether.component", &DropComponent { mailbox_id: probe_mbox }))])
+    let dropped = harness
+        .execute(vec![(
+            "drop",
+            HarnessOp::send_and_await("aether.component", &DropComponent { mailbox_id: probe_mbox }),
+        )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
         DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
-    let post_drop = bench.count_observed(TICK_OBSERVED);
+    let post_drop = harness.count_observed(TICK_OBSERVED);
 
-    bench.execute(vec![("post", BenchOp::advance(10))]).expect("post-drop advance");
+    harness.execute(vec![("post", HarnessOp::advance(10))]).expect("post-drop advance");
     assert_eq!(
-        bench.count_observed(TICK_OBSERVED),
+        harness.count_observed(TICK_OBSERVED),
         post_drop,
         "tick_observed count climbed after drop_component; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -477,25 +480,25 @@ fn replace_component_preserves_mailbox_identity() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let probe_mbox = load_probe(&mut bench, &wasm_path);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let probe_mbox = load_probe(&mut harness, &wasm_path);
 
-    bench.execute(vec![("warm", BenchOp::advance(3))]).expect("pre-replace advance");
+    harness.execute(vec![("warm", HarnessOp::advance(3))]).expect("pre-replace advance");
     assert_eq!(
-        bench.count_observed(TICK_OBSERVED),
+        harness.count_observed(TICK_OBSERVED),
         3,
         "expected 3 tick_observed before replace; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 
     // Replace the wasm at the same mailbox id with the same fixture
     // binary. `SendAndAwait` blocks on `ReplaceResult` so the splice
     // completes before the post-replace baseline is sampled.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id: probe_mbox,
@@ -512,16 +515,16 @@ fn replace_component_preserves_mailbox_identity() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    let post_replace_baseline = bench.count_observed(TICK_OBSERVED);
-    bench.execute(vec![("post", BenchOp::advance(4))]).expect("post-replace advance");
-    let post_replace = bench.count_observed(TICK_OBSERVED);
+    let post_replace_baseline = harness.count_observed(TICK_OBSERVED);
+    harness.execute(vec![("post", HarnessOp::advance(4))]).expect("post-replace advance");
+    let post_replace = harness.count_observed(TICK_OBSERVED);
 
     assert!(
         post_replace > post_replace_baseline,
         "tick_observed count did not climb after replace; \
          baseline={post_replace_baseline}, final={post_replace}; \
          observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }
 
@@ -545,15 +548,15 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     };
     let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load the `Counter` actor (a non-entry actor in the bundle) under the
     // `stateful_replace` name and capture its mailbox id.
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -571,12 +574,12 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 
     // Bump the counter to 3, then read it back. `send_mail` is
     // fire-and-settle, so the three bumps land before the query.
-    let pre = bench
+    let pre = harness
         .execute(vec![
-            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
@@ -586,10 +589,10 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // `on_dehydrate` saves the count on the old instance; `on_rehydrate`
     // restores it on the new one.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -602,8 +605,8 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 
     // The new instance booted fresh (init count = 0) and then rehydrated
     // from the saved bundle. Query it: the count must still be 3.
-    let post = bench
-        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
+    let post = harness
+        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -633,13 +636,13 @@ fn replace_preserves_state_via_typed_state_kind() {
     };
     let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -651,12 +654,12 @@ fn replace_preserves_state_via_typed_state_kind() {
     };
 
     // Bump the counter to 3, then read it back.
-    let pre = bench
+    let pre = harness
         .execute(vec![
-            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -667,10 +670,10 @@ fn replace_preserves_state_via_typed_state_kind() {
 
     // Replace with the same binary; the generated hooks carry the count.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -681,8 +684,8 @@ fn replace_preserves_state_via_typed_state_kind() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    let post = bench
-        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
+    let post = harness
+        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -701,7 +704,7 @@ fn replace_preserves_state_via_typed_state_kind() {
 /// gained a field). The recovered count is 0 — the fresh-`init` value —
 /// because the saved bundle's leading id no longer matches. The warn the
 /// generated hook emits on the decode-miss is covered host-side by
-/// `aether-actor`'s `state_framing_roundtrip` test (the bench does not
+/// `aether-actor`'s `state_framing_roundtrip` test (the harness does not
 /// route `aether.log` mail through its observed sinks).
 #[test]
 fn typed_state_decode_miss_boots_fresh() {
@@ -717,13 +720,13 @@ fn typed_state_decode_miss_boots_fresh() {
     };
     let addr = format!("aether.component/{}:{TYPED_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
 
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: typed_wasm,
@@ -739,12 +742,12 @@ fn typed_state_decode_miss_boots_fresh() {
         LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
     };
 
-    let pre = bench
+    let pre = harness
         .execute(vec![
-            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -756,10 +759,10 @@ fn typed_state_decode_miss_boots_fresh() {
     // Replace with the reshaped wasm: the saved bundle's leading id no
     // longer matches the new `CounterState::ID`, so rehydrate misses.
     let reshaped_wasm = fs::read(&reshaped_path).expect("read reshaped fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id,
@@ -776,8 +779,8 @@ fn typed_state_decode_miss_boots_fresh() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    let post = bench
-        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
+    let post = harness
+        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -806,13 +809,13 @@ fn childless_component_hot_reloads_unchanged() {
     };
     let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
 
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -829,11 +832,11 @@ fn childless_component_hot_reloads_unchanged() {
         LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
     };
 
-    let pre = bench
+    let pre = harness
         .execute(vec![
-            ("bump_a", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", BenchOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -843,10 +846,10 @@ fn childless_component_hot_reloads_unchanged() {
     );
 
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = bench
+    let swapped = harness
         .execute(vec![(
             "swap",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -857,8 +860,8 @@ fn childless_component_hot_reloads_unchanged() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    let post = bench
-        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
+    let post = harness
+        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     assert_eq!(
         post.reply::<CountReport>("query").expect("decode post-replace CountReport"),

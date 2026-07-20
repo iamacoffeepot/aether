@@ -54,7 +54,7 @@ impl LifecycleConfig {
 ///
 /// Components subscribe the `Tick` (and `Render`) stage directly on
 /// `aether.lifecycle` (ADR-0082 §7/§11), so the config wires no initial
-/// subscribers. The desktop chassis and the substrate bench adopt this
+/// subscribers. The desktop chassis and the substrate harness adopt this
 /// graph; headless stays on its tick-only graph (its render cap is a
 /// no-op, so a `Render` / `Present` stage would settle to no GPU work).
 ///
@@ -97,7 +97,7 @@ mod tests {
         // the non-terminal state kinds + terminals) plus the empty
         // `initial_subscribers` set. Quit-edge *placement* (on `Present`,
         // not `Tick`) is verified by the `resolve_edge` tests and
-        // end-to-end by the substrate-bench quit-drain scenario.
+        // end-to-end by the substrate-harness quit-drain scenario.
         let cfg = frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT);
         let graph_dbg = format!("{:?}", cfg.graph);
         let tick = format!("{:?}", <Tick as Kind>::ID);

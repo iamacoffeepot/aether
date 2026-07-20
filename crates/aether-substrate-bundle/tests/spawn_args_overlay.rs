@@ -178,7 +178,7 @@ fn actor_trace_ring_size_env_reaches_chassis_boot() {
     // and reaches the boot — observable on the same `aether_substrate::boot`
     // tracing line that already reports `tick_hz`. The freshly-spawned
     // chassis actors seed their trace rings at this cap (the in-process
-    // `SubstrateBench` tests assert the ring-level eviction behaviour); this
+    // `SubstrateHarness` tests assert the ring-level eviction behaviour); this
     // test guards the env → chassis-main → builder edge.
     let lines = run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")], Duration::from_secs(2));
     let cap = find_numeric_field(&lines, "trace_ring_capacity")
@@ -192,7 +192,7 @@ fn actor_trace_ring_max_size_env_reaches_chassis_boot() {
     // `AETHER_ACTOR_TRACE_RING_MAX_SIZE` (the growth ceiling) is resolved
     // by the headless chassis main and reaches the boot — observable on
     // the same `aether_substrate::boot` tracing line as the floor. The
-    // in-process `SubstrateBench` / `aether-actor` tests assert the ring-level
+    // in-process `SubstrateHarness` / `aether-actor` tests assert the ring-level
     // growth behaviour; this guards the env → chassis-main → builder edge.
     let lines =
         run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "131072")], Duration::from_secs(2));

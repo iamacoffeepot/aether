@@ -101,11 +101,11 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The render scenario tests (`tests/render_scenario.rs`, rehomed from
 # `aether-substrate-bundle` per issue #3771) drive an in-process
-# `SubstrateBench` composed with the render cap and score the captured
+# `SubstrateHarness` composed with the render cap and score the captured
 # PNGs through the capture crate's visual reductions + `ArtifactGuard`.
 aether-component = { path = "../aether-component" }
-aether-substrate-bench = { path = "../aether-substrate-bench" }
-aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 # The wasm-loading scenarios mail the probe/cube fixtures with the shared
 # fixture kinds; the rlib pin also keeps their `KindDescriptor` inventory
 # entries linked into the test binary.

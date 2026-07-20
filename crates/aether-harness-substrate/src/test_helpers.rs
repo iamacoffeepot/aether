@@ -1,4 +1,4 @@
-//! Shared test helpers for in-process substrate-bench scenarios (issue
+//! Shared test helpers for in-process substrate-harness scenarios (issue
 //! 460; relocated from `aether-scenario` per issue 821).
 //!
 //! Three concerns lifted out of every per-component scenario file:
@@ -7,19 +7,19 @@
 //!   one; driverless dev boxes need to skip cleanly),
 //! - locating the component's pre-built wasm under the workspace
 //!   `target/wasm32-unknown-unknown/` tree,
-//! - setting up a per-process `save://` sandbox the bench's
+//! - setting up a per-process `save://` sandbox the harness's
 //!   `aether.fs` capability can read and write.
 //!
 //! These helpers don't reference any scenario vocabulary (Script /
 //! Step / Check) — they live on the chassis side so any test that
-//! drives a `SubstrateBench` directly can call them, scenario crate or
+//! drives a `SubstrateHarness` directly can call them, scenario crate or
 //! not.
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! use aether_substrate_bench::{
-//!     SubstrateBench,
+//! use aether_harness_substrate::{
+//!     SubstrateHarness,
 //!     test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots},
 //! };
 //!
@@ -29,17 +29,17 @@
 //!         return;
 //!     };
 //!     let sandbox = init_save_sandbox("my-component");
-//!     let mut bench = SubstrateBench::builder()
+//!     let mut harness = SubstrateHarness::builder()
 //!         .size(64, 48)
 //!         .namespace_roots(test_namespace_roots(sandbox))
 //!         .build()
 //!         .expect("boot");
-//!     // … drive bench directly …
+//!     // … drive harness directly …
 //! }
 //! ```
 //!
 //! Visual scenarios that need the wgpu adapter probe use
-//! `aether_substrate_bench_capture::test_helpers::require_runtime`
+//! `aether_harness_substrate_capture::test_helpers::require_runtime`
 //! instead — the probe belongs with the GPU crate (issue #3765).
 
 use std::path::{Path, PathBuf};
@@ -54,8 +54,8 @@ use std::process;
 /// across a binary's tests resolve to the same dir — handy for
 /// `write_fixture` consumers that look up the sandbox by label.
 ///
-/// Per issue 464, the sandbox is just a directory; `SubstrateBench`
-/// receives it via `SubstrateBench::builder().namespace_roots(...)`, not
+/// Per issue 464, the sandbox is just a directory; `SubstrateHarness`
+/// receives it via `SubstrateHarness::builder().namespace_roots(...)`, not
 /// via env-var mutation. The `OnceLock` no longer linearises a
 /// `set_var` call — it just memoises the path.
 static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -110,7 +110,7 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 }
 
 /// Skip-or-panic gate over the wasm artifact alone: locates the wasm
-/// with no GPU involvement, for scenarios whose bench composition needs
+/// with no GPU involvement, for scenarios whose harness composition needs
 /// no render cap (issue #3765). Returns the wasm path on success; `None`
 /// when the test should skip. Visual scenarios use the capture crate's
 /// `require_runtime`, which adds the wgpu adapter probe in front of
@@ -159,11 +159,11 @@ pub fn require_wasm(crate_name: &str) -> Option<PathBuf> {
 /// on the first call and the same path is returned on every
 /// subsequent call. Per issue 464, this helper no longer mutates
 /// process env — callers pass the returned path to
-/// `SubstrateBench::builder().namespace_roots(test_namespace_roots(path))`.
+/// `SubstrateHarness::builder().namespace_roots(test_namespace_roots(path))`.
 ///
 /// `label` is baked into the dirname so the tempdir is self-describing
 /// (`/tmp/aether-<label>-tests-<pid>`); pass a stable per-crate label
-/// like `"kit-mesh"` or `"substrate-bench-io"`. Each integration test
+/// like `"kit-mesh"` or `"substrate-harness-io"`. Each integration test
 /// binary is its own process, so the label is only ever set once per
 /// process and collisions across binaries don't arise.
 ///
@@ -183,7 +183,7 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
 /// [`init_save_sandbox`]) backs the `save://` namespace; `assets://`
 /// and `config://` reuse the same dir so writes that target either
 /// don't escape the sandbox. Pass the result to
-/// `SubstrateBench::builder().namespace_roots(...)`.
+/// `SubstrateHarness::builder().namespace_roots(...)`.
 ///
 /// Per issue 464, this is the no-env replacement for the old
 /// `init_save_sandbox`-sets-`AETHER_SAVE_DIR` pattern.

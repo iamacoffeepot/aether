@@ -79,12 +79,12 @@ tracing = { workspace = true, default-features = false }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = { workspace = true }
 
-# Integration tests boot a `SubstrateBench`, load this crate's own wasm
+# Integration tests boot a `SubstrateHarness`, load this crate's own wasm
 # artifact, and assert mail-flow + render properties via direct
-# `SubstrateBench` calls. Tests run host-side; the wasm is built separately
+# `SubstrateHarness` calls. Tests run host-side; the wasm is built separately
 # for `wasm32-unknown-unknown` and discovered at runtime under
 # `target/wasm32-unknown-unknown/{debug,release}/`. Each scenario states its
-# minimal cap composition on the `SubstrateBenchBuilder` (issue #3764), so the
+# minimal cap composition on the `SubstrateHarnessBuilder` (issue #3764), so the
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
@@ -92,8 +92,8 @@ aether-clipboard = { path = "../aether-clipboard" }
 aether-game = { path = "../aether-game" }
 aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
-aether-substrate-bench = { path = "../aether-substrate-bench" }
-aether-substrate-bench-capture = { path = "../aether-substrate-bench-capture" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 aether-tcp = { path = "../aether-tcp" }
 aether-text = { path = "../aether-text" }
 # The widget/editor scenarios load the `test.editor_region_probe` /

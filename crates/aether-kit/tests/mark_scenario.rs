@@ -5,18 +5,18 @@
 //! with the same wasm. The final allocation proves both live marks and the
 //! deleted-id watermark crossed the lifecycle boundary.
 
-use aether_substrate_bench::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::require_wasm;
 use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_kit::mark::{
     Mark, MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGeometry, MarkGet, MarkGetResult, MarkId,
     MarkList, MarkListResult, MarkRef, MarkUpdate, MarkUpdateResult,
 };
 use aether_kit::world::WorldPoint;
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 
 // Retain all of the kit's native inventory submissions in this integration
 // test binary, matching the other component scenarios.
@@ -29,11 +29,11 @@ fn component_address() -> String {
     format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn load_mark_book(bench: &mut SubstrateBench, wasm_path: &Path) -> aether_data::MailboxId {
-    let loaded = bench
+fn load_mark_book(harness: &mut SubstrateHarness, wasm_path: &Path) -> aether_data::MailboxId {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -59,22 +59,22 @@ fn mark_crud_and_allocation_survive_component_replace() {
     let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mailbox_id = load_mark_book(&mut bench, &wasm_path);
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mailbox_id = load_mark_book(&mut harness, &wasm_path);
     let address = component_address();
 
-    let created = bench
+    let created = harness
         .execute(vec![
             (
                 "create_point",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     address.as_str(),
                     &MarkCreate { geometry: MarkGeometry::Point(WorldPoint::new(128, 256)), label: "camp".to_owned() },
                 ),
             ),
             (
                 "create_path",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     address.as_str(),
                     &MarkCreate {
                         geometry: MarkGeometry::Path(vec![WorldPoint::new(0, 0), WorldPoint::new(256, 256)]),
@@ -97,11 +97,11 @@ fn mark_crud_and_allocation_survive_component_replace() {
 
     let updated_geometry =
         MarkGeometry::Area(vec![WorldPoint::new(64, 64), WorldPoint::new(192, 64), WorldPoint::new(128, 192)]);
-    let changed = bench
+    let changed = harness
         .execute(vec![
             (
                 "update",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     address.as_str(),
                     &MarkUpdate {
                         id: point_ref.id,
@@ -110,10 +110,10 @@ fn mark_crud_and_allocation_survive_component_replace() {
                     },
                 ),
             ),
-            ("get", BenchOp::send_and_await(address.as_str(), &MarkGet { id: point_ref.id })),
-            ("list", BenchOp::send_and_await(address.as_str(), &MarkList)),
-            ("delete", BenchOp::send_and_await(address.as_str(), &MarkDelete { id: path_ref.id })),
-            ("get_deleted", BenchOp::send_and_await(address.as_str(), &MarkGet { id: path_ref.id })),
+            ("get", HarnessOp::send_and_await(address.as_str(), &MarkGet { id: point_ref.id })),
+            ("list", HarnessOp::send_and_await(address.as_str(), &MarkList)),
+            ("delete", HarnessOp::send_and_await(address.as_str(), &MarkDelete { id: path_ref.id })),
+            ("get_deleted", HarnessOp::send_and_await(address.as_str(), &MarkGet { id: path_ref.id })),
         ])
         .expect("update, read, and delete sequence");
     assert_eq!(
@@ -146,10 +146,10 @@ fn mark_crud_and_allocation_survive_component_replace() {
         MarkGetResult { mark: None }
     );
 
-    let replaced = bench
+    let replaced = harness
         .execute(vec![(
             "replace",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id,
@@ -166,13 +166,13 @@ fn mark_crud_and_allocation_survive_component_replace() {
         ReplaceResult::Err { error } => panic!("replace mark book: {error}"),
     }
 
-    let after = bench
+    let after = harness
         .execute(vec![
-            ("get", BenchOp::send_and_await(address.as_str(), &MarkGet { id: point_ref.id })),
-            ("list", BenchOp::send_and_await(address.as_str(), &MarkList)),
+            ("get", HarnessOp::send_and_await(address.as_str(), &MarkGet { id: point_ref.id })),
+            ("list", HarnessOp::send_and_await(address.as_str(), &MarkList)),
             (
                 "create",
-                BenchOp::send_and_await(
+                HarnessOp::send_and_await(
                     address.as_str(),
                     &MarkCreate {
                         geometry: MarkGeometry::Point(WorldPoint::new(512, 768)),

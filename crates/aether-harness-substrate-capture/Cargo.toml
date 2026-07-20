@@ -1,12 +1,12 @@
 [package]
-name = "aether-substrate-bench-capture"
+name = "aether-harness-substrate-capture"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Render/GPU capture support for `aether-substrate-bench` (issue #3765):
+# Render/GPU capture support for `aether-harness-substrate` (issue #3765):
 # the offscreen wgpu pipeline (`Gpu`), the `GpuRenderExt`/`GpuFrameHook`
-# pair that plugs into the core bench's `RenderExt`/`FrameHook` seam, the
+# pair that plugs into the core harness's `RenderExt`/`FrameHook` seam, the
 # image-compare/`FrameCheck` scoring in `visual`, and the failure-only
 # `ArtifactGuard`. Split from the core so only visual consumers carry the
 # aether-render + wgpu edge in their `cargo xtask affected` closure.
@@ -17,7 +17,7 @@ aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 aether-render = { path = "../aether-render" }
 aether-substrate = { path = "../aether-substrate" }
-aether-substrate-bench = { path = "../aether-substrate-bench" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 anyhow = { workspace = true }
 png = { workspace = true }
 pollster = "0.4.0"

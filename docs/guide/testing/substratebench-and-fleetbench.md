@@ -1,4 +1,4 @@
-# SubstrateBench and FleetBench
+# SubstrateHarness and FleetBench
 
 Aether has two integration harnesses because “use the real actor runtime” and
 “use the real process boundary” answer different questions.
@@ -6,15 +6,15 @@ Aether has two integration harnesses because “use the real actor runtime” an
 | Harness | Boundary crossed | Best for |
 |---|---|---|
 | Unit/pure test | function/module only | codecs, parsers, state machines, validation |
-| `SubstrateBench` | real substrate, scheduler, capabilities; in process | actor chains, settlement, frames, filesystem, component behavior |
+| `SubstrateHarness` | real substrate, scheduler, capabilities; in process | actor chains, settlement, frames, filesystem, component behavior |
 | `FleetBench` | real hub RPC plus forked child process | stores/selectors, spawn/terminate, proxy routing, cross-process load/replace |
 
 Choose the narrowest harness that can falsify the contract. Process tests are
 valuable, but they are slower and produce less-local failures.
 
-## SubstrateBench topology
+## SubstrateHarness topology
 
-The in-process `SubstrateBench` boots the substrate-bench chassis and owns it on the test
+The in-process `SubstrateHarness` boots the substrate-harness chassis and owns it on the test
 thread. Replies route through a recording loopback rather than a socket. API
 methods pump chassis events synchronously and correlate each reply by a fresh
 correlation id.
@@ -24,7 +24,7 @@ It still uses the real:
 - mailbox registry, scheduler, actor runtimes, and settlement graph;
 - component loader and wasm host;
 - filesystem capability when the builder is given namespace roots (the default
-  `SubstrateBench` omits `aether.fs`);
+  `SubstrateHarness` omits `aether.fs`);
 - offscreen render/capture path;
 - lifecycle driver and input/tick stages;
 - logging/tracing rings and typed replies.
@@ -33,7 +33,7 @@ It is not a mock engine. The simplification is process/transport ownership.
 
 ## Builder and isolation
 
-`SubstrateBenchBuilder` configures the boundary a test needs: target size, namespace
+`SubstrateHarnessBuilder` configures the boundary a test needs: target size, namespace
 roots, worker count, log/trace capacities, settlement cap, clipboard mode, and
 game gateway configuration.
 
@@ -67,7 +67,7 @@ real readiness/result signal.
 
 ## Declarative operation sequences
 
-`SubstrateBench::execute` runs labelled `BenchOp`s and centralizes the settlement
+`SubstrateHarness::execute` runs labelled `HarnessOp`s and centralizes the settlement
 discipline:
 
 - `Advance` drives complete frames;
@@ -141,7 +141,7 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 |---|---|
 | Pure encode/validation mismatch | unit test / kind schema |
 | In-process settlement timeout | actor lineage, hold, or scheduler contract |
-| SubstrateBench unknown mailbox | load/wire/lineage name |
+| SubstrateHarness unknown mailbox | load/wire/lineage name |
 | Capture mismatch with correct mail | render/frame ordering |
 | FleetBench cannot spawn | dist manifest, binary selector, process boot |
 | FleetBench mail fails after spawn | RPC proxy, engine id, child registry |
@@ -149,8 +149,8 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 
 ## Source routes
 
-- Public SubstrateBench API: `crates/aether-substrate-bench/src/`
-- Scenario examples: `crates/aether-substrate-bundle/tests/substrate_bench_scenario/`
+- Public SubstrateHarness API: `crates/aether-harness-substrate/src/`
+- Scenario examples: `crates/aether-substrate-bundle/tests/substrate_harness_scenario/`
 - FleetBench harness: `crates/aether-fleet-bench/src/lib.rs`
 - Fleet scenarios: `crates/aether-substrate-bundle/tests/fleetbench_*.rs`
 - Fixtures: `crates/aether-test-fixtures/`

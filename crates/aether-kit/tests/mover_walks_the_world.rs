@@ -16,11 +16,17 @@
 // Integration-test diagnostics intentionally surface alongside a failing test.
 #![allow(clippy::print_stderr)]
 
-use aether_substrate_bench_capture::RenderBenchBuilderExt;
+use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::ArtifactGuard;
+use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::visual::{
+    ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats,
+};
 use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
@@ -31,12 +37,6 @@ use aether_kit::world::{Material, SetChunk, SetRegion};
 use aether_kit::{
     EditorConfig, EditorKeyChord, EditorRegionRect, MoverConfig, MoverTeleport, RegionInputLanes, RegionSpec,
 };
-use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::ArtifactGuard;
-use aether_substrate_bench_capture::test_helpers::require_runtime;
-use aether_substrate_bench_capture::visual::{
-    ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats,
-};
 
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
@@ -46,7 +46,7 @@ const HEIGHT_BREAK_ROW: usize = 8;
 const CLIFF_HEIGHT_OCTIMETERS: i32 = 256;
 const REGION_ID: u32 = 1;
 
-/// `SubstrateBench` readback RGB for the renderer's clear color.
+/// `SubstrateHarness` readback RGB for the renderer's clear color.
 const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
 /// The built-in Sand style's documented sRGB design value.
 const SAND_CLIFF_SRGB: [u8; 3] = [217, 199, 140];
@@ -81,21 +81,21 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-fn load_kit_export(bench: &mut SubstrateBench, wasm: &[u8], export: &str, name: &str) -> MailboxId {
-    load_kit_export_with_config(bench, wasm, export, name, Vec::new())
+fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str) -> MailboxId {
+    load_kit_export_with_config(harness, wasm, export, name, Vec::new())
 }
 
 fn load_kit_export_with_config(
-    bench: &mut SubstrateBench,
+    harness: &mut SubstrateHarness,
     wasm: &[u8],
     export: &str,
     name: &str,
     config: Vec<u8>,
 ) -> MailboxId {
-    let loaded = bench
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -118,7 +118,7 @@ fn load_kit_export_with_config(
     }
 }
 
-fn load_mover_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], mover: MailboxId) {
+fn load_mover_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], mover: MailboxId) {
     let lanes = RegionInputLanes { key_press: true, key_release: true, ..RegionInputLanes::default() };
     let config = EditorConfig {
         regions: vec![RegionSpec {
@@ -137,7 +137,7 @@ fn load_mover_editor_shell(bench: &mut SubstrateBench, wasm: &[u8], mover: Mailb
         }],
     };
     let _editor =
-        load_kit_export_with_config(bench, wasm, "aether.kit.widget.editor", "editor", config.encode_into_bytes());
+        load_kit_export_with_config(harness, wasm, "aether.kit.widget.editor", "editor", config.encode_into_bytes());
 }
 
 /// Chunk 0 is one grass region. Rows north of z=8 sit one meter above the
@@ -183,12 +183,12 @@ fn scene_checks() -> Vec<FrameCheck> {
 /// Capture the mover camera/marker and world into one frame, asking the
 /// substrate for basic silhouette checks so `ArtifactGuard` can preserve the
 /// exact frame, masks, and measurements when a visual assertion fails.
-fn capture_scene(bench: &mut SubstrateBench, mover: &str, world: &str, label: &'static str) -> SceneCapture {
+fn capture_scene(harness: &mut SubstrateHarness, mover: &str, world: &str, label: &'static str) -> SceneCapture {
     let checks = scene_checks();
-    let captured = bench
+    let captured = harness
         .execute(vec![(
             label,
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
                     mails: vec![envelope(mover, &Render), envelope(world, &Render)],
@@ -253,7 +253,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
@@ -262,20 +262,20 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .expect("boot");
     let world = component_address("world");
     let mover_address = component_address("mover");
-    let _world_mailbox = load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
+    let _world_mailbox = load_kit_export(&mut harness, &wasm, "aether.kit.world", "world");
     let mover_mailbox = load_kit_export_with_config(
-        &mut bench,
+        &mut harness,
         &wasm,
         "aether.kit.mover",
         "mover",
         MoverConfig { owns_input: false }.encode_into_bytes(),
     );
 
-    bench
+    harness
         .execute(vec![
             (
                 "region",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     world.as_str(),
                     &SetRegion {
                         region_id: REGION_ID,
@@ -285,34 +285,34 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
                     },
                 ),
             ),
-            ("chunk", BenchOp::send_mail(world.as_str(), &height_break_chunk())),
+            ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
             (
                 "retained-window-size",
-                BenchOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
             ),
-            ("place", BenchOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
-            ("settle", BenchOp::advance(2)),
+            ("place", HarnessOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("author world and settle opted-out mover");
 
-    let before = capture_scene(&mut bench, &mover_address, &world, "opt-out-before");
-    bench
+    let before = capture_scene(&mut harness, &mover_address, &world, "opt-out-before");
+    harness
         .execute(vec![
-            ("unrouted-w", BenchOp::send_mail("aether.input", &Key { code: KEY_W })),
-            ("unrouted-advance", BenchOp::advance(32)),
+            ("unrouted-w", HarnessOp::send_mail("aether.input", &Key { code: KEY_W })),
+            ("unrouted-advance", HarnessOp::advance(32)),
         ])
         .expect("unrouted input window");
-    let blocked = capture_scene(&mut bench, &mover_address, &world, "opt-out-blocked");
+    let blocked = capture_scene(&mut harness, &mover_address, &world, "opt-out-blocked");
 
-    load_mover_editor_shell(&mut bench, &wasm, mover_mailbox);
-    bench
+    load_mover_editor_shell(&mut harness, &wasm, mover_mailbox);
+    harness
         .execute(vec![
-            ("routed-w", BenchOp::send_mail("aether.input", &Key { code: KEY_W })),
-            ("routed-advance", BenchOp::advance(32)),
-            ("routed-release", BenchOp::send_mail("aether.input", &KeyRelease { code: KEY_W })),
+            ("routed-w", HarnessOp::send_mail("aether.input", &Key { code: KEY_W })),
+            ("routed-advance", HarnessOp::advance(32)),
+            ("routed-release", HarnessOp::send_mail("aether.input", &KeyRelease { code: KEY_W })),
         ])
         .expect("editor-routed input window");
-    let routed = capture_scene(&mut bench, &mover_address, &world, "editor-routed");
+    let routed = capture_scene(&mut harness, &mover_address, &world, "editor-routed");
 
     let before_image = decode_png(&before.png).expect("decode before png");
     let blocked_image = decode_png(&blocked.png).expect("decode blocked png");
@@ -336,7 +336,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
@@ -346,14 +346,14 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
 
     let world = component_address("world");
     let mover = component_address("mover");
-    load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
-    load_kit_export(&mut bench, &wasm, "aether.kit.mover", "mover");
+    load_kit_export(&mut harness, &wasm, "aether.kit.world", "world");
+    load_kit_export(&mut harness, &wasm, "aether.kit.mover", "mover");
 
-    bench
+    harness
         .execute(vec![
             (
                 "region",
-                BenchOp::send_mail(
+                HarnessOp::send_mail(
                     world.as_str(),
                     &SetRegion {
                         region_id: REGION_ID,
@@ -363,39 +363,42 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
                     },
                 ),
             ),
-            ("chunk", BenchOp::send_mail(world.as_str(), &height_break_chunk())),
-            ("aspect", BenchOp::send_mail(mover.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
-            ("place", BenchOp::send_mail(mover.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
+            ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
+            (
+                "aspect",
+                HarnessOp::send_mail(mover.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            ),
+            ("place", HarnessOp::send_mail(mover.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             // Let both actors finish wiring before input begins.
-            ("settle", BenchOp::advance(2)),
+            ("settle", HarnessOp::advance(2)),
         ])
         .expect("author height break + settle actors");
 
-    let before = capture_scene(&mut bench, &mover, &world, "before");
+    let before = capture_scene(&mut harness, &mover, &world, "before");
 
     // A cell is 256 octimeters and the mover advances 8 per tick. Ninety-six
     // ticks walk exactly three cells north, bringing the z=8 wall toward the
     // follow camera without crossing it.
-    bench
+    harness
         .execute(vec![
-            ("press_w", BenchOp::send_mail(mover.as_str(), &Key { code: KEY_W })),
-            ("walk", BenchOp::advance(96)),
+            ("press_w", HarnessOp::send_mail(mover.as_str(), &Key { code: KEY_W })),
+            ("walk", HarnessOp::advance(96)),
         ])
         .expect("hold W + walk north");
-    let walked_capture = capture_scene(&mut bench, &mover, &world, "moved");
+    let walked_capture = capture_scene(&mut harness, &mover, &world, "moved");
 
     // Release at a cell center, settle the release, then leave a full cell's
     // worth of ticks between captures. If held-W state did not clear, the
     // second stopped capture would scroll by another cell.
-    bench
+    harness
         .execute(vec![
-            ("release_w", BenchOp::send_mail(mover.as_str(), &KeyRelease { code: KEY_W })),
-            ("settle_release", BenchOp::advance(4)),
+            ("release_w", HarnessOp::send_mail(mover.as_str(), &KeyRelease { code: KEY_W })),
+            ("settle_release", HarnessOp::advance(4)),
         ])
         .expect("release W + settle");
-    let stopped_first = capture_scene(&mut bench, &mover, &world, "stopped_first");
-    bench.execute(vec![("idle", BenchOp::advance(32))]).expect("idle for one cell cadence");
-    let stopped_second = capture_scene(&mut bench, &mover, &world, "stopped_second");
+    let stopped_first = capture_scene(&mut harness, &mover, &world, "stopped_first");
+    harness.execute(vec![("idle", HarnessOp::advance(32))]).expect("idle for one cell cadence");
+    let stopped_second = capture_scene(&mut harness, &mover, &world, "stopped_second");
 
     // Decode each capture exactly once, then derive every oracle from those
     // four images.

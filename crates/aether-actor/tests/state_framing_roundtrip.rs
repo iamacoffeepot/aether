@@ -5,7 +5,7 @@
 //! `Persistence::save_state_kind`; the generated `on_rehydrate` recovers
 //! it via `PriorState::decode_kind` and boots fresh (warning) when the decode
 //! misses. Those hooks only run on the wasm load/replace path, which the
-//! substrate bench drives end-to-end — but the substrate bench cannot observe the
+//! substrate harness drives end-to-end — but the substrate harness cannot observe the
 //! decode-miss warn (it does not route `aether.log` mail through its
 //! observed sinks). This test stands in for that seam on the host: it
 //! exercises the deposit (`save_state_kind`) and recovery (`decode_kind`)

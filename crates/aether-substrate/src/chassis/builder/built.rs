@@ -81,7 +81,7 @@ impl<C: Chassis> BuiltChassis<C> {
     }
 }
 
-/// A chassis built without a driver. The embedder (`SubstrateBench`, future
+/// A chassis built without a driver. The embedder (`SubstrateHarness`, future
 /// embedded harnesses) drives any loop manually. Passives are booted
 /// and addressable via [`Self::resolve_actor`] / [`Self::resolve_actors`];
 /// they shut down when the `PassiveChassis` is dropped.

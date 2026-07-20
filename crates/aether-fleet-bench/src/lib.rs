@@ -1,6 +1,6 @@
 //! `FleetBench` — a real-process E2E test-support harness over the
-//! hub/RPC path (issue 1451). Where `SubstrateBench`
-//! (`aether-substrate-bench`'s in-process harness) drives the substrate
+//! hub/RPC path (issue 1451). Where `SubstrateHarness`
+//! (`aether-harness-substrate`'s in-process harness) drives the substrate
 //! over a loopback channel, `FleetBench`
 //! drives the *actual* hub → RPC → forked-headless-substrate stack: it
 //! boots a hub-shaped passive chassis (`RpcServerCapability` +
@@ -261,14 +261,14 @@ pub struct Loaded {
 /// Forked engines are tracked so [`Drop`] terminates each one — a
 /// scenario leaves no orphaned substrate behind.
 pub struct FleetBench {
-    /// Kept alive for the lifetime of the bench; dropping it tears the
+    /// Kept alive for the lifetime of the harness; dropping it tears the
     /// hub caps down.
     _chassis: PassiveChassis<TestChassis>,
     stream: TcpStream,
     next_cid: u64,
     spawned: Vec<EngineId>,
     calls: Vec<CallRecord>,
-    /// Per-bench scratch root the forked substrates materialize their
+    /// Per-harness scratch root the forked substrates materialize their
     /// per-engine executables under (ADR-0115), so they can't collide with
     /// another concurrent fork+exec test on the shared default root.
     /// Removed on [`Drop`].
@@ -291,10 +291,10 @@ impl FleetBench {
             .set_read_timeout(Some(READ_REARM))
             .expect("test setup: setting a read timeout on a connected stream succeeds");
 
-        let mut bench =
+        let mut harness =
             Self { _chassis: chassis, stream, next_cid: 1, spawned: Vec::new(), calls: Vec::new(), store_root };
-        bench.handshake();
-        bench
+        harness.handshake();
+        harness
     }
 
     /// The recorded call sequence, in order. Used by scenarios to assert
@@ -944,12 +944,12 @@ impl Drop for FleetBench {
         for engine in engines {
             self.terminate_quietly(engine);
         }
-        // Best-effort: reap this bench's per-engine scratch dirs.
+        // Best-effort: reap this harness's per-engine scratch dirs.
         let _ = fs::remove_dir_all(&self.store_root);
     }
 }
 
-/// Point this bench's forked substrates at a unique per-process scratch
+/// Point this harness's forked substrates at a unique per-process scratch
 /// root for their per-engine executable materialization (ADR-0115), so a
 /// concurrent fork+exec test on the shared default
 /// `dirs::data_dir()/aether/engines` root can't collide. Threaded into
@@ -961,7 +961,7 @@ fn isolate_store_root() -> PathBuf {
         let nonce = STORE_ROOT_NONCE.fetch_add(1, Ordering::Relaxed);
         // Each `FleetBench` in a process gets a fresh nonce-tagged root,
         // and `create_dir` claims it before `boot_hub` opens
-        // `root/binaries`, so a concurrent same-process bench can't race on
+        // `root/binaries`, so a concurrent same-process harness can't race on
         // the path.
         //
         // The hub's binary store (ADR-0115) is isolated under
@@ -987,9 +987,9 @@ pub fn allocate_store_root_for_test() -> PathBuf {
 /// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// settle and close. Returns the chassis and the port the RPC server
 /// bound. Mirrors the seed's `boot_hub`. `binary_store_dir` isolates the
-/// hub's content-addressed store (ADR-0115) per-bench, and
+/// hub's content-addressed store (ADR-0115) per-harness, and
 /// `engine_store_root` isolates the per-engine spawn-dir parent (issue
-/// 1274) per-bench — both via `EngineConfig` (ADR-0090); the heartbeat
+/// 1274) per-harness — both via `EngineConfig` (ADR-0090); the heartbeat
 /// stays disabled (the `Default`).
 fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());

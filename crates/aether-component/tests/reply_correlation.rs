@@ -15,18 +15,18 @@ use std::fs;
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_substrate_bench::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
-use aether_substrate_bench::{BenchOp, SubstrateBench};
 use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
-fn load_fs_demux(bench: &mut SubstrateBench, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
-    let loaded = bench
+fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+    let loaded = harness
         .execute(vec![(
             "load",
-            BenchOp::send_and_await(
+            HarnessOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent {
                     wasm,
@@ -53,7 +53,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
     // Component host to load the fixture; sandboxed namespace roots so its
     // `aether.fs.read` requests resolve — no render, so no wgpu gate.
     let sandbox = init_save_sandbox("reply-correlation");
-    let mut bench = SubstrateBench::builder()
+    let mut harness = SubstrateHarness::builder()
         .with_component_host()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
@@ -62,20 +62,20 @@ fn same_payload_fs_replies_demux_by_request_id() {
 
     let path = write_fixture("same-payload.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let (_, fixture_addr) = load_fs_demux(&mut bench, wasm, "fs-demux");
-    let baseline = bench.count_observed(FsDemuxReport::NAME);
+    let (_, fixture_addr) = load_fs_demux(&mut harness, wasm, "fs-demux");
+    let baseline = harness.count_observed(FsDemuxReport::NAME);
 
-    bench
+    harness
         .execute(vec![(
             "trigger",
-            BenchOp::send_mail(&fixture_addr, &RunFsDemux { namespace: "save".to_owned(), path }),
+            HarnessOp::send_mail(&fixture_addr, &RunFsDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsDemux to fixture");
 
     assert_eq!(
-        bench.count_observed(FsDemuxReport::NAME) - baseline,
+        harness.count_observed(FsDemuxReport::NAME) - baseline,
         1,
         "fixture did not report both same-payload fs replies as request-id matched; observed kinds: {:?}",
-        bench.observed_kinds(),
+        harness.observed_kinds(),
     );
 }

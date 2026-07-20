@@ -5,7 +5,7 @@
 > stages, settlement-gated advance, per-stage subscription on `aether.lifecycle`
 > — is **stable**, and the stage-kind vocabulary (`Tick`, `Render`, `Present`,
 > `Shutdown`, `Quit`) ships today. The **per-chassis graphs are still being built
-> out**: desktop and `substrate_bench` run a `Tick → Render → Present` frame; headless
+> out**: desktop and `substrate_harness` run a `Tick → Render → Present` frame; headless
 > stays tick-only; the `InitCaps` / `InitComponents` boot stages exist in the kind
 > vocabulary but aren't yet wired into a shipped graph. Build on the stage kinds
 > and the subscribe surface; read `aether-lifecycle` and the ADR for the graph
@@ -26,7 +26,7 @@ shape as [input streams](input.md), on a different mailbox.
 Every chassis runs the same skeleton — a cadence source, a per-frame broadcast,
 the drain that waits for the frame's work to finish, and a present or capture at
 the end — and each one drives a different cadence: the desktop chassis paces to
-vsync, the headless chassis to a fixed timer, the substrate bench steps one frame at a
+vsync, the headless chassis to a fixed timer, the substrate harness steps one frame at a
 time. Encoding that skeleton as hand-written loop code in each binary forces the
 same structure to be re-derived per chassis, and the only thing that actually
 differs between them is the cadence and which stages they run.
@@ -72,7 +72,7 @@ the reply it waits on.
 
 **The graph is a builder over kind types.** A chassis builds its graph with
 `LifecycleGraphData::builder()`, naming each stage by its kind and the edge out of
-it. The desktop and substrate-bench frame:
+it. The desktop and substrate-harness frame:
 
 ```rust
 LifecycleGraphData::builder()
@@ -182,7 +182,7 @@ engine; let the chassis drive the frame.
 Which stages a chassis declares is its own choice; the driver walks whatever graph
 it's handed. The shipped graphs:
 
-- **Desktop and `substrate_bench`** run `frame_lifecycle_config` —
+- **Desktop and `substrate_harness`** run `frame_lifecycle_config` —
   `Tick → Render → Present → Tick`, looping, with the `Quit` escape to a
   `Shutdown` terminal on `Present`. A full `Tick → Render → Present` cycle runs
   per frame; `Render` broadcasts only after the `Tick` chain settles, and GPU

@@ -1,9 +1,9 @@
-//! `SubstrateBench::execute` — a declarative op sequence over the
-//! settlement-gated `SubstrateBench` primitives (issue 868).
+//! `SubstrateHarness::execute` — a declarative op sequence over the
+//! settlement-gated `SubstrateHarness` primitives (issue 868).
 //!
-//! Every `substrate_bench`-driven test is a small state machine: load a
+//! Every `substrate_harness`-driven test is a small state machine: load a
 //! component, advance, send a mail, advance, capture, send cleanup.
-//! Each step calls a separate [`SubstrateBench`] method, and each method
+//! Each step calls a separate [`SubstrateHarness`] method, and each method
 //! is independently responsible for waiting on its causal chain to
 //! settle (ADR-0080 §6). That per-method settlement glue has been a
 //! recurring flake source (issues 834 / 836 / 838 / 860): when a
@@ -11,8 +11,8 @@
 //! surfaced the race, and the fix was a one-off patch to the
 //! offending method.
 //!
-//! [`SubstrateBench::execute`] centralizes the sequencing: it takes a
-//! labelled list of [`BenchOp`]s, dispatches each through the
+//! [`SubstrateHarness::execute`] centralizes the sequencing: it takes a
+//! labelled list of [`HarnessOp`]s, dispatches each through the
 //! matching settlement-gated primitive, blocks on settlement, then
 //! proceeds. When the next timing race surfaces it gets fixed once,
 //! inside the op→primitive mapping, rather than N times across the
@@ -26,49 +26,49 @@ use std::fmt;
 use aether_data::{Kind, KindId};
 use aether_kinds::NamedMail;
 
-use super::bench::{SubstrateBench, SubstrateBenchError};
+use super::harness::{SubstrateHarness, SubstrateHarnessError};
 
-/// One atomic step in a [`SubstrateBench::execute`] sequence. Each variant
+/// One atomic step in a [`SubstrateHarness::execute`] sequence. Each variant
 /// resolves via an existing settlement-gated primitive on
-/// [`SubstrateBench`]; the sequencer waits for the op's causal chain to
+/// [`SubstrateHarness`]; the sequencer waits for the op's causal chain to
 /// drain before proceeding to the next step.
 ///
-/// Build ops with the typed constructors ([`BenchOp::send_mail`],
-/// [`BenchOp::send_and_await`], [`BenchOp::advance`],
-/// [`BenchOp::capture`]) — they encode the payload from a typed kind
+/// Build ops with the typed constructors ([`HarnessOp::send_mail`],
+/// [`HarnessOp::send_and_await`], [`HarnessOp::advance`],
+/// [`HarnessOp::capture`]) — they encode the payload from a typed kind
 /// via [`Kind::encode_into_bytes`], so callers never hand-encode.
 ///
 /// Recipients are mailbox *names* (`"aether.fs"`, `"aether.component"`,
 /// a loaded component's trampoline address) — mailbox ids are
 /// one-way name hashes, so every send resolves by name.
-pub enum BenchOp {
-    /// Run `ticks` complete frames. Build with [`BenchOp::advance`].
+pub enum HarnessOp {
+    /// Run `ticks` complete frames. Build with [`HarnessOp::advance`].
     Advance { ticks: u32 },
     /// Fire-and-settle a mail; no reply is awaited. Build with the
-    /// typed [`BenchOp::send_mail`].
+    /// typed [`HarnessOp::send_mail`].
     SendMail { recipient: String, kind: KindId, payload: Vec<u8> },
     /// Send a mail and block until a reply arrives, stashing the raw
-    /// reply bytes. Build with the typed [`BenchOp::send_and_await`].
+    /// reply bytes. Build with the typed [`HarnessOp::send_and_await`].
     /// Covers component load / replace / drop and the `aether.fs`
     /// read / write / delete / list round trips uniformly — decode
     /// the stored bytes downstream with [`ExecutionResult::reply`].
     SendAndAwait { recipient: String, kind: KindId, payload: Vec<u8> },
     /// Capture the current frame as PNG bytes. Build with
-    /// [`BenchOp::capture`]. Does not dispatch a tick — sequence a
-    /// [`BenchOp::Advance`] before it if the world must move first.
+    /// [`HarnessOp::capture`]. Does not dispatch a tick — sequence a
+    /// [`HarnessOp::Advance`] before it if the world must move first.
     Capture,
     /// Capture with pre/after mail bundles dispatched atomically
     /// around the readback (the `CaptureFrame` shape, ADR-0020): `pre`
     /// lands *before* the readback so its effects appear in the PNG,
     /// `after` runs *after* (cleanup). Build with
-    /// [`BenchOp::capture_with_mails`]. Use this rather than
+    /// [`HarnessOp::capture_with_mails`]. Use this rather than
     /// decomposing into separate `SendMail` + `Capture` ops when the
     /// pre-mail's geometry must land in the same frame as the
     /// readback.
     CaptureWithMails { pre: Vec<NamedMail>, after: Vec<NamedMail> },
 }
 
-impl BenchOp {
+impl HarnessOp {
     /// Run `ticks` complete frames.
     #[must_use]
     pub fn advance(ticks: u32) -> Self {
@@ -82,7 +82,7 @@ impl BenchOp {
     }
 
     /// Capture with pre/after mail bundles dispatched atomically
-    /// around the readback. See [`BenchOp::CaptureWithMails`].
+    /// around the readback. See [`HarnessOp::CaptureWithMails`].
     #[must_use]
     pub fn capture_with_mails(pre: Vec<NamedMail>, after: Vec<NamedMail>) -> Self {
         Self::CaptureWithMails { pre, after }
@@ -108,20 +108,20 @@ impl BenchOp {
 /// One output per executed op, keyed by the op's label in
 /// [`ExecutionResult`]. `Replied` and `Captured` carry bytes; the
 /// other two are unit markers confirming the op ran.
-pub enum BenchOutput {
+pub enum HarnessOutput {
     Advanced,
     Mailed,
     Replied(Vec<u8>),
     Captured(Vec<u8>),
 }
 
-/// Map of per-op outputs from a successful [`SubstrateBench::execute`]
+/// Map of per-op outputs from a successful [`SubstrateHarness::execute`]
 /// call, keyed by each op's label. Fetch results by label so tests
 /// read by intent (`result.captured("snap")`) and survive step
 /// reordering, rather than destructuring a positional array.
 #[derive(Default)]
 pub struct ExecutionResult {
-    inner: HashMap<String, BenchOutput>,
+    inner: HashMap<String, HarnessOutput>,
 }
 
 impl ExecutionResult {
@@ -133,21 +133,21 @@ impl ExecutionResult {
 
     /// Raw output for `label`, if the step ran.
     #[must_use]
-    pub fn get(&self, label: &str) -> Option<&BenchOutput> {
+    pub fn get(&self, label: &str) -> Option<&HarnessOutput> {
         self.inner.get(label)
     }
 
-    /// PNG bytes from a [`BenchOp::Capture`] step. `None` if `label`
+    /// PNG bytes from a [`HarnessOp::Capture`] step. `None` if `label`
     /// didn't run or wasn't a `Capture`.
     #[must_use]
     pub fn captured(&self, label: &str) -> Option<&[u8]> {
         match self.inner.get(label)? {
-            BenchOutput::Captured(bytes) => Some(bytes),
+            HarnessOutput::Captured(bytes) => Some(bytes),
             _ => None,
         }
     }
 
-    /// Decode the reply from a [`BenchOp::SendAndAwait`] step as `R`.
+    /// Decode the reply from a [`HarnessOp::SendAndAwait`] step as `R`.
     /// `R` is any reply kind (`LoadResult`, `ReplaceResult`,
     /// `WriteResult`, …); the bytes decode through the kind's declared
     /// codec (cast or structured) via `Kind::decode_from_bytes`
@@ -160,7 +160,7 @@ impl ExecutionResult {
         R: Kind,
     {
         match self.inner.get(label) {
-            Some(BenchOutput::Replied(bytes)) => {
+            Some(HarnessOutput::Replied(bytes)) => {
                 R::decode_from_bytes(bytes).ok_or_else(|| ExecutionError::ReplyDecode {
                     label: label.to_owned(),
                     error: "Kind::decode_from_bytes returned None".to_owned(),
@@ -171,17 +171,17 @@ impl ExecutionResult {
     }
 }
 
-/// Failure modes of [`SubstrateBench::execute`] and its result accessors.
+/// Failure modes of [`SubstrateHarness::execute`] and its result accessors.
 #[derive(Debug)]
 pub enum ExecutionError {
     /// Two ops in the same `execute` call shared a label.
     DuplicateLabel(String),
     /// The op at `label` failed mid-sequence; `error` is the
-    /// underlying [`SubstrateBenchError`] (settlement timeout, decode
+    /// underlying [`SubstrateHarnessError`] (settlement timeout, decode
     /// failure, unknown mailbox, …). Aborts the sequence.
-    OpFailed { label: String, error: SubstrateBenchError },
+    OpFailed { label: String, error: SubstrateHarnessError },
     /// [`ExecutionResult::reply`] was asked for a label that didn't
-    /// run a [`BenchOp::SendAndAwait`] (or didn't run at all).
+    /// run a [`HarnessOp::SendAndAwait`] (or didn't run at all).
     NoSuchReply(String),
     /// [`ExecutionResult::reply`] couldn't decode the stashed reply
     /// bytes as the requested type.
@@ -209,9 +209,9 @@ impl fmt::Display for ExecutionError {
 
 impl error::Error for ExecutionError {}
 
-impl SubstrateBench {
+impl SubstrateHarness {
     /// Execute `steps` in order. Each op dispatches via the matching
-    /// settlement-gated [`SubstrateBench`] primitive, blocks until its
+    /// settlement-gated [`SubstrateHarness`] primitive, blocks until its
     /// causal chain drains (ADR-0080 §6), then proceeds. Outputs are
     /// keyed by each op's label; fetch them from the returned
     /// [`ExecutionResult`] (`captured(label)`, `reply::<R>(label)`).
@@ -224,23 +224,23 @@ impl SubstrateBench {
     /// `execute` composes over the per-op primitives — it does not
     /// replace them. Tests that assert intermediate state between ops
     /// stay imperative, or split into multiple `execute` calls.
-    pub fn execute(&mut self, steps: Vec<(&str, BenchOp)>) -> Result<ExecutionResult, ExecutionError> {
+    pub fn execute(&mut self, steps: Vec<(&str, HarnessOp)>) -> Result<ExecutionResult, ExecutionError> {
         let mut out = ExecutionResult::default();
         for (label, op) in steps {
             if out.contains(label) {
                 return Err(ExecutionError::DuplicateLabel(label.to_owned()));
             }
             let result = match op {
-                BenchOp::Advance { ticks } => self.advance(ticks).map(|_| BenchOutput::Advanced),
-                BenchOp::SendMail { recipient, kind, payload } => {
-                    self.send_bytes(&recipient, kind, payload).map(|()| BenchOutput::Mailed)
+                HarnessOp::Advance { ticks } => self.advance(ticks).map(|_| HarnessOutput::Advanced),
+                HarnessOp::SendMail { recipient, kind, payload } => {
+                    self.send_bytes(&recipient, kind, payload).map(|()| HarnessOutput::Mailed)
                 }
-                BenchOp::SendAndAwait { recipient, kind, payload } => {
-                    self.send_bytes_and_await(&recipient, kind, payload).map(BenchOutput::Replied)
+                HarnessOp::SendAndAwait { recipient, kind, payload } => {
+                    self.send_bytes_and_await(&recipient, kind, payload).map(HarnessOutput::Replied)
                 }
-                BenchOp::Capture => self.capture().map(BenchOutput::Captured),
-                BenchOp::CaptureWithMails { pre, after } => {
-                    self.capture_with_mails(pre, after).map(BenchOutput::Captured)
+                HarnessOp::Capture => self.capture().map(HarnessOutput::Captured),
+                HarnessOp::CaptureWithMails { pre, after } => {
+                    self.capture_with_mails(pre, after).map(HarnessOutput::Captured)
                 }
             };
             match result {
@@ -293,7 +293,7 @@ mod tests {
         // The substrate reply path encodes via `Kind::encode_into_bytes`
         // (ADR-0100), so the recorded bytes are the cast image.
         let bytes = reply.encode_into_bytes();
-        let result = ExecutionResult { inner: HashMap::from([("reply".to_owned(), BenchOutput::Replied(bytes))]) };
+        let result = ExecutionResult { inner: HashMap::from([("reply".to_owned(), HarnessOutput::Replied(bytes))]) };
 
         let decoded: CastReply = result.reply("reply").expect("cast reply decodes");
         assert_eq!(decoded, reply);

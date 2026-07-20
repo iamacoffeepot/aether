@@ -45,7 +45,7 @@ filter = "package(=aether-kit) & (binary(widget_render_interaction) | binary(wor
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Every binary under `crates/aether-kit/tests/` cold-loads and compiles
-# `aether_kit.wasm` and boots a wgpu `SubstrateBench`, so they are one slow
+# `aether_kit.wasm` and boots a wgpu `SubstrateHarness`, so they are one slow
 # class rather than a fixed allowlist: #2805 measured the camera scenario
 # around 56.5s and mesh around 52-53s against the default 60s cap, and
 # iamacoffeepot/aether#3527 saw two more binaries (`mark_scenario`,
@@ -59,7 +59,7 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 
 # The `aether-component` integration binaries mix two rehomed slow classes:
 # the scenario tests (iamacoffeepot/aether#3769) cold-load and compile
-# fixture wasm into a `SubstrateBench`, and the fleet tests
+# fixture wasm into a `SubstrateHarness`, and the fleet tests
 # (iamacoffeepot/aether#3776) fork real debug `aether-substrate-headless`
 # processes through `FleetBench` and wait for them to bind. The fork class
 # stretches well past 60s under contention with the sibling fleet suites,
@@ -72,8 +72,8 @@ filter = "package(=aether-component) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The `aether-substrate` integration binaries mix two rehomed slow
-# classes: the bench tests (cap_registry / cost_table /
-# substrate_bench_logs, iamacoffeepot/aether#3770) cold-load fixture wasm
+# classes: the harness tests (cap_registry / cost_table /
+# substrate_harness_logs, iamacoffeepot/aether#3770) cold-load fixture wasm
 # — cap_registry's replace test additionally cold-compiles
 # `aether_kit.wasm`, the exact load that pushed the aether-kit binaries
 # past 60s (#2805) — and the fleet log-tail test (`fleetbench_logs`,
@@ -152,8 +152,8 @@ filter = "package(=aether-rpc) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The `aether-render` render scenario binary (rehomed from the bundle's
-# `substrate_bench_scenario` dispatcher, issue #3771) boots a wgpu
-# `SubstrateBench` per test and runs ~18 GPU captures; on CI's shared
+# `substrate_harness_scenario` dispatcher, issue #3771) boots a wgpu
+# `SubstrateHarness` per test and runs ~18 GPU captures; on CI's shared
 # 2-core runner the frames rasterize in software under full-suite
 # contention, so the binary stretches well past the 60s steady-state cap
 # while still making timely progress. It ran under the bundle's 180s
@@ -188,8 +188,8 @@ filter = "package(=aether-substrate-bundle) & binary(fleetbench_replace)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The `aether-text` text scenario binary (rehomed from the bundle's
-# `substrate_bench_scenario` dispatcher, issue #3772) boots a wgpu
-# `SubstrateBench` per test and runs a dozen GPU captures; on CI's
+# `substrate_harness_scenario` dispatcher, issue #3772) boots a wgpu
+# `SubstrateHarness` per test and runs a dozen GPU captures; on CI's
 # shared 2-core runner the frames rasterize in software under
 # full-suite contention, so the binary stretches well past the 60s
 # steady-state cap while still making timely progress. It ran under

@@ -211,7 +211,7 @@ See [`workbench/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/cra
 
 ## Chassis caveats and extension routes
 
-Desktop and render-capable SubstrateBench provide the lifecycle, input, text, fs,
+Desktop and render-capable SubstrateHarness provide the lifecycle, input, text, fs,
 and render peers needed for the visual workbench. Mark and terra actors are
 render-independent and remain useful in nonvisual tests. The production
 headless graph has `Tick` but no `Render`: mutations and queries can run, but

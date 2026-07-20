@@ -94,7 +94,7 @@ pub struct App {
     /// the cap clears its pending-advance guard (ADR-0082 §6), so gating
     /// the next advance on it — rather than on the raw settlement channel
     /// — keeps the back-to-back advances from racing the cap's overlap
-    /// guard (the same reply-gate the substrate-bench frame loop uses,
+    /// guard (the same reply-gate the substrate-harness frame loop uses,
     /// iamacoffeepot/aether#999).
     lifecycle_reply_inbox: SettlingInbox,
     /// Mailbox id of [`Self::lifecycle_reply_inbox`], used as the
@@ -741,7 +741,7 @@ impl ApplicationHandler<UserEvent> for App {
                         Some(req) => {
                             // iamacoffeepot/aether#860: wait for each
                             // pre-mail's causal chain to settle before
-                            // rendering, mirroring the substrate-bench fix.
+                            // rendering, mirroring the substrate-harness fix.
                             // The desktop driver doesn't have a
                             // `SettlementTimeout` error to surface, so
                             // a stuck chain replies the capture with

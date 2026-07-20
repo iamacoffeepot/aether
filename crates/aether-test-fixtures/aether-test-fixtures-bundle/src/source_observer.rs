@@ -9,13 +9,13 @@
 //!
 //! - `on_source_query` (manual): handles `SourceQuery`, reads
 //!   `ctx.source_mailbox()`, logs it, broadcasts `SourceReport { mailbox_id }`
-//!   to the substrate-bench observer mailbox, and replies it directly. `mailbox_id`
+//!   to the substrate-harness observer mailbox, and replies it directly. `mailbox_id`
 //!   is `0` when `source_mailbox()` returns `None` (Session / no-sender origin).
 //!
 //! Integration test pattern:
-//! - Session case: the bench sends `SourceQuery` via `send_and_await`; the
+//! - Session case: the harness sends `SourceQuery` via `send_and_await`; the
 //!   reply is `SourceReport { mailbox_id: 0 }` (Session source → None).
-//! - Component case: load two instances ("sender" + "reader"). Bench sends
+//! - Component case: load two instances ("sender" + "reader"). Harness sends
 //!   `SendSourceQuery { to: reader_mailbox.0 }` (fire-and-settle) to sender.
 //!   Sender forwards `SourceQuery` to reader (component-origin mail). Reader
 //!   reads `source_mailbox()` → `Some(sender_mailbox)` → logs
@@ -59,12 +59,12 @@ impl WasmActor for SourceObserver {
     #[handler::manual]
     fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: SourceQuery) {
         let mailbox_id = ctx.source_mailbox().map_or(0, |m| m.0);
-        // Log the raw value so the SubstrateBench integration test can verify it
+        // Log the raw value so the SubstrateHarness integration test can verify it
         // with `log_tail` without relying on broadcast payload access.
         tracing::info!(target: "test.source_observer", "source_mailbox={mailbox_id}");
         // Broadcast to the observer for count-based assertions.
         ctx.send_to_named::<SourceReport>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &SourceReport { mailbox_id });
-        // Reply to the bench when it sent `SourceQuery` directly (Session case).
+        // Reply to the harness when it sent `SourceQuery` directly (Session case).
         ctx.reply(&SourceReport { mailbox_id });
     }
 }
