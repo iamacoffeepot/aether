@@ -13,8 +13,12 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
         return;
     }
     let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench =
-        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .full()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = "fs-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -64,8 +68,12 @@ fn fs_delete_removes_written_file() {
         return;
     }
     let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench =
-        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .full()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = "fs-delete.bin".to_owned();
     // A failed write would abort the sequence with `OpFailed`, so
@@ -110,8 +118,12 @@ fn fs_list_returns_written_path() {
         return;
     }
     let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench =
-        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .full()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = "probe-list.bin".to_owned();
     let result = bench
@@ -149,8 +161,12 @@ fn fs_read_unknown_path_returns_not_found() {
         return;
     }
     let sandbox = init_save_sandbox("substrate-bench-fs");
-    let mut bench =
-        SubstrateBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
+    let mut bench = SubstrateBench::builder()
+        .full()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let result = bench
         .execute(vec![(

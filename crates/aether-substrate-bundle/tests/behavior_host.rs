@@ -240,7 +240,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let v2 = fs::read(&v2_path).expect("read intercept_slider_v2 wasm");
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
 
-    let mut bench = SubstrateBench::start_with_size(240, 220).expect("boot");
+    let mut bench = SubstrateBench::builder().size(240, 220).full().build().expect("boot");
     load_panel_with_host(&mut bench, &kit_wasm, intercept);
     let panel = panel_address();
 

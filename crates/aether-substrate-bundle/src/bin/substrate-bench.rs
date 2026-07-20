@@ -35,8 +35,7 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::resolve_teardown_cap;
 use aether_substrate_bundle::substrate_bench::{
-    RenderSizeConfig, SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchClipboardMode, SubstrateBenchEnv,
-    WORKERS,
+    RenderSizeConfig, SubstrateBenchBuild, SubstrateBenchChassis, SubstrateBenchEnv, WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
 };
@@ -64,8 +63,20 @@ fn main() -> anyhow::Result<()> {
         events_tx,
         capture_queue: capture_queue.clone(),
         namespace_roots: Some(namespace_roots),
-        clipboard_mode: SubstrateBenchClipboardMode::InMemory,
-        game_gateway: aether_game::GameGatewayConfig::default(),
+        // Issue #3764: the standalone binary is the MCP-drivable chassis,
+        // so it composes the full cap set — an in-process bench composes
+        // per scenario instead.
+        render: true,
+        component_host: true,
+        compose: vec![
+            Box::new(|b| b.with_actor::<aether_input::InputCapability>(aether_input::InputConfig::default())),
+            Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>(())),
+            Box::new(|b| b.with_actor::<aether_text::TextCapability>(())),
+            Box::new(|b| {
+                b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardConfig::InMemory)
+            }),
+            Box::new(|b| b.with_actor::<aether_game::GameGatewayCapability>(aether_game::GameGatewayConfig::default())),
+        ],
         // Issue #2509: the standalone binary is an env-reading edge, so
         // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including
         // the `0 → wait forever` sentinel) — the same knob the settlement
@@ -76,6 +87,7 @@ fn main() -> anyhow::Result<()> {
     let SubstrateBenchBuild { passive, boot, render_handles, kind_tick } = SubstrateBenchChassis::build_passive(env)?;
 
     let (width, height) = RenderSizeConfig::from_env().to_size();
+    let render_handles = render_handles.expect("substrate-bench binary composes render");
     let gpu = Gpu::new(width, height, render_handles);
     tracing::info!(
         target: "aether_substrate::boot",

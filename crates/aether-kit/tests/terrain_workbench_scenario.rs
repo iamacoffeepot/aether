@@ -191,7 +191,7 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(WIDTH, HEIGHT).expect("boot SubstrateBench");
+    let mut bench = SubstrateBench::builder().size(WIDTH, HEIGHT).full().build().expect("boot SubstrateBench");
     let mark_book_mailbox = load_export(&mut bench, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME, Vec::new());
     let world_mailbox = load_export(&mut bench, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME, Vec::new());
     let terra_mailbox = load_export(

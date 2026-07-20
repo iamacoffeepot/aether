@@ -109,7 +109,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mark_mailbox = load_mark_book(&mut bench, &wasm_path);
     load_terra(&mut bench, &wasm_path, mark_mailbox);
     let mark_address = component_address(MARK_COMPONENT_NAME);

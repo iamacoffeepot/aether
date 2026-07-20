@@ -47,7 +47,7 @@ mod tests {
         let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
             return;
         };
-        let mut bench = match SubstrateBench::start_with_size(64, 48) {
+        let mut bench = match SubstrateBench::builder().size(64, 48).full().build() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("skipping: SubstrateBench boot failed (likely no wgpu adapter): {e}");

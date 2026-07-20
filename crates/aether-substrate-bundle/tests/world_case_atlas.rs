@@ -587,7 +587,8 @@ fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
 
     let fixture = AtlasFixture::new(starter_cases());
     let world = component_address("world");
-    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).build().expect("boot atlas bench");
+    let mut bench =
+        SubstrateBench::builder().full().size(WINDOW_WIDTH, WINDOW_HEIGHT).build().expect("boot atlas bench");
     load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
     fixture.apply_all(&mut bench, &world);
     bench.execute(vec![("settle", BenchOp::advance(2))]).expect("settle atlas remesh");
@@ -615,7 +616,7 @@ fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
     let isolation_fixture = AtlasFixture::new(vec![single_label_case(), two_label_case()]);
     let isolation_world = component_address("isolation-world");
     let mut isolation_bench =
-        SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).build().expect("boot isolation bench");
+        SubstrateBench::builder().full().size(WINDOW_WIDTH, WINDOW_HEIGHT).build().expect("boot isolation bench");
     load_kit_export(&mut isolation_bench, &wasm, "aether.kit.world", "isolation-world");
     isolation_fixture.apply_case(&mut isolation_bench, &isolation_world, 0);
     isolation_bench.execute(vec![("settle", BenchOp::advance(2))]).expect("settle isolated case");

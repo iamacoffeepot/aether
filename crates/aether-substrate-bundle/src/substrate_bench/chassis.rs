@@ -11,13 +11,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_clipboard::{ClipboardCapability, ClipboardConfig, HeadlessClipboardCapability};
 use aether_component::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
-use aether_game::{GameGatewayCapability, GameGatewayConfig};
-use aether_input::{InputCapability, InputConfig};
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderHandles};
@@ -26,13 +23,10 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
     Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
-use aether_tcp::TcpCapability;
-use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
 use super::cap::{SubstrateBenchCapConfig, SubstrateBenchCapability};
-use super::config::SubstrateBenchClipboardMode;
 use super::events::{ChassisEvent, EventSender};
 use crate::chassis_common::frame_lifecycle_config;
 use aether_lifecycle::LifecycleConfig;
@@ -99,6 +93,11 @@ impl Chassis for SubstrateBenchChassis {
     }
 }
 
+/// A deferred `Builder::with_actor` application: the embedder names the
+/// cap type and captures its config; the chassis applies the closure
+/// after the bench basics so composition order stays chassis-owned.
+pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateBenchChassis>) -> Builder<SubstrateBenchChassis> + Send>;
+
 /// Bag of resolved configs the substrate-bench chassis takes at build
 /// time. Constructed by the embedder — the binary's `main()` reads
 /// env vars; the in-process [`super::SubstrateBench`] takes builder
@@ -155,11 +154,21 @@ pub struct SubstrateBenchEnv {
     /// pre-issue-673 silent-skip semantics. When `None`, fs is not
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
-    /// Clipboard implementation composed for this bench.
-    pub clipboard_mode: SubstrateBenchClipboardMode,
-    /// Inert-by-default player-listener config. Loopback game scenarios
-    /// supply an active listener and exact simulation mailbox id.
-    pub game_gateway: GameGatewayConfig,
+    /// Compose the render cap (and its capture backend). Off, the chassis
+    /// boots no `RenderCapability`, publishes no `RenderHandles`, and
+    /// [`SubstrateBenchBuild::render_handles`] is `None` — mail to
+    /// `aether.render` warn-drops and captures are unavailable.
+    pub render: bool,
+    /// Compose the component host. Off, `aether.component.load` /
+    /// `replace` / `drop` have no recipient — benches that never touch
+    /// wasm skip the cap entirely.
+    pub component_host: bool,
+    /// Caller-supplied capability composition, applied to the chassis
+    /// [`Builder`] after the bench basics (trace dispatch, the bench cap,
+    /// lifecycle, headless window) in push order. The bench gives the
+    /// basics; each embedder composes exactly the caps its scenario
+    /// needs (issue #3764).
+    pub compose: Vec<ComposeFn>,
     /// Issue #2509: cumulative patience for the instanced-actor teardown
     /// close-done gate. The in-process `SubstrateBench` resolves this from the
     /// same `SettlementConfig` (`AETHER_SETTLEMENT_CAP_SECS`) knob its
@@ -187,12 +196,13 @@ pub struct SubstrateBenchEnv {
 pub struct SubstrateBenchBuild {
     pub passive: PassiveChassis<SubstrateBenchChassis>,
     pub boot: SubstrateBoot,
-    /// Driver-facing accumulator + GPU bundle. Pre-PR-E2 the embedder
-    /// also got `Arc<RenderCapability>` via `passive.capability()` to
-    /// call `install_gpu` / `record_frame` / etc. on it; post-E2
-    /// render is a facade cap (dispatcher owns the cap) and the
-    /// encoder-level methods live on [`RenderHandles`].
-    pub render_handles: RenderHandles,
+    /// Driver-facing accumulator + GPU bundle, `Some` iff the env
+    /// composed the render cap. Pre-PR-E2 the embedder also got
+    /// `Arc<RenderCapability>` via `passive.capability()` to call
+    /// `install_gpu` / `record_frame` / etc. on it; post-E2 render is a
+    /// facade cap (dispatcher owns the cap) and the encoder-level
+    /// methods live on [`RenderHandles`].
+    pub render_handles: Option<RenderHandles>,
     pub kind_tick: KindId,
 }
 
@@ -225,18 +235,14 @@ impl SubstrateBenchChassis {
             events_tx,
             capture_queue,
             namespace_roots,
-            clipboard_mode,
-            game_gateway,
+            render,
+            component_host,
+            compose,
             teardown_cap,
         } = env;
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
         let _ = workers;
-        let component_host_config = ComponentHostConfig {
-            engine: Arc::clone(&boot.engine),
-            linker: Arc::clone(&boot.linker),
-            hub_outbound: Arc::clone(&boot.outbound),
-        };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
 
@@ -252,8 +258,9 @@ impl SubstrateBenchChassis {
         // Phase 2. The cap dispatcher parks the request on
         // `capture_queue`; the embedder loop sees `CaptureRequested`
         // and routes through `record_frame` + readback like before.
+        // Built only when the env composes render.
         let events_for_render = events_tx.clone();
-        let render_config = RenderConfig {
+        let render_config = render.then(|| RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds: observed_kinds.clone(),
             assets_dir,
@@ -266,15 +273,13 @@ impl SubstrateBenchChassis {
                 }),
                 outbound: Arc::clone(&boot.outbound),
             }),
-        };
+        });
 
         // Phase 4: advance lands on `SubstrateBenchCapability` claiming
         // `aether.substrate_bench`. The cap pushes `ChassisEvent::Advance`
         // onto the embedder loop just like the retired
         // `chassis_handler` closure did.
         let substrate_bench_cap_config = SubstrateBenchCapConfig { events: events_tx.clone() };
-
-        let input_config = InputConfig::default();
 
         // Pre-validate fs roots if supplied. Pre-validation
         // mirrors what `LocalFileAdapter::new` does inside
@@ -337,31 +342,41 @@ impl SubstrateBenchChassis {
             );
         }
 
-        // ADR-0082 §1 / PR 3b: substrate-bench uses the shared Tick-only
+        // ADR-0082 §1 / PR 3b: substrate-bench uses the shared frame
         // lifecycle graph. The embedder pushes `LifecycleAdvance` via
-        // SubstrateBench's own pumping logic; the driver broadcasts Tick to
-        // `aether.input` via the relay subscriber.
+        // SubstrateBench's own pumping logic; the driver broadcasts Tick
+        // to the stage subscriber set.
+        //
+        // Issue #3764: the fixed chain below is the bench basics — trace
+        // dispatch, the bench cap, lifecycle, and the fail-fast headless
+        // window. Everything else is embedder-composed: the render cap
+        // and component host ride env flags (they need boot-internal
+        // wiring), fs rides pre-validated roots, and arbitrary caps
+        // arrive as `compose` closures applied between the basics and
+        // lifecycle.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_workers(pool_workers)
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_cap(teardown_cap)
-            .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<InputCapability>(input_config)
-            .with_actor::<ComponentHostCapability>(component_host_config)
-            .with_actor::<TcpCapability>(())
-            .with_actor::<GameGatewayCapability>(game_gateway)
-            .with_actor::<RenderCapability>(render_config)
-            .with_actor::<TextCapability>(())
+            .with_actor::<TraceDispatchCapability>(());
+        if component_host {
+            builder = builder.with_actor::<ComponentHostCapability>(ComponentHostConfig {
+                engine: Arc::clone(&boot.engine),
+                linker: Arc::clone(&boot.linker),
+                hub_outbound: Arc::clone(&boot.outbound),
+            });
+        }
+        if let Some(config) = render_config {
+            builder = builder.with_actor::<RenderCapability>(config);
+        }
+        for apply in compose {
+            builder = apply(builder);
+        }
+        builder = builder
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<SubstrateBenchCapability>(substrate_bench_cap_config)
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT));
-        builder = match clipboard_mode {
-            SubstrateBenchClipboardMode::InMemory => {
-                builder.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory)
-            }
-            SubstrateBenchClipboardMode::Unavailable => builder.with_actor::<HeadlessClipboardCapability>(()),
-        };
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }
@@ -371,12 +386,15 @@ impl SubstrateBenchChassis {
         // bundle on the chassis's `ExportedHandles` map during `init`.
         // Embedders retrieve via `PassiveChassis::handle::<H>()` — no
         // `Arc<RenderCapability>` ever escapes the dispatcher thread.
-        let render_handles: RenderHandles =
-            passive.handle::<RenderHandles>().ok_or_else(|| {
+        let render_handles: Option<RenderHandles> = if render {
+            Some(passive.handle::<RenderHandles>().ok_or_else(|| {
                 anyhow::anyhow!(
                     "SubstrateBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before SubstrateBench builds",
                 )
-            })?;
+            })?)
+        } else {
+            None
+        };
 
         // The cap config already cloned `events_tx`; dropping the
         // local copy lets the receiver hang up cleanly once every

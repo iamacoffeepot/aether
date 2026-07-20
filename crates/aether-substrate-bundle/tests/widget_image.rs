@@ -145,7 +145,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::start_with_size(48, 40).expect("boot");
+    let mut bench = SubstrateBench::builder().size(48, 40).full().build().expect("boot");
     let first_texture_id = create_texture(&mut bench, "first_texture", first_texture_pixels());
     let second_texture_id = create_texture(&mut bench, "second_texture", second_texture_pixels());
     let tint = Rgba::WHITE;

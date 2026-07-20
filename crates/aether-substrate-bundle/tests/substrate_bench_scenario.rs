@@ -20,7 +20,7 @@
 //! gate, `save://` sandbox) live in
 //! `aether_substrate_bundle::substrate_bench::test_helpers` (issues 460 +
 //! 821). Per issue 464, the sandbox flows in via
-//! `SubstrateBench::builder().namespace_roots(...)` rather than env-var
+//! `SubstrateBench::builder().full().namespace_roots(...)` rather than env-var
 //! mutation.
 
 // Integration-test skip diagnostic: emit via stderr so `cargo test`

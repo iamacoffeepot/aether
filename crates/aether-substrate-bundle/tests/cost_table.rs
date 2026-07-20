@@ -58,7 +58,7 @@ fn init_seeds_cells_and_dispatch_folds() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let mbox = load_probe(&mut bench, &wasm_path);
 
     // At construction, before any dispatch: both declared handlers

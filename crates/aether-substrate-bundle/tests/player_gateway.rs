@@ -122,6 +122,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     };
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
     let mut bench = SubstrateBench::builder()
+        .full()
         .size(96, 96)
         .game_gateway(GameGatewayConfig {
             listener_addr: Some("127.0.0.1:0".into()),

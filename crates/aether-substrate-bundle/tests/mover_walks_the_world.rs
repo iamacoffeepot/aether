@@ -247,7 +247,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).full().build().expect("boot");
     let world = component_address("world");
     let mover_address = component_address("mover");
     let _world_mailbox = load_kit_export(&mut bench, &wasm, "aether.kit.world", "world");
@@ -324,7 +324,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).full().build().expect("boot");
 
     let world = component_address("world");
     let mover = component_address("mover");

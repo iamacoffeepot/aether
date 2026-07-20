@@ -29,7 +29,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // the `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
@@ -133,7 +133,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // it under the `Named("tagged")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:tagged");
 
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineTagParent`, capturing its mailbox id for the replace. The
@@ -241,7 +241,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // `Named("widget")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:widget");
 
-    let mut bench = SubstrateBench::start_with_size(64, 48).expect("boot");
+    let mut bench = SubstrateBench::builder().size(64, 48).full().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineDespawnParent` from the `inline_child` bundle, then probe

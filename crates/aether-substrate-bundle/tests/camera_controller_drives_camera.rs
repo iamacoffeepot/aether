@@ -144,7 +144,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut bench = SubstrateBench::start_with_size(WINDOW_WIDTH, WINDOW_HEIGHT).expect("boot");
+    let mut bench = SubstrateBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).full().build().expect("boot");
 
     let world = component_address("world");
     // The controller resolves its target camera by the camera export's default
