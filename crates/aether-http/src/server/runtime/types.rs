@@ -301,6 +301,14 @@ pub struct StreamState {
     /// window. A chunk arriving with this at zero is an over-window flood
     /// (ADR-0128 §Consequences trust boundary) → the stream is torn down.
     pub credit_outstanding: u32,
+    /// The handler sent `HttpResponseStreamEnd`; no more chunks are coming,
+    /// so no further credit is ever granted. Distinct from
+    /// [`Self::pending_end`], which clears once the terminator is handed to
+    /// the writer: a slot freed by a still-draining body chunk after that
+    /// hand-off must not mint a grant, because the handler is done with this
+    /// stream and the stale grant would leak into its *next* request's
+    /// stream accounting (issue 3797).
+    pub ended: bool,
     /// The handler sent `HttpResponseStreamEnd` but the terminator did not
     /// fit the bounded channel yet (chunks still queued). Flushed as slots
     /// free so the terminating chunk always follows the body in order.

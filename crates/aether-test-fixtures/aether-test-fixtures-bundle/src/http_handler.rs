@@ -84,6 +84,79 @@ impl WasmActor for HttpHandler {
 /// credit window so the e2e round trip exercises credit replenishment.
 const STREAM_CHUNK_COUNT: u32 = 20;
 
+/// The streaming state [`StreamingHttpHandler`] and
+/// [`RoutedStreamingHttpHandler`] share verbatim, so their e2e comparison
+/// isolates the dispatch path, not the behavior: the ADR-0133 stream slot,
+/// the arming floor, and per-request chunk progress.
+#[derive(Default)]
+struct StreamProgress {
+    /// The stream this handler is feeding (ADR-0133), captured from the
+    /// first credit mail — the counterparty that dispatched it plus the
+    /// stream id. `None` until that first grant arms it.
+    stream: Option<ResponseStream>,
+    /// The last stream id this handler armed. The cap's replenishment
+    /// grants race the terminator, so a grant for a stream this handler
+    /// already finished can arrive after the next request reset the slot
+    /// (issue 3797); stream ids are cap-minted monotonic, so only a grant
+    /// *above* this floor may arm the slot. Survives [`Self::begin_request`]
+    /// — the floor is exactly the cross-request state.
+    last_armed_id: Option<u64>,
+    /// Index of the next chunk to emit.
+    next_index: u32,
+    /// Whether the terminator has been sent.
+    ended: bool,
+}
+
+impl StreamProgress {
+    /// Reset for a fresh request: disarm the previous request's stream so
+    /// the slot re-arms from the new stream's own first credit grant, and
+    /// rewind the chunk progress. The arming floor stays — it is what keeps
+    /// the previous stream's stale grants from re-arming the fresh slot.
+    fn begin_request(&mut self) {
+        self.stream = None;
+        self.next_index = 0;
+        self.ended = false;
+    }
+
+    /// Spend one `HttpStreamCredit` grant: arm the stream handle on the
+    /// first grant above the floor (ADR-0133 — the counterparty that
+    /// dispatched it, so chunks flow back to whoever paced the stream
+    /// rather than a hard-coded cap singleton), emit up to `credit.credit`
+    /// more chunks, and terminate once all [`STREAM_CHUNK_COUNT`] have gone
+    /// out. A grant for any other stream — stale leftovers from an earlier
+    /// request racing the terminator (issue 3797) — is ignored: spending it
+    /// would overrun the live stream's window (the cap tears the connection
+    /// down as a flood) or arm the slot with a dead stream.
+    fn spend_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: &HttpStreamCredit) {
+        let stream = match self.stream {
+            Some(stream) if credit.stream_id == stream.stream_id => stream,
+            Some(_) => return,
+            None => {
+                if self.last_armed_id.is_some_and(|last| credit.stream_id <= last) {
+                    return;
+                }
+                match ResponseStream::from_credit(ctx, credit) {
+                    Some(stream) => {
+                        self.last_armed_id = Some(stream.stream_id);
+                        *self.stream.insert(stream)
+                    }
+                    None => return,
+                }
+            }
+        };
+        let mut budget = credit.credit;
+        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
+            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
+            self.next_index += 1;
+            budget -= 1;
+        }
+        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
+            stream.end(ctx);
+            self.ended = true;
+        }
+    }
+}
+
 /// Reference response-streaming handler fixture (ADR-0128) for the
 /// `serving-http` streaming e2e test. It replies `HttpResponseStreamOpen`
 /// instead of `HttpServerResponse`, emits `STREAM_CHUNK_COUNT` chunks paced
@@ -92,48 +165,8 @@ const STREAM_CHUNK_COUNT: u32 = 20;
 /// reassembles a deterministic body.
 ///
 /// Registered at `aether.component/aether.embedded:test.web_stream` after load.
-/// Spend one `HttpStreamCredit` grant: arm the stream handle on the first
-/// grant (ADR-0133 — the counterparty that dispatched it, so chunks flow
-/// back to whoever paced the stream rather than a hard-coded cap
-/// singleton), emit up to `credit.credit` more chunks, and terminate once
-/// all [`STREAM_CHUNK_COUNT`] have gone out. Shared verbatim by
-/// [`StreamingHttpHandler`] and [`RoutedStreamingHttpHandler`] so their
-/// e2e comparison isolates the dispatch path, not the behavior.
-fn spend_credit(
-    stream_slot: &mut Option<ResponseStream>,
-    next_index: &mut u32,
-    ended: &mut bool,
-    ctx: &mut WasmCtx<'_, Manual>,
-    credit: &HttpStreamCredit,
-) {
-    let stream = match *stream_slot {
-        Some(stream) => stream,
-        None => match ResponseStream::from_credit(ctx, credit) {
-            Some(stream) => *stream_slot.insert(stream),
-            None => return,
-        },
-    };
-    let mut budget = credit.credit;
-    while budget > 0 && *next_index < STREAM_CHUNK_COUNT {
-        stream.chunk(ctx, format!("chunk-{}\n", *next_index).into_bytes());
-        *next_index += 1;
-        budget -= 1;
-    }
-    if *next_index >= STREAM_CHUNK_COUNT && !*ended {
-        stream.end(ctx);
-        *ended = true;
-    }
-}
-
 pub struct StreamingHttpHandler {
-    /// The stream this handler is feeding (ADR-0133), captured from the
-    /// first credit mail — the counterparty that dispatched it plus the
-    /// stream id. `None` until that first grant arms it.
-    stream: Option<ResponseStream>,
-    /// Index of the next chunk to emit.
-    next_index: u32,
-    /// Whether the terminator has been sent.
-    ended: bool,
+    progress: StreamProgress,
 }
 
 #[actor]
@@ -141,7 +174,7 @@ impl WasmActor for StreamingHttpHandler {
     const NAMESPACE: &'static str = "test.web_stream";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(StreamingHttpHandler { stream: None, next_index: 0, ended: false })
+        Ok(StreamingHttpHandler { progress: StreamProgress::default() })
     }
 
     /// The cap reads this actor's accept-set off the catch-all binding to
@@ -159,12 +192,7 @@ impl WasmActor for StreamingHttpHandler {
     //noinspection DuplicatedCode -- actor macros require one request handler per fixture actor type.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
-        // Disarm the previous request's stream too: each request opens a
-        // fresh stream, and the slot must re-arm from the new stream's own
-        // first credit grant or every chunk goes to the dead stream.
-        self.stream = None;
-        self.next_index = 0;
-        self.ended = false;
+        self.progress.begin_request();
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
@@ -178,7 +206,7 @@ impl WasmActor for StreamingHttpHandler {
     //noinspection DuplicatedCode -- actor macros require one credit handler per fixture actor type.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
-        spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
+        self.progress.spend_credit(ctx, &credit);
     }
 }
 
@@ -363,13 +391,7 @@ impl WasmActor for RoutedHttpHandler {
 /// Registered at `aether.component/aether.embedded:test.web_stream_routed`
 /// after load.
 pub struct RoutedStreamingHttpHandler {
-    /// The stream this handler is feeding (ADR-0133), captured from the first
-    /// credit mail. `None` until that first grant arms it.
-    stream: Option<ResponseStream>,
-    /// Index of the next chunk to emit.
-    next_index: u32,
-    /// Whether the terminator has been sent.
-    ended: bool,
+    progress: StreamProgress,
 }
 
 #[actor]
@@ -377,7 +399,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     const NAMESPACE: &'static str = "test.web_stream_routed";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(RoutedStreamingHttpHandler { stream: None, next_index: 0, ended: false })
+        Ok(RoutedStreamingHttpHandler { progress: StreamProgress::default() })
     }
 
     /// Claim `/routed-stream` for this actor's own mailbox through the raw
@@ -403,12 +425,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// `wire`.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
-        // Disarm the previous request's stream too: each request opens a
-        // fresh stream, and the slot must re-arm from the new stream's own
-        // first credit grant or every chunk goes to the dead stream.
-        self.stream = None;
-        self.next_index = 0;
-        self.ended = false;
+        self.progress.begin_request();
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
@@ -421,6 +438,6 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// window slot.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
-        spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
+        self.progress.spend_credit(ctx, &credit);
     }
 }
