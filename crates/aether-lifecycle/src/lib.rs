@@ -31,9 +31,8 @@
 //!    [`LifecycleAdvanceComplete`](aether_kinds::LifecycleAdvanceComplete)
 //!    to the chassis loop that issued the advance.
 //!
-//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3749) as a
-//! leaf per-cap crate of the arc that dissolves the capabilities
-//! monolith. Owns the lifecycle graph ([`LifecycleGraphData`] + its
+//! Extracted by the arc that dissolved the capabilities monolith
+//! (iamacoffeepot/aether#3749) as a leaf per-cap crate. Owns the lifecycle graph ([`LifecycleGraphData`] + its
 //! typestate builder), the [`LifecycleConfig`] init config, the
 //! [`LifecycleCapability`] identity + its subscriber-table / settlement
 //! runtime (`runtime`), and the send-side [`LifecycleMailboxExt`] facade.

@@ -29,12 +29,12 @@
 
 // The `#[actor] impl NativeActor for X` macro emits
 // `impl ::aether_substrate::NativeDispatch for X` so external callers
-// (caps in `aether-capabilities`, user-crate caps) resolve
+// (the per-cap crates, user-crate caps) resolve
 // unambiguously. For impls written *inside* aether-substrate the
 // `::aether_substrate` prefix is in-crate; the self-alias makes
 // absolute paths resolve without a separate "internal vs external"
 // macro arm. (Pre-issue-654 the wasm trampoline was one such in-crate
-// impl; post-654 it lives in `aether-capabilities`, but the alias
+// impl; post-654 it lives in `aether-component`, but the alias
 // stays because future substrate-internal `#[actor]` impls would hit
 // the same need.)
 extern crate self as aether_substrate;

@@ -41,8 +41,8 @@
 //!
 //! ## Crate shape
 //!
-//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3751) as a
-//! per-cap crate of the arc that dissolves the capabilities monolith.
+//! Extracted by the arc that dissolved the capabilities monolith
+//! (iamacoffeepot/aether#3751) as a per-cap crate.
 //! Owns the whole three-tier lineage — [`TcpCapability`],
 //! [`TcpListenerActor`], [`TcpSessionActor`] — plus the cap's own
 //! `aether.tcp.*` mail kinds ([`kinds`]), the listener / session init
@@ -52,9 +52,8 @@
 //! The `aether-game` player tier is the in-repo consumer that names these
 //! types directly (its gateway is a listener consumer and its sessions
 //! write framed bytes through [`TcpNativeExt`]). That is a downward
-//! leaf→leaf dependency, not a facade: `aether-capabilities` holds no
-//! dependency on this crate, so a downstream crate that wants TCP deps
-//! here and never enters the capabilities graph.
+//! leaf→leaf dependency, not a facade: a downstream crate that wants TCP
+//! deps here directly, and pulls in nothing else.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the

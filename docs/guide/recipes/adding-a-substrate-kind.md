@@ -11,7 +11,7 @@ documented upstream consumer that cannot depend on the owner.
 
 | Contract | Location |
 |---|---|
-| Request/reply for one native capability | `aether-capabilities/src/<cap>/kinds.rs` |
+| Request/reply for one native capability | `aether-<cap>/src/kinds.rs` |
 | Component/guest public API | that component's public rlib or sibling contract crate |
 | Shared lifecycle/control/diagnostic vocabulary | `aether-kinds`, with an explicit reason |
 | Internal worker/task wake kind | private next to the runtime state |
@@ -21,7 +21,7 @@ engine registry, including dynamically loaded component kinds.
 
 The clipboard contract is a compact current exemplar:
 
-- kinds: `aether-capabilities/src/clipboard/kinds.rs`;
+- kinds: `aether-clipboard/src/kinds.rs`;
 - identity/helpers: `clipboard/mod.rs`;
 - real/headless handlers: `clipboard/{runtime,headless_runtime}.rs`;
 - live discovery: inventory registry → `describe_kinds`/`describe_handlers`.

@@ -69,7 +69,7 @@ path = "src/bin/perf-plot.rs"
 # iamacoffeepot/aether#2311 / ADR-0122): a split cap's `NativeActor` /
 # `Lifecycle` / `NativeDispatch` impls compile only when this feature is
 # active. The bundle never builds to wasm and has no transport-only
-# consumer, so it is default-on. `aether-substrate` / `aether-capabilities`
+# consumer, so it is default-on. `aether-substrate` and the per-cap crates
 # already arrive with their own `runtime` defaults via the
 # non-`default-features = false` deps below, so no forwarding is needed.
 [features]
@@ -78,7 +78,6 @@ runtime = []
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
-aether-capabilities = { path = "../aether-capabilities" }
 # iamacoffeepot/aether#3758: the http caps were extracted to `aether-http`;
 # every chassis installs `HttpCapability` + `HttpServerCapability` and the
 # CLI re-exports their clap overlays, so the bundle takes the runtime face.
@@ -152,7 +151,7 @@ clap = { workspace = true }
 # Each overlay assembles a partial `<*ConfigLayer as confique::Config>::Layer`;
 # the cap's `from_argv_then_env` then preloads it into the confique
 # builder ahead of `.env()`. Direct dep so cli.rs can name the
-# `confique::Layer` trait without reaching through aether-capabilities.
+# `confique::Layer` trait without reaching through another crate.
 confique = { workspace = true }
 # Catch-all error type for chassis main()s + build_passive that
 # bridge BootError / wasmtime / io faults purely to bubble up.

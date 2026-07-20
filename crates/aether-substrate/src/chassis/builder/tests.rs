@@ -200,7 +200,7 @@ macro_rules! unit_shutdown_actor {
 
 /// Lightweight passive-cap fixture for chassis-level boot tests.
 /// The chassis-builder tests don't care about handler dispatch
-/// (per-cap dispatch coverage lives in `aether-capabilities`); the
+/// (per-cap dispatch coverage lives in the per-cap crates); the
 /// real caps would force a circular dep, so this stub stands in.
 struct StubLog;
 impl Addressable for StubLog {

@@ -31,7 +31,7 @@ applies projection, clipping, blending, and frame lifetime. See
 `text` feature. Its fontdue-backed native state is compiled only with
 `text-runtime`; wasm senders can use the kinds without linking fontdue or
 substrate runtime types. The split is defined in
-[`text/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/mod.rs).
+[`text/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/mod.rs).
 
 ## Public mail surface
 
@@ -46,7 +46,7 @@ Wire kind names and Rust types are deliberately shown separately:
 | `aether.text.draw_batch` | `DrawTextBatch` | fire-and-forget ordered strings with compatible-run batching |
 
 The exact schemas are in
-[`text/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/kinds.rs).
+[`text/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs).
 `FontRef`, `DrawText`, and `LoadFontBytes` are Rust value types, not extra
 mail-kind names.
 
@@ -99,9 +99,9 @@ or clip transition flushes the current run; later items with an earlier key do
 not reorder backward to join it. Unknown-font or invalid-size items alone are
 dropped, without discarding valid neighbors. Glyph uploads are sent before the
 quad run that can sample them. The implementation is in
-[`text/runtime/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/runtime/mod.rs)
+[`text/runtime/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/mod.rs)
 and
-[`text/runtime/layout.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/runtime/layout.rs).
+[`text/runtime/layout.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/layout.rs).
 
 ### Measuring locally
 
@@ -138,7 +138,7 @@ cache, resets the shelf packer, uploads one full transparent rectangle, then
 re-rasterizes the requested glyphs as misses. The saturating frame may be
 partial; the next frame recovers if its working set fits. There is no LRU or
 multi-atlas spill. See
-[`text/runtime/atlas.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/runtime/atlas.rs).
+[`text/runtime/atlas.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/atlas.rs).
 
 ## Invariants and failure modes
 
@@ -170,12 +170,12 @@ The current composition is defined in
 [`chassis_common.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs),
 [`test_bench/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/test_bench/chassis.rs),
 and
-[`render/headless_runtime.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/render/headless_runtime.rs).
+[`render/headless_runtime.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/headless_runtime.rs).
 
 ## Where to change or extend it
 
 - Change the wire surface in
-  [`text/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/text/kinds.rs) and
+  [`text/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs) and
   update ADR-0105 when the contract changes. Keep mail kind strings distinct
   from helper value types.
 - Add shaping, fallback, kerning, or multiline behavior in the CPU layout

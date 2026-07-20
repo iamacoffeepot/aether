@@ -101,7 +101,7 @@ the transform owns only the value conversion.
 
 ## Change route
 
-- Capability: `crates/aether-capabilities/src/inventory/`
+- Capability: `crates/aether-inventory/src/`
 - Shared inventory kinds: `crates/aether-kinds/src/lib.rs`
 - Link-time entries and canonical ids: `crates/aether-data/src/`
 - Registry: `crates/aether-substrate/src/mail/registry/`

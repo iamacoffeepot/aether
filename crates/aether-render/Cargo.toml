@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `aether.render` capability, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3721) as a per-cap crate of the arc that dissolves
-# the capabilities monolith. The largest of the per-cap extractions: it
+# `aether.render` capability, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3721) as a per-cap crate. The largest of the per-cap extractions: it
 # owns the full render stack — the `aether.render` mailbox surface, the
 # drawing + texture mail kinds (`kinds`, ADR-0121), the driver-facing
 # accumulator + wgpu GPU bundle (`runtime`: `pipeline` / `texture` /
@@ -14,14 +13,11 @@ license.workspace = true
 # identity, and the fail-fast `HeadlessRenderCapability` companion
 # (`headless_runtime`).
 #
-# Like `aether-window` / `aether-trace` and unlike the pure-leaf
-# `aether-clipboard`, `aether-capabilities` RETAINS a
-# `default-features = false` dependency on this crate: the `aether.text`
-# cap (which stays in capabilities) composes the render surface —
-# `text/mod.rs`, `text/runtime/mod.rs`, `text/runtime/layout.rs`
-# reference `crate::render` items. So capabilities keeps the identity-only
-# dep and forwards `aether-render/runtime` from its own `text-runtime`
-# feature (no re-export facade).
+# Unlike the pure-leaf `aether-clipboard`, this crate has inbound cap
+# consumers: `aether-text` composes the render surface, so it holds a
+# `default-features = false` dependency here and forwards
+# `aether-render/runtime` from its own `runtime` feature (no re-export
+# facade).
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity (`RenderCapability` / `HeadlessRenderCapability`

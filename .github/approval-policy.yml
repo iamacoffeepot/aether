@@ -44,10 +44,9 @@
 #
 # KNOWN GAP: a glob matches paths, not novelty, so "adding a new core system"
 # cannot be fully expressed here. A new CRATE is caught — it must add a
-# `crates/*/Cargo.toml`, which is `human` below. A new CAPABILITY MODULE is not:
-# it is only new files inside `crates/aether-capabilities/`, indistinguishable by
-# path from an edit to an existing one, so it lands in `judge`. If new caps must
-# stop at the owner's desk, that needs a signal other than a path glob.
+# `crates/*/Cargo.toml`, which is `human` below. A new capability now IS a new
+# crate (every cap owns one), so it is caught by that same rule; a new MODULE
+# inside an existing cap crate is not, and lands in `judge`.
 
 default: judge
 
@@ -138,8 +137,6 @@ rules:
   # are spelled out because this is where a new capability or a chassis change
   # lands, and a reader should not have to infer the tier of the busiest tree in
   # the repo.
-  - glob: "crates/aether-capabilities/**"
-    tier: judge
   - glob: "crates/aether-substrate-bundle/**"
     tier: judge
   - glob: "crates/aether-behavior/**"

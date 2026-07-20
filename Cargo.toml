@@ -22,7 +22,6 @@ members = [
     "crates/aether-inventory",
     "crates/aether-mesh",
     "crates/aether-kit",
-    "crates/aether-capabilities",
     "crates/aether-rpc",
     "crates/aether-engine",
     "crates/aether-clipboard",
@@ -120,7 +119,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 toml = "0.9"
 # Content-addressed hashing for the hub binary store (ADR-0115, issue
 # 1953): sha256 over a binary's raw bytes keys each entry. Native-only
-# consumer (`aether-capabilities` under `native`); pinned here so any
+# consumer (the hub binary store under `native`); pinned here so any
 # future hashing surface shares the major. Default features off keeps the
 # no_std consumers (`aether-bloomery`'s wasm-safe content-addressing core,
 # ADR-0149) no_std; native consumers re-add `std` on their own declaration.

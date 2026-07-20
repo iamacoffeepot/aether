@@ -37,9 +37,9 @@ MCP sessions should use distinct track `lane` strings when sharing a path.
 `audio` feature. Native state, cpal, WAV decode, and the worker thread require
 `audio-runtime`. A wasm guest can therefore name the capability and its kinds
 without linking the native stack. See
-[`audio/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/mod.rs) and the
+[`audio/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/mod.rs) and the
 feature declarations in
-[`aether-capabilities/Cargo.toml`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/Cargo.toml).
+[`aether-audio/Cargo.toml`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/Cargo.toml).
 
 ## Public mail surface
 
@@ -59,7 +59,7 @@ payload types. Do not send a Rust type name as a kind name.
 | `aether.audio.load_instrument` | `LoadInstrument` | deferred `aether.audio.load_instrument_result` / `LoadInstrumentResult` |
 
 The exact fields and schemas live in
-[`audio/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/kinds.rs).
+[`audio/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/kinds.rs).
 The capability has 15 kinds total when the six reply kinds are counted.
 
 ### Notes and scheduling
@@ -75,7 +75,7 @@ voice on that key, one at a time; an unmatched note-off is a silent no-op. The
 runtime does not special-case velocity zero: it still allocates a
 zero-amplitude voice, so send `NoteOff` when release is intended. The current
 behavior is pinned in
-[`runtime/synth.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/synth.rs),
+[`runtime/synth.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/synth.rs),
 even though some older comments describe retrigger or velocity-zero behavior
 differently.
 
@@ -96,9 +96,9 @@ events within a render block at the due sample. Validation is atomic:
 
 Any validation failure rejects the whole batch. A full event queue also returns
 `ScheduleResult::Err`; no prefix is admitted. See
-[`runtime/schedule.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/schedule.rs)
+[`runtime/schedule.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/schedule.rs)
 and
-[`runtime/handlers.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/handlers.rs).
+[`runtime/handlers.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/handlers.rs).
 
 ### Instruments, tracks, and files
 
@@ -108,14 +108,14 @@ Built-in instrument ids are append-only and currently map as follows:
 `5 piano`, `6 electric_piano`, `7 pad`, `8 kick`, `9 hat`, `10 snare`.
 
 Reordering that table is a wire break. The source of truth is
-[`runtime/instrument.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/instrument.rs).
+[`runtime/instrument.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/instrument.rs).
 
 `PlayTrack` and `LoadInstrument` address files as `namespace` plus `path` and
 delegate reads to `aether.fs`; audio does not own a second namespace registry.
 The v1 decoder accepts 16-bit integer and 32-bit float WAV PCM, averages
 multichannel files to mono, and linearly resamples once to the device rate.
 Decode happens on blocking-dispatch work, never in the callback. See
-[`runtime/decode.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/decode.rs)
+[`runtime/decode.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/decode.rs)
 and [File I/O](file-io.md).
 
 A track has a per-play linear gain and optional looping. Replaying the same
@@ -130,9 +130,9 @@ unknown opcodes warn and are ignored. A successful load appends a bank after
 the built-ins and returns its session-scoped `u8` id plus resident PCM bytes.
 There is no unload or deduplication. Load order therefore matters, and ids do
 not survive restart. Details are in
-[`runtime/sfz.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/sfz.rs)
+[`runtime/sfz.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/sfz.rs)
 and
-[`runtime/load.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/load.rs).
+[`runtime/load.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/load.rs).
 
 ### Gain, pan, and reverb
 
@@ -146,10 +146,10 @@ Voice output is split left/right by pan. A stereo device receives left on
 channel 0 and right on channel 1; additional channels receive their average.
 A mono device receives the pre-pan mono sum, so pan is intentionally inaudible.
 The implementation is in
-[`runtime/voice.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/voice.rs),
-[`runtime/synth.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/synth.rs),
+[`runtime/voice.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/voice.rs),
+[`runtime/synth.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/synth.rs),
 and
-[`runtime/reverb.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/runtime/reverb.rs).
+[`runtime/reverb.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/reverb.rs).
 
 ## Invariants and failure modes
 
@@ -196,7 +196,7 @@ and
 ## Where to change or extend it
 
 - Change wire vocabulary in
-  [`audio/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-capabilities/src/audio/kinds.rs),
+  [`audio/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/kinds.rs),
   then update handlers, schemas, tests, and the governing ADR. Required fields
   such as `pan` are strict on structured input; omission is an encoding error.
 - Add a built-in patch only by appending to `BUILTINS`; never reorder existing

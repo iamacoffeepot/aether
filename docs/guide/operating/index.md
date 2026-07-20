@@ -159,6 +159,6 @@ When prose and behavior disagree, inspect these routes in order:
   `crates/aether-engine/src/server/runtime.rs` and
   `engine/proxy/runtime.rs`
 - Stored artifacts: `crates/aether-engine/src/store/`
-- Live kind inventory: `crates/aether-capabilities/src/inventory/`
+- Live kind inventory: `crates/aether-inventory/src/`
 - Loaded component registry and lifecycle:
   `crates/aether-component/src/component/`

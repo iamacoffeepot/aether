@@ -39,7 +39,7 @@ pub(super) fn parse_level(s: &str) -> Result<u8, McpError> {
 /// Inverse of [`parse_level`]: render the `0..=4` byte back to the
 /// canonical lowercase level string. Out-of-band bytes render as
 /// `"info"` (matches the existing fallback in
-/// `aether-capabilities::log`'s pre-issue-776 conversion).
+/// the log cap's pre-issue-776 conversion).
 pub(super) fn level_to_str(level: u8) -> &'static str {
     match level {
         0 => "trace",

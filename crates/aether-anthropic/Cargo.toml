@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# ADR-0050 `aether.anthropic` content-gen cap, extracted from
-# `aether-capabilities` (iamacoffeepot/aether#3705) as a leaf provider crate of
-# the provider-cluster split. Owns the full Anthropic stack: the mail kinds
+# ADR-0050 `aether.anthropic` content-gen cap, extracted by the arc that
+# dissolved the capabilities monolith (iamacoffeepot/aether#3705) as a leaf
+# provider crate of the provider-cluster split. Owns the full Anthropic stack: the mail kinds
 # (`kinds`), the `AnthropicConfig`, and the `AnthropicCapability` identity + the
 # `ureq` Messages backend / `claude` subprocess backend / task-queue runtime. It
-# is a pure leaf — no other cap depends on it, so `aether-capabilities` keeps no
-# `aether-anthropic` dependency (no facade).
+# is a pure leaf — no other cap depends on it, so nothing depends back on this
+# crate (no facade).
 #
 # It builds on the shared content-gen layer `aether-contentgen` (the adapter
 # traits + the `ureq` transport plumbing), so it depends on `aether-contentgen`

@@ -35,7 +35,7 @@ rules:
     tier: auto
   - glob: "crates/aether-kit/**"
     tier: auto
-  - glob: "crates/aether-capabilities/**"
+  - glob: "crates/aether-substrate-bundle/**"
     tier: judge
   - glob: "scripts/surface-match.py"
     tier: human
@@ -72,7 +72,7 @@ fn literal_subtrees_are_set_sound() {
         ("crates/aether-kit/src/**", Tier::Auto),
         ("crates/aether-kit/**", Tier::Human),
         ("docs/**", Tier::Human),
-        ("crates/aether-capabilities/new/**", Tier::Judge),
+        ("crates/aether-substrate-bundle/new/**", Tier::Judge),
         ("new-top/**", Tier::Judge),
     ];
     for (surface, expected) in cases {

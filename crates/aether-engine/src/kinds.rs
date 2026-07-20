@@ -2,18 +2,16 @@
 //!
 //! The engine-internal control-plane vocabulary — proxy forwarding
 //! (`ForwardEnvelope`) and fleet liveness (`EngineHeartbeatTick` /
-//! `EngineDied` / `EngineAlive`). Each is consumed only inside
-//! `aether-capabilities` and
-//! embedded in no kind that stays in `aether-kinds`, so the engine cap
-//! owns it here (capabilities → kinds is the allowed dependency
-//! direction; the embedded `DeathReason` re-imports back from
-//! `aether_kinds`).
+//! `EngineDied` / `EngineAlive`). Each is consumed only inside this crate
+//! and embedded in no kind that stays in `aether-kinds`, so the engine cap
+//! owns it here (cap crate → kinds is the allowed dependency direction; the
+//! embedded `DeathReason` re-imports back from `aether_kinds`).
 //!
 //! The engine cap's request / result / descriptor kinds
 //! (`SpawnEngine`, `ListEngines`, `TerminateEngine`, the upload / resolve
 //! families, and their support descriptors) stay in `aether-kinds`: they
 //! are the MCP harness's RPC protocol, and `aether-mcp` consumes them
-//! while being barred from depending on `aether-capabilities`.
+//! while being barred from depending on a cap crate.
 
 use aether_data::{Kind, KindId, MailboxId, Schema};
 use aether_kinds::DeathReason;

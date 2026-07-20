@@ -13,13 +13,10 @@ examples.
 
 ## Crate placement
 
-A capability lives either as a module of `aether-capabilities` or as its own
-`aether-<cap>` crate. A crate of its own keeps the capability off its
-neighbours' reverse-dependency closure, so a change to it reruns only the tests
-that actually depend on it. The standalone single caps are `aether-fs`,
-`aether-clipboard`, `aether-render`, `aether-trace`, `aether-window`,
-`aether-audio`, `aether-inventory`, and `aether-text`. The module shape below is
-the same either way. A standalone cap carries its own feature ladder —
+A capability lives in its own `aether-<cap>` crate, named for the mailbox it
+owns. A crate of its own keeps the capability off its neighbours'
+reverse-dependency closure, so a change to it reruns only the tests that
+actually depend on it. A cap crate carries its own feature ladder —
 `default = ["runtime"]`, with a `runtime` feature gating the substrate-typed
 half and the marker face compiling under `default-features = false` — and each
 downstream crate depends directly on the cap crate it uses, never through a
@@ -39,7 +36,8 @@ own reverse-dependency closure reruns on a change to it.
 ## Typical directory
 
 ```text
-aether-capabilities/src/example/
+aether-example/src/
+  lib.rs                 identity, public re-exports, feature boundary
   mod.rs                 identity, public re-exports, feature boundary
   kinds.rs               caller-facing request/reply/value schemas
   config.rs              resolved native config when it is a distinct seam
@@ -48,9 +46,9 @@ aether-capabilities/src/example/
   tests.rs               only when tests would overwhelm the subject file
 ```
 
-Clusters such as `engine/`, `http/`, and `tcp/` keep the root thin and put
-independent actors under `server/`, `proxy/`, `listener/`, `session/`, or shard
-submodules. Organize by state/lifetime ownership, not an arbitrary line limit.
+Clusters such as `aether-engine`, `aether-http`, and `aether-tcp` keep the root
+thin and put independent actors under `server/`, `proxy/`, `listener/`,
+`session/`, or shard submodules. Organize by state/lifetime ownership, not an arbitrary line limit.
 
 ## Identity in the module root
 
@@ -116,7 +114,7 @@ re-exported from `example/mod.rs`. The marker face remains wasm-safe: schema,
 serde, and lightweight data dependencies only.
 
 Keep a kind in `aether-kinds` only when a named upstream consumer cannot depend
-on `aether-capabilities`, or when it is truly substrate-wide. Document that
+on the cap's own crate, or when it is truly substrate-wide. Document that
 must-stay reason next to the exception. Current examples include inventory and
 some engine/control/capture contracts consumed by MCP or substrate core.
 

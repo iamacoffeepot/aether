@@ -5,7 +5,7 @@ as their responsibility requires.
 
 ```text
 product actors and reusable UI/gameplay pieces       aether-kit
-native services and their public mail contracts      aether-capabilities
+native services and their public mail contracts      aether-<capability> crates
 guest actor and behavior authoring SDKs               aether-actor, aether-behavior
 process profiles, binaries, test bench, packaging     aether-substrate-bundle
 mail runtime, wasm host, scheduler, chassis traits    aether-substrate
@@ -25,8 +25,8 @@ procedural macros                                     *-derive crates
 
 The capability-local ownership rule matters. Render, audio, filesystem, HTTP,
 and other capability messages live under
-`aether-capabilities/src/<capability>/kinds.rs`; do not put every new native
-message into `aether-kinds`.
+the owning capability's own crate, `aether-<capability>/src/kinds.rs`; do not
+put every new native message into `aether-kinds`.
 
 ## Actor authoring crates
 
@@ -47,7 +47,12 @@ compares these with native capabilities.
 | Crate | Owns |
 |---|---|
 | `aether-substrate` | registry, rings, dispatch, scheduler, native/wasm actor hosts, settlement, chassis traits |
-| `aether-capabilities` | native actors for render, audio, HTTP, filesystem, lifecycle, component hosting, engine fleet, and other chassis services |
+| `aether-render`, `aether-text`, `aether-audio` | draw queues and the wgpu pipeline, font layout and the glyph atlas, the synth and instrument banks |
+| `aether-fs`, `aether-clipboard`, `aether-window`, `aether-input` | namespaced file I/O, text clipboard, window mode/title/focus, input-stream subscriptions |
+| `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
+| `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
+| `aether-engine`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
+| `aether-anthropic`, `aether-gemini`, `aether-contentgen` | the two content-gen provider caps and the adapter/staging/transport layer they share |
 | `aether-substrate-bundle` | desktop, headless, hub, and test-bench chassis; autoload; bundle packing; performance binaries |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches |
 
@@ -99,7 +104,7 @@ uses the nightly fuzzing toolchain.
 
 | Change | Likely starting point | Also inspect |
 |---|---|---|
-| Add a message to a native capability | `aether-capabilities/src/<cap>/kinds.rs` | runtime handler, descriptors, wasm-facing feature gates |
+| Add a message to a native capability | that capability's own crate, `aether-<cap>/src/kinds.rs` | runtime handler, descriptors, wasm-facing feature gates |
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Add a reusable guest actor | `aether-kit` or a new component crate | `aether-actor`, export/cardinality rules |

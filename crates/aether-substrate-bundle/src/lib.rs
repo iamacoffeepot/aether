@@ -39,7 +39,6 @@ pub mod perf;
 pub mod test_bench;
 pub mod visual;
 
-pub use aether_capabilities as capabilities;
 pub use aether_component::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{
     Chassis, Component, ComponentCtx, HubOutbound, InboxHandler, InlineHandler, KindId, Mail, MailKind, MailboxEntry,

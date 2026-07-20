@@ -34,8 +34,8 @@ aether-behavior = { path = "../aether-behavior", default-features = false, optio
 # `aether-component`. kit is a wasm guest, so it takes the marker-only
 # identity face — it addresses `ComponentHostCapability`, resolves loaded
 # peers through `ComponentHostWasmExt`, and reads `WasmTrampoline::NAMESPACE`
-# to build trampoline addresses. This replaced the crate's last
-# `aether-capabilities` use, so that dependency is gone.
+# to build trampoline addresses. This replaced the crate's last use of the
+# old capabilities monolith, so that dependency is gone.
 aether-component = { path = "../aether-component", default-features = false }
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
 # `aether-lifecycle`. kit is a wasm guest, so it takes the marker-only

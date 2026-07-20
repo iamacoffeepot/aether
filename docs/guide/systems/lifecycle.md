@@ -8,7 +8,7 @@
 > out**: desktop and `test_bench` run a `Tick → Render → Present` frame; headless
 > stays tick-only; the `InitCaps` / `InitComponents` boot stages exist in the kind
 > vocabulary but aren't yet wired into a shipped graph. Build on the stage kinds
-> and the subscribe surface; read `aether-capabilities` and the ADR for the graph
+> and the subscribe surface; read `aether-lifecycle` and the ADR for the graph
 > a given chassis declares.
 
 A component never runs a loop. The substrate owns the frame, and an actor reaches

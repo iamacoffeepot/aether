@@ -28,10 +28,10 @@
 //!
 //! ## Crate shape
 //!
-//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3754) as a
-//! per-cap crate of the arc that dissolves the capabilities monolith. It
-//! is a leaf: no other capability depends on it, so capabilities keeps no
-//! `aether-game` dependency (no facade). It depends downward on
+//! Extracted by the arc that dissolved the capabilities monolith
+//! (iamacoffeepot/aether#3754) as a per-cap crate. It is a leaf: no other
+//! capability depends on it, so nothing depends back on this crate (no
+//! facade). It depends downward on
 //! `aether-tcp` for the transport its sessions ride.
 //!
 //! The ADR-0122 identity/runtime split rides the `runtime` feature: the

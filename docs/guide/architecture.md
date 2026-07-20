@@ -70,7 +70,7 @@ project replies.
 | Data/wire | `aether-data`, `aether-codec`, `aether-math`, `aether-kinds` | ids, schemas, canonical encoding, framing, shared vocabulary |
 | Guest SDK | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
-| Native services | `aether-capabilities` | chassis resource actors and public capability kinds |
+| Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
 | Process profiles | `aether-substrate-bundle` | desktop/headless/hub/test-bench composition, packaging, perf |
 | Product actors | `aether-kit`, `aether-mesh` | camera, UI, world/terrain, sim, geometry authoring |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
@@ -78,7 +78,8 @@ project replies.
 
 The [repository map](orientation/repository-map.md) routes changes across the
 full workspace. Capability messages such as render/audio/filesystem kinds live
-with `aether-capabilities`, not in a universal central kind catalog (ADR-0121).
+with their own capability crate, not in a universal central kind catalog
+(ADR-0121).
 
 ## Chassis composition
 

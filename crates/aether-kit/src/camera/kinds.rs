@@ -7,7 +7,7 @@
 //! `aether.view_projection` (the singular `view_proj` kind consumed by the
 //! desktop chassis's `aether.render` mailbox per ADR-0074
 //! §Decision 7) is *not* here — it's a chassis sink contract and
-//! lives in `aether-capabilities` alongside the render cap.
+//! lives in `aether-render` alongside the render cap.
 //!
 //! [`CameraComponent`]: crate::camera::CameraComponent
 

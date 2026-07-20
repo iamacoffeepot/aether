@@ -117,9 +117,9 @@ make paid network calls. Useful boundaries include:
 
 ## Change route
 
-- Anthropic kinds/adapters/runtime: `crates/aether-capabilities/src/anthropic/`
-- Gemini kinds/adapters/runtime: `crates/aether-capabilities/src/gemini/`
-- Shared queue, staging, transport: `crates/aether-capabilities/src/shared/contentgen/`
+- Anthropic kinds/adapters/runtime: `crates/aether-anthropic/src/`
+- Gemini kinds/adapters/runtime: `crates/aether-gemini/src/`
+- Shared queue, staging, transport: `crates/aether-contentgen/src/`
 - Settlement primitive: `crates/aether-substrate/src/actor/native/`
 - Configuration: [Configuration](configuration.md)
 - Decision: ADR-0050, interpreted against current code; ADR-0093 for blocking dispatch

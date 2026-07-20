@@ -137,10 +137,12 @@ jobs:
         run: cargo doc --workspace --no-deps
 
   # Marker-only host build (iamacoffeepot/aether#2583). The transport-only
-  # tier — `aether-capabilities` with `default-features = false`, so the
-  # `runtime` feature is off — must compile on the host triple, the config a
-  # component author's reflexive `cargo build` hits against a marker-only
-  # consumer. The other jobs never exercise it: clippy / docs / test build
+  # tier — a cap crate with `default-features = false`, so the `runtime`
+  # feature is off — must compile on the host triple, the config a component
+  # author's reflexive `cargo build` hits against a marker-only consumer.
+  # `aether-render` stands in for the per-cap crates: it is the largest of
+  # them and the one whose runtime half gates the most (wgpu, clap,
+  # confique), so its marker face is the strictest of the set. The other jobs never exercise it: clippy / docs / test build
   # `--workspace`, where resolver-3 feature unification turns `runtime` back on
   # for the crate (ADR-0122 §33), and the wasm cross-build elides the native
   # half. So this guard is an isolated `-p` build — never `--workspace`, which
@@ -154,7 +156,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo build -p aether-capabilities --no-default-features
+      - run: cargo build -p aether-render --no-default-features
 
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,

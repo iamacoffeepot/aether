@@ -107,4 +107,4 @@ remains.
 - Capture argument contract: `crates/aether-mcp/src/args.rs`
 - Reply spill allocation: `crates/aether-mcp/src/tools/bytes.rs`
 - Engine-side capture and checks:
-  `crates/aether-capabilities/src/render/`
+  `crates/aether-render/src/`

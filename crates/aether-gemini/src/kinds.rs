@@ -4,7 +4,7 @@
 //! live with their contract owner here rather than in `aether-kinds`.
 //! The four `Kind`-deriving request/result types carry their
 //! `inventory::submit!` descriptor registration via the derive; because
-//! `aether-capabilities` links into every chassis binary, `describe_kinds`
+//! this crate links into every chassis binary, `describe_kinds`
 //! and `descriptors::all()` keep surfacing them. `Usage` stays shared in
 //! `aether-kinds` (the `aether.anthropic` kinds consume it too) and is
 //! imported back here.

@@ -5,9 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 # `aether.component` wasm-component-lifecycle capability (ADR-0022,
-# ADR-0038, ADR-0122), extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3756) as a per-cap crate of the arc that dissolves
-# the capabilities monolith. Named for the `aether.component` mailbox it
+# ADR-0038, ADR-0122), extracted by the arc that dissolved the capabilities
+# monolith (iamacoffeepot/aether#3756) as a per-cap crate. Named for the `aether.component` mailbox it
 # owns, matching every other cap crate in the arc.
 #
 # The cap (`component`) and the trampoline every loaded wasm component
@@ -21,8 +20,7 @@ license.workspace = true
 # The `http` cap's deferred-reply path names `ComponentHostCapability` to
 # resolve the handler component it answers through, so `aether-http`
 # depends on this crate. That is a genuine downward use, not a facade —
-# neither crate re-exports the other's names. `aether-capabilities` keeps
-# only a dev-dependency, for the embeddable-resolution test.
+# neither crate re-exports the other's names.
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the ZST
 # cap and trampoline identities with their `Addressable`, per-handler

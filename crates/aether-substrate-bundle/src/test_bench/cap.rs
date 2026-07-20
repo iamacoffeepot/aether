@@ -8,7 +8,7 @@
 //! embedder's `run_frame` loop processes the event and replies via
 //! outbound when the requested ticks finish.
 //!
-//! Companion: `aether-capabilities::UnsupportedTestBenchCapability`
+//! Companion: [`UnsupportedTestBenchCapability`](super::unsupported_cap::UnsupportedTestBenchCapability)
 //! claims the same mailbox on desktop / headless and replies `Err` so
 //! agents fail fast. Mirrors the pattern from
 //! `RenderCapability` / `HeadlessRenderCapability`.

@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# ADR-0105 `aether.text` capability, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3727) as a leaf per-cap crate of the arc that dissolves
-# the capabilities monolith. Owns the full text stack: the mail kinds
+# ADR-0105 `aether.text` capability, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3727) as a leaf per-cap crate. Owns the full text stack: the mail kinds
 # (`kinds`), the `TextCapability` identity, and the CPU-only runtime
 # (`runtime`: the `fontdue` font registry, the shelf-packed glyph atlas, and the
 # immediate-mode layout / draw path). It is a pure leaf — no other capability

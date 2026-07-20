@@ -8,7 +8,7 @@
 //! `MouseMove`, `MouseButton`, `WindowSize`) stay in `aether-kinds`
 //! because they are driver-produced core vocabulary consumed broadly
 //! (and moving them would require upstream consumers to depend on
-//! `aether-capabilities`).
+//! this cap crate).
 
 use serde::{Deserialize, Serialize};
 

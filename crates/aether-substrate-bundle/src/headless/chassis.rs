@@ -17,10 +17,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::test_bench::UnsupportedTestBenchCapability;
 use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
-use aether_capabilities::UnsupportedTestBenchCapability;
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostConfig;
 use aether_contentgen::ContentGenConfig;

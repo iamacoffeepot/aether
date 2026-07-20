@@ -9,8 +9,8 @@
 //! alongside the `aether.http.server` ingress cap (ADR-0108); `RpcServerCapability`
 //! stays mounted unchanged for fleet plumbing.
 //!
-//! The whole module is runtime-gated (it pulls `aether-substrate` /
-//! `aether-capabilities`), so the marker/wasm consumer never links it.
+//! The whole module is runtime-gated (it pulls `aether-substrate` and the
+//! cap crates), so the marker/wasm consumer never links it.
 
 mod dto;
 mod runtime;

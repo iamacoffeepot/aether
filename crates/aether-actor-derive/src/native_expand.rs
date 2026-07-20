@@ -488,7 +488,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         }
     });
 
-    // iamacoffeepot/aether#1037: override `NativeDispatch::__aether_capabilities`
+    // iamacoffeepot/aether#1037: override `NativeActor::capabilities`
     // so native caps surface the same ADR-0033 receive-side capability
     // shape (handler kinds + `#[fallback]` presence) a wasm component
     // ships in its `aether.kinds.inputs` manifest. The native-cap-boot
@@ -539,7 +539,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
     // handler-method impl all reach for `::aether_substrate::*` paths
     // and native-only types in their bodies. They're emitted under
-    // `#[cfg(not(target_family = "wasm"))]` so `aether-capabilities`
+    // `#[cfg(not(target_family = "wasm"))]` so a cap crate
     // can compile for `wasm32-unknown-unknown` without the substrate
     // dep — wasm consumers see only the always-on Addressable +
     // HandlesKind markers, which is enough for typed

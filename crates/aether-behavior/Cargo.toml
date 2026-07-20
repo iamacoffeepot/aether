@@ -19,7 +19,7 @@ license.workspace = true
 # The non-default `host` feature is the third face (ADR-0137, issue
 # 2687): the `BehaviorHost` actor that embeds a `wasmi` interpreter and
 # interposes at a tree slot. It turns on the optional `aether-actor` /
-# `wasmi` / `aether-capabilities` deps, none of which the default face
+# `wasmi` deps, neither of which the default face
 # names, so a script build never links them. Host-enabled wasm is
 # compiled in a separate cargo invocation from script wasm (issue 2688),
 # so `host` never feature-unifies into a script's build graph.

@@ -98,5 +98,5 @@ authority over that alias. The artifact runbook defines the verification chain.
 - Bytes-field host reads and reply spills: `crates/aether-mcp/src/tools/bytes.rs`
 - Capture validation and host write: `crates/aether-mcp/src/tools/capture.rs`
 - Engine-side similarity reference read:
-  `crates/aether-capabilities/src/render/runtime/capture.rs`
+  `crates/aether-render/src/runtime/capture.rs`
 - Public path arguments: `crates/aether-mcp/src/args.rs`

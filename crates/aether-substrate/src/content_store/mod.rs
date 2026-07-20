@@ -7,9 +7,10 @@
 //!
 //! Two consumers share it: the hub's `ArtifactStore` (binary / component
 //! artifacts, LRU-budget eviction) and Bloomery's eviction-free
-//! `artifacts` canonical record (ADR-0149). Both live in the higher
-//! `aether-capabilities` crate, so the core sits beside the two primitives
-//! it builds on (`atomic_write`, `pid_lock`) and closes no crate cycle.
+//! `artifacts` canonical record (ADR-0149). Both live in higher crates
+//! (`aether-engine`, `aether-bloomery-host`), so the core sits beside the
+//! two primitives it builds on (`atomic_write`, `pid_lock`) and closes no
+//! crate cycle.
 //!
 //! ## Layout
 //!

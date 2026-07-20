@@ -8,8 +8,8 @@
 //!
 //! ## Crate shape
 //!
-//! Extracted from `aether-capabilities` (iamacoffeepot/aether#3758) as the
-//! final per-cap crate of the arc that dissolves the capabilities monolith.
+//! Extracted by the arc that dissolved the capabilities monolith
+//! (iamacoffeepot/aether#3758) as its final per-cap crate.
 //! Both caps move as one unit because they are one wire vocabulary split
 //! across two directions — [`kinds`] is shared, and the typed route surface
 //! ([`typed`], [`stream`]) is authored against the server while the client

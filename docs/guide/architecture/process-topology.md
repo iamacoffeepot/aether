@@ -42,8 +42,8 @@ table as intent rather than a hardcoded manifest.
 
 Their builders live under
 `crates/aether-substrate-bundle/src/{desktop,headless,hub,test_bench}`. Shared
-runtime mechanism remains in `aether-substrate`; shared native actors remain in
-`aether-capabilities`.
+runtime mechanism remains in `aether-substrate`; each shared native actor
+remains in its own `aether-<capability>` crate.
 
 “Headless” is a process/profile statement, not permission to assume every
 capability is absent. Some capabilities have explicit headless implementations

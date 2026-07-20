@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# ADR-0041 `aether.fs` capability, extracted from `aether-capabilities`
-# (iamacoffeepot/aether#3706) as the first per-cap crate of the arc that
-# dissolves the capabilities monolith. Owns the full fs stack: the mail
+# ADR-0041 `aether.fs` capability, extracted by the arc that dissolved the
+# capabilities monolith (iamacoffeepot/aether#3706) as its first per-cap
+# crate. Owns the full fs stack: the mail
 # kinds (`kinds`), the `FileAdapter` trait + `LocalFileAdapter` backend
 # (`adapter`), the `AdapterRegistry` + env-driven `NamespaceRoots`
 # (`config` / `registry`), and the `FsCapability` identity + runtime.
