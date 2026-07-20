@@ -32,6 +32,7 @@ members = [
     "crates/aether-rpc",
     "crates/aether-engine",
     "crates/aether-harness-fleet",
+    "crates/aether-harness-perf",
     "crates/aether-clipboard",
     "crates/aether-window",
     "crates/aether-input",

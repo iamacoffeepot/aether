@@ -40,7 +40,8 @@ jobs:
           filters: |
             perf:
               - 'crates/aether-substrate/src/**'
-              - 'crates/aether-substrate-bundle/src/perf/**'
+              - 'crates/aether-harness-perf/**'
+              - 'crates/aether-harness-substrate/src/perf/**'
 
   compare:
     name: Compare dispatch perf vs merge-base

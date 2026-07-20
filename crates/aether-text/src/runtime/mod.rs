@@ -1115,7 +1115,7 @@ mod tests {
     /// The raw bytes of [`test_font`], for the read-result tests that
     /// feed the parse path a real TTF.
     fn test_font_bytes() -> &'static [u8] {
-        include_bytes!("../../../aether-substrate-bundle/assets/fonts/RobotoMono.ttf")
+        include_bytes!("../../../aether-text/assets/fonts/RobotoMono.ttf")
     }
 
     /// `build_font_metrics`'s table scales back to fontdue's draw-path
