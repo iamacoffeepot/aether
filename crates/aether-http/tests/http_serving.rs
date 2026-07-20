@@ -33,6 +33,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_anthropic::AnthropicConfig;
+use aether_chassis::autoload::AutoloadComponent;
 use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
@@ -40,7 +41,6 @@ use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_c
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
 use aether_substrate_bundle::Chassis as _;
-use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 
 /// The `http_handler` fixture's `NAMESPACE` const — the subname under

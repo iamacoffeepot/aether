@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 
+use aether_chassis::autoload::expand_replicas;
+use aether_chassis::bundle_pack::decode_pack;
 use aether_substrate::Chassis;
-use aether_substrate_bundle::autoload::expand_replicas;
-use aether_substrate_bundle::bundle_pack::decode_pack;
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 
 /// The component pack, embedded at build time. `build.rs` stages it

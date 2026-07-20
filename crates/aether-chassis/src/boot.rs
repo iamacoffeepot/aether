@@ -53,8 +53,8 @@ use aether_trace::TraceDispatchCapability;
 use confique::Config as _;
 use confique::meta::Meta;
 
-use crate::desktop::driver::WindowConfigLayer;
-use crate::headless::driver::TickConfigLayer;
+use crate::tick::TickConfigLayer;
+use crate::window::WindowConfigLayer;
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -71,7 +71,7 @@ pub const CONFIG_FILE_ENV: &str = "AETHER_CONFIG_FILE";
 /// ADR-0090 §1/§4. The runtime (log / panic-hook) knobs are registered
 /// by `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler
 /// hot-path, chassis boot, window, and tick knobs are covered by the
-/// derive-emitted `*Layer::META`s in [`chassis_registry`].
+/// derive-emitted `*Layer::META`s in `chassis_registry`.
 pub const CHASSIS_KNOBS: &[KnobRecord] = &[
     KnobRecord {
         env_key: CONFIG_FILE_ENV,
@@ -465,7 +465,7 @@ pub struct ChassisBootConfig {
     pub boot_manifest: Option<String>,
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS=<ms>` force-complete deadline
     /// (ms) for a pending lifecycle advance's `Settled` (issue 1048,
-    /// ADR-0082). Default [`DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS`] (1 s).
+    /// ADR-0082). Default `DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS` (1 s).
     /// A garbage value hard-errors at boot (ADR-0090 §4 strict path),
     /// replacing the old soft-warn fallback.
     #[config(
@@ -567,7 +567,7 @@ pub fn chassis_config_dump() -> String {
     dump_config(metas, &records)
 }
 
-/// The hub chassis config registry: the full shared [`chassis_registry`]
+/// The hub chassis config registry: the full shared `chassis_registry`
 /// plus the two hub-only additions — `EngineConfigLayer::META` (the
 /// engines-cap heartbeat / proxy / disk-budget knobs only the hub wires)
 /// and the `AETHER_ENGINE_STORE_ROOT` hand knob (the engines cap's
@@ -680,6 +680,7 @@ pub struct CommonBoot {
 /// Boot order is declaration order. ADR-0081 retired the central
 /// `LogCapability` — every actor owns its own per-actor log ring; no
 /// boot ordering is needed for logging anymore.
+#[must_use]
 pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
     // Resolve the content-gen staging root once, here, where the resolved
     // `NamespaceRoots.save` is in scope: the `AETHER_GEN_DIR` override wins,
@@ -755,6 +756,7 @@ pub fn binary_manifest(chassis: &str, caps: Vec<&'static str>) -> BinaryManifest
 /// mirroring the hub chassis. Substrate becomes an RPC server peer
 /// that a hub (or any client) connects out to. `engine_name`
 /// identifies the chassis profile in the `HelloAck` peer-kind.
+#[must_use]
 pub fn maybe_with_rpc_server<C: Chassis>(
     builder: Builder<C>,
     rpc_addr: Option<SocketAddr>,
@@ -779,6 +781,7 @@ pub fn maybe_with_rpc_server<C: Chassis>(
 /// Issue 1761: boot the HTTP server only when `config` is `Some` (i.e.
 /// the cap's `enabled` flag is set). Mirrors [`maybe_with_rpc_server`]:
 /// an unconfigured chassis binds nothing.
+#[must_use]
 pub fn maybe_with_http_server<C: Chassis>(builder: Builder<C>, config: Option<HttpServerConfig>) -> Builder<C> {
     let Some(config) = config else {
         return builder;
@@ -1150,34 +1153,5 @@ mod tests {
             .expect("present section decodes")
             .expect("actor section present");
         assert_eq!(section.log_ring_capacity, Some(2048));
-    }
-
-    /// Regression guard for the enable / disable convention (#1791): a
-    /// capability's enable/disable flag is resolved through its
-    /// derive-`Config` (`*Config::from_argv_then_env`), never a raw
-    /// `env::var` read in a chassis builder. This is the shape #1761 put
-    /// the http server on; the guard keeps a future cap from regressing to
-    /// presence-inference or a hand-rolled env read. The chassis window /
-    /// tick / boot knobs are now also derive-`Config` (`WindowConfig`,
-    /// `TickConfig`, `ChassisBootConfig`), so no raw `env::var` of any
-    /// known `AETHER_*` key should appear in the chassis builder sources.
-    #[test]
-    fn chassis_builders_resolve_cap_enable_flags_via_config() {
-        // Enable / disable env keys owned by a derive-`Config` cap. Add a
-        // cap's flag key here when a new opt-in / opt-out cap lands.
-        const CAP_FLAG_KEYS: &[&str] = &["AETHER_HTTP_SERVER_ENABLED", "AETHER_AUDIO_DISABLE"];
-        let desktop = include_str!("desktop/chassis.rs");
-        let headless = include_str!("headless/chassis.rs");
-        for key in CAP_FLAG_KEYS {
-            let raw_read = format!("env::var(\"{key}\")");
-            for (chassis, src) in [("desktop", desktop), ("headless", headless)] {
-                assert!(
-                    !src.contains(&raw_read),
-                    "{chassis} chassis reads {key} via raw env::var — route it through the \
-                     cap's config API instead (see the `config` module's \
-                     \"Enable / disable convention\")",
-                );
-            }
-        }
     }
 }

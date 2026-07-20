@@ -32,14 +32,14 @@ use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail
 /// is `frame_loop::DRAIN_BUDGET`; a starved-but-healthy chain resolves
 /// before this cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
+use aether_chassis::next_chassis_correlation;
+use aether_chassis::{RenderSizeConfig, resolve_teardown_cap};
 use aether_harness_substrate::{
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
     events::{self, ChassisEvent},
 };
 use aether_harness_substrate_capture::{Gpu, GpuRenderExt};
 use aether_render::RenderHandles;
-use aether_substrate_bundle::chassis_root::next_chassis_correlation;
-use aether_substrate_bundle::{RenderSizeConfig, resolve_teardown_cap};
 
 fn main() -> anyhow::Result<()> {
     let capture_queue = CaptureQueue::new();

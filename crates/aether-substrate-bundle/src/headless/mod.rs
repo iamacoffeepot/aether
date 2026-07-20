@@ -7,4 +7,4 @@ pub mod driver;
 
 pub use chassis::{HeadlessChassis, HeadlessEnv};
 
-pub use crate::autoload::AutoloadComponent;
+pub use aether_chassis::autoload::AutoloadComponent;

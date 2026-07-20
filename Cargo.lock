@@ -191,6 +191,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-chassis"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-anthropic",
+ "aether-audio",
+ "aether-component",
+ "aether-contentgen",
+ "aether-data",
+ "aether-engine",
+ "aether-fs",
+ "aether-game",
+ "aether-gemini",
+ "aether-harness-substrate",
+ "aether-http",
+ "aether-input",
+ "aether-inventory",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-render",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-tcp",
+ "aether-text",
+ "aether-trace",
+ "clap",
+ "confique",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "aether-clipboard"
 version = "0.3.0-alpha"
 dependencies = [
@@ -442,6 +476,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-anthropic",
+ "aether-chassis",
  "aether-component",
  "aether-contentgen",
  "aether-data",
@@ -696,8 +731,8 @@ dependencies = [
  "aether-actor",
  "aether-anthropic",
  "aether-audio",
+ "aether-chassis",
  "aether-clipboard",
- "aether-codec",
  "aether-component",
  "aether-contentgen",
  "aether-data",
@@ -710,23 +745,17 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-http",
  "aether-input",
- "aether-inventory",
  "aether-kinds",
- "aether-kit",
  "aether-lifecycle",
- "aether-math",
  "aether-render",
  "aether-rpc",
  "aether-substrate",
  "aether-tcp",
- "aether-test-fixtures-kinds",
  "aether-text",
  "aether-trace",
  "aether-window",
  "anyhow",
  "clap",
- "confique",
- "crossbeam-channel",
  "ctrlc",
  "plotters",
  "png",
@@ -734,7 +763,6 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook 0.4.4",
- "toml 0.9.12+spec-1.1.0",
  "tracing",
  "wasmtime",
  "wgpu",

@@ -129,6 +129,9 @@ aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # cycle; whole-graph in `xtask affected` until the by-chassis bundle
 # split.
 aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+# The boot-manifest autoload entries the test's `HeadlessEnv` carries
+# moved to the shared chassis layer (issue #3809).
+aether-chassis = { path = "../aether-chassis" }
 # `locate_component_wasm` / `init_save_sandbox` / `test_namespace_roots`
 # — the shared wasm-discovery + sandbox helpers the test boots with.
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
