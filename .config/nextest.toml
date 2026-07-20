@@ -55,6 +55,17 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-substrate-bundle) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The rehomed tcp fleet-load test (`fleetbench_tcp_load`, #3780) forks a
+# real debug `aether-substrate-headless` process through `FleetBench` and
+# then churns real loopback listeners/sessions on top — the same
+# fork-contention class as the bundle's fleet suites above, so it carries
+# the same 180s wall-clock backstop. `kind(test)` scopes the cap to the
+# integration binary; the crate's `kind(lib)` unit tests keep the 60s
+# default.
+[[profile.ci.overrides]]
+filter = "package(=aether-tcp) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The fleetbench replace binary also cold-loads `aether_kit.wasm` and was
 # measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary.
