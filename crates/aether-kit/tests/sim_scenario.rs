@@ -1,6 +1,6 @@
 //! Tick-native turn simulation through two real instances of the kit wasm.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench::test_helpers::require_wasm;
 use std::fs;
 use std::path::Path;
 
@@ -12,7 +12,6 @@ use aether_kit::sim::{
     TrajectoryEvent, TrajectoryKind,
 };
 use aether_substrate_bench::{BenchOp, SubstrateBench};
-use aether_substrate_bench_capture::test_helpers::require_runtime;
 
 #[allow(unused_imports)]
 use aether_kit as _;
@@ -79,10 +78,10 @@ fn poll(bench: &mut SubstrateBench, address: &str, label: &'static str) -> PollR
 
 #[test]
 fn turn_sim_moves_in_tick_order_and_replays_byte_identically_through_real_wasm() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit") else {
         return;
     };
-    let mut bench = SubstrateBench::builder().size(96, 96).full().build().expect("boot");
+    let mut bench = SubstrateBench::builder().size(96, 96).with_component_host().build().expect("boot");
     let first = load_sim(&mut bench, &wasm_path, FIRST_SIM_NAME);
     let second = load_sim(&mut bench, &wasm_path, SECOND_SIM_NAME);
 

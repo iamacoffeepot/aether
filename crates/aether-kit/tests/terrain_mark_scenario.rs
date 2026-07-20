@@ -1,6 +1,6 @@
 //! Terrain picking and MarkBook-projected overlays through the real kit wasm.
 
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::RenderBenchBuilderExt;
 use std::f32::consts::FRAC_PI_3;
 use std::fs;
 use std::path::Path;
@@ -157,7 +157,8 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     fs::write(sandbox.join(water_world_path), authored_water.to_bytes()).expect("write authored water world fixture");
 
     let mut bench = SubstrateBench::builder()
-        .full()
+        .with_render()
+        .with_component_host()
         .size(WIDTH, HEIGHT)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()

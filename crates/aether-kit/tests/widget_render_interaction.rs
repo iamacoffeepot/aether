@@ -39,15 +39,15 @@
 // paths — the recipient-name resolution surface the interaction drives.
 #![allow(clippy::disallowed_methods)]
 
-use aether_substrate_bench_capture::RenderBenchExt;
-use aether_substrate_bundle::FullBenchExt;
+use aether_substrate_bench_capture::{RenderBenchBuilderExt, RenderBenchExt};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_clipboard::{ClipboardCapability, GetClipboardText, GetClipboardTextResult};
+use aether_clipboard::{ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_fs::NamespaceRoots;
+use aether_input::{InputCapability, InputConfig};
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     KEY_V, KEY_X,
@@ -74,7 +74,7 @@ use aether_substrate_bench_capture::{
     visual::{Image, decode_png},
 };
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
-use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
+use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point), matching `widget_set` / `widget_text_alignment`.
@@ -137,18 +137,32 @@ fn child_address(subname: &str) -> String {
     format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, subname)
 }
 
-/// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
+/// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
 /// to this crate at build time.
 fn assets_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
-/// Boot a chassis whose `assets://` points at the bundle assets dir (the TTF)
+/// Boot a chassis whose `assets://` points at the kit assets dir (the TTF)
 /// and whose `save://` / `config://` sink into a per-process sandbox tempdir.
+///
+/// Composition: GPU captures + kit / fixture wasm loads, the real
+/// `aether.input` fan-out the suite drives, `aether.text` glyph rasterization
+/// (fonts fetched via `aether.fs`, composed from the roots), and the
+/// deterministic in-memory clipboard the copy/cut/paste scenarios read back.
 fn build_bench() -> SubstrateBench {
     let sandbox = init_save_sandbox("widget-render-interaction");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    SubstrateBench::builder().full().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
+    SubstrateBench::builder()
+        .with_render()
+        .with_component_host()
+        .with_actor::<InputCapability>(InputConfig::default())
+        .with_actor::<TextCapability>(())
+        .with_actor::<ClipboardCapability>(ClipboardConfig::InMemory)
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .namespace_roots(roots)
+        .build()
+        .expect("boot")
 }
 
 /// Deterministically load `RobotoMono.ttf` into the shared `aether.text`
