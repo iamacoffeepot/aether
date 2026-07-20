@@ -1,5 +1,5 @@
 //! Hub chassis binary entry point. The hub chassis lives in
-//! `aether-hub`; this binary just reads argv-then-env and runs.
+//! `aether-chassis-hub`; this binary just reads argv-then-env and runs.
 //!
 //! Parses argv with [`HubCli`] (ADR-0090 unit d, issue 1258);
 //! `--rpc-port` shadows `AETHER_RPC_PORT`.
@@ -12,7 +12,7 @@
 
 use aether_chassis::cli::HubCli;
 use aether_chassis::hub_config_dump;
-use aether_substrate_bundle::hub::{Chassis, HubChassis, HubEnv};
+use aether_chassis_hub::{Chassis, HubChassis, HubEnv};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli)?)?;
-    eprintln!("aether-substrate-bundle: hub chassis initialised (profile={})", HubChassis::PROFILE);
+    eprintln!("aether-chassis-hub: hub chassis initialised (profile={})", HubChassis::PROFILE);
     chassis.run()?;
     Ok(())
 }

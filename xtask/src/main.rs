@@ -267,7 +267,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     if !args.no_bins {
         fs::create_dir_all(dist.join("bin")).context("create dist/bin")?;
         let host_profile_dir = target_dir.join(args.profile.as_str());
-        for bin in CHASSIS_BINS {
+        for (_, bin) in CHASSIS_BINS {
             let src = host_profile_dir.join(bin);
             let rel = format!("bin/{bin}");
             copy_artifact(&src, &dist.join(&rel))?;
@@ -592,8 +592,16 @@ fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
 
 fn build_chassis(profile: Profile) -> Result<()> {
     let mut cmd = Command::new(cargo());
-    cmd.args(["build", "-p", CHASSIS_PACKAGE]);
-    for bin in CHASSIS_BINS {
+    // One invocation selects every owning package plus every bin —
+    // bin selectors are global across the selected packages, and the
+    // names are unique workspace-wide.
+    cmd.arg("build");
+    let mut packages: Vec<&str> = CHASSIS_BINS.iter().map(|(pkg, _)| *pkg).collect();
+    packages.dedup();
+    for pkg in packages {
+        cmd.args(["-p", pkg]);
+    }
+    for (_, bin) in CHASSIS_BINS {
         cmd.args(["--bin", bin]);
     }
     if let Some(flag) = profile.cargo_flag() {

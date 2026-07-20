@@ -225,6 +225,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-chassis-hub"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-chassis",
+ "aether-data",
+ "aether-engine",
+ "aether-kinds",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-trace",
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "serde_json",
+ "signal-hook 0.4.4",
+ "tracing",
+]
+
+[[package]]
 name = "aether-clipboard"
 version = "0.3.0-alpha"
 dependencies = [
@@ -736,7 +756,6 @@ dependencies = [
  "aether-component",
  "aether-contentgen",
  "aether-data",
- "aether-engine",
  "aether-fs",
  "aether-game",
  "aether-gemini",
@@ -752,7 +771,6 @@ dependencies = [
  "aether-substrate",
  "aether-tcp",
  "aether-text",
- "aether-trace",
  "aether-window",
  "anyhow",
  "clap",

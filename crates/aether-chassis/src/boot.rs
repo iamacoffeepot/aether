@@ -789,6 +789,20 @@ pub fn maybe_with_http_server<C: Chassis>(builder: Builder<C>, config: Option<Ht
     builder.with_actor::<HttpServerCapability>(config)
 }
 
+/// Parse the `AETHER_RPC_PORT` env var into an optional port number
+/// (issue 792). `None` when unset or unparseable. The hub chassis
+/// substitutes its default port when this returns `None`; the desktop
+/// and headless chassis treat `None` as "don't boot the RPC server"
+/// instead.
+#[must_use]
+// Chassis boot config: the AETHER_RPC_PORT fallback for an absent --rpc-port flag
+// (the hub injects this into forked engines), read at the process boundary — not
+// a cap config knob.
+#[allow(clippy::disallowed_methods)]
+pub fn rpc_port_from_env() -> Option<u16> {
+    env::var("AETHER_RPC_PORT").ok().and_then(|s| s.parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::ActorRingConfig;

@@ -44,12 +44,11 @@ use winit::event_loop::EventLoop;
 use aether_chassis::WindowConfig;
 
 use super::driver::DesktopDriverCapability;
-use crate::hub;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
     maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
-    resolve_with_file, with_common_caps,
+    resolve_with_file, rpc_port_from_env, with_common_caps,
 };
 use aether_chassis::cli::{CommonOverlay, DesktopCli};
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
@@ -339,7 +338,7 @@ impl DesktopEnv {
 
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
-            cli_rpc_port.or_else(hub::rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
+            cli_rpc_port.or_else(rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
         let workers = chassis_boot.to_workers();

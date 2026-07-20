@@ -31,14 +31,21 @@ const BEHAVIOR_DEP: &str = "aether-behavior";
 /// [`discover_behaviors`] excludes on.
 const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 
-/// Cargo package owning the chassis binaries. All three live here, so
-/// they build in one cargo invocation (same crate, shared feature
-/// resolve) without the per-package isolation the wasm components need.
+/// Cargo package owning the full-stack chassis binaries and the wasm-
+/// executing scenario tests the affected-set coupling rule keys on. The
+/// hub chassis moved to its own crate (issue #3810); the remaining
+/// bundle-resident bins live here.
 pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
 
-/// Chassis (host-target) binaries packaged into `dist/bin/`. Each name is
+/// Chassis (host-target) binaries packaged into `dist/bin/`, as
+/// `(package, bin)` pairs — the by-chassis bundle split (issues
+/// #3809-#3816) spreads them over per-chassis crates. Each bin name is
 /// both the `--bin` selector and the output filename.
-pub const CHASSIS_BINS: &[&str] = &["aether-substrate", "aether-substrate-headless", "aether-substrate-hub"];
+pub const CHASSIS_BINS: &[(&str, &str)] = &[
+    (CHASSIS_PACKAGE, "aether-substrate"),
+    (CHASSIS_PACKAGE, "aether-substrate-headless"),
+    ("aether-chassis-hub", "aether-substrate-hub"),
+];
 
 /// One discovered wasm component artifact.
 #[derive(Debug, Clone)]
