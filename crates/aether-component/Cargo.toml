@@ -68,6 +68,18 @@ inventory = { workspace = true }
 # in-process `SubstrateBench` harness (issue #3765) with
 # `.with_component_host()` — non-visual, so no capture-crate edge.
 aether-substrate-bench = { path = "../aether-substrate-bench" }
+# iamacoffeepot/aether#3776: the component fleet tests (load / replace /
+# describe over the wire, the hub component store, and replace/drop reply
+# routing) rehomed here from aether-substrate-bundle. They drive the real
+# hub → RPC → forked-headless stack through `FleetBench` and speak raw
+# wire `Call` frames, which needs the rpc wire vocabulary in test scope.
+aether-fleet-bench = { path = "../aether-fleet-bench" }
+aether-rpc = { path = "../aether-rpc" }
+# `fleetbench_replace` swaps the probe for the kit camera export,
+# drives it with `CameraCreate`, and cold-loads `aether_kit.wasm`, so
+# the dep is both a real import and the #3766 source→consumer coupling
+# that keeps determinator and the dist pre-build honest.
+aether-kit = { path = "../aether-kit" }
 # Integration tests see only the lib + dev-deps, so the SDK / data /
 # kind-vocabulary crates the tests import need their own dev entries even
 # though the lib already depends on them.

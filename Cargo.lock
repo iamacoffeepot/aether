@@ -217,7 +217,10 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-data",
+ "aether-fleet-bench",
  "aether-kinds",
+ "aether-kit",
+ "aether-rpc",
  "aether-substrate",
  "aether-substrate-bench",
  "aether-test-fixtures-boot",
