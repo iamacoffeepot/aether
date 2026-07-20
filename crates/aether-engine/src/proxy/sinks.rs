@@ -4,9 +4,9 @@
 //! `TestEchoReply` values. The whole module is `#[cfg(test)]` (gated at
 //! its `mod` declaration), so none of it ships in the cap's surface.
 
-use crate::engine::kinds::{EngineAlive, EngineDied};
-use crate::rpc::server::test_echo::TestEchoReply;
+use crate::kinds::{EngineAlive, EngineDied};
 use aether_actor::actor;
+use aether_rpc::server::test_echo::TestEchoReply;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use std::sync::{Arc, Mutex};

@@ -426,7 +426,7 @@ mod client {
     #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
     mod tests {
         use super::{RpcClient, RpcClientError};
-        use crate::rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+        use crate::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
         use aether_codec::frame::{read_frame, write_frame};
         use std::io::BufReader;
         use std::net::{TcpListener, TcpStream};

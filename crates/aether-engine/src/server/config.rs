@@ -5,8 +5,8 @@
 //! [`EngineServer::init`](super::EngineServer) via
 //! `with_actor::<EngineServer>(cfg)`.
 
-use crate::engine::proxy::HeartbeatParams;
-use crate::engine::store::DEFAULT_DISK_BUDGET_BYTES;
+use crate::proxy::HeartbeatParams;
+use crate::store::DEFAULT_DISK_BUDGET_BYTES;
 use std::collections::HashSet;
 use std::time::Duration;
 

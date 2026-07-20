@@ -156,9 +156,9 @@ When prose and behavior disagree, inspect these routes in order:
 - Fleet and component orchestration:
   `crates/aether-mcp/src/tools/engine.rs` and `components.rs`
 - Hub fleet ownership and engine death handling:
-  `crates/aether-capabilities/src/engine/server/runtime.rs` and
+  `crates/aether-engine/src/server/runtime.rs` and
   `engine/proxy/runtime.rs`
-- Stored artifacts: `crates/aether-capabilities/src/engine/store/`
+- Stored artifacts: `crates/aether-engine/src/store/`
 - Live kind inventory: `crates/aether-capabilities/src/inventory/`
 - Loaded component registry and lifecycle:
   `crates/aether-capabilities/src/component/`

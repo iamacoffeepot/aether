@@ -24,9 +24,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_bloomery_host::session::{Acquire, AcquireResult, Release, ReleaseResult, SessionKey, SessionManifest};
-use aether_capabilities::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, mailbox_id_from_path};
+use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
 
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to

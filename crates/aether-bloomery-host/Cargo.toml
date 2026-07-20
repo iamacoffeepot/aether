@@ -26,6 +26,7 @@ default = ["runtime"]
 runtime = [
     "dep:aether-substrate",
     "dep:aether-capabilities",
+    "dep:aether-rpc",
     "dep:aether-trace",
     "dep:aether-kinds",
     "dep:dirs",
@@ -58,6 +59,9 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # Runtime-only (native).
 aether-substrate = { path = "../aether-substrate", optional = true }
 aether-capabilities = { path = "../aether-capabilities", optional = true }
+# The generic TCP RPC transport (extracted from capabilities, #3735) the
+# bloomery chassis binds (`RpcServerCapability`).
+aether-rpc = { path = "../aether-rpc", optional = true }
 # The `aether.trace` cap (extracted from capabilities, #3719) the bloomery
 # chassis mounts (`TraceDispatchCapability`). Runtime half (default-on).
 aether-trace = { path = "../aether-trace", optional = true }

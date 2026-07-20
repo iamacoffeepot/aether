@@ -1,4 +1,4 @@
-use crate::rpc::wire::PeerKind;
+use crate::wire::PeerKind;
 use aether_data::MailboxId;
 
 /// Init config for `RpcServerCapability`.

@@ -3,8 +3,8 @@
 //! freshly-forked substrate comes up. Native-only (owns the outbound
 //! `RpcConnection`).
 
-use crate::rpc::{PeerKind, RpcClient, RpcClientError, RpcConnection, RpcInboundReady};
 use aether_data::{Kind, KindId, MailboxId};
+use aether_rpc::{PeerKind, RpcClient, RpcClientError, RpcConnection, RpcInboundReady};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::SpawnError;
 use aether_substrate::chassis::error::BootError;

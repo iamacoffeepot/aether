@@ -43,13 +43,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_capabilities::rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
-    WIRE_VERSION, WireFrame,
-};
-use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
+use aether_engine::{EngineConfig, EngineServer};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
@@ -59,6 +55,10 @@ use aether_kinds::{
     ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
     ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine, SpawnEngineResult,
     TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+};
+use aether_rpc::{
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
+    WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;

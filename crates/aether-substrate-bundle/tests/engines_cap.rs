@@ -14,8 +14,8 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_actor::Addressable;
-use aether_capabilities::{EngineConfig, EngineServer};
 use aether_data::{Kind, mailbox_id_from_name};
+use aether_engine::{EngineConfig, EngineServer};
 use aether_kinds::descriptors;
 use aether_kinds::{
     BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,

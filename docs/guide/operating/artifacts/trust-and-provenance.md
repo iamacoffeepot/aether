@@ -115,11 +115,11 @@ stop. Do not improvise trust from content addressing.
 ## Source routes
 
 - Native/component ingestion:
-  `crates/aether-capabilities/src/engine/server/artifacts.rs`
+  `crates/aether-engine/src/server/artifacts.rs`
 - Stored manifests, hashes, aliases, and eviction:
-  `crates/aether-capabilities/src/engine/store/`
+  `crates/aether-engine/src/store/`
 - Native spawn realization:
-  `crates/aether-capabilities/src/engine/server/runtime.rs`
+  `crates/aether-engine/src/server/runtime.rs`
 - Component load and replacement:
   `crates/aether-capabilities/src/component/` and
   `crates/aether-capabilities/src/trampoline/runtime/replace.rs`

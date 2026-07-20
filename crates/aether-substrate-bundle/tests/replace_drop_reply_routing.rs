@@ -12,9 +12,9 @@
 mod fleetbench;
 
 mod tests {
-    use aether_capabilities::rpc::MailEnvelope;
     use aether_data::Kind;
     use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+    use aether_rpc::MailEnvelope;
 
     use crate::fleetbench::{FleetBench, dist_component_available, read_component_wasm};
 
