@@ -3,7 +3,8 @@
 //! subscription, drop, `capture_frame` round-trip, `replace_component`
 //! (all via `aether-test-fixtures`'s `probe` cdylib), or the chassis `aether.fs`
 //! adapter's read/write/delete/list round trips — driving every step
-//! through `SubstrateBench::execute` (issue 868).
+//! through `SubstrateBench::execute` (issue 868). The text scenarios
+//! moved to `aether-text`'s own `text_scenario` target (issue #3772).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
@@ -38,15 +39,15 @@ use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardTex
 use aether_data::{Kind, MailboxId};
 use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
 use aether_kinds::{
-    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult, FrameCheck,
-    FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult, LoadComponent, LoadResult,
-    NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent, ReplaceResult, SimilarityCheck,
+    CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult, FrameCheck, FrameCheckResult, FrameRect,
+    FrameReduction, ListComponents, ListComponentsResult, LoadComponent, LoadResult, NamedMail, Ping, QuadScale,
+    QuadSpace, ReplaceComponent, ReplaceResult, SimilarityCheck,
 };
-use aether_math::{Mat4, Rgb, Rgba, Vec3};
+use aether_math::{Rgb, Rgba};
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
     DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
-    TextureFormat, TexturedQuad, UpdateTexture, Vertex, ViewProjection, WHITE_TEXTURE_ID,
+    TextureFormat, TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
@@ -62,7 +63,6 @@ use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
     SetRender, TagSpawnQuery, TagSpawnReport,
 };
-use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the
@@ -131,21 +131,6 @@ fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
 
 fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
     !rgb_close(rgba_at(img, x, y), bg, tolerance)
-}
-
-fn lit_fraction_in_rect(img: &Image, x: u32, y: u32, width: u32, height: u32, bg: [u8; 3], tolerance: u8) -> f32 {
-    let mut lit = 0u32;
-    for py in y..y + height {
-        for px in x..x + width {
-            if pixel_is_lit(img, px, py, bg, tolerance) {
-                lit += 1;
-            }
-        }
-    }
-    #[allow(clippy::cast_precision_loss)]
-    {
-        lit as f32 / (width * height) as f32
-    }
 }
 
 /// Load the probe into the bench via `execute`, blocking on the
@@ -229,8 +214,6 @@ mod filesystem;
 mod inline_child;
 #[path = "substrate_bench_scenario/render.rs"]
 mod render;
-#[path = "substrate_bench_scenario/text.rs"]
-mod text;
 
 // Pre-#775 the bench emitted `aether.observation.frame_stats` every
 // 120 frames and a test verified one broadcast arrived after
