@@ -35,12 +35,10 @@ use aether_substrate::net::teardown_connect_addr;
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
-pub use crate::engine::EngineServer;
-pub use crate::engine::kinds::{CallSettled, RouteEnvelope};
+pub use crate::rpc::kinds::{CallSettled, RouteEnvelope};
 pub use crate::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
-pub use aether_actor::Addressable;
 pub use aether_codec::frame::{FrameError, write_frame};
-pub use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
+pub use aether_data::{Kind, KindId, MailId, MailboxId};
 pub use aether_substrate::Mail;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -90,6 +88,10 @@ pub struct InFlight {
 pub struct RpcServerState {
     pub peer_kind: PeerKind,
     pub self_mailbox: MailboxId,
+    /// Mailbox that envelope-requested forwards (`to.engine.is_some()`)
+    /// route to, from `RpcServerConfig::route_target`. `None` on chassis
+    /// that don't forward — the forward branch drops, as today.
+    pub route_target: Option<MailboxId>,
     /// Cached `Arc<Mailer>` so per-handler ctxs (`NativeCtx`,
     /// which doesn't expose `mailer()`) can fire wake mails into
     /// the cap from internal helpers — and so the `Call`
@@ -223,12 +225,12 @@ impl RpcServerState {
     }
 
     pub fn handle_call(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, cid: Option<u64>, envelope: MailEnvelope) {
-        // Engine-addressed Calls (issue 763 P5a): relay to the
-        // engines cap (`aether.engine`), which owns the
-        // `EngineId -> proxy` table and re-emits a `ForwardEnvelope`
-        // at the right proxy. The substrate's reply streams back
-        // here as a normal reply mail (handled by `on_any` as a
-        // `ReplyEvent`); its terminal `ReplyEnd` arrives — via the
+        // The envelope requests a forward to a specific remote target
+        // (issue 763 P5a): relay to the configured `route_target`
+        // mailbox, which owns the `EngineId -> proxy` table and re-emits
+        // a `ForwardEnvelope` at the right proxy. The substrate's reply
+        // streams back here as a normal reply mail (handled by `on_any`
+        // as a `ReplyEvent`); its terminal `ReplyEnd` arrives — via the
         // proxy — as a `CallSettled` (also handled by `on_any`).
         //
         // Crucially this path does NOT subscribe to settlement: the
@@ -237,25 +239,25 @@ impl RpcServerState {
         // would close the wire call prematurely. The terminal close
         // comes from `CallSettled` instead.
         //
-        // On a chassis with no engines cap the `RouteEnvelope`
-        // warn-drops and the call never closes — only the hub
-        // chassis wires `aether.engine`, and only the hub fields
-        // engine-addressed Calls.
+        // On a chassis with no `route_target` the forward drops and the
+        // call never closes — only the hub chassis wires the forwarding
+        // target, and only the hub fields forward-requesting Calls.
         if let Some(engine_id) = envelope.to.engine {
+            let Some(target) = self.route_target else {
+                tracing::debug!(
+                    target: "aether_substrate::rpc",
+                    conn = conn_id,
+                    "rpc forward requested but no route_target configured; dropping",
+                );
+                return;
+            };
             let route = RouteEnvelope {
                 engine_id: engine_id.0.to_string(),
                 mailbox: envelope.to.mailbox,
                 kind: envelope.kind,
                 payload: envelope.payload,
             };
-            // Runtime-name routing: forwarding a wire `Call` to the
-            // well-known engines cap (`EngineServer::NAMESPACE`); the server
-            // holds opaque MailboxId/KindId/bytes, with no compile-time
-            // sibling type to resolve through.
-            #[allow(clippy::disallowed_methods)]
-            let engine_cap = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
-            let mail_id =
-                ctx.send_envelope_detached(engine_cap, <RouteEnvelope as Kind>::ID, &route.encode_into_bytes());
+            let mail_id = ctx.send_envelope_detached(target, <RouteEnvelope as Kind>::ID, &route.encode_into_bytes());
             if let Some(wire_cid) = cid {
                 self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
             }
@@ -402,6 +404,7 @@ impl NativeActor for RpcServerCapability {
         Ok(RpcServerState {
             peer_kind: config.peer_kind,
             self_mailbox: self_id,
+            route_target: config.route_target,
             mailer: ctx.mailer(),
             bind_addr: config.bind_addr,
             listener_port: port,

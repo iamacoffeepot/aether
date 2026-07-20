@@ -168,6 +168,7 @@ mod tests {
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
                 peer_kind: substrate_peer_kind(),
+                route_target: None,
             })
             .build_passive()
             .expect("caps boot");

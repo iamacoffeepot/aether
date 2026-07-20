@@ -9,9 +9,10 @@
 
 use super::{EngineConfig, EngineServer};
 pub use crate::engine::kinds::ForwardEnvelope;
-use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
+use crate::engine::kinds::{EngineAlive, EngineDied};
 pub use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
+use crate::rpc::RouteEnvelope;
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
 pub use aether_kinds::{

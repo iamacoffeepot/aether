@@ -1002,6 +1002,7 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
                 engine_version: "0.1.0".into(),
                 kinds: vec![],
             },
+            route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
         })
         .build_passive()
         .expect("test setup: hub caps boot");

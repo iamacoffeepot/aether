@@ -252,6 +252,9 @@ impl BloomeryChassis {
                     engine_version: env!("CARGO_PKG_VERSION").into(),
                     kinds: vec![],
                 },
+                // The bloomery host fields no engine-addressed forwards
+                // (it wires no engines cap), so it needs no route target.
+                route_target: None,
             })
             // The REST control ingress (ADR-0149 §Packaging, #3498): the HTTP
             // server cap binds localhost, and the api cap claims the control

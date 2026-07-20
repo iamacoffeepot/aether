@@ -13,10 +13,10 @@
 //! state.
 
 use super::{EngineProxy, EngineProxyConfig};
-pub use crate::engine::kinds::{CallSettled, EngineAlive, EngineDied};
+pub use crate::engine::kinds::{EngineAlive, EngineDied};
 use crate::engine::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 use crate::rpc::RpcInboundReady;
-pub use crate::rpc::{MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
+pub use crate::rpc::{CallSettled, MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
 pub use aether_actor::Addressable;
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, KindId, MailboxId, mailbox_id_from_name};
