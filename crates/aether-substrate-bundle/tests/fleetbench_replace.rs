@@ -5,8 +5,6 @@
 //! capability set reflects the new binary while the lineage address
 //! stays put.
 
-mod fleetbench;
-
 mod tests {
     use aether_actor::Addressable;
     use aether_component::WasmTrampoline;
@@ -15,7 +13,7 @@ mod tests {
     use aether_kit::camera::CameraCreate;
     use aether_test_fixtures_kinds::SetRender;
 
-    use crate::fleetbench::{FleetBench, dist_component_available};
+    use aether_fleet_bench::{FleetBench, dist_component_available};
 
     /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
     /// it with `aether-kit`'s non-entry `aether.camera` export (selector

@@ -3,15 +3,13 @@
 //! `dist/manifest.json`) into a forked substrate and assert it registers
 //! at its ADR-0099 lineage address.
 
-mod fleetbench;
-
 mod tests {
     use aether_actor::Addressable;
     use aether_component::WasmTrampoline;
     use aether_data::Kind;
     use aether_kinds::{LoadComponent, LoadResult};
 
-    use crate::fleetbench::{FleetBench, dist_component_available};
+    use aether_fleet_bench::{FleetBench, dist_component_available};
 
     /// Load the `probe` component and assert `LoadResult.name` is the
     /// `/`-rendered lineage

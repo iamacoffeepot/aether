@@ -3,10 +3,8 @@
 //! through the hub's engines cap, then assert the supervised fleet tracks
 //! the spawned set and that a `terminate` evicts an engine synchronously.
 
-mod fleetbench;
-
 mod tests {
-    use crate::fleetbench::{FleetBench, poll_until};
+    use aether_fleet_bench::{FleetBench, poll_until};
     use aether_kinds::DeathReason;
 
     /// Spawn two headless substrates and assert both round-trip through

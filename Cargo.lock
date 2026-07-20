@@ -305,6 +305,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-fleet-bench"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-codec",
+ "aether-data",
+ "aether-engine",
+ "aether-kinds",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-trace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aether-fs"
 version = "0.3.0-alpha"
 dependencies = [
@@ -588,6 +603,7 @@ dependencies = [
  "aether-contentgen",
  "aether-data",
  "aether-engine",
+ "aether-fleet-bench",
  "aether-fs",
  "aether-game",
  "aether-gemini",

@@ -9,15 +9,13 @@
 //! - **`send_mail_traced`**: an atomic traced batch settles, yields its
 //!   non-error ack root, and rides its correlated reply home.
 
-mod fleetbench;
-
 mod tests {
     use aether_data::{Kind, MailId};
     use aether_fs::{List, ListResult};
     use aether_kinds::trace::DispatchTraced;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
-    use crate::fleetbench::{FleetBench, dist_component_available};
+    use aether_fleet_bench::{FleetBench, dist_component_available};
 
     /// Ping-pong (verify-first, the #1451 deferral): load
     /// `ProbeWithConfig` from the `probe` bundle with a seeded `ProbeConfig`, send it a

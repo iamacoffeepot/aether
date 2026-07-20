@@ -13,8 +13,6 @@
 //! recipient-as-identity, the guest membrane) is covered by the unit
 //! tests in `aether-actor` / `aether-substrate`.
 
-mod fleetbench;
-
 mod tests {
     use aether_data::Kind;
     use aether_test_fixtures_kinds::{
@@ -22,7 +20,7 @@ mod tests {
         InlineProbe,
     };
 
-    use crate::fleetbench::{FleetBench, dist_component_available};
+    use aether_fleet_bench::{FleetBench, dist_component_available};
 
     /// Load `inline_child`, address its inline child by the rendered
     /// lineage name over the wire, and assert the child replied
