@@ -744,8 +744,10 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
 /// starts the listener (substrate becomes an RPC peer a hub or client dials);
 /// unset composes the cap disabled — it still claims its `aether.rpc.server`
 /// mailbox, so mail to it is answered rather than warn-dropped, and the same
-/// binary claims the same namespaces wherever `--describe` runs. `engine_name`
-/// identifies the chassis profile in the `HelloAck` peer-kind.
+/// binary claims the same namespaces wherever `--describe` runs. The
+/// `HelloAck` peer-kind's engine name is derived from `C::PROFILE` by
+/// [`aether_substrate::engine_name`], so it is never stated as a second
+/// literal beside the profile.
 ///
 /// The config is not staged here (#3849 retired the programmatic-`bind_addr`
 /// bridge): desktop / headless `set_argv::<RpcServerConfig>` the `--rpc-port`
@@ -764,10 +766,10 @@ pub fn stage_rpc_argv(sources: &mut ConfigSources, overlay: RpcServerOverlay) {
 }
 
 #[must_use]
-pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, engine_name: &str) -> Builder<C> {
+pub fn with_rpc_server<C: Chassis>(builder: Builder<C>) -> Builder<C> {
     builder.with_actor::<RpcServerCapability>(RpcServerParams {
         peer_kind: PeerKind::Substrate {
-            engine_name: engine_name.into(),
+            engine_name: aether_substrate::engine_name::<C>(),
             engine_version: env!("CARGO_PKG_VERSION").into(),
             kinds: vec![],
         },

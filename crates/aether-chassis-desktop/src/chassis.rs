@@ -430,7 +430,7 @@ impl DesktopChassis {
             .with_actor::<RenderCapability>(render_params)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
-        with_rpc_server(builder, "aether-desktop").with_actor::<HttpServerCapability>(())
+        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
     }
 
     /// Build the desktop chassis: construct the Start-stage runtime handles

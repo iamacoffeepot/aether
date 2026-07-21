@@ -288,18 +288,17 @@ impl HubOutbound {
     /// Fresh facade with no backend attached. Egress methods drop
     /// silently until `attach_backend` is called. The boot path always
     /// constructs through this so substrate-core never holds a
-    /// hub-protocol-aware default — the wiring happens at chassis
-    /// composition time (the `HubClientCapability` boot, today).
+    /// hub-protocol-aware default; the backend is wired later at chassis
+    /// composition time.
     #[must_use]
     pub fn disconnected() -> Arc<Self> {
         Arc::new(Self { backend: OnceLock::new() })
     }
 
-    /// Wire a backend. Called once by `HubClientCapability::boot` after
-    /// a successful TCP handshake (or by an in-process loopback
-    /// harness). Subsequent calls warn-and-ignore — `HubOutbound` is
-    /// single-backend by design so frames can't race across two
-    /// implementations.
+    /// Wire a backend. Called once by an in-process loopback harness
+    /// after it builds its `RecordingBackend`. Subsequent calls
+    /// warn-and-ignore — `HubOutbound` is single-backend by design so
+    /// frames can't race across two implementations.
     pub fn attach_backend(&self, backend: Arc<dyn EgressBackend>) {
         if self.backend.set(backend).is_err() {
             tracing::warn!(

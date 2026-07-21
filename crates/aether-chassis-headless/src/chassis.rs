@@ -401,7 +401,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
-        with_rpc_server(builder, "aether-headless").with_actor::<HttpServerCapability>(())
+        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
     }
 
     /// Build the headless chassis: stand up substrate-core internals,
