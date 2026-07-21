@@ -173,13 +173,6 @@ pub trait RenderExt: Send {
 /// the matching `events_rx` rides on [`SubstrateHarnessBuild`] for the
 /// embedder to drive.
 pub struct SubstrateHarnessEnv {
-    /// Substrate identity for the hub `Hello` handshake (e.g.
-    /// `"substrate-harness"`). Used by both binary and in-process API.
-    pub name: String,
-    /// Substrate version for the hub `Hello`. Typically
-    /// `env!("CARGO_PKG_VERSION")` from the binary; in-process API
-    /// supplies the same.
-    pub version: String,
     /// Number of workers for the wire-stable `EngineInfo.workers`
     /// field. Defaults to [`WORKERS`].
     pub workers: usize,
@@ -286,8 +279,6 @@ impl SubstrateHarnessChassis {
     #[allow(clippy::too_many_lines)] // PR 3b growth from lifecycle graph + relay wiring.
     pub fn build_passive(env: SubstrateHarnessEnv) -> anyhow::Result<SubstrateHarnessBuild> {
         let SubstrateHarnessEnv {
-            name,
-            version,
             workers,
             pool_workers,
             ring_caps,
@@ -302,7 +293,7 @@ impl SubstrateHarnessChassis {
             teardown_cap,
         } = env;
 
-        let boot = SubstrateBoot::builder(&name, &version).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         let _ = workers;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");

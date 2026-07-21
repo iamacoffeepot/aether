@@ -493,8 +493,6 @@ impl SubstrateHarness {
         // about io supply tempdir roots through
         // `start_with_namespace_roots`; otherwise the harness skips Io.
         let env = SubstrateHarnessEnv {
-            name: "substrate-harness".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
             workers: WORKERS,
             pool_workers,
             ring_caps,

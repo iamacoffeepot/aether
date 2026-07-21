@@ -117,7 +117,7 @@ impl DesktopChassis {
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
         let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
@@ -134,7 +134,7 @@ impl DesktopChassis {
     /// Returns [`BootError`] when config resolution or substrate boot fails.
     pub fn config_manifest() -> Result<ConfigManifest, BootError> {
         let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         Ok(Self::compose(&boot, env).config_manifest())
     }
 
@@ -465,7 +465,7 @@ impl DesktopChassis {
         event_loop.set_control_flow(ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
 
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >

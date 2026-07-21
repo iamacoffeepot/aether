@@ -17,11 +17,12 @@
 //! linker, hub outbound, input subscribers) and exposes them as fields
 //! the chassis main passes into `ComponentHostConfig` at the call site.
 //!
-//! **Hub connect is explicit.** `build()` does NOT dial
-//! `AETHER_HUB_URL`. The chassis registers its own sinks and any
-//! other state that should exist before the hub knows the engine is
-//! alive, then dials by composing `aether_hub::HubClientCapability`
-//! through `Builder::with_actor()`. Without this separation, a hub-driven
+//! **Hub connect is explicit.** `build()` does NOT open the engine to
+//! the hub. The chassis registers its own sinks and any other state
+//! that should exist before the hub knows the engine is alive, then
+//! accepts the hub's connection by composing
+//! `aether_rpc::RpcServerCapability` through `Builder::with_actor()`
+//! (the hub dials the substrate). Without this separation, a hub-driven
 //! `load_component` could race ahead of the chassis's main thread
 //! and bind a chassis sink name to a freshly-loaded component before
 //! the chassis's later `register_inbox` call, panicking the substrate
@@ -73,30 +74,19 @@ pub struct SubstrateBoot {
     /// log the count, etc. Same `Vec` that was registered with the
     /// `Registry`.
     pub boot_descriptors: Vec<KindDescriptor>,
-    /// Substrate identity passed to the boot builder. Chassis crates
-    /// thread these through to `aether_hub::HubClientCapability` (via
-    /// the `Hello` handshake) without re-reading their own config.
-    pub name: String,
-    pub version: String,
 }
 
-pub struct SubstrateBootBuilder<'a> {
-    name: &'a str,
-    version: &'a str,
-}
+pub struct SubstrateBootBuilder;
 
 impl SubstrateBoot {
-    /// Begin a boot. `name` / `version` identify the substrate in the
-    /// hub's `Hello` handshake — typically a short chassis-or-profile
-    /// name (`"hello-triangle"`, `"headless"`) and
-    /// `env!("CARGO_PKG_VERSION")`.
+    /// Begin a boot.
     #[must_use]
-    pub fn builder<'a>(name: &'a str, version: &'a str) -> SubstrateBootBuilder<'a> {
-        SubstrateBootBuilder { name, version }
+    pub fn builder() -> SubstrateBootBuilder {
+        SubstrateBootBuilder
     }
 }
 
-impl SubstrateBootBuilder<'_> {
+impl SubstrateBootBuilder {
     /// Execute the boot: registers `aether_kinds::descriptors::all()`,
     /// wires the diagnostic sink, and prepares the runtime handles
     /// (engine, registry, mailer, linker, outbound, input subscribers)
@@ -105,8 +95,9 @@ impl SubstrateBootBuilder<'_> {
     /// `aether-component::ComponentHostCapability`, booted through
     /// `Builder::with_actor::<ComponentHostCapability>(...)` by the
     /// chassis main using the fields exposed on [`SubstrateBoot`].
-    /// Does NOT dial the hub — chassis mains compose
-    /// `aether_hub::HubClientCapability` themselves (issue #262).
+    /// Does NOT open the engine to the hub — chassis mains compose
+    /// `aether_rpc::RpcServerCapability` themselves so the hub can dial
+    /// in (issue #262).
     ///
     /// # Panics
     /// Panics if `aether_kinds::descriptors::all()` contains a
@@ -182,16 +173,7 @@ impl SubstrateBootBuilder<'_> {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        Ok(SubstrateBoot {
-            engine,
-            registry,
-            linker,
-            queue,
-            outbound,
-            boot_descriptors,
-            name: self.name.to_owned(),
-            version: self.version.to_owned(),
-        })
+        Ok(SubstrateBoot { engine, registry, linker, queue, outbound, boot_descriptors })
     }
 }
 
@@ -205,21 +187,19 @@ mod tests {
     /// component, panicking the substrate when the chassis later
     /// tries to install the real sink handler. ADR-0070 phase 4 /
     /// ADR-0071 phase 7 retired `boot.connect_hub` entirely — the
-    /// chassis composes `aether_hub::HubClientCapability` via the
-    /// `Builder::with_actor()` path instead, so `build()` is structurally
-    /// incapable of reaching the hub. This test asserts the
+    /// chassis composes `aether_rpc::RpcServerCapability` via the
+    /// `Builder::with_actor()` path instead so the hub can dial in, so
+    /// `build()` is structurally incapable of reaching the hub. This test asserts the
     /// substrate-core invariant: `build()` returns a fully-wired
     /// boot whose `outbound` is disconnected.
     #[test]
     fn build_does_not_dial_hub() {
-        let boot = SubstrateBoot::builder("test", env!("CARGO_PKG_VERSION"))
-            .build()
-            .expect("build must succeed without dialling the hub");
+        let boot = SubstrateBoot::builder().build().expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry.register_inbox("test_chassis_sink", Arc::new(|_dispatch| {}));
         // No backend attached → `is_connected()` is false. Chassis
-        // crates that want a hub bridge wire `HubClientCapability`
+        // crates that want a hub bridge wire `RpcServerCapability`
         // themselves through their `Builder`.
         assert!(!boot.outbound.is_connected());
     }

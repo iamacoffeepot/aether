@@ -66,7 +66,7 @@ impl HubChassis {
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
         let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
@@ -83,7 +83,7 @@ impl HubChassis {
     /// Returns [`BootError`] when config resolution or substrate boot fails.
     pub fn config_manifest() -> Result<ConfigManifest, BootError> {
         let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         Ok(Self::compose(&boot, env).config_manifest())
     }
 
@@ -234,7 +234,7 @@ impl HubChassis {
     }
 
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
         // the subscriber is installed (env > `[runtime]` file > `info`).
         apply_filter(&env.runtime.log_filter);

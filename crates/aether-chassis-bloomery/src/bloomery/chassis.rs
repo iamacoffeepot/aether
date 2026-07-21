@@ -165,7 +165,7 @@ impl BloomeryChassis {
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
         let env = BloomeryEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(BinaryManifest {
             chassis: Self::PROFILE.to_owned(),
@@ -264,7 +264,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
+        let boot = SubstrateBoot::builder().build()?;
         let builder = Self::compose(&boot, env);
         // The driver owns the boot and drops it on the shutdown signal — it
         // moves in here, after `compose` finished borrowing it.
