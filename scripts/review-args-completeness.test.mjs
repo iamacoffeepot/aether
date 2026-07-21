@@ -4,16 +4,16 @@ import test from 'node:test'
 import { findGaps, parseReviewable, toRepoRelative } from './review-args-completeness.mjs'
 
 const REVIEWABLE = [
-  'crates/aether-bloomery-host/tests/rest_api.rs',
-  'crates/aether-bloomery-host/src/bloomery/approve/tests.rs',
+  'crates/aether-chassis-bloomery/tests/rest_api.rs',
+  'crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs',
 ]
 
 const complete = {
-  files: ['crates/aether-bloomery-host/src/bloomery/approve/tests.rs'],
-  testFiles: ['crates/aether-bloomery-host/tests/rest_api.rs'],
+  files: ['crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs'],
+  testFiles: ['crates/aether-chassis-bloomery/tests/rest_api.rs'],
   diffs: {
-    'crates/aether-bloomery-host/tests/rest_api.rs': '@@ -0,0 +1,119 @@\n+// new test',
-    'crates/aether-bloomery-host/src/bloomery/approve/tests.rs': '@@ -0,0 +1,28 @@\n+// new test',
+    'crates/aether-chassis-bloomery/tests/rest_api.rs': '@@ -0,0 +1,119 @@\n+// new test',
+    'crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs': '@@ -0,0 +1,28 @@\n+// new test',
   },
 }
 
@@ -30,12 +30,12 @@ test('complete args (every changed file present with a non-empty diff) yields no
 // entirely, absent from files ∪ testFiles. It must be a gap, never silent.
 test('a changed file absent from files/testFiles is a gap', () => {
   const args = {
-    files: ['crates/aether-bloomery-host/src/bloomery/approve/tests.rs'],
+    files: ['crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs'],
     testFiles: [],
-    diffs: { 'crates/aether-bloomery-host/src/bloomery/approve/tests.rs': '@@ +1 @@\n+x' },
+    diffs: { 'crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs': '@@ +1 @@\n+x' },
   }
   const gaps = findGaps(REVIEWABLE, args)
-  assert.deepEqual(gaps, [{ file: 'crates/aether-bloomery-host/tests/rest_api.rs', reason: 'absent-from-files' }])
+  assert.deepEqual(gaps, [{ file: 'crates/aether-chassis-bloomery/tests/rest_api.rs', reason: 'absent-from-files' }])
 })
 
 // Tripwire (#3608): the subtler #3600 shape — a changed file present in the sets
@@ -43,20 +43,20 @@ test('a changed file absent from files/testFiles is a gap', () => {
 // "unchanged". A missing OR empty diff entry must both be gaps.
 test('a changed file present but with a missing or empty diff is a gap', () => {
   const missing = {
-    files: ['crates/aether-bloomery-host/src/bloomery/approve/tests.rs'],
-    testFiles: ['crates/aether-bloomery-host/tests/rest_api.rs'],
-    diffs: { 'crates/aether-bloomery-host/src/bloomery/approve/tests.rs': '@@ +1 @@\n+x' },
+    files: ['crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs'],
+    testFiles: ['crates/aether-chassis-bloomery/tests/rest_api.rs'],
+    diffs: { 'crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs': '@@ +1 @@\n+x' },
   }
   assert.deepEqual(findGaps(REVIEWABLE, missing), [
-    { file: 'crates/aether-bloomery-host/tests/rest_api.rs', reason: 'missing-diff' },
+    { file: 'crates/aether-chassis-bloomery/tests/rest_api.rs', reason: 'missing-diff' },
   ])
 
   const empty = {
     ...complete,
-    diffs: { ...complete.diffs, 'crates/aether-bloomery-host/tests/rest_api.rs': '   \n  ' },
+    diffs: { ...complete.diffs, 'crates/aether-chassis-bloomery/tests/rest_api.rs': '   \n  ' },
   }
   assert.deepEqual(findGaps(REVIEWABLE, empty), [
-    { file: 'crates/aether-bloomery-host/tests/rest_api.rs', reason: 'empty-diff' },
+    { file: 'crates/aether-chassis-bloomery/tests/rest_api.rs', reason: 'empty-diff' },
   ])
 })
 
@@ -67,11 +67,11 @@ test('a changed file present but with a missing or empty diff is a gap', () => {
 test('absolute args paths normalize against GITHUB_WORKSPACE and match repo-relative reviewable paths', () => {
   const root = '/home/runner/work/aether/aether'
   const absolute = {
-    files: [`${root}/crates/aether-bloomery-host/src/bloomery/approve/tests.rs`],
-    testFiles: [`${root}/crates/aether-bloomery-host/tests/rest_api.rs`],
+    files: [`${root}/crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs`],
+    testFiles: [`${root}/crates/aether-chassis-bloomery/tests/rest_api.rs`],
     diffs: {
-      [`${root}/crates/aether-bloomery-host/tests/rest_api.rs`]: '@@ +1 @@\n+a',
-      [`${root}/crates/aether-bloomery-host/src/bloomery/approve/tests.rs`]: '@@ +1 @@\n+b',
+      [`${root}/crates/aether-chassis-bloomery/tests/rest_api.rs`]: '@@ +1 @@\n+a',
+      [`${root}/crates/aether-chassis-bloomery/src/bloomery/approve/tests.rs`]: '@@ +1 @@\n+b',
     },
   }
   assert.deepEqual(findGaps(REVIEWABLE, absolute, root), [])

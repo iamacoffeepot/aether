@@ -62,7 +62,7 @@ const RUN_ALL_PREFIXES: &[&str] = &[".cargo/", ".config/", "xtask/"];
 /// (`ci.yml` itself is screened to `run_all` before rules run), and the
 /// `fuzz/` tree, which is its own cargo workspace built only by
 /// fuzz-nightly. `bloomery/**` is the opposite case — a cross-boundary
-/// test input: the `aether-bloomery-host` approve tests read
+/// test input: the `aether-chassis-bloomery` approve tests read
 /// `bloomery/approval-policy.yml` from the repo root, so a change there
 /// marks that package (and its reverse closure) changed.
 const PATH_RULES_TOML: &str = r#"
@@ -72,7 +72,7 @@ mark-changed = []
 
 [[path-rule]]
 globs = ["bloomery/**"]
-mark-changed = ["aether-bloomery-host"]
+mark-changed = ["aether-chassis-bloomery"]
 "#;
 
 #[derive(Args)]
@@ -209,7 +209,7 @@ fn is_dist_consumer<'a>(mut dependency_names: impl Iterator<Item = &'a str>, was
 /// selected tests: the chassis package's scenario tests execute component
 /// wasm, a wasm-source crate's own tests may read its wasm, and a crate
 /// that depends on a wasm source can execute that source's wasm at test
-/// time (issue #3617 — the original such consumer was `aether-bloomery-host`
+/// time (issue #3617 — the original such consumer was `aether-chassis-bloomery`
 /// running `aether-bloomery`'s control-core wasm; that retired when the control
 /// core became a native cap, but the rule stays generic for any future consumer
 /// that would hard-fail under `AETHER_REQUIRE_RUNTIME` without the pre-build).
@@ -309,14 +309,14 @@ mod tests {
         // nor a wasm source, but whose tests execute a wasm source's component at
         // runtime, still needs the dist pre-build — deriving wasm_needed from
         // chassis membership alone would skip it and hard-fail under
-        // AETHER_REQUIRE_RUNTIME. (The original instance was aether-bloomery-host
+        // AETHER_REQUIRE_RUNTIME. (The original instance was aether-chassis-bloomery
         // running aether-bloomery's control-core wasm; that retired when the
         // control core became a native cap, so the labels below are illustrative
         // — the generic rule stays for any future such consumer.)
         let wasm_sources = string_set(&["aether-bloomery"]);
-        let wasm_consumers = string_set(&["aether-bloomery-host"]);
+        let wasm_consumers = string_set(&["aether-chassis-bloomery"]);
         assert!(
-            derive_wasm_needed(&string_set(&["aether-bloomery-host"]), &wasm_sources, &wasm_consumers),
+            derive_wasm_needed(&string_set(&["aether-chassis-bloomery"]), &wasm_sources, &wasm_consumers),
             "a selected wasm-consumer crate needs the pre-build"
         );
         assert!(
@@ -360,11 +360,15 @@ mod tests {
         // A leaf-crate change selects that crate but not the chassis
         // package — the payoff case this tool exists for. An inverted or
         // over-wide closure shows up here.
-        let leaf =
-            select(&graph, &strings(&["crates/aether-bloomery-host/src/lib.rs"]), &no_wasm_sources, &no_wasm_consumers)
-                .expect("select over leaf change");
+        let leaf = select(
+            &graph,
+            &strings(&["crates/aether-chassis-bloomery/src/lib.rs"]),
+            &no_wasm_sources,
+            &no_wasm_consumers,
+        )
+        .expect("select over leaf change");
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
-        assert!(leaf.packages.contains("aether-bloomery-host"), "changed crate must be selected");
+        assert!(leaf.packages.contains("aether-chassis-bloomery"), "changed crate must be selected");
 
         // A path matching no package and no rule must fall back to the
         // whole workspace — silent deselection of unknown inputs is the
@@ -378,6 +382,6 @@ mod tests {
         let policy = select(&graph, &strings(&["bloomery/approval-policy.yml"]), &no_wasm_sources, &no_wasm_consumers)
             .expect("select over bloomery config change");
         assert!(policy.run_all.is_none(), "bloomery config maps to a package, not run_all");
-        assert!(policy.packages.contains("aether-bloomery-host"), "bloomery config change must select its reader");
+        assert!(policy.packages.contains("aether-chassis-bloomery"), "bloomery config change must select its reader");
     }
 }

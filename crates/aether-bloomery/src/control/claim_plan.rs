@@ -6,7 +6,7 @@
 //! The native `ControlCore` cap is only the sender; every
 //! decision here is a pure function of the snapshot and the event's decisions.
 //! That split is what makes the interposition's enforcement and reconcile
-//! decisions testable without a wasm host: `aether-bloomery-host`'s
+//! decisions testable without a wasm host: `aether-chassis-bloomery`'s
 //! `claim_reconcile` integration test drives these exact plans — as the wire
 //! bytes the actor would send — through the real source capability over the
 //! adapter's in-process fake, so the two crates' independently-declared

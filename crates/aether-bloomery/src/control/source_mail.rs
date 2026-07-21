@@ -6,11 +6,11 @@
 //! boot-reconcile deep-heal ops ([`EnumerateClaims`] with [`EnumerateClaimsResult`],
 //! and [`CompleteTransfer`] / [`CompleteRelease`], amended PR #3556) — are
 //! *defined here* in `aether-bloomery` rather
-//! than in `aether-bloomery-host` alongside the rest of the `aether.source.*`
+//! than in `aether-chassis-bloomery` alongside the rest of the `aether.source.*`
 //! family, for the same reason the store's [`Commit`](super::Commit) family
 //! lives here: the native `ControlCore` cap's `on_admit`
 //! must construct and send them (the seal/supersede/release interposition,
-//! ADR-0150 §The claim registry), and `aether-bloomery-host` depends on
+//! ADR-0150 §The claim registry), and `aether-chassis-bloomery` depends on
 //! `aether-bloomery`, so a reverse edge would be a package cycle. Defining them
 //! here keeps one definition both sides share — the host's `SourceCapability`
 //! re-exports them inward, cycle-free, exactly as it re-exports

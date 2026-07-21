@@ -21,7 +21,7 @@ members = [
     "crates/aether-behavior-derive",
     "crates/aether-bloomery",
     "crates/aether-bloomery-github",
-    "crates/aether-bloomery-host",
+    "crates/aether-chassis-bloomery",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
     "crates/aether-derive",
@@ -121,7 +121,7 @@ serde = { version = "1", default-features = false }
 serde_json = "1"
 # ADR-0149 Bloomery journal store (issue 3458): SQLite in WAL mode is the
 # durable single-writer home for the journal / inbox / outbox / active-
-# membership tables. Host crate (`aether-bloomery-host`) only — the guest
+# membership tables. Host crate (`aether-chassis-bloomery`) only — the guest
 # sees typed transact mail, never SQL. `bundled` compiles SQLite from
 # source so no system libsqlite3 is required on CI runners.
 rusqlite = { version = "0.32", features = ["bundled"] }

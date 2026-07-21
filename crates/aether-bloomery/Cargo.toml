@@ -9,7 +9,7 @@ license.workspace = true
 # control/source `aether.{store,source}.*` mail kinds the native host and the
 # GitHub adapter both link inward, cycle-free (ADR-0149 §The boundary). This crate
 # was formerly also a `cdylib` compiling the wasm control-core actor; that actor
-# became a native cap (`aether-bloomery-host`'s `control`), so the crate no longer
+# became a native cap (`aether-chassis-bloomery`'s `control`), so the crate no longer
 # emits a wasm component or depends on the guest SDK.
 crate-type = ["rlib"]
 

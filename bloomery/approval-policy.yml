@@ -6,7 +6,7 @@
 # glob block the scope revision carries). ADR-0149 / ADR-0151.
 #
 # This is the Bloomery-owned successor to `.github/approval-policy.yml`: the host
-# gate (`crates/aether-bloomery-host/src/bloomery/approve.rs`) reimplements the
+# gate (`crates/aether-chassis-bloomery/src/bloomery/approve.rs`) reimplements the
 # `--tier` resolution over these rules in Rust (the `scripts/surface-match.py`
 # resolver is ported into the gate), so the semantics below are the contract the
 # gate honours, not a script's.

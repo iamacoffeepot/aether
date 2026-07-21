@@ -239,7 +239,7 @@ jobs:
       # clippy.toml, ci.yml, xtask/) and any path matching no package and
       # no rule run everything, and the couplings cargo's graph can't see
       # (component/behavior wasm executed by the bundle's scenario tests;
-      # bloomery/ config read by aether-bloomery-host tests) are injected
+      # bloomery/ config read by aether-chassis-bloomery tests) are injected
       # in xtask. Pushes to main always run the unconditional full suite
       # below — squash-merge means main tests the exact landed tree, so a
       # selection miss delays a red signal but never loses it. That same
