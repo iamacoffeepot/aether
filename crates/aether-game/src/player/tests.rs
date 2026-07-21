@@ -175,17 +175,15 @@ fn boot_player_substrate_with_limits(
     let gateway_mailbox = GameGatewayCapability::resolve(0, ());
     let turn_sim_mailbox = TestTurnSim::resolve(0, ());
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
-        .with_actor::<TcpCapability>((), ())
-        .with_actor::<TestTurnSim>(
-            (),
-            TestTurnSimParams {
-                sim: SimConfig { fact_sink: Some(gateway_mailbox), ring_depth: 8, grid_bounds: GridBounds::default() },
-                retained: vec![bundle(1), bundle(2)],
-                observed: observed_tx,
-                defer_poll_result,
-            },
-        )
-        .with_actor::<GameGatewayCapability>(
+        .with_actor::<TcpCapability>(())
+        .with_actor::<TestTurnSim>(TestTurnSimParams {
+            sim: SimConfig { fact_sink: Some(gateway_mailbox), ring_depth: 8, grid_bounds: GridBounds::default() },
+            retained: vec![bundle(1), bundle(2)],
+            observed: observed_tx,
+            defer_poll_result,
+        })
+        .with_actor_configured::<GameGatewayCapability>(
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
             GameGatewayConfig {
                 listener_addr: Some("127.0.0.1:0".into()),
                 listener_name: LISTENER_NAME.into(),
@@ -194,7 +192,6 @@ fn boot_player_substrate_with_limits(
                 max_active_sessions,
                 max_pending_live_bundles,
             },
-            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
         )
         .build_passive()
         .expect("player test chassis boots");
@@ -343,7 +340,8 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
 
     let turn_sim_mailbox = MailboxId(0xfeed_beef);
     let _chassis = Builder::<TestChassis>::new(registry, mailer)
-        .with_actor::<GameGatewayCapability>(
+        .with_actor_configured::<GameGatewayCapability>(
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
             GameGatewayConfig {
                 listener_addr: Some("127.0.0.1:0".into()),
                 listener_name: LISTENER_NAME.into(),
@@ -352,7 +350,6 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
                 max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
                 max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
             },
-            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
         )
         .build_passive()
         .expect("gateway observer chassis boots");

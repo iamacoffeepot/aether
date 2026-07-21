@@ -292,7 +292,7 @@ fn driver_build_runs_driver_and_tears_down_passives() {
     let ran = Arc::new(AtomicBool::new(false));
 
     let chassis = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
-        .with_actor::<StubLog>((), ())
+        .with_actor::<StubLog>(())
         .driver(RanDriver { ran: Arc::clone(&ran) })
         .build()
         .expect("build succeeds");
@@ -386,8 +386,8 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
     registry.register_inline("test.claim_only.inline_sink", Arc::new(|_dispatch: registry::MailDispatch<'_>| {}));
 
     let claimed = Builder::<DrivenTestChassis<ClaimingDriver>>::new(registry, Arc::clone(&mailer))
-        .with_actor::<StubLog>((), ())
-        .with_actor::<InitTripwireCap>((), Arc::clone(&init_count))
+        .with_actor::<StubLog>(())
+        .with_actor::<InitTripwireCap>(Arc::clone(&init_count))
         .claim_namespaces()
         .expect("claim-only succeeds");
 
@@ -485,8 +485,8 @@ fn duplicate_passive_mailbox_aborts_build_and_shuts_down_prior() {
     let (registry, mailer) = bare_substrate();
 
     let err = Builder::<TestChassis>::new(registry, mailer)
-        .with_actor::<StubLog>((), ())
-        .with_actor::<StubLog>((), ())
+        .with_actor::<StubLog>(())
+        .with_actor::<StubLog>(())
         .build_passive()
         .expect_err("second passive must fail with duplicate claim");
 
@@ -534,7 +534,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
 
     let (registry, mailer) = bare_substrate();
     let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<FailingCap>((), ())
+        .with_actor::<FailingCap>(())
         .build_passive()
         .expect_err("init failure must propagate");
     // The error wraps init's std::io::Error message.
@@ -547,6 +547,45 @@ fn failed_singleton_init_releases_namespace_and_sink() {
         "sink at {} should be removed after failed init",
         FailingCap::NAMESPACE,
     );
+}
+
+/// ADR-0156 §5: an override staged for a type no composed member declares as
+/// its `Config` is a hard boot error naming the type — the
+/// staged-but-never-composed coherence guard (defense-in-depth on the
+/// `ConfigSources` bulk path). The paired [`Builder::with_actor_configured`]
+/// makes an orphan *unconstructable* through the public builder API — an
+/// override always composes its actor — so the orphan case is reachable only by
+/// staging directly into a `ConfigSources` and handing it over via
+/// `with_config_sources` (the chassis's argv/file bulk path), which is what
+/// this test does. A composed cap with no orphan override boots.
+#[test]
+fn build_passive_rejects_staged_but_never_composed_override() {
+    use crate::config::ConfigSources;
+
+    // A distinctive marker type that is never any cap's `Config`.
+    #[derive(Debug)]
+    struct OrphanKnob;
+
+    let mut orphan_sources = ConfigSources::hermetic();
+    orphan_sources.set_override(OrphanKnob);
+
+    let (registry, mailer) = bare_substrate();
+    let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_config_sources(orphan_sources)
+        .with_actor::<StubLog>(())
+        .build_passive()
+        .expect_err("a staged-but-never-composed override must abort boot");
+    assert!(
+        format!("{err:?}").contains("OrphanKnob"),
+        "the orphan-override error must name the offending type, got {err:?}",
+    );
+
+    // The paired form composes + stages coherently, so it boots.
+    let (registry, mailer) = bare_substrate();
+    Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StubLog>(())
+        .build_passive()
+        .expect("a composed cap with no orphan override boots");
 }
 
 /// Issue 552 stage 1: end-to-end smoke for the new
@@ -616,7 +655,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     let received = Arc::new(AtomicU32::new(0));
 
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ProbeCap>((), Arc::clone(&received))
+        .with_actor::<ProbeCap>(Arc::clone(&received))
         .build_passive()
         .expect("with_actor boot succeeds");
 
@@ -727,7 +766,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     let (registry, mailer) = bare_substrate();
     let observed = Arc::new(AtomicU32::new(0));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<LocalProbe>((), Arc::clone(&observed))
+        .with_actor::<LocalProbe>(Arc::clone(&observed))
         .build_passive()
         .expect("LocalProbe boots");
 
@@ -831,7 +870,7 @@ fn ctx_spawn_child_routes_through_handler() {
     let child_received = Arc::new(AtomicU32::new(0));
 
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ParentCap>((), (Arc::clone(&spawn_count), Arc::clone(&child_received)))
+        .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&child_received)))
         .build_passive()
         .expect("ParentCap boots");
 
@@ -2056,7 +2095,7 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
     let (registry, mailer) = bare_substrate();
     let wire_count = Arc::new(AtomicU32::new(0));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<WireProbe>((), Arc::clone(&wire_count))
+        .with_actor::<WireProbe>(Arc::clone(&wire_count))
         .build_passive()
         .expect("with_actor boot succeeds");
 
@@ -2154,9 +2193,9 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
 
     let builder = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer));
     let builder = if pinger_first {
-        builder.with_actor::<Pinger>((), Arc::clone(&wire_ran)).with_actor::<Ponger>((), Arc::clone(&received))
+        builder.with_actor::<Pinger>(Arc::clone(&wire_ran)).with_actor::<Ponger>(Arc::clone(&received))
     } else {
-        builder.with_actor::<Ponger>((), Arc::clone(&received)).with_actor::<Pinger>((), Arc::clone(&wire_ran))
+        builder.with_actor::<Ponger>(Arc::clone(&received)).with_actor::<Pinger>(Arc::clone(&wire_ran))
     };
     let chassis = builder.build_passive().expect("multi-pass boot succeeds");
 

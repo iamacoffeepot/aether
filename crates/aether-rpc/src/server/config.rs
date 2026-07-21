@@ -1,6 +1,6 @@
 use crate::wire::PeerKind;
 use aether_data::MailboxId;
-use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
+use aether_substrate::config::{ConfigError, ConfigMember, ConfigMemberRecord, ConfigSources};
 
 /// Init config for `RpcServerCapability`.
 ///
@@ -32,6 +32,17 @@ pub struct RpcServerConfig {
 impl ConfigMember for RpcServerConfig {
     fn members() -> Vec<ConfigMemberRecord> {
         Vec::new()
+    }
+
+    /// ADR-0156 §5: the programmatic-only bridge. `bind_addr` is resolved from
+    /// `AETHER_RPC_PORT` outside the derive path (in the chassis) and staged as
+    /// a programmatic override via `Builder::with_config`, so this member has
+    /// no argv/env/file layer of its own — it takes the override, defaulting to
+    /// the disabled (`None`) address if a composer forgot to stage one. Dies
+    /// with the hand impl when the port knob migrates onto a derive-`Config`
+    /// member (#3849).
+    fn resolve(sources: &mut ConfigSources) -> Result<Self, ConfigError> {
+        Ok(sources.take_or(|| Self { bind_addr: None }))
     }
 }
 

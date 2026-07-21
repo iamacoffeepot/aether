@@ -257,7 +257,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>((), ())
+        .with_actor::<InputCapability>(())
         .build()
         .expect("boot");
     let world = component_address("world");
@@ -340,7 +340,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>((), ())
+        .with_actor::<InputCapability>(())
         .build()
         .expect("boot");
 

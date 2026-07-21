@@ -356,20 +356,38 @@ impl SubstrateHarnessBuilder {
     /// its basics (trace dispatch, the harness cap, lifecycle, fail-fast
     /// headless window) and each scenario composes exactly the caps it
     /// needs on top (issue #3764); this is the generic surface for any
-    /// cap without boot-internal wiring — `.with_actor::<TextCapability>((), (), ())`,
-    /// `.with_actor::<InputCapability>(config, (), ())`, a scenario-local
-    /// `NativeActor`, and so on. Applied to the chassis builder in push
-    /// order, between the harness basics and lifecycle. `params` is the
-    /// ADR-0156 composer-supplied construction input, `()` for every cap in
-    /// this slice.
+    /// cap without boot-internal wiring — `harness.with_actor::<TextCapability>(())`,
+    /// a scenario-local `NativeActor`, and so on. Applied to the chassis builder
+    /// in push order, between the harness basics and lifecycle.
+    ///
+    /// ADR-0156 §5: mirrors `Builder::with_actor` — it carries only `params`
+    /// (the composer-supplied construction input). To also supply a cap's
+    /// operator-resolvable `Config`, use the paired [`Self::with_actor_configured`].
     #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
+    pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
         A: NativeActor,
         A::Config: Send + 'static + ConfigMember,
         A::Params: Send + 'static,
     {
-        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(config, params)));
+        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(params)));
+        self
+    }
+
+    /// ADR-0156 §5: the paired form — compose actor `A` and stage its explicit
+    /// `config` in one compiler-checked call (mirrors `Builder::with_actor_configured`).
+    /// This is the **primary** API for a scenario that composes an actor and
+    /// supplies its config value together: the `A::Config` type binds `config`
+    /// at the call, and the harness's hermetic source stack means an unstaged
+    /// member falls through to its compiled default rather than process env.
+    #[must_use]
+    pub fn with_actor_configured<A>(mut self, params: A::Params, config: A::Config) -> Self
+    where
+        A: NativeActor,
+        A::Config: Send + 'static + ConfigMember,
+        A::Params: Send + 'static,
+    {
+        self.compose.push(Box::new(move |builder| builder.with_actor_configured::<A>(params, config)));
         self
     }
 

@@ -43,6 +43,22 @@ use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
 use aether_lifecycle::LifecycleConfig;
 use aether_substrate::Chassis as _;
+use aether_substrate::config::ConfigSources;
+
+/// ADR-0156 §5: stage the cap configs a headless HTTP scenario needs as
+/// programmatic overrides on the builder's source stack — the in-code
+/// equivalent of the argv/env/file layers `HeadlessEnv::from_env` assembles.
+/// The builder resolves each composed cap's `Config` off this at boot, so a
+/// test constructs configs in code without a process env read.
+fn base_sources(server_config: HttpServerConfig) -> ConfigSources {
+    let mut sources = ConfigSources::new(None);
+    sources.set_override(HttpConfig::default());
+    sources.set_override(server_config);
+    sources.set_override(AnthropicConfig::default());
+    sources.set_override(GeminiConfig::default());
+    sources.set_override(LifecycleConfig { advance_timeout_millis: 1_000 });
+    sources
+}
 
 /// The `http_handler` fixture's `NAMESPACE` const — the subname under
 /// which `WasmTrampoline` registers it, and the last segment of its
@@ -344,10 +360,7 @@ mod tests {
         let sandbox = init_save_sandbox("http-serving");
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
-            http: HttpConfig::default(),
-            http_server: server_config,
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             rpc_addr: None,
@@ -355,7 +368,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -456,10 +468,7 @@ mod tests {
         let sandbox = init_save_sandbox("http-serving-stream");
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
-            http: HttpConfig::default(),
-            http_server: server_config,
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             rpc_addr: None,
@@ -467,7 +476,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -563,10 +571,7 @@ mod tests {
         let sandbox = init_save_sandbox("http-serving-stream-route");
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
-            http: HttpConfig::default(),
-            http_server: server_config,
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             rpc_addr: None,
@@ -574,7 +579,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -675,10 +679,7 @@ mod tests {
         let sandbox = init_save_sandbox("http-serving-websocket");
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
-            http: HttpConfig::default(),
-            http_server: server_config,
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             rpc_addr: None,
@@ -686,7 +687,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -901,10 +901,7 @@ mod tests {
         let sandbox = init_save_sandbox("http-route-drop");
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
-            http: HttpConfig::default(),
-            http_server: server_config,
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             rpc_addr: None,
@@ -912,7 +909,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![
                 AutoloadComponent {
                     wasm: wasm.clone(),

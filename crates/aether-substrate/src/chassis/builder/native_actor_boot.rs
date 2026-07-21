@@ -14,6 +14,7 @@ use crate::actor::native::local;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::ctx::{ChassisCtx, MailboxSender, MailboxWakeSlot};
 use crate::chassis::error::BootError;
+use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
@@ -31,12 +32,19 @@ struct ClaimResources {
 /// via `mem::replace(&mut self.state, Transitioning)` plus a final
 /// state assignment, so each transition is atomic w.r.t. partial
 /// moves.
+///
+/// ADR-0156 §5: the cap config + params no longer ride the state — the
+/// config is resolved off the builder's source stack in the `resolve`
+/// pass (ahead of Claim) and, with the params, held in [`NativeActorBoot`]'s
+/// own `Option` fields until `init` consumes them. Decoupling them from
+/// the phase state is what lets the claim-only `--describe` path (which
+/// never resolves a config value) run the Claim pass on this boot
+/// unchanged: `claim` touches neither.
 enum BootState<A: NativeActor> {
-    /// Pre-claim — only the cap config + ADR-0156 params are held.
-    Pending { config: A::Config, params: A::Params },
-    /// Post-claim, pre-init — mailbox + transport + slots claimed,
-    /// config + params still pending consumption by `init`.
-    Claimed { resources: ClaimResources, config: A::Config, params: A::Params },
+    /// Pre-claim.
+    Pending,
+    /// Post-claim, pre-init — mailbox + transport + slots claimed.
+    Claimed { resources: ClaimResources },
     /// Post-init, pre-wire — actor instance constructed.
     Initialized { resources: ClaimResources, actor: Box<A::State> },
     /// Post-wire, pre-spawn — wire ran. The dispatcher is next.
@@ -64,18 +72,38 @@ enum BootState<A: NativeActor> {
 /// `LifecycleAdvance` chain root (not a per-mailbox pending counter) is
 /// the frame-integration gate now.
 pub(super) struct NativeActorBoot<A: NativeActor> {
+    /// The resolved cap config, filled by the ADR-0156 §5 `resolve` pass off
+    /// the builder's source stack and consumed by `init`. `None` until
+    /// `resolve` runs — the claim-only `--describe` path never resolves it, so
+    /// this stays `None` and the Claim pass runs regardless.
+    config: Option<A::Config>,
+    /// The ADR-0156 composer-supplied construction input, staged at compose and
+    /// consumed by `init`.
+    params: Option<A::Params>,
     state: BootState<A>,
 }
 
 impl<A: NativeActor> NativeActorBoot<A> {
-    pub(super) fn new(config: A::Config, params: A::Params) -> Self {
-        Self { state: BootState::Pending { config, params } }
+    pub(super) fn new(params: A::Params) -> Self {
+        Self { config: None, params: Some(params), state: BootState::Pending }
     }
 }
 
-impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
+impl<A: NativeActor> PassiveBoot for NativeActorBoot<A>
+where
+    A::Config: ConfigMember,
+{
+    fn resolve(&mut self, sources: &mut ConfigSources) -> Result<(), ConfigError> {
+        // ADR-0156 §5: resolve this cap's `Config` off the builder's source
+        // stack (programmatic > argv > env > file > default) ahead of Claim.
+        // Section identity comes from `A::Config`'s `ConfigMember` declaration,
+        // so no chassis-side section string is threaded here.
+        self.config = Some(<A::Config as ConfigMember>::resolve(sources)?);
+        Ok(())
+    }
+
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
-        let BootState::Pending { config, params } = mem::replace(&mut self.state, BootState::Transitioning) else {
+        let BootState::Pending = mem::replace(&mut self.state, BootState::Transitioning) else {
             panic!("PassiveBoot::claim called in non-Pending state");
         };
 
@@ -139,17 +167,18 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
 
         self.state = BootState::Claimed {
             resources: ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots },
-            config,
-            params,
         };
         Ok(())
     }
 
     fn init(&mut self, ctx: &mut ChassisCtx<'_>, handles: &mut ExportedHandles) -> Result<(), BootError> {
-        let BootState::Claimed { resources, config, params } = mem::replace(&mut self.state, BootState::Transitioning)
-        else {
+        let BootState::Claimed { resources } = mem::replace(&mut self.state, BootState::Transitioning) else {
             panic!("PassiveBoot::init called in non-Claimed state");
         };
+        // ADR-0156 §5: the config was resolved in the `resolve` pass; params
+        // were staged at compose. Both are consumed here.
+        let config = self.config.take().expect("PassiveBoot::init requires the resolve pass to have run first");
+        let params = self.params.take().expect("PassiveBoot::init called twice — params already consumed");
 
         // ADR-0081: wrap `init` in `local::with_stamped` so any
         // `tracing::*` event the cap fires lands in its per-actor
@@ -284,7 +313,7 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         match self.state {
             // Pre-claim or mid-method failure that already cleaned up
             // inline — no chassis-side state to release.
-            BootState::Pending { .. } | BootState::Transitioning => {}
+            BootState::Pending | BootState::Transitioning => {}
             // Any past-claim variant: release the mailbox + namespace
             // claims. `resources` (and any held actor) drop at the end
             // of this match arm — dropping `transport` closes the

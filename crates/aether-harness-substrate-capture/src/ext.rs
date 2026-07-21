@@ -37,9 +37,10 @@ impl RenderExt for GpuRenderExt {
         wiring: &BenchWiring,
         builder: Builder<SubstrateHarnessChassis>,
     ) -> Builder<SubstrateHarnessChassis> {
-        builder.with_actor::<RenderCapability>(
-            RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES },
+        // ADR-0156 §5: compose + stage the render tuning in one paired call.
+        builder.with_actor_configured::<RenderCapability>(
             RenderParams { observed_kinds: wiring.observed_kinds.clone(), assets_dir: wiring.assets_dir.clone() },
+            RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES },
         )
     }
 

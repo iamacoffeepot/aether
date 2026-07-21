@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::any::TypeId;
+use std::collections::{BTreeSet, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,9 @@ use crate::actor::native::NativeActor;
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
-use crate::config::{ConfigManifest, ConfigMember, ConfigMemberRecord, RingCapacities, SchedulerTuning};
+use crate::config::{
+    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, RingCapacities, SchedulerTuning,
+};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -119,6 +122,20 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// members (workers / ring capacities / scheduler tuning / teardown cap);
     /// [`Self::config_manifest`] reads it plus the driver's members.
     config_members: Vec<ConfigMemberRecord>,
+    /// ADR-0156 §5: the builder's config source stack (programmatic > argv >
+    /// env > file > default). The chassis hands over the file + per-member argv
+    /// overlays via [`Self::with_config_sources`]; tests / `SubstrateHarness`
+    /// stage explicit programmatic values via [`Self::with_actor_configured`].
+    /// The Pass 0 resolve loop in `boot_passives` resolves each composed cap's
+    /// `Config` off it ahead of `init`.
+    config_sources: ConfigSources,
+    /// ADR-0156 §5: the `TypeId`s of every composed member's `Config` — each
+    /// [`Self::with_actor`]'s `A::Config` (including `()` and the
+    /// `RpcServerConfig` bridge, whose `members()` is empty) and each
+    /// [`Self::with_config_member`]. Folded with the driver's members at build /
+    /// claim to reject a staged override that matches no composed member (a
+    /// staged-but-never-composed override is a hard boot error).
+    composed_config_types: HashSet<TypeId>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -141,6 +158,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
             scheduler_tuning: SchedulerTuning::default(),
             teardown_cap: DEFAULT_TEARDOWN_CAP,
             config_members: Vec::new(),
+            config_sources: ConfigSources::default(),
+            composed_config_types: HashSet::new(),
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -175,6 +194,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
             scheduler_tuning: self.scheduler_tuning,
             teardown_cap: self.teardown_cap,
             config_members: self.config_members,
+            config_sources: self.config_sources,
+            composed_config_types: self.composed_config_types,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -197,7 +218,10 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // red under a saturated local `--workspace` run). A small default
         // keeps the manual-drive path light; the perf benches that want a
         // real pool already pass `.with_workers(_)` explicitly, which wins.
+        // ADR-0156 §5: reject a staged-but-never-composed override before boot.
+        self.validate_config_overrides()?;
         let workers = self.workers.or(Some(PASSIVE_DEFAULT_WORKERS));
+        let mut config_sources = self.config_sources;
         // ADR-0155 §4: the no-driver path still runs the Claim stage over
         // `C::Driver`'s value-free hook — for a passive chassis that is
         // `NeverDriver`, whose default hook reserves nothing.
@@ -209,6 +233,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             self.ring_caps,
             self.scheduler_tuning,
             self.teardown_cap,
+            &mut config_sources,
             self.passives,
             <C::Driver as DriverCapability>::claim,
         )?;
@@ -247,13 +272,56 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// live handle, a resolved `MailboxId`) has no derive-emitted
     /// `ConfigMember` and stops compiling at this call site.
     #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
+    pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
         A: NativeActor,
         A::Config: ConfigMember,
     {
         self.config_members.extend(<A::Config as ConfigMember>::members());
-        self.passives.push(Box::new(NativeActorBoot::<A>::new(config, params)));
+        // ADR-0156 §5: record the composed `Config` type so a `with_config`
+        // override targeting it validates. `()` and `RpcServerConfig` declare no
+        // aggregate member (empty `members()`) but are still valid override
+        // targets, so key off the type, not the member records.
+        self.composed_config_types.insert(TypeId::of::<A::Config>());
+        self.passives.push(Box::new(NativeActorBoot::<A>::new(params)));
+        self
+    }
+
+    /// ADR-0156 §5: the paired form — compose actor `A` and stage its explicit
+    /// `config` in one compiler-checked call. This is **the** way to supply a
+    /// composed actor's config value: the `A::Config` type binds `config` to the
+    /// actor at the call (a mismatched value is a type error), and because
+    /// staging an override always composes its actor, an orphaned override is
+    /// unconstructable through the public builder API. The config rides the
+    /// source stack's programmatic layer (top of programmatic > argv > env >
+    /// file > default), so a paired value never reads argv/env/file.
+    ///
+    /// (The owner's adjacency census found every override site sits immediately
+    /// beside its `with_actor`, so the detached `with_config` seam had no users
+    /// and was cut; the bulk `with_config_sources` handoff — file + argv layers,
+    /// used by the chassis mains — is the remaining source-staging seam.)
+    #[must_use]
+    pub fn with_actor_configured<A>(mut self, params: A::Params, config: A::Config) -> Self
+    where
+        A: NativeActor,
+        A::Config: ConfigMember + 'static,
+    {
+        self.config_sources.set_override::<A::Config>(config);
+        self.with_actor::<A>(params)
+    }
+
+    /// ADR-0156 §5: hand the builder the config source stack the chassis
+    /// assembled adjacent to composition — the loaded config file plus each
+    /// composed member's argv overlay (`Overlay::into_layer`). The Pass 0
+    /// resolve loop resolves every composed cap's `Config` off it ahead of
+    /// `init`, so the per-cap `resolve_with_file::<C>(argv, file, "section")`
+    /// lines and chassis-side section strings disappear — section identity
+    /// comes from each member's [`ConfigMember`] declaration. Replaces the
+    /// whole stack; the per-value programmatic overrides staged by
+    /// [`Self::with_actor_configured`] stack on top of whatever this installs.
+    #[must_use]
+    pub fn with_config_sources(mut self, sources: ConfigSources) -> Self {
+        self.config_sources = sources;
         self
     }
 
@@ -268,9 +336,33 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// smallest seam that folds their section + `META` into the same walk.
     /// Purely type-level (`M::members()`), so no value is required.
     #[must_use]
-    pub fn with_config_member<M: ConfigMember>(mut self) -> Self {
+    pub fn with_config_member<M: ConfigMember + 'static>(mut self) -> Self {
         self.config_members.extend(M::members());
+        // ADR-0156 §5: a declared non-cap member is a valid `with_config`
+        // override target (the chassis may override its resolved value).
+        self.composed_config_types.insert(TypeId::of::<M>());
         self
+    }
+
+    /// ADR-0156 §5: the acceptable-override-target set — the `TypeId`s of every
+    /// composed member's `Config` (the `with_actor` / `with_config_member`
+    /// accumulator) plus the driver type's declared members. A staged
+    /// `with_config` override outside this set is an orphan.
+    fn acceptable_override_targets(&self) -> HashSet<TypeId> {
+        let mut targets = self.composed_config_types.clone();
+        targets.extend(<C::Driver as DriverCapability>::config_members().iter().map(|record| record.type_id));
+        targets
+    }
+
+    /// ADR-0156 §5: reject a staged-but-never-composed `with_config` override.
+    /// Run at build / claim before resolution — a `with_config::<T>` whose `T`
+    /// matches no composed member is a hard boot error naming `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when an override matches no composed member.
+    fn validate_config_overrides(&self) -> Result<(), BootError> {
+        self.config_sources.validate_overrides(&self.acceptable_override_targets()).map_err(BootError::from)
     }
 
     /// Issue 745: override the worker pool size. `None` keeps
@@ -346,6 +438,9 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// hand-maintained capability list can drift from it. The describe
     /// rewire that consumes this lands in a later slice.
     pub fn claim_namespaces(self) -> Result<BTreeSet<String>, BootError> {
+        // ADR-0156 §5: the same override coherence check the build path runs —
+        // a staged-but-never-composed override is a fault at claim time too.
+        self.validate_config_overrides()?;
         claim_only(&self.registry, &self.mailer, &self.aborter, self.ring_caps, self.passives, |ctx| {
             <C::Driver as DriverCapability>::claim(ctx)
         })
@@ -371,6 +466,19 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         members.extend(<C::Driver as DriverCapability>::config_members());
         ConfigManifest::from_members(members)
     }
+
+    /// ADR-0156 §5: the resolved-provenance rollup — for every composed member,
+    /// the highest-precedence source layer present in the builder's stack
+    /// (programmatic / argv / file / env / default). The sibling of
+    /// [`Self::config_manifest`]'s declaration walk that answers "which layer
+    /// won" per member, reading the same source stack the Pass 0 resolve loop
+    /// resolves cap configs against. Borrows `&self` in [`NoDriver`] state the
+    /// same way `config_manifest` does, so `--print-config` can report
+    /// provenance without a driver value.
+    #[must_use]
+    pub fn config_provenance(&self) -> Vec<(&'static str, ConfigProvenance)> {
+        self.config_manifest().provenance(&self.config_sources)
+    }
 }
 
 impl<C: Chassis> Builder<C, HasDriver> {
@@ -385,6 +493,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// installed — fail-fast per ADR-0063: the typestate guarantees
     /// `with_driver` has run, so a missing driver is a builder API bug.
     pub fn build(self) -> Result<BuiltChassis<C>, BootError> {
+        // ADR-0156 §5: reject a staged-but-never-composed override before boot.
+        self.validate_config_overrides()?;
         let Self {
             registry,
             mailer,
@@ -395,6 +505,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             ring_caps,
             scheduler_tuning,
             teardown_cap,
+            config_sources: mut sources,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
@@ -411,6 +522,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             ring_caps,
             scheduler_tuning,
             teardown_cap,
+            &mut sources,
             passives,
             <C::Driver as DriverCapability>::claim,
         )?;

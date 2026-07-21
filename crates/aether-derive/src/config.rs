@@ -560,10 +560,12 @@ fn emit_trait_impl(domain_ident: &Ident, layer_ident: &Ident, fields: &[FieldInf
     }
 }
 
-/// ADR-0156 §4: emit the `ConfigMember` impl carrying this config's TOML
-/// section name and its confique layer `Meta`. `Builder::config_manifest`
-/// walks these off the composed `with_actor` chain to derive the chassis
-/// config aggregate (known-keys sweep + `--print-config`).
+/// ADR-0156 §4/§5: emit the `ConfigMember` impl carrying this config's TOML
+/// section name, its confique layer `Meta`, and its `TypeId`, plus the §5
+/// `resolve` body that resolves off the builder's source stack at its own
+/// section. `Builder::config_manifest` walks the declarations off the composed
+/// `with_actor` chain (known-keys sweep + `--print-config` + provenance) and
+/// the composition boundary calls `resolve` once per member ahead of `init`.
 fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str) -> TokenStream2 {
     quote! {
         impl ::aether_substrate::config::ConfigMember for #domain_ident {
@@ -571,7 +573,14 @@ fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str) ->
                 ::std::vec![::aether_substrate::config::ConfigMemberRecord {
                     section: #section,
                     meta: &<#layer_ident as ::confique::Config>::META,
+                    type_id: ::core::any::TypeId::of::<Self>(),
                 }]
+            }
+
+            fn resolve(
+                sources: &mut ::aether_substrate::config::ConfigSources,
+            ) -> ::core::result::Result<Self, ::aether_substrate::config::ConfigError> {
+                sources.resolve_layered::<Self>(#section)
             }
         }
     }

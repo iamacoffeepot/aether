@@ -33,7 +33,7 @@ use std::fs;
 const KEY_CODE: u32 = 65;
 
 fn boot_bench() -> SubstrateHarness {
-    SubstrateHarness::builder().with_component_host().with_actor::<InputCapability>((), ()).build().expect("boot")
+    SubstrateHarness::builder().with_component_host().with_actor::<InputCapability>(()).build().expect("boot")
 }
 
 fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {

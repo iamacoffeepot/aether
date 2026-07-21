@@ -8,7 +8,7 @@ use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
-use crate::config::{RingCapacities, SchedulerTuning};
+use crate::config::{ConfigSources, RingCapacities, SchedulerTuning};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
@@ -134,7 +134,11 @@ pub(super) fn boot_passives(
     ring_caps: RingCapacities,
     scheduler_tuning: SchedulerTuning,
     teardown_cap: Duration,
-    passives: Vec<Box<dyn PassiveBoot>>,
+    // ADR-0156 §5: the builder's config source stack (programmatic > argv >
+    // env > file > default). The Pass 0 resolve loop resolves each passive's
+    // cap `Config` off this ahead of Claim.
+    sources: &mut ConfigSources,
+    mut passives: Vec<Box<dyn PassiveBoot>>,
     // ADR-0155 §4: the driver type's value-free Claim hook, run in Pass 1
     // alongside the passives' claims (before any Init). `Builder::build`
     // passes `<C::Driver>::claim`; the no-driver `build_passive` passes the
@@ -293,6 +297,16 @@ pub(super) fn boot_passives(
             );
             boot.cleanup_after_failure(&mut ctx);
         }
+    }
+
+    // Pass 0 (ADR-0156 §5) — resolve every passive's cap `Config` off the
+    // builder's source stack, in composition order, before any mailbox is
+    // claimed. A resolution fault (a garbage known env/argv value or a
+    // malformed file section, ADR-0090 §4) aborts boot here with the same
+    // `ConfigError` surface the chassis env resolvers used to raise — no
+    // rollback needed, nothing has been claimed yet.
+    for boot in &mut passives {
+        boot.resolve(sources)?;
     }
 
     let mut booted: Vec<Box<dyn PassiveBoot>> = Vec::with_capacity(passives.len());

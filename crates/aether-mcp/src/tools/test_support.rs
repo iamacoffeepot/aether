@@ -217,10 +217,9 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<EngineServer>(EngineConfig::default(), ())
-        .with_actor::<RpcServerCapability>(
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor_configured::<EngineServer>((), EngineConfig::default())
+        .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
@@ -230,6 +229,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -277,14 +277,13 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<EngineServer>(EngineConfig::default(), ())
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor_configured::<EngineServer>((), EngineConfig::default())
         // The inventory cap pulls `Arc::clone(ctx.mailer().registry())`
         // in `init`, so it sees the same `Registry` we just wrote
         // the extra kinds into.
-        .with_actor::<InventoryCapability>((), ())
-        .with_actor::<RpcServerCapability>(
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+        .with_actor::<InventoryCapability>(())
+        .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
@@ -294,6 +293,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -322,10 +322,9 @@ pub(super) fn boot_hub_with_route_loopback(
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<RouteInventorySink>((), RouteLoopbackParams { reply, calls })
-        .with_actor::<RpcServerCapability>(
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<RouteInventorySink>(RouteLoopbackParams { reply, calls })
+        .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
@@ -335,6 +334,7 @@ pub(super) fn boot_hub_with_route_loopback(
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -356,10 +356,9 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<TerrainRouteSink>((), TerrainRouteLoopbackParams { inventory, calls, replies })
-        .with_actor::<RpcServerCapability>(
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<TerrainRouteSink>(TerrainRouteLoopbackParams { inventory, calls, replies })
+        .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
@@ -369,6 +368,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
         )
         .build_passive()?;
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;

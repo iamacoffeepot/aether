@@ -106,10 +106,12 @@ pub fn boot_test_chassis_with<A>(
 ) -> PassiveChassis<TestChassis>
 where
     A: NativeActor,
-    A::Config: ConfigMember,
+    A::Config: ConfigMember + 'static,
 {
+    // ADR-0156 §5: compose the cap and stage its explicit `config` in one
+    // paired call — the params and the config value bound to `A` together.
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
-        .with_actor::<A>(config, params)
+        .with_actor_configured::<A>(params, config)
         .build_passive()
         .expect("test chassis boots")
 }

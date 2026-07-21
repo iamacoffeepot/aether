@@ -36,10 +36,25 @@ use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_c
 use aether_http::{HttpConfig, HttpServerConfig};
 use aether_lifecycle::LifecycleConfig;
 use aether_substrate::Chassis as _;
+use aether_substrate::config::ConfigSources;
 
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// ADR-0156 §5: the cap configs a hub-less headless autoload boot needs,
+    /// staged as programmatic overrides on the builder's source stack — the
+    /// in-code equivalent of the argv/env/file layers `HeadlessEnv::from_env`
+    /// assembles. The builder resolves each composed cap's `Config` off this.
+    fn default_sources() -> ConfigSources {
+        let mut sources = ConfigSources::new(None);
+        sources.set_override(HttpConfig::default());
+        sources.set_override(HttpServerConfig::default());
+        sources.set_override(AnthropicConfig::default());
+        sources.set_override(GeminiConfig::default());
+        sources.set_override(LifecycleConfig { advance_timeout_millis: 1_000 });
+        sources
+    }
 
     #[test]
     fn autoloaded_component_comes_up_with_no_hub() {
@@ -76,10 +91,7 @@ mod tests {
         // persistence off so the boot touches no shared on-disk state.
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
-            http: HttpConfig::default(),
-            http_server: HttpServerConfig::default(),
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: default_sources(),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
             rpc_addr: None,
@@ -87,7 +99,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
         };
 
@@ -147,10 +158,7 @@ mod tests {
 
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
-            http: HttpConfig::default(),
-            http_server: HttpServerConfig::default(),
-            anthropic: AnthropicConfig::default(),
-            gemini: GeminiConfig::default(),
+            sources: default_sources(),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
             rpc_addr: None,
@@ -158,7 +166,6 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload,
         };
 
