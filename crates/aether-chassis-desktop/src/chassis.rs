@@ -435,12 +435,12 @@ impl DesktopChassis {
         // in-flight frame before shutting down (see the driver's
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
-            .with_actor::<AudioCapability>(audio)
-            .with_actor::<ClipboardCapability>(ClipboardConfig::System)
-            .with_actor::<RenderCapability>(render_config)
-            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis));
-        with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(http_server)
+            .with_actor::<AudioCapability>(audio, ())
+            .with_actor::<ClipboardCapability>(ClipboardConfig::System, ())
+            .with_actor::<RenderCapability>(render_config, ())
+            .with_actor::<UnsupportedSubstrateHarnessCapability>((), ())
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis), ());
+        with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(http_server, ())
     }
 
     /// Build the desktop chassis: construct the Start-stage runtime handles

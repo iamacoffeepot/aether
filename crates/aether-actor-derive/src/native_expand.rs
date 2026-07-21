@@ -61,6 +61,11 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut config_type: Option<syn::ImplItemType> = None;
+    // ADR-0156 §1/§2 (issue 3845): optional `type Params = …`. Unlike
+    // `Config` (required on native), `Params` is synthesized to `()` when the
+    // author omits it — the `Persist` stand-in shape — so every existing cap
+    // keeps a zero-line diff. A `_params: ()` param is injected into `init`.
+    let mut params_type: Option<syn::ImplItemType> = None;
     let mut handlers: Vec<NativeActorHandlerFn> = Vec::new();
     // ADR-0093 §3: `#[handler(task)]` completion handlers, collected
     // separately from mail handlers — they get no `HandlesKind<K>` impl
@@ -87,6 +92,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             ImplItem::Type(it) if it.ident == "Config" => {
                 config_type = Some(it);
             }
+            ImplItem::Type(it) if it.ident == "Params" => {
+                params_type = Some(it);
+            }
             ImplItem::Type(it) if it.ident == "State" => {
                 // Pre-scanned into `declared_state_ty` above; accepted here so
                 // it isn't rejected as a stray associated type.
@@ -95,8 +103,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             ImplItem::Type(it) => {
                 return Err(syn::Error::new_spanned(
                     it,
-                    "#[actor] impl NativeActor for X accepts only `type Config = …` \
-                     and `type State = …` — other associated types aren't part of the trait",
+                    "#[actor] impl NativeActor for X accepts only `type Config = …`, \
+                     `type Params = …`, and `type State = …` — other associated types \
+                     aren't part of the trait",
                 ));
             }
             ImplItem::Const(c) => {
@@ -173,11 +182,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         }
     }
 
-    let init_method = init_method.ok_or_else(|| {
+    let mut init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
             "#[actor] impl NativeActor requires \
-             `fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError>`",
+             `fn init(config: Self::Config, params: Self::Params, ctx: &mut NativeInitCtx<'_>) \
+             -> Result<Self, BootError>`",
         )
     })?;
 
@@ -188,6 +198,28 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
              use `()` for caps without configuration",
         )
     })?;
+
+    // ADR-0156 §2 (issue 3845): the factory becomes `init(config, params,
+    // ctx)`. `Config` is required (declared above), so the user always spells
+    // `config` — index 0. When the author omits `type Params`, synthesize
+    // `type Params = ();` and inject a `_params: ()` at index 1, so an
+    // existing cap's `fn init(config, ctx)` body still satisfies the new
+    // trait shape with a zero-line author diff.
+    let synthesized_params_type = if params_type.is_some() {
+        None
+    } else {
+        let synth: syn::ImplItemType = syn::parse_quote!(
+            type Params = ();
+        );
+        let params_param: syn::FnArg = syn::parse_quote!(_params: ());
+        init_method.sig.inputs.insert(1, params_param);
+        Some(synth)
+    };
+    let params_type_tokens = match (params_type.as_ref(), synthesized_params_type.as_ref()) {
+        (Some(user), _) => quote! { #user },
+        (None, Some(synth)) => quote! { #synth },
+        (None, None) => unreachable!("synthesized_params_type is Some when user omitted"),
+    };
 
     // Issue 576 + issue 603: native actors come in three flavours —
     // strict typed receiver (only `#[handler]`s), catch-all cap (only
@@ -636,6 +668,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         #runtime_gate
         impl #impl_generics ::aether_actor::Lifecycle<#state_ty> for #self_ty #where_clause {
             #config_type
+            #params_type_tokens
             type InitError = ::aether_substrate::BootError;
             type InitCtx<'__a> = ::aether_substrate::NativeInitCtx<'__a>;
             type Ctx<'__a> = ::aether_substrate::NativeCtx<'__a>;

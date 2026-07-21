@@ -342,6 +342,7 @@ impl NativeActor for EngineServer {
                         heartbeat: state.heartbeat,
                         connect_budget: state.connect_budget,
                     },
+                    (),
                 )
                 .finish();
 

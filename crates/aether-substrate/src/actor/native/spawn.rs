@@ -320,6 +320,7 @@ impl Spawner {
         self: Arc<Self>,
         subname: Subname<'_>,
         config: A::Config,
+        params: A::Params,
         after_init_mail: Vec<Envelope>,
         sender_for_init: Source,
         parent: Option<(u64, MailboxId)>,
@@ -415,7 +416,7 @@ impl Spawner {
             // per-actor `ActorLogRing`. The pre-ADR
             // `with_actor_dispatch` + `drain_buffer` flush hop
             // retired alongside `LogBatch`.
-            let init_result = local::with_stamped(&slots, || A::init(config, &mut init_ctx));
+            let init_result = local::with_stamped(&slots, || A::init(config, params, &mut init_ctx));
             match init_result {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
@@ -622,6 +623,9 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     spawner: Arc<Spawner>,
     subname: Subname<'ctx>,
     config: Option<A::Config>,
+    /// ADR-0156 §2 composer-supplied params, threaded to `A::init` beside
+    /// `config`. Taken with `config` when `finish` runs.
+    params: Option<A::Params>,
     sender: Source,
     /// ADR-0099 §3: the spawning actor's lineage `(carry, id)`, or
     /// `None` for a top-level chassis-level spawn. `Some` nests the
@@ -647,6 +651,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         spawner: Arc<Spawner>,
         subname: Subname<'ctx>,
         config: A::Config,
+        params: A::Params,
         sender: Source,
         parent: Option<(u64, MailboxId)>,
     ) -> Self {
@@ -654,6 +659,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
             spawner,
             subname,
             config: Some(config),
+            params: Some(params),
             sender,
             parent,
             after_init: Vec::new(),
@@ -718,9 +724,10 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// enforced by the move into `finish`, and a double-finish would
     /// require an unsafe API misuse.
     pub fn finish(self) -> Result<MailboxId, SpawnError> {
-        let SpawnBuilder { spawner, subname, config, sender, parent, after_init, .. } = self;
+        let SpawnBuilder { spawner, subname, config, params, sender, parent, after_init, .. } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
-        Spawner::spawn_actor::<A>(spawner, subname, config, after_init, sender, parent)
+        let params = params.expect("SpawnBuilder::finish consumed exactly once");
+        Spawner::spawn_actor::<A>(spawner, subname, config, params, after_init, sender, parent)
     }
 }
 

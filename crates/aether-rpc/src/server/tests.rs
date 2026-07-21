@@ -26,11 +26,10 @@ fn test_peer_kind() -> PeerKind {
 fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>, TcpStream) {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: Some("127.0.0.1:0".into()),
-            peer_kind: test_peer_kind(),
-            route_target: None,
-        })
+        .with_actor::<RpcServerCapability>(
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()), peer_kind: test_peer_kind(), route_target: None },
+            (),
+        )
         .build_passive()
         .expect("rpc server boots");
     let stream = connect_to_rpc_server(&chassis, timeout);
@@ -46,13 +45,12 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<DeferredEchoActor>(())
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: Some("127.0.0.1:0".into()),
-            peer_kind: test_peer_kind(),
-            route_target: None,
-        })
+        .with_actor::<TraceDispatchCapability>((), ())
+        .with_actor::<DeferredEchoActor>((), ())
+        .with_actor::<RpcServerCapability>(
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()), peer_kind: test_peer_kind(), route_target: None },
+            (),
+        )
         .build_passive()
         .expect("caps boot");
     let mut stream = connect_to_rpc_server(&chassis, timeout);
@@ -65,13 +63,12 @@ fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
 
     let (registry, mailer) = fresh_substrate();
     Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<TestEchoActor>(())
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: Some("127.0.0.1:0".into()),
-            peer_kind: test_peer_kind(),
-            route_target: None,
-        })
+        .with_actor::<TraceDispatchCapability>((), ())
+        .with_actor::<TestEchoActor>((), ())
+        .with_actor::<RpcServerCapability>(
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()), peer_kind: test_peer_kind(), route_target: None },
+            (),
+        )
         .build_passive()
         .expect("caps boot")
 }
@@ -149,11 +146,10 @@ fn disabled_rpc_server_claims_mailbox_and_binds_nothing() {
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: None,
-            peer_kind: test_peer_kind(),
-            route_target: None,
-        })
+        .with_actor::<RpcServerCapability>(
+            RpcServerConfig { bind_addr: None, peer_kind: test_peer_kind(), route_target: None },
+            (),
+        )
         .build_passive()
         .expect("disabled rpc server boots");
 
@@ -260,13 +256,12 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<HeadlessWindowCapability>(())
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: Some("127.0.0.1:0".into()),
-            peer_kind: test_peer_kind(),
-            route_target: None,
-        })
+        .with_actor::<TraceDispatchCapability>((), ())
+        .with_actor::<HeadlessWindowCapability>((), ())
+        .with_actor::<RpcServerCapability>(
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()), peer_kind: test_peer_kind(), route_target: None },
+            (),
+        )
         .build_passive()
         .expect("caps boot");
 
@@ -503,12 +498,11 @@ fn call_without_cid_is_fire_and_forget() {
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TestEchoActor>(())
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: Some("127.0.0.1:0".into()),
-            peer_kind: test_peer_kind(),
-            route_target: None,
-        })
+        .with_actor::<TestEchoActor>((), ())
+        .with_actor::<RpcServerCapability>(
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()), peer_kind: test_peer_kind(), route_target: None },
+            (),
+        )
         .build_passive()
         .expect("caps boot");
 

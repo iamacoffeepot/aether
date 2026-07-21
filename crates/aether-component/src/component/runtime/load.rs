@@ -226,7 +226,8 @@ impl ComponentHostCapabilityState {
             // sibling's own handler set (looked up by actor-type tag).
             actor_caps: actors,
         };
-        let mailbox_id = match ctx.spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config).finish() {
+        let mailbox_id = match ctx.spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config, ()).finish()
+        {
             Ok(id) => id,
             Err(e) => {
                 // ADR-0147: if this load freshly spawned the module's boot
@@ -352,7 +353,7 @@ impl ComponentHostCapabilityState {
             actor_caps: actors.to_vec(),
         };
         let boot_mailbox = ctx
-            .spawn_child::<WasmTrampoline>(Subname::Named(boot_namespace), boot_config)
+            .spawn_child::<WasmTrampoline>(Subname::Named(boot_namespace), boot_config, ())
             .finish()
             .map_err(|e| format!("boot trampoline spawn failed: {e:?}"))?;
         self.mailer.capability_registry().register(boot_mailbox, &boot_caps);

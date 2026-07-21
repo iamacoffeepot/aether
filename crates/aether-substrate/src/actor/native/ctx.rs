@@ -715,6 +715,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         &'b self,
         subname: super::spawn::Subname<'b>,
         config: A::Config,
+        params: A::Params,
     ) -> super::spawn::SpawnBuilder<'b, A>
     where
         A: aether_actor::Instanced + NativeActor,
@@ -732,6 +733,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
             Arc::clone(spawner),
             subname,
             config,
+            params,
             sender,
             Some((self.binding.carry(), self.binding.self_mailbox())),
         )
@@ -1234,10 +1236,11 @@ mod tests {
 
     impl aether_actor::Lifecycle<Self> for StubActor {
         type Config = ();
+        type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { boots: AtomicU32::new(0) })
         }
     }

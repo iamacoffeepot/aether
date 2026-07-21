@@ -16,8 +16,10 @@ const CLIPBOARD_MAILBOX: &str = "aether.clipboard";
 
 #[test]
 fn clipboard_set_then_get_round_trips_in_memory() {
-    let mut harness =
-        SubstrateHarness::builder().with_actor::<ClipboardCapability>(ClipboardConfig::InMemory).build().expect("boot");
+    let mut harness = SubstrateHarness::builder()
+        .with_actor::<ClipboardCapability>(ClipboardConfig::InMemory, ())
+        .build()
+        .expect("boot");
 
     let result = harness
         .execute(vec![
@@ -43,7 +45,8 @@ fn clipboard_set_then_get_round_trips_in_memory() {
 fn unavailable_clipboard_err_replies_to_get_and_set() {
     // Issue #3765: the unavailable-mode round trip needs only the
     // fail-fast clipboard on the harness basics.
-    let mut harness = SubstrateHarness::builder().with_actor::<HeadlessClipboardCapability>(()).build().expect("boot");
+    let mut harness =
+        SubstrateHarness::builder().with_actor::<HeadlessClipboardCapability>((), ()).build().expect("boot");
 
     let result = harness
         .execute(vec![

@@ -8,7 +8,7 @@
 //! #3764): the render cap via `RenderHarnessBuilderExt::with_render` (the
 //! text cap composes render's texture / quad surface by mail and the
 //! assertions read captured frames), the text cap via
-//! `.with_actor::<TextCapability>(())`, and the `aether.fs` cap via
+//! `.with_actor::<TextCapability>((), ())`, and the `aether.fs` cap via
 //! `.namespace_roots(...)` so `aether.text.load_font` can read the TTF
 //! through the `assets` namespace.
 //!
@@ -139,7 +139,7 @@ fn text_draws_a_screen_space_string() {
     let (frame_width, frame_height) = (128u32, 64u32);
     let mut harness = SubstrateHarness::builder()
         .with_render()
-        .with_actor::<TextCapability>(())
+        .with_actor::<TextCapability>((), ())
         .size(frame_width, frame_height)
         .namespace_roots(font_namespace_roots())
         .build()
@@ -233,7 +233,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
 
     let mut harness = SubstrateHarness::builder()
         .with_render()
-        .with_actor::<TextCapability>(())
+        .with_actor::<TextCapability>((), ())
         .size(128, 64)
         .namespace_roots(font_namespace_roots())
         .build()
@@ -328,7 +328,7 @@ fn font_metrics_grab_measures_like_the_draw_path() {
 
     let mut harness = SubstrateHarness::builder()
         .with_render()
-        .with_actor::<TextCapability>(())
+        .with_actor::<TextCapability>((), ())
         .size(64, 32)
         .namespace_roots(font_namespace_roots())
         .build()
@@ -392,7 +392,7 @@ fn text_screen_origin_shifts_centroid() {
     let (frame_width, frame_height) = (256u32, 128u32);
     let mut harness = SubstrateHarness::builder()
         .with_render()
-        .with_actor::<TextCapability>(())
+        .with_actor::<TextCapability>((), ())
         .size(frame_width, frame_height)
         .namespace_roots(font_namespace_roots())
         .build()
@@ -495,7 +495,7 @@ fn text_draws_world_space_label() {
     let (frame_width, frame_height) = (128u32, 96u32);
     let mut harness = SubstrateHarness::builder()
         .with_render()
-        .with_actor::<TextCapability>(())
+        .with_actor::<TextCapability>((), ())
         .size(frame_width, frame_height)
         .namespace_roots(font_namespace_roots())
         .build()

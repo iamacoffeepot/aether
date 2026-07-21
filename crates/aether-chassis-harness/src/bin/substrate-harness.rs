@@ -70,13 +70,15 @@ fn main() -> anyhow::Result<()> {
         render_ext: Some(Box::new(GpuRenderExt)),
         component_host: true,
         compose: vec![
-            Box::new(|b| b.with_actor::<aether_input::InputCapability>(aether_input::InputConfig::default())),
-            Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>(())),
-            Box::new(|b| b.with_actor::<aether_text::TextCapability>(())),
+            Box::new(|b| b.with_actor::<aether_input::InputCapability>(aether_input::InputConfig::default(), ())),
+            Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>((), ())),
+            Box::new(|b| b.with_actor::<aether_text::TextCapability>((), ())),
             Box::new(|b| {
-                b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardConfig::InMemory)
+                b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardConfig::InMemory, ())
             }),
-            Box::new(|b| b.with_actor::<aether_game::GameGatewayCapability>(aether_game::GameGatewayConfig::default())),
+            Box::new(|b| {
+                b.with_actor::<aether_game::GameGatewayCapability>(aether_game::GameGatewayConfig::default(), ())
+            }),
         ],
         // Issue #2509: the standalone binary is an env-reading edge, so
         // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including

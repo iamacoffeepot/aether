@@ -59,10 +59,11 @@ impl aether_actor::Addressable for RingRelay {
 impl aether_actor::HandlesKind<Ping> for RingRelay {}
 impl aether_actor::Lifecycle<Self> for RingRelay {
     type Config = MailboxId;
+    type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a>;
-    fn init(next: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(next: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { next })
     }
 }
@@ -117,10 +118,11 @@ impl aether_actor::Addressable for HoldRelay {
 impl aether_actor::HandlesKind<Ping> for HoldRelay {}
 impl aether_actor::Lifecycle<Self> for HoldRelay {
     type Config = ();
+    type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a>;
-    fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
 }
@@ -162,7 +164,7 @@ fn spawn_topology(tb: &SubstrateHarness, topo: &Topology) {
     for i in 0..topo.downstreams.len() {
         let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
         let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
-        tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config).finish().expect("spawn relay");
+        tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish().expect("spawn relay");
     }
 }
 
@@ -222,7 +224,7 @@ fn mail_saturation_profile() {
     for i in 0..n {
         let next = ring_id((i + 1) % n);
         let sub = i.to_string();
-        tb.spawn_actor::<RingRelay>(Subname::Named(&sub), next).finish().expect("spawn ring relay");
+        tb.spawn_actor::<RingRelay>(Subname::Named(&sub), next, ()).finish().expect("spawn ring relay");
     }
 
     let m: usize = env::var("TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
@@ -340,7 +342,7 @@ fn emit_settlement_settles_with_holds() {
         eprintln!("skipping emit_settlement_settles_with_holds: no wgpu adapter");
         return;
     };
-    tb.spawn_actor::<HoldRelay>(Subname::Named("0"), ()).finish().expect("spawn hold relay");
+    tb.spawn_actor::<HoldRelay>(Subname::Named("0"), (), ()).finish().expect("spawn hold relay");
     let entry = hold_id();
 
     let roots = 50u32;
@@ -770,7 +772,7 @@ fn settlement_detection_latency() {
     // so settlement fires on that mail's `Finished` alone.
     let topo = depth_chain(1);
     let config = RelayConfig { downstreams: topo.downstreams[0].iter().map(|&j| relay_id(j)).collect(), work_iters: 0 };
-    tb.spawn_actor::<Relay>(Subname::Named("0"), config).finish().expect("spawn leaf relay");
+    tb.spawn_actor::<Relay>(Subname::Named("0"), config, ()).finish().expect("spawn leaf relay");
     let entry = relay_id(0);
 
     let samples: usize = env::var("SETTLE_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);

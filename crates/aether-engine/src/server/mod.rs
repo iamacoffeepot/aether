@@ -200,8 +200,8 @@ mod tests {
         // only the store dir is overridden.
         let config = EngineConfig { binary_store_dir: Some(isolated_store_dir()), ..EngineConfig::default() };
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<EngineServer>(config)
-            .with_actor::<ReplySink>(cells.clone())
+            .with_actor::<EngineServer>(config, ())
+            .with_actor::<ReplySink>(cells.clone(), ())
             .build_passive()
             .expect("caps boot");
         (chassis, mailer, cells)

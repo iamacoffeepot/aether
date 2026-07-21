@@ -240,7 +240,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     let mut harness = SubstrateHarness::builder()
         .with_render()
         .with_component_host()
-        .with_actor::<TextCapability>(())
+        .with_actor::<TextCapability>((), ())
         .size(240, 220)
         .namespace_roots(roots)
         .build()
