@@ -549,6 +549,35 @@ fn failed_singleton_init_releases_namespace_and_sink() {
     );
 }
 
+/// ADR-0156 §5: a `with_config` override staged for a type no composed member
+/// declares as its `Config` is a hard boot error naming the type — the
+/// staged-but-never-composed coherence guard. A composed cap plus a matching
+/// override boots fine (the paired-form path); an orphan `with_config` aborts.
+#[test]
+fn build_passive_rejects_staged_but_never_composed_override() {
+    // A distinctive marker type that is never any cap's `Config`.
+    #[derive(Debug)]
+    struct OrphanKnob;
+
+    let (registry, mailer) = bare_substrate();
+    let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StubLog>(())
+        .with_config(OrphanKnob)
+        .build_passive()
+        .expect_err("a staged-but-never-composed override must abort boot");
+    assert!(
+        format!("{err:?}").contains("OrphanKnob"),
+        "the orphan-override error must name the offending type, got {err:?}",
+    );
+
+    // The paired form composes + stages coherently, so it boots.
+    let (registry, mailer) = bare_substrate();
+    Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<StubLog>(())
+        .build_passive()
+        .expect("a composed cap with no orphan override boots");
+}
+
 /// Issue 552 stage 1: end-to-end smoke for the new
 /// [`Builder::with_actor`] boot path. Boots a hand-rolled
 /// `NativeActor` fixture, looks it up via

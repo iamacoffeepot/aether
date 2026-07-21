@@ -22,6 +22,7 @@ use aether_lifecycle::LifecycleCapability;
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::config::ConfigSources;
 use aether_substrate::mail::MailboxId;
 use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue};
 use aether_trace::TraceDispatchCapability;
@@ -412,7 +413,15 @@ impl SubstrateHarnessChassis {
         // wiring), fs rides pre-validated roots, and arbitrary caps
         // arrive as `compose` closures applied between the basics and
         // lifecycle.
+        // ADR-0156 §5: the harness resolves off a HERMETIC source stack — no env
+        // layer, no file layer — so a member it composes but forgets to stage
+        // falls through to its compiled default rather than a stray process env
+        // var. Before the compose-then-resolve inversion, harness-composed
+        // members never read env (their values were constructed directly); this
+        // keeps that property. Scenario overrides ride the programmatic layer via
+        // `with_actor_configured` / the builder's `with_config`.
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+            .with_config_sources(ConfigSources::hermetic())
             .with_workers(pool_workers)
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
@@ -434,10 +443,10 @@ impl SubstrateHarnessChassis {
         builder = builder
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config)
-            .with_config(LifecycleConfig::default())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_params());
+            // ADR-0156 §5: compose + stage the lifecycle config in one paired call.
+            .with_actor_configured::<LifecycleCapability>(frame_lifecycle_params(), LifecycleConfig::default());
         if let Some(roots) = io_roots {
-            builder = builder.with_config(roots).with_actor::<FsCapability>(());
+            builder = builder.with_actor_configured::<FsCapability>((), roots);
         }
         let passive = builder.build_passive()?;
 

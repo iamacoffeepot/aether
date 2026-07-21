@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::any::TypeId;
+use std::collections::{BTreeSet, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,6 +130,13 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// resolve loop in `boot_passives` resolves each composed cap's `Config` off
     /// it ahead of `init`.
     config_sources: ConfigSources,
+    /// ADR-0156 §5: the `TypeId`s of every composed member's `Config` — each
+    /// [`Self::with_actor`]'s `A::Config` (including `()` and the
+    /// `RpcServerConfig` bridge, whose `members()` is empty) and each
+    /// [`Self::with_config_member`]. Folded with the driver's members at build /
+    /// claim to reject a `with_config` override that matches no composed member
+    /// (a staged-but-never-composed override is a hard boot error).
+    composed_config_types: HashSet<TypeId>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -152,6 +160,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             teardown_cap: DEFAULT_TEARDOWN_CAP,
             config_members: Vec::new(),
             config_sources: ConfigSources::default(),
+            composed_config_types: HashSet::new(),
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -187,6 +196,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             teardown_cap: self.teardown_cap,
             config_members: self.config_members,
             config_sources: self.config_sources,
+            composed_config_types: self.composed_config_types,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -209,6 +219,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // red under a saturated local `--workspace` run). A small default
         // keeps the manual-drive path light; the perf benches that want a
         // real pool already pass `.with_workers(_)` explicitly, which wins.
+        // ADR-0156 §5: reject a staged-but-never-composed override before boot.
+        self.validate_config_overrides()?;
         let workers = self.workers.or(Some(PASSIVE_DEFAULT_WORKERS));
         let mut config_sources = self.config_sources;
         // ADR-0155 §4: the no-driver path still runs the Claim stage over
@@ -267,8 +279,31 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         A::Config: ConfigMember,
     {
         self.config_members.extend(<A::Config as ConfigMember>::members());
+        // ADR-0156 §5: record the composed `Config` type so a `with_config`
+        // override targeting it validates. `()` and `RpcServerConfig` declare no
+        // aggregate member (empty `members()`) but are still valid override
+        // targets, so key off the type, not the member records.
+        self.composed_config_types.insert(TypeId::of::<A::Config>());
         self.passives.push(Box::new(NativeActorBoot::<A>::new(params)));
         self
+    }
+
+    /// ADR-0156 §5: the paired form — compose actor `A` and stage its explicit
+    /// `config` in one compiler-checked call. This is the primary API for a
+    /// **direct composition site** (a chassis / harness / test that composes an
+    /// actor *and* supplies its config value together): the `A::Config` type
+    /// binds `config` to the actor at the call, so a mismatched value is a type
+    /// error rather than a silent orphan. Equivalent to
+    /// `self.with_config::<A::Config>(config).with_actor::<A>(params)` with the
+    /// two halves guaranteed coherent. Prefer it over the split
+    /// `with_config` + `with_actor` pair wherever both are known at the site.
+    #[must_use]
+    pub fn with_actor_configured<A>(self, params: A::Params, config: A::Config) -> Self
+    where
+        A: NativeActor,
+        A::Config: ConfigMember + 'static,
+    {
+        self.with_config::<A::Config>(config).with_actor::<A>(params)
     }
 
     /// ADR-0156 §5: hand the builder the config source stack the chassis
@@ -286,12 +321,28 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         self
     }
 
-    /// ADR-0156 §5: stage a programmatic explicit value for config type `C` —
-    /// the top layer of the source stack (above argv). This is how
-    /// `SubstrateHarness` and unit tests keep constructing configs in code:
-    /// resolution short-circuits to the staged value, so an in-code
-    /// construction never reads process env. Pairs with [`Self::with_actor`],
-    /// which no longer carries the config value (ADR-0156 §5 inversion).
+    /// ADR-0156 §5: stage a programmatic explicit value for config type `T` —
+    /// the top layer of the source stack (above argv). Resolution
+    /// short-circuits to it, so the staged value never reads argv/env/file.
+    ///
+    /// This is the **cross-helper override** seam — use it to override the
+    /// `Config` of a member composed *elsewhere* (inside `with_common_caps`,
+    /// `with_hub_fleet_passthrough`, a shared boot fragment). When a site
+    /// composes an actor *and* supplies its config together, prefer the paired
+    /// [`Self::with_actor_configured`], which binds the value to the actor's
+    /// `Config` type at the call.
+    ///
+    /// The override is keyed by `TypeId::of::<T>()`, so it is **type-aliasing**:
+    /// two composed actors that share one `Config` type share this one override
+    /// (the last `with_config::<T>` staged wins for both). At build / claim, an
+    /// override whose `T` matches no composed member is a hard
+    /// [`BootError`](crate::chassis::error::BootError) naming `T` — a
+    /// staged-but-never-composed override cannot be left behind silently.
+    ///
+    /// `with_config::<()>(())` is a no-op: `()`'s resolution ignores overrides
+    /// (it resolves to `()` unconditionally), so the staged unit is never read.
+    /// It still validates (`()` is a composed member type on any chassis that
+    /// wires a config-less cap).
     #[must_use]
     pub fn with_config<T: 'static>(mut self, value: T) -> Self {
         self.config_sources.set_override(value);
@@ -324,9 +375,33 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// smallest seam that folds their section + `META` into the same walk.
     /// Purely type-level (`M::members()`), so no value is required.
     #[must_use]
-    pub fn with_config_member<M: ConfigMember>(mut self) -> Self {
+    pub fn with_config_member<M: ConfigMember + 'static>(mut self) -> Self {
         self.config_members.extend(M::members());
+        // ADR-0156 §5: a declared non-cap member is a valid `with_config`
+        // override target (the chassis may override its resolved value).
+        self.composed_config_types.insert(TypeId::of::<M>());
         self
+    }
+
+    /// ADR-0156 §5: the acceptable-override-target set — the `TypeId`s of every
+    /// composed member's `Config` (the `with_actor` / `with_config_member`
+    /// accumulator) plus the driver type's declared members. A staged
+    /// `with_config` override outside this set is an orphan.
+    fn acceptable_override_targets(&self) -> HashSet<TypeId> {
+        let mut targets = self.composed_config_types.clone();
+        targets.extend(<C::Driver as DriverCapability>::config_members().iter().map(|record| record.type_id));
+        targets
+    }
+
+    /// ADR-0156 §5: reject a staged-but-never-composed `with_config` override.
+    /// Run at build / claim before resolution — a `with_config::<T>` whose `T`
+    /// matches no composed member is a hard boot error naming `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when an override matches no composed member.
+    fn validate_config_overrides(&self) -> Result<(), BootError> {
+        self.config_sources.validate_overrides(&self.acceptable_override_targets()).map_err(BootError::from)
     }
 
     /// Issue 745: override the worker pool size. `None` keeps
@@ -402,6 +477,9 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// hand-maintained capability list can drift from it. The describe
     /// rewire that consumes this lands in a later slice.
     pub fn claim_namespaces(self) -> Result<BTreeSet<String>, BootError> {
+        // ADR-0156 §5: the same override coherence check the build path runs —
+        // a staged-but-never-composed override is a fault at claim time too.
+        self.validate_config_overrides()?;
         claim_only(&self.registry, &self.mailer, &self.aborter, self.ring_caps, self.passives, |ctx| {
             <C::Driver as DriverCapability>::claim(ctx)
         })
@@ -454,6 +532,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// installed — fail-fast per ADR-0063: the typestate guarantees
     /// `with_driver` has run, so a missing driver is a builder API bug.
     pub fn build(self) -> Result<BuiltChassis<C>, BootError> {
+        // ADR-0156 §5: reject a staged-but-never-composed override before boot.
+        self.validate_config_overrides()?;
         let Self {
             registry,
             mailer,

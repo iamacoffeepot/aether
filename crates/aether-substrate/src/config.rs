@@ -73,7 +73,7 @@
 //! bool deserialization accepts the usual `1` / `true` / `yes` / `0` /
 //! `false` / `no` spellings (case-insensitive, trimmed).
 
-use std::any::{Any, TypeId};
+use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -283,6 +283,32 @@ pub trait FromArgvThenEnv: Sized {
         file: Option<<Self::Layer as confique::Config>::Layer>,
     ) -> Result<Self, ConfigError> {
         let mut builder = <Self::Layer as confique::Config>::builder().preloaded(argv).env();
+        if let Some(file) = file {
+            builder = builder.preloaded(file);
+        }
+        let layer = builder.load().map_err(ConfigError::from_confique)?;
+        Ok(Self::from_layer(layer))
+    }
+
+    /// The hermetic sibling of [`try_resolve`](Self::try_resolve): resolves
+    /// with **no env layer** (ADR-0156 §5). Source order collapses to argv >
+    /// file > typed defaults — the process environment never contributes. Backs
+    /// [`ConfigSources::hermetic`], which `SubstrateHarness` uses so a member it
+    /// composes but forgets to stage falls through to its compiled default
+    /// (deterministic) rather than a stray process env var (a flake factory):
+    /// before the compose-then-resolve inversion, harness-composed members never
+    /// read env at all (their values were constructed directly), and this keeps
+    /// that property.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnparseableKnown`] when a preloaded argv/file
+    /// value fails the layer's parser.
+    fn try_resolve_hermetic(
+        argv: <Self::Layer as confique::Config>::Layer,
+        file: Option<<Self::Layer as confique::Config>::Layer>,
+    ) -> Result<Self, ConfigError> {
+        let mut builder = <Self::Layer as confique::Config>::builder().preloaded(argv);
         if let Some(file) = file {
             builder = builder.preloaded(file);
         }
@@ -751,11 +777,19 @@ impl fmt::Display for ConfigProvenance {
 #[derive(Default)]
 pub struct ConfigSources {
     file: Option<toml::Table>,
+    /// ADR-0156 §5: when set, resolution runs the [hermetic](Self::hermetic)
+    /// path — no env layer (and no file, forced `None` by the constructor), so
+    /// a composed-but-unstaged member falls through to its compiled default
+    /// rather than a stray process env var. `SubstrateHarness` sets it.
+    hermetic: bool,
     /// Programmatic explicit values keyed by config `TypeId`. Boxed `dyn Any`
     /// because members are heterogeneously typed. Assembled and consumed on the
     /// one chassis-boot thread — no `Send`, matching the `Builder` itself
-    /// (whose `!Send` driver-boot closure already keeps it thread-local).
+    /// (whose `!Send` driver-boot closure already keeps it thread-local). The
+    /// parallel `override_names` keeps each override's `type_name` for the
+    /// staged-but-never-composed boot error.
     overrides: HashMap<TypeId, Box<dyn Any>>,
+    override_names: HashMap<TypeId, &'static str>,
     /// Per-member argv overlay layers keyed by config `TypeId`. Each holds the
     /// member's `<C::Layer as confique::Config>::Layer` produced by its
     /// `Overlay::into_layer` (a confique partial layer, not necessarily
@@ -765,16 +799,36 @@ pub struct ConfigSources {
 
 impl ConfigSources {
     /// A source stack over the optional loaded chassis config file, with no
-    /// argv overlays or programmatic overrides staged yet.
+    /// argv overlays or programmatic overrides staged yet. Resolution runs the
+    /// full stack — programmatic > argv > env > file > default.
     #[must_use]
     pub fn new(file: Option<toml::Table>) -> Self {
-        Self { file, overrides: HashMap::new(), argv: HashMap::new() }
+        Self { file, hermetic: false, overrides: HashMap::new(), override_names: HashMap::new(), argv: HashMap::new() }
+    }
+
+    /// ADR-0156 §5: a **hermetic** source stack — no env layer, no file layer.
+    /// Resolution collapses to programmatic > argv > default; the process
+    /// environment is never read. `SubstrateHarness` uses this so a member it
+    /// composes but forgets to stage falls through to its compiled default
+    /// (deterministic) rather than leaking a process env var into a test
+    /// (before this inversion, harness-composed members never read env — their
+    /// values were constructed directly — and this preserves that).
+    #[must_use]
+    pub fn hermetic() -> Self {
+        Self {
+            file: None,
+            hermetic: true,
+            overrides: HashMap::new(),
+            override_names: HashMap::new(),
+            argv: HashMap::new(),
+        }
     }
 
     /// Stage a programmatic explicit value for member `C` — the top layer of
     /// the stack. Backs `Builder::with_config`.
     pub fn set_override<C: 'static>(&mut self, value: C) {
         self.overrides.insert(TypeId::of::<C>(), Box::new(value));
+        self.override_names.insert(TypeId::of::<C>(), type_name::<C>());
     }
 
     /// Stage member `C`'s argv overlay layer (its `Overlay::into_layer`
@@ -821,11 +875,37 @@ impl ConfigSources {
             return Ok(value);
         }
         let argv = self.take_argv::<C>().unwrap_or_else(<<C::Layer as confique::Config>::Layer>::empty);
+        // Hermetic mode (`SubstrateHarness`) skips both the env and the file
+        // layers, so an unstaged member resolves to its compiled default.
+        if self.hermetic {
+            return C::try_resolve_hermetic(argv, None);
+        }
         let file = match &self.file {
             Some(table) => file_section::<C>(table, section)?,
             None => None,
         };
         C::try_resolve(argv, file)
+    }
+
+    /// ADR-0156 §5: reject any staged programmatic override whose config type is
+    /// not in `composed` — the set of `TypeId`s of every composed member's
+    /// `Config` (each `with_actor`'s `A::Config`, each `with_config_member`, and
+    /// the driver's members). A typo'd or orphaned `with_config::<T>(value)` —
+    /// staged but matching no composed member — is a hard boot error naming `T`
+    /// rather than a value silently left behind. Run at build / claim time,
+    /// before resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::OrphanOverride`] naming the first override type
+    /// that matches no composed member.
+    pub fn validate_overrides(&self, composed: &HashSet<TypeId>) -> Result<(), ConfigError> {
+        for (type_id, name) in &self.override_names {
+            if !composed.contains(type_id) {
+                return Err(ConfigError::OrphanOverride { type_name: (*name).to_owned() });
+            }
+        }
+        Ok(())
     }
 
     /// Take a programmatic override for member `C`, or the supplied fallback.
@@ -915,6 +995,14 @@ pub enum ConfigError {
         /// The underlying TOML decode error.
         source: Box<dyn StdError + Send + Sync + 'static>,
     },
+    /// ADR-0156 §5: a programmatic `with_config::<T>(value)` override was staged
+    /// on the builder whose config type `T` matches no composed member — a
+    /// typo'd or orphaned override that would otherwise be silently left behind.
+    /// A hard boot error naming `T` (via [`ConfigSources::validate_overrides`]).
+    OrphanOverride {
+        /// The `type_name` of the staged override that matches no composed member.
+        type_name: String,
+    },
 }
 
 impl ConfigError {
@@ -970,6 +1058,14 @@ impl fmt::Display for ConfigError {
             Self::ConfigSection { section, source } => {
                 write!(f, "failed to parse chassis config section [{section}]: {source}")
             }
+            Self::OrphanOverride { type_name } => {
+                write!(
+                    f,
+                    "programmatic config override for `{type_name}` matches no composed member \
+                     — staged via with_config but no composed actor declares it as its Config \
+                     (typo? removed cap? wrong type?)"
+                )
+            }
         }
     }
 }
@@ -980,6 +1076,7 @@ impl StdError for ConfigError {
             Self::UnparseableKnown { source, .. }
             | Self::ConfigFile { source, .. }
             | Self::ConfigSection { source, .. } => Some(&**source),
+            Self::OrphanOverride { .. } => None,
         }
     }
 }
@@ -1050,6 +1147,23 @@ mod tests {
     }
 
     impl FromArgvThenEnv for PrecedenceConfig {
+        type Layer = Self;
+
+        fn from_layer(layer: Self::Layer) -> Self {
+            layer
+        }
+    }
+
+    // A unique-keyed fixture so the hermetic env-skip test never races the
+    // `AETHER_PRECEDENCE_COUNT` mutation in `try_resolve_orders_*`.
+    #[derive(Clone, Debug, confique::Config)]
+    #[allow(dead_code)]
+    struct HermeticFixture {
+        #[config(env = "AETHER_HERMETIC_FIXTURE_COUNT", default = 7)]
+        count: u32,
+    }
+
+    impl FromArgvThenEnv for HermeticFixture {
         type Layer = Self;
 
         fn from_layer(layer: Self::Layer) -> Self {
@@ -1278,5 +1392,42 @@ mod tests {
         let mut override_sources = ConfigSources::new(Some(precedence_file_table(11)));
         override_sources.set_override(PrecedenceConfig { count: 1 });
         assert_eq!(override_sources.provenance(type_id, "precedence", meta), ConfigProvenance::Programmatic);
+    }
+
+    #[test]
+    fn validate_overrides_rejects_orphan_and_accepts_composed() {
+        // Tripwire: an override whose type is in the composed set validates; one
+        // that is not is a hard `OrphanOverride` naming the type. Drifts if the
+        // staged-but-never-composed guard is dropped or inverted.
+        let mut sources = ConfigSources::new(None);
+        sources.set_override(PrecedenceConfig { count: 1 });
+
+        let mut composed: HashSet<TypeId> = HashSet::new();
+        composed.insert(TypeId::of::<PrecedenceConfig>());
+        assert!(sources.validate_overrides(&composed).is_ok(), "a composed override is accepted");
+
+        let orphan = sources.validate_overrides(&HashSet::new());
+        match orphan {
+            Err(ConfigError::OrphanOverride { type_name }) => {
+                assert!(type_name.contains("PrecedenceConfig"), "the error names the orphan type: {type_name}");
+            }
+            other => panic!("expected OrphanOverride, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hermetic_resolution_ignores_env() {
+        // Tripwire: hermetic resolution skips the env layer — a set env var does
+        // not leak into a hermetic-stack resolve; the member falls through to its
+        // compiled default. The non-hermetic path still reads env. Unique env key
+        // (no race). Drifts if `try_resolve_hermetic` regains an `.env()` layer.
+        // SAFETY: unique key set then removed in this test scope.
+        unsafe { env::set_var("AETHER_HERMETIC_FIXTURE_COUNT", "55") };
+        let hermetic = ConfigSources::hermetic().resolve_layered::<HermeticFixture>("hermetic");
+        let full = ConfigSources::new(None).resolve_layered::<HermeticFixture>("hermetic");
+        // SAFETY: same scope.
+        unsafe { env::remove_var("AETHER_HERMETIC_FIXTURE_COUNT") };
+        assert_eq!(hermetic.expect("hermetic resolve").count, 7, "hermetic skips env → default");
+        assert_eq!(full.expect("full resolve").count, 55, "the full stack still reads env");
     }
 }

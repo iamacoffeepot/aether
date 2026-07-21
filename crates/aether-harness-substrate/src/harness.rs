@@ -374,10 +374,30 @@ impl SubstrateHarnessBuilder {
         self
     }
 
+    /// ADR-0156 §5: the paired form — compose actor `A` and stage its explicit
+    /// `config` in one compiler-checked call (mirrors `Builder::with_actor_configured`).
+    /// This is the **primary** API for a scenario that composes an actor and
+    /// supplies its config value together: the `A::Config` type binds `config`
+    /// at the call, and the harness's hermetic source stack means an unstaged
+    /// member falls through to its compiled default rather than process env.
+    #[must_use]
+    pub fn with_actor_configured<A>(mut self, params: A::Params, config: A::Config) -> Self
+    where
+        A: NativeActor,
+        A::Config: Send + 'static + ConfigMember,
+        A::Params: Send + 'static,
+    {
+        self.compose.push(Box::new(move |builder| builder.with_actor_configured::<A>(params, config)));
+        self
+    }
+
     /// ADR-0156 §5: stage a programmatic explicit config value onto the chassis
-    /// builder's source stack — the mirror of `Builder::with_config`. Scenarios
-    /// pair it with [`Self::with_actor`] (`harness.with_config(cfg).with_actor::<A>(())`)
-    /// to construct a cap's `Config` in code without a process env read.
+    /// builder's source stack — the mirror of `Builder::with_config`, the
+    /// cross-helper override seam. Prefer [`Self::with_actor_configured`] when a
+    /// scenario composes an actor and supplies its config together; reach for
+    /// this only to override the `Config` of a member composed inside a shared
+    /// fragment. A staged override matching no composed member is a hard boot
+    /// error at build time.
     #[must_use]
     pub fn with_config<T: Send + 'static>(mut self, value: T) -> Self {
         self.compose.push(Box::new(move |builder| builder.with_config(value)));
