@@ -28,11 +28,13 @@ use aether_kinds::trace::Settled;
 // `RpcServerConfig` / `RpcServerParams` types name no `aether_substrate` type,
 // so they stay top-level `not(wasm32)` plain structs; the `RpcServerHandle`
 // boot artifact lives in the runtime half and is re-exported below under the
-// runtime gate.
+// runtime gate. `RpcServerConfig`'s `#[derive(aether_substrate::Config)]` emits
+// the `RpcServerConfigLayer` / `RpcServerOverlay` too (#3849) — the chassis
+// flattens the overlay to expose `--rpc-port`.
 #[cfg(not(target_family = "wasm"))]
 mod config;
 #[cfg(not(target_family = "wasm"))]
-pub use config::{RpcServerConfig, RpcServerParams};
+pub use config::{RpcServerConfig, RpcServerConfigLayer, RpcServerOverlay, RpcServerParams};
 pub use runtime::RpcServerHandle;
 
 // Named at file root so the runtime half reaches it through `super::`

@@ -15,12 +15,14 @@
 //! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching
 //! confique's native env-side bool deserialization.
 //!
-//! Chassis-wide knobs (`workers`, `boot_manifest`, `rpc_port`), the lifecycle
-//! cap's `advance_timeout_millis`, and per-chassis knobs (`window_mode` /
-//! `window_title` for desktop, `tick_hz` for headless) are now fully migrated
-//! to `#[derive(aether_substrate::Config)]` overlays: `ChassisBootOverlay` /
-//! `LifecycleOverlay` / `WindowOverlay` / `TickOverlay`. Only `rpc_port`
-//! remains hand-written (its per-chassis default differs).
+//! Chassis-wide knobs (`workers`, `boot_manifest`), the lifecycle cap's
+//! `advance_timeout_millis`, the RPC bind port (`rpc_port`), and per-chassis
+//! knobs (`window_mode` / `window_title` for desktop, `tick_hz` for headless)
+//! are all `#[derive(aether_substrate::Config)]` overlays now:
+//! `ChassisBootOverlay` / `LifecycleOverlay` / `RpcServerOverlay` /
+//! `WindowOverlay` / `TickOverlay`. `--rpc-port` rides the derive like the rest
+//! (#3849 retired its hand-written flag); the per-chassis default lives at each
+//! compose site, not in the flag.
 //!
 //! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
 //! structs now ride the `#[derive(aether_substrate::Config)]` next to
@@ -48,6 +50,7 @@ pub use aether_gemini::GeminiOverlay;
 pub use aether_http::HttpOverlay;
 pub use aether_http::HttpServerOverlay;
 pub use aether_lifecycle::LifecycleOverlay;
+pub use aether_rpc::RpcServerOverlay;
 
 pub use crate::boot::ChassisBootOverlay;
 pub use crate::tick::TickOverlay;
@@ -80,11 +83,12 @@ pub struct CommonOverlay {
     #[command(flatten)]
     pub lifecycle: LifecycleOverlay,
 
-    /// `AETHER_RPC_PORT` — `aether.rpc.server` bind port. Absent →
-    /// chassis-specific default (desktop / headless skip the RPC
-    /// server entirely; hub falls back to `DEFAULT_RPC_PORT`).
-    #[arg(long = "rpc-port")]
-    pub rpc_port: Option<u16>,
+    /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
+    /// port. Absent → the member's `None` default, so desktop / headless skip
+    /// the RPC server entirely; the hub applies its own `DEFAULT_RPC_PORT`
+    /// fallback at its compose site.
+    #[command(flatten)]
+    pub rpc: RpcServerOverlay,
 }
 
 /// Desktop chassis CLI root.
@@ -158,10 +162,10 @@ pub struct HeadlessCli {
     about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073."
 )]
 pub struct HubCli {
-    /// `AETHER_RPC_PORT` — `aether.rpc.server` bind port (default
-    /// 8901).
-    #[arg(long = "rpc-port")]
-    pub rpc_port: Option<u16>,
+    /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
+    /// port (the hub applies its `DEFAULT_RPC_PORT`, 8901, when unset).
+    #[command(flatten)]
+    pub rpc: RpcServerOverlay,
 
     /// Engines-cap knobs — the liveness-heartbeat tuning
     /// (`--hub-heartbeat-interval-secs` / `--hub-heartbeat-miss-limit`,
@@ -197,7 +201,7 @@ mod checkability_tests {
     //! to a chassis's composition without flattening its overlay into the root
     //! (or a stale flag left in the root) fails the assertion honestly.
 
-    use super::{CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HubCli, TickOverlay};
+    use super::{CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HubCli, RpcServerOverlay, TickOverlay};
     use crate::window::WindowOverlay;
     use aether_audio::AudioOverlay;
     use clap::{Args, CommandFactory};
@@ -241,10 +245,11 @@ mod checkability_tests {
 
     #[test]
     fn hub_root_flags_equal_composed_overlay_set() {
-        // The hub composes only the engines cap; `--rpc-port` is a direct root
-        // flag (its per-chassis default differs) alongside the meta flags.
+        // The hub composes the engines cap plus the RPC server; `--rpc-port`
+        // now rides the derive-emitted `RpcServerOverlay` (#3849) like every
+        // other flag, alongside the meta flags.
         let mut expected = overlay_flags::<EngineOverlay>();
-        expected.insert("rpc-port".to_owned());
+        expected.extend(overlay_flags::<RpcServerOverlay>());
         expected.extend(meta_flags());
         assert_eq!(long_flags(&HubCli::command()), expected);
     }

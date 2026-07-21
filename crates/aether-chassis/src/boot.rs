@@ -14,7 +14,6 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,8 +38,9 @@ use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerConfig
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{ConfigError, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
-use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
+
+use crate::cli::RpcServerOverlay;
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
@@ -53,32 +53,28 @@ use crate::window::WindowConfig;
 /// layer's lower precedence relative to ordinary `AETHER_*` env knobs.
 pub const CONFIG_FILE_ENV: &str = "AETHER_CONFIG_FILE";
 
-/// Chassis-direct env knobs that aren't `#[derive(Config)]` fields — the
-/// hand-registered knobs the chassis bins read inline (`AETHER_RPC_PORT`).
-/// Registered as [`KnobRecord`]s so e1's unknown-`AETHER_*` sweep doesn't flag
-/// them and e2's `--print-config` dump lists them. ADR-0090 §1/§4. The runtime
-/// (log / panic-hook) knobs are registered by
-/// `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler hot-path, chassis
-/// boot, window, tick, and wire-frame-size knobs are covered by the
-/// derive-emitted `*Layer::META`s the composition-derived
-/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) walks — the
-/// frame-size knob is now the [`FrameSizeConfig`] member (ADR-0156 §6), pushed
-/// into the codec by [`install_frame_size`].
-pub const CHASSIS_KNOBS: &[KnobRecord] = &[
-    KnobRecord {
-        env_key: CONFIG_FILE_ENV,
-        doc: "Path to a sectioned TOML chassis config file; overridden by --config <PATH>.",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_RPC_PORT",
-        doc: "aether.rpc.server bind port; desktop/headless skip the server when unset, hub always \
-              binds (default 8901).",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    },
-];
+/// Chassis-direct env knobs that aren't `#[derive(Config)]` members — the
+/// residual hand records the composition-derived
+/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) can't own.
+///
+/// After #3849 (`AETHER_RPC_PORT` → the `RpcServerConfig` member; the runtime
+/// log / panic-hook knobs → the chassis-declared [`RuntimeConfig`] member) and
+/// #3850 (`AETHER_MAX_FRAME_SIZE` → the [`FrameSizeConfig`] member, pushed into
+/// the codec by [`install_frame_size`]), every former residual moved onto a
+/// derive-`Config` member resolved through the source stack. The meta-knob that
+/// selects the file source is the sole survivor — it *cannot* live in the file
+/// it selects.
+///
+/// Registered as a [`KnobRecord`] so the unknown-`AETHER_*` sweep doesn't flag
+/// it and the `--print-config` dump lists it (ADR-0090 §1/§4). The scheduler
+/// hot-path, chassis boot, window, tick, RPC-port, frame-size, and runtime knobs
+/// are covered by their derive-emitted `*Layer::META`s the manifest walks.
+pub const CHASSIS_KNOBS: &[KnobRecord] = &[KnobRecord {
+    env_key: CONFIG_FILE_ENV,
+    doc: "Path to a sectioned TOML chassis config file; overridden by --config <PATH>.",
+    default: None,
+    kind: KnobKind::HandRegistered,
+}];
 
 /// Resolve the optional chassis config-file path from argv first, then
 /// `AETHER_CONFIG_FILE`. Empty values are treated as absent.
@@ -405,9 +401,9 @@ impl ChassisBootConfig {
 }
 
 /// Resolve the [`FrameSizeConfig`] member off the assembled source stack and
-/// push it set-once into `aether-codec` (ADR-0156 §6). Each chassis calls this
-/// once during config resolution — before the RPC server binds or dials, so it
-/// runs before any framing. `aether-codec` sits below the config system and
+/// push it set-once into `aether-codec` (ADR-0156 §6, #3850). Each chassis calls
+/// this once during config resolution — before the RPC server binds or dials, so
+/// it runs before any framing. `aether-codec` sits below the config system and
 /// cannot pull the knob itself; this is the push half of the inversion, the
 /// codec's [`install_max_frame_size`] the receiving half.
 ///
@@ -420,20 +416,71 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
     Ok(())
 }
 
+/// The substrate runtime knobs (ADR-0156 §6, #3849): the tracing log-filter
+/// directive plus the three panic-hook knobs, migrated off the hand-registered
+/// `RUNTIME_KNOBS` slice onto this chassis-declared `#[derive(aether_substrate::Config)]`
+/// member so they join the composition-derived aggregate — the known-keys sweep
+/// and `--print-config` dump — like any other member instead of riding
+/// [`chassis_residual_knobs`]. Each chassis resolves it before Compose and
+/// declares its membership via `with_config_member` (folded into
+/// [`with_common_caps`] and [`with_hub_fleet_passthrough`]).
+///
+/// `env_prefix = "AETHER"` with an explicit `env =` per field pins each
+/// historical key byte-for-byte. Only [`log_filter`](Self::log_filter) is
+/// re-applied after resolution (via
+/// [`apply_filter`](aether_substrate::runtime::log_install::apply_filter)): the
+/// subscriber installs an env-or-`info` filter at boot, before the config file
+/// loads, so a `[runtime]` file directive needs a re-apply. The three
+/// panic-hook fields declare their keys for the aggregate; the process-level
+/// panic hook keeps reading them from env directly (installed at boot, fired at
+/// panic time — below the actor/config layer, above no cap).
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER", cli_prefix = "runtime")]
+pub struct RuntimeConfig {
+    /// `AETHER_LOG_FILTER=<directive>` tracing `EnvFilter` directive for the
+    /// substrate subscriber stack (default `info`). Re-applied after full
+    /// resolution so a `[runtime]` config-file value below env takes effect.
+    #[config(env = "AETHER_LOG_FILTER", default = "info")]
+    pub log_filter: String,
+    /// `AETHER_BACKTRACE=<any>` forces backtrace capture on a substrate panic
+    /// without flipping the process-wide `RUST_BACKTRACE`. Presence-tested by
+    /// the panic hook; declared here for the aggregate.
+    #[config(env = "AETHER_BACKTRACE")]
+    pub backtrace: Option<String>,
+    /// `AETHER_CRASH_LOG_DISABLE=<truthy>` disables the ADR-0081 §4 JSONL
+    /// crash-dump path (the tracing event still fires). Consumed by the panic
+    /// hook's own lenient env read; declared here for the aggregate.
+    #[config(env = "AETHER_CRASH_LOG_DISABLE")]
+    pub crash_log_disable: Option<String>,
+    /// `AETHER_CRASH_LOG_DIR=<path>` overrides the crash-dump base directory
+    /// (unset → `$XDG_DATA_HOME/aether/crash/`, then
+    /// `$HOME/.local/share/aether/crash/`). Consumed by the panic hook;
+    /// declared here for the aggregate.
+    #[config(env = "AETHER_CRASH_LOG_DIR")]
+    pub crash_log_dir: Option<String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        // Matches the unset resolution: the subscriber's `info` fallback and no
+        // panic-hook overrides. Tests that construct an `Env` directly use this.
+        Self { log_filter: "info".to_owned(), backtrace: None, crash_log_disable: None, crash_log_dir: None }
+    }
+}
+
 /// The residual hand-registered knobs the composition-derived
-/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) doesn't yet
-/// own (ADR-0156 §6 folds these in on later slices): the chassis-direct
-/// records ([`CHASSIS_KNOBS`] — the config-file path and RPC port) plus the
-/// runtime log-filter / panic-hook knobs
-/// (`aether_substrate::runtime::RUNTIME_KNOBS`). Folded in beside the
+/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) can't own — the
+/// sole survivor is the `AETHER_CONFIG_FILE` meta-knob that selects the file
+/// source (so it cannot live in the file), alongside the orphaned codec
+/// frame-size knob (retired by #3850). Every other former residual — the RPC
+/// port and the runtime log / panic-hook knobs — moved onto derive-`Config`
+/// members (#3849), so they now ride the manifest walk. Folded in beside the
 /// manifest metas by every chassis's known-keys sweep and `--print-config`
 /// dump ([`ConfigManifest::known_keys`](aether_substrate::config::ConfigManifest::known_keys)
 /// / [`dump`](aether_substrate::config::ConfigManifest::dump)).
 #[must_use]
 pub fn chassis_residual_knobs() -> Vec<KnobRecord> {
-    let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
-    records.extend_from_slice(RUNTIME_KNOBS);
-    records
+    CHASSIS_KNOBS.to_vec()
 }
 
 /// The hub's residual knobs: the shared [`chassis_residual_knobs`] plus the
@@ -485,6 +532,7 @@ pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C>
         .with_config_member::<SchedulerTuningConfig>()
         .with_config_member::<SettlementConfig>()
         .with_config_member::<FrameSizeConfig>()
+        .with_config_member::<RuntimeConfig>()
 }
 
 /// Build the single-stage lifecycle params the headless chassis runs
@@ -605,11 +653,15 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_config_member::<SchedulerTuningConfig>()
         .with_config_member::<SettlementConfig>()
         .with_config_member::<ContentGenConfig>()
-        // ADR-0156 §6: the wire-frame-size knob. It configures the shared codec
-        // rather than any single cap and is pushed into the codec by
+        // ADR-0156 §6: the wire-frame-size knob (#3850). It configures the shared
+        // codec rather than any single cap and is pushed into the codec by
         // `install_frame_size`, so it declares its aggregate membership here
         // (the retired `AETHER_MAX_FRAME_SIZE` `KnobRecord`'s replacement).
         .with_config_member::<FrameSizeConfig>()
+        // The substrate runtime knobs (log filter + panic-hook knobs, #3849)
+        // configure the process, not any single cap, so they declare their
+        // aggregate membership here like the other non-cap members.
+        .with_config_member::<RuntimeConfig>()
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<InputCapability>(())
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
@@ -654,47 +706,44 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
     }
 }
 
-/// ADR-0155 §3: always compose the RPC server on the substrate chassis;
-/// the resolved `rpc_addr` gates only whether a socket binds. `Some(addr)`
-/// starts the listener (substrate becomes an RPC peer a hub or client
-/// dials); `None` composes the cap disabled — it still claims its
-/// `aether.rpc.server` mailbox, so mail to it is answered rather than
-/// warn-dropped, and the same binary claims the same namespaces wherever
-/// `--describe` runs. `engine_name` identifies the chassis profile in the
-/// `HelloAck` peer-kind.
-#[must_use]
-pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketAddr>, engine_name: &str) -> Builder<C> {
-    // ADR-0156 §5: `RpcServerConfig` is the programmatic-only bridge — its
-    // `bind_addr` is resolved from `AETHER_RPC_PORT` outside the derive path
-    // (#3849 migrates it onto a derive member), so it rides the builder's
-    // programmatic layer rather than the source stack.
-    builder.with_actor_configured::<RpcServerCapability>(
-        RpcServerParams {
-            peer_kind: PeerKind::Substrate {
-                engine_name: engine_name.into(),
-                engine_version: env!("CARGO_PKG_VERSION").into(),
-                kinds: vec![],
-            },
-            // A forked substrate peer never fields engine-addressed forwards
-            // (only the hub does), so it needs no route target.
-            route_target: None,
-        },
-        RpcServerConfig { bind_addr: rpc_addr.map(|addr| addr.to_string()) },
-    )
+/// ADR-0155 §3: always compose the RPC server on the substrate chassis; its
+/// `RpcServerConfig.port` (resolved by the builder off the source stack the
+/// chassis staged — argv `--rpc-port` > env `AETHER_RPC_PORT` > `[rpc]` file
+/// section > default) gates only whether a socket binds. A resolved port
+/// starts the listener (substrate becomes an RPC peer a hub or client dials);
+/// unset composes the cap disabled — it still claims its `aether.rpc.server`
+/// mailbox, so mail to it is answered rather than warn-dropped, and the same
+/// binary claims the same namespaces wherever `--describe` runs. `engine_name`
+/// identifies the chassis profile in the `HelloAck` peer-kind.
+///
+/// The config is not staged here (#3849 retired the programmatic-`bind_addr`
+/// bridge): desktop / headless `set_argv::<RpcServerConfig>` the `--rpc-port`
+/// overlay into the source stack, and the builder resolves it — unset falls
+/// through to the member's `None` default (unbound). Only the hub overrides
+/// this with its `DEFAULT_RPC_PORT` fallback, via `with_actor_configured` at
+/// its own compose site.
+/// Stage the `--rpc-port` argv overlay into the source stack so the builder
+/// resolves `RpcServerConfig` (argv > `AETHER_RPC_PORT` env > `[rpc]` file >
+/// default) like any other composed member. Keeps the `RpcServerConfig` type
+/// internal to `aether-chassis` — the full-stack chassis crates need no direct
+/// `aether-rpc` dependency to stage the port, they just hand this the overlay
+/// `CommonOverlay.rpc` carries.
+pub fn stage_rpc_argv(sources: &mut ConfigSources, overlay: RpcServerOverlay) {
+    sources.set_argv::<RpcServerConfig>(overlay.into_layer());
 }
 
-/// Parse the `AETHER_RPC_PORT` env var into an optional port number
-/// (issue 792). `None` when unset or unparseable. The hub chassis
-/// substitutes its default port when this returns `None`; the desktop
-/// and headless chassis treat `None` as "don't boot the RPC server"
-/// instead.
 #[must_use]
-// Chassis boot config: the AETHER_RPC_PORT fallback for an absent --rpc-port flag
-// (the hub injects this into forked engines), read at the process boundary — not
-// a cap config knob.
-#[allow(clippy::disallowed_methods)]
-pub fn rpc_port_from_env() -> Option<u16> {
-    env::var("AETHER_RPC_PORT").ok().and_then(|s| s.parse().ok())
+pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, engine_name: &str) -> Builder<C> {
+    builder.with_actor::<RpcServerCapability>(RpcServerParams {
+        peer_kind: PeerKind::Substrate {
+            engine_name: engine_name.into(),
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            kinds: vec![],
+        },
+        // A forked substrate peer never fields engine-addressed forwards
+        // (only the hub does), so it needs no route target.
+        route_target: None,
+    })
 }
 
 #[cfg(test)]
@@ -837,31 +886,28 @@ mod tests {
     }
 
     #[test]
-    fn residual_knobs_carry_the_infra_records() {
-        // Tripwire: the composition-derived aggregate doesn't yet own the
-        // chassis-direct records (config-file path, RPC port) or the runtime
-        // log/panic knobs — they ride `chassis_residual_knobs`, folded into
-        // every chassis's known-keys sweep beside the manifest metas (ADR-0156
-        // §6 relocates them onto members on later slices). Catches a refactor
-        // that drops the `RUNTIME_KNOBS` extend or a `CHASSIS_KNOBS` record,
-        // re-introducing a false unknown-key warning. The frame-size knob left
-        // this set for the `FrameSizeConfig` member (ADR-0156 §6), so it is
-        // covered by the manifest walk, not a residual record.
+    fn residual_knobs_are_the_config_file_meta_only() {
+        // Tripwire (#3849 + #3850): after the RPC-port, runtime, and frame-size
+        // knobs migrated onto derive-`Config` members, the residual set shrank to
+        // exactly one record the composition-derived aggregate can't own — the
+        // `AETHER_CONFIG_FILE` meta-knob (it selects the file source, so it
+        // cannot live in the file). Every migrated key must NOT reappear here, or
+        // it would be double-registered (member + residual).
         let keys: Vec<&str> = chassis_residual_knobs().iter().map(|record| record.env_key).collect();
-        for key in [
-            "AETHER_CONFIG_FILE",
+        assert_eq!(keys, ["AETHER_CONFIG_FILE"], "the config-file meta-knob is the sole residual survivor");
+        for migrated in [
             "AETHER_RPC_PORT",
+            "AETHER_MAX_FRAME_SIZE",
             "AETHER_LOG_FILTER",
             "AETHER_BACKTRACE",
             "AETHER_CRASH_LOG_DISABLE",
             "AETHER_CRASH_LOG_DIR",
         ] {
-            assert!(keys.contains(&key), "chassis_residual_knobs missing {key}");
+            assert!(
+                !keys.contains(&migrated),
+                "{migrated} moved onto a derive-Config member — it must not stay residual"
+            );
         }
-        assert!(
-            !keys.contains(&"AETHER_MAX_FRAME_SIZE"),
-            "the frame-size knob moved onto the FrameSizeConfig member; it must not ride a residual record",
-        );
     }
 
     #[test]

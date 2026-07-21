@@ -18,14 +18,14 @@
 use aether_actor::Local;
 use aether_actor::log::{ActorLogRing, render_event};
 
-use crate::config::{KnobKind, KnobRecord};
-
 use super::now_unix_millis;
 use std::io;
+use std::sync::OnceLock;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt as tsfmt};
 
@@ -77,25 +77,62 @@ pub fn emit_host_event(level: u32, target: &str, message: &str) {
 
 const FILTER_ENV: &str = "AETHER_LOG_FILTER";
 
-/// Registered so e1's unknown-`AETHER_*` boot sweep
-/// (`validate_env`) and e2's `--config` discovery dump
-/// (ADR-0090 §4) both cover `AETHER_LOG_FILTER`.
-pub const LOG_KNOBS: &[KnobRecord] = &[KnobRecord {
-    env_key: FILTER_ENV,
-    doc: "Tracing EnvFilter directive for the substrate subscriber stack (default \"info\").",
-    default: Some("info"),
-    kind: KnobKind::HandRegistered,
-}];
+/// Reload handle for the installed [`EnvFilter`] layer, boxed behind a
+/// closure so callers never name the layered-subscriber generic. Set once
+/// by [`init_subscriber`] when it wins `try_init`; [`apply_filter`] uses it
+/// to swap the filter after full config resolution. `AETHER_LOG_FILTER` moved
+/// off `RUNTIME_KNOBS` onto the chassis-declared `RuntimeConfig` derive-`Config`
+/// member (ADR-0156 §6); the boot-time install still reads env directly (it
+/// runs before the config file loads), and the chassis re-applies the resolved
+/// directive through this handle.
+type FilterReload = Box<dyn Fn(EnvFilter) + Send + Sync>;
+static FILTER_RELOAD: OnceLock<FilterReload> = OnceLock::new();
 
-/// Install the tracing subscriber stack: `EnvFilter` (reads
+/// Install the tracing subscriber stack: a reloadable `EnvFilter` (reads
 /// `AETHER_LOG_FILTER`, default `info`) + `tsfmt::Layer` to stderr +
-/// [`ActorAwareLayer`]. Called from `SubstrateBoot::build`;
-/// idempotent (later calls no-op via `try_init`).
+/// [`ActorAwareLayer`]. Called from `SubstrateBoot::build`; idempotent (later
+/// calls no-op via `try_init`). The filter rides a [`reload::Layer`] so
+/// [`apply_filter`] can re-apply the fully-resolved directive (which may pick
+/// up a `[runtime]` config-file value the env-only boot install couldn't see).
 pub fn init_subscriber() {
     let filter = EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::registry()
-        .with(filter)
+    let (filter_layer, handle) = reload::Layer::new(filter);
+    let installed = tracing_subscriber::registry()
+        .with(filter_layer)
         .with(tsfmt::layer().with_writer(io::stderr))
         .with(ActorAwareLayer)
-        .try_init();
+        .try_init()
+        .is_ok();
+    // Only publish the handle when *this* call installed the stack — otherwise
+    // it points at a subscriber that never became global (another `try_init`
+    // won, e.g. a test's own subscriber), and re-applying through it is a no-op
+    // at best. `OnceLock::set` on a later call fails silently, keeping the
+    // first installer's handle.
+    if installed {
+        let _ = FILTER_RELOAD.set(Box::new(move |filter| {
+            let _ = handle.reload(filter);
+        }));
+    }
+}
+
+/// Re-apply a fully-resolved `EnvFilter` directive after config resolution
+/// (ADR-0156 §6). [`init_subscriber`] installs the env-or-`info` filter at
+/// boot, before the chassis config file is loaded; the chassis resolves
+/// `RuntimeConfig` (env > `[runtime]` file section > `info`) and calls this so
+/// a directive set only in the config file takes effect. A malformed directive
+/// warns and keeps the installed filter; a no-op when this process's subscriber
+/// isn't the one [`init_subscriber`] installed.
+pub fn apply_filter(directive: &str) {
+    let Some(reload) = FILTER_RELOAD.get() else {
+        return;
+    };
+    match EnvFilter::try_new(directive) {
+        Ok(filter) => reload(filter),
+        Err(error) => tracing::warn!(
+            target: "aether_substrate::boot",
+            directive,
+            %error,
+            "resolved AETHER_LOG_FILTER directive is invalid — keeping the boot-time filter",
+        ),
+    }
 }

@@ -12,18 +12,13 @@ pub mod trace;
 
 pub use panic_hook::init_panic_hook;
 
-use crate::config::KnobRecord;
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The runtime tuning knobs registered for config discovery
-/// (ADR-0090 §4): the log-filter knob (`log_install::LOG_KNOBS`) and
-/// the three panic-hook knobs (`panic_hook::PANIC_KNOBS`), concatenated
-/// element-by-element (mirrors `scheduler::SCHEDULER_KNOBS`'s `const`
-/// concat shape) so the aggregate stays a `const`. The chassis crates
-/// folds this into `chassis_registry()` alongside `SCHEDULER_KNOBS`.
-pub const RUNTIME_KNOBS: &[KnobRecord] =
-    &[log_install::LOG_KNOBS[0], panic_hook::PANIC_KNOBS[0], panic_hook::PANIC_KNOBS[1], panic_hook::PANIC_KNOBS[2]];
+// ADR-0156 §6 (#3849): the runtime tuning knobs (`AETHER_LOG_FILTER` +
+// the three panic-hook knobs) retired the hand-registered `RUNTIME_KNOBS`
+// slice — they are now a chassis-declared `RuntimeConfig` derive-`Config`
+// member, so they join the composition-derived aggregate (known-keys sweep +
+// `--print-config`) like any other member rather than as a residual hand record.
 
 pub(crate) fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {

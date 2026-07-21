@@ -35,10 +35,11 @@ aether-kinds = { path = "../aether-kinds" }
 aether-substrate = { path = "../aether-substrate" }
 serde = { workspace = true, features = ["derive", "alloc"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
-# `FrameSizeConfig`'s `#[derive(aether_substrate::Config)]` emits a
-# `#[derive(confique::Config)]` layer struct and a `#[derive(clap::Args)]`
-# overlay (ADR-0090); both are reached only through the macro-emitted paths, so
-# the source-only unused-deps scan can't see them (ignored below).
+# `FrameSizeConfig` (#3850) and `RpcServerConfig` (#3849) each derive
+# `aether_substrate::Config`; the macro emits a `#[derive(confique::Config)]`
+# layer struct and a `#[derive(clap::Args)]` overlay (ADR-0090), both reached
+# only through macro-emitted paths the source-only unused-deps scan can't see
+# (ignored below).
 clap = { workspace = true }
 confique = { workspace = true }
 

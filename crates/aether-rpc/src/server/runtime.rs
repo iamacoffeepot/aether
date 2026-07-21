@@ -365,15 +365,16 @@ impl NativeActor for RpcServerCapability {
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
 
         // ADR-0155 §3: the cap is always composed and always claims its
-        // mailbox; the resolved bind address gates only what Start does.
-        // A `None` bind address is the disabled state — claim the mailbox,
-        // bind no socket, spawn no accept thread, publish no handle. Mail
-        // arriving here is then answered (or intercepted by `on_any`)
-        // rather than warn-dropped at an unknown mailbox.
-        let Some(bind_addr) = config.bind_addr else {
+        // mailbox; the resolved port gates only what Start does. A `None`
+        // port is the disabled state — claim the mailbox, bind no socket,
+        // spawn no accept thread, publish no handle. Mail arriving here is
+        // then answered (or intercepted by `on_any`) rather than warn-dropped
+        // at an unknown mailbox. `Some(port)` binds localhost (single-host
+        // development story); `0` lets the OS pick an ephemeral port.
+        let Some(bind_port) = config.port else {
             tracing::info!(
                 target: "aether_substrate::rpc",
-                "rpc server composed disabled (no bind address); claiming mailbox, binding no socket",
+                "rpc server composed disabled (no bind port); claiming mailbox, binding no socket",
             );
             return Ok(RpcServerState {
                 peer_kind: params.peer_kind,
@@ -392,6 +393,7 @@ impl NativeActor for RpcServerCapability {
             });
         };
 
+        let bind_addr = format!("127.0.0.1:{bind_port}");
         let listener = TcpListener::bind(&bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
         let local_addr = listener.local_addr().map_err(|e| BootError::Other(Box::new(e)))?;
         let port = local_addr.port();

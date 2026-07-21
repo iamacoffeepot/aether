@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::AutoloadComponent;
+use aether_chassis::boot::RuntimeConfig;
 use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
@@ -363,7 +364,7 @@ mod tests {
             sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
@@ -471,7 +472,7 @@ mod tests {
             sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
@@ -574,7 +575,7 @@ mod tests {
             sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
@@ -682,7 +683,7 @@ mod tests {
             sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
@@ -904,7 +905,7 @@ mod tests {
             sources: base_sources(server_config),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),

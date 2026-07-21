@@ -1017,7 +1017,7 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
                 },
                 route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
             },
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerConfig { port: Some(0) },
         )
         .build_passive()
         .expect("test setup: hub caps boot");
