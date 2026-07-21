@@ -27,7 +27,7 @@ use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
-use aether_http::{HttpConfig as HttpConf, HttpServerConfig};
+use aether_http::{HttpConfig as HttpConf, HttpServerCapability, HttpServerConfig};
 use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
@@ -45,8 +45,8 @@ use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
-    maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
-    resolve_with_file, rpc_port_from_env, with_common_caps,
+    resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file, rpc_port_from_env, with_common_caps,
+    with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, DesktopCli};
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
@@ -153,14 +153,17 @@ pub struct DesktopEnv {
     /// argv > env > default), threaded to `Gpu::new` at window creation.
     /// `WireframeMode::from_config_value` owns the tri-state parse.
     pub boot_wireframe: Option<String>,
-    /// Issue 1761: optional `aether.http.server` init config (ADR-0108).
-    /// `Some` iff the cap's `enabled` flag is set (`AETHER_HTTP_SERVER_ENABLED`
-    /// / `--http-server-enabled`); `None` (default) skips booting
-    /// `HttpServerCapability` so an unconfigured chassis binds no HTTP port.
-    pub http_server: Option<HttpServerConfig>,
-    /// Issue 763 P2: optional `aether.rpc.server` bind address.
-    /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
-    /// `RpcServerCapability` so existing chassis behavior is unchanged.
+    /// The resolved `aether.http.server` init config (ADR-0108, ADR-0155 §3).
+    /// The cap is always composed and always claims `aether.http.server`;
+    /// its `enabled` flag (`AETHER_HTTP_SERVER_ENABLED` /
+    /// `--http-server-enabled`, default off) gates only whether Start binds
+    /// the socket, so an unconfigured chassis binds no HTTP port yet still
+    /// answers mail rather than warn-dropping it.
+    pub http_server: HttpServerConfig,
+    /// The resolved `aether.rpc.server` bind address (ADR-0155 §3). The cap
+    /// is always composed and always claims `aether.rpc.server`; the
+    /// address (from `AETHER_RPC_PORT`) gates only whether Start binds the
+    /// socket — `None` (default) leaves the mailbox claimed but unbound.
     pub rpc_addr: Option<SocketAddr>,
     /// Issue 745: optional worker-pool size override. Populated from
     /// `AETHER_WORKERS` / `--workers`; `None` keeps `PoolConfig::default()`
@@ -269,12 +272,13 @@ impl DesktopEnv {
         let gemini = resolve_with_file::<GeminiConfig>(gemini.into_layer(), config_file, "gemini")?;
         let contentgen = resolve_with_file::<ContentGenConfig>(contentgen.into_layer(), config_file, "contentgen")?;
         let namespace_roots = resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
-        // The HTTP server is opt-in: resolve its config and boot the cap
-        // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
-        // so an unconfigured chassis binds no HTTP port.
-        let http_server_config =
+        // ADR-0155 §3: the HTTP server cap is always composed and always
+        // claims its mailbox; its `enabled` flag (default off) gates only
+        // whether Start binds the socket. Resolve the whole config and hand
+        // it over — an unconfigured chassis binds no HTTP port but still
+        // answers `aether.http.server` mail with a fail-fast `Err`.
+        let http_server =
             resolve_with_file::<HttpServerConfig>(http_server_overlay.into_layer(), config_file, "http-server")?;
-        let http_server = http_server_config.enabled.then_some(http_server_config);
         let audio = resolve_with_file::<AudioConf>(audio_overlay.into_layer(), config_file, "audio")?;
 
         // Window mode and title: resolved through `WindowConfig` (argv > env >
@@ -466,8 +470,8 @@ impl DesktopChassis {
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis));
-        let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
-        let builder = maybe_with_http_server(builder, http_server);
+        let builder =
+            with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(http_server);
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load off

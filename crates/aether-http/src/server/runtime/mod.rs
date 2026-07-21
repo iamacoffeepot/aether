@@ -87,6 +87,19 @@ pub use websocket::*;
 #[cfg(test)]
 mod unit_tests;
 
+/// ADR-0155 §3 fail-fast reply for a disabled server. The cap is composed
+/// and claims `aether.http.server`, but no socket is bound, so the
+/// route-registration surface answers `Err` rather than letting the mail
+/// warn-drop at an unknown mailbox — "linked but not enabled" is a
+/// first-class, diagnosable state.
+fn disabled_route_result() -> RegisterRouteResult {
+    RegisterRouteResult::Err {
+        error: "aether.http.server is composed but disabled on this chassis (enabled = false); \
+                no socket is bound, so routes cannot be registered"
+            .to_owned(),
+    }
+}
+
 #[runtime]
 impl NativeActor for HttpServerCapability {
     /// The runtime state this identity boots into (ADR-0122 split,
@@ -100,6 +113,23 @@ impl NativeActor for HttpServerCapability {
     const NAMESPACE: &'static str = "aether.http.server";
 
     fn init(config: HttpServerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<HttpSupervisorState, BootError> {
+        let mailer: Arc<Mailer> = ctx.mailer();
+
+        // ADR-0155 §3: the cap is always composed and always claims its
+        // mailbox; the resolved `enabled` flag gates only what Start does.
+        // Disabled — claim the mailbox, bind no socket, spawn no accept
+        // thread, publish no handle. The route-registration handlers then
+        // fail fast with an `Err` reply rather than the mail warn-dropping
+        // at an unknown mailbox, and the same binary claims the same
+        // namespace wherever `--describe` runs.
+        if !config.enabled {
+            tracing::info!(
+                target: "aether_http::server",
+                "http server composed disabled (enabled = false); claiming mailbox, binding no socket",
+            );
+            return Ok(HttpSupervisorState::disabled(config, mailer));
+        }
+
         let listener = TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
         let local_addr = listener.local_addr().map_err(|e| BootError::Other(Box::new(e)))?;
         let port = local_addr.port();
@@ -109,7 +139,6 @@ impl NativeActor for HttpServerCapability {
         let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
 
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
-        let mailer: Arc<Mailer> = ctx.mailer();
         let self_id = ctx.self_id();
         let wake_kind = <HttpInboundReady as Kind>::ID;
 
@@ -179,6 +208,11 @@ impl NativeActor for HttpServerCapability {
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        // A disabled server (ADR-0155 §3) bound no socket and spawned no
+        // accept thread, so there is nothing to unblock or join.
+        if !state.config.enabled {
+            return;
+        }
         // Stop the accept thread; self-connect to unblock its blocking
         // `accept()`. The shards join their own reader/writer sidecars in
         // their own `unwire` (the chassis tears instanced actors down
@@ -245,6 +279,9 @@ impl NativeActor for HttpServerCapability {
         ctx: &mut NativeCtx<'_>,
         payload: RegisterRoute,
     ) -> RegisterRouteResult {
+        if !state.config.enabled {
+            return disabled_route_result();
+        }
         if let Err(error) = validate_route_mailbox(state.mailer.registry(), payload.mailbox) {
             return RegisterRouteResult::Err { error };
         }
@@ -272,6 +309,9 @@ impl NativeActor for HttpServerCapability {
         ctx: &mut NativeCtx<'_>,
         payload: RegisterRouteSelf,
     ) -> RegisterRouteResult {
+        if !state.config.enabled {
+            return disabled_route_result();
+        }
         match ctx.source_mailbox() {
             Some(mailbox) => {
                 let result =
@@ -301,6 +341,9 @@ impl NativeActor for HttpServerCapability {
         _ctx: &mut NativeCtx<'_>,
         payload: UnregisterRoute,
     ) -> RegisterRouteResult {
+        if !state.config.enabled {
+            return disabled_route_result();
+        }
         state.unregister_route(&payload.prefix, payload.method, payload.mailbox)
     }
 
@@ -316,6 +359,9 @@ impl NativeActor for HttpServerCapability {
         ctx: &mut NativeCtx<'_>,
         payload: UnregisterRouteSelf,
     ) -> RegisterRouteResult {
+        if !state.config.enabled {
+            return disabled_route_result();
+        }
         match ctx.source_mailbox() {
             Some(mailbox) => state.unregister_route(&payload.prefix, payload.method, mailbox),
             None => RegisterRouteResult::Err {

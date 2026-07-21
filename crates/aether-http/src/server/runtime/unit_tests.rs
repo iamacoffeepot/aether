@@ -12,6 +12,35 @@ fn conn_header(value: &str) -> Vec<HttpHeader> {
     vec![HttpHeader { name: "Connection".to_string(), value: value.to_string() }]
 }
 
+/// ADR-0155 §3: a server composed disabled claims its mailbox but binds
+/// no socket, so its route-registration surface must fail fast with an
+/// `Err` reply (the fail-fast convention the headless caps use) rather
+/// than the mail warn-dropping at an unknown mailbox. The disabled branch
+/// returns before touching the registry, so a bare ctx suffices.
+#[test]
+fn disabled_http_server_err_replies_to_register_route() {
+    use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState, NativeCtx};
+    use crate::kinds::RegisterRoute;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::fresh_substrate;
+
+    let (_registry, mailer) = fresh_substrate();
+    let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
+    let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
+    let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+    let result = HttpServerCapability::on_register_route(
+        &mut state,
+        &mut ctx,
+        RegisterRoute { prefix: "/".to_string(), method: None, kind: KindId(0), mailbox: MailboxId(1), shared: false },
+    );
+    assert!(
+        matches!(result, RegisterRouteResult::Err { .. }),
+        "a disabled http server must fail fast on register_route, got {result:?}",
+    );
+}
+
 /// Tripwire: keep-alive defaulting is branch logic over the HTTP version
 /// and the `Connection` header, not a derived mirror — HTTP/1.1 keeps
 /// alive unless told to close, HTTP/1.0 closes unless told to keep alive,

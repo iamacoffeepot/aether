@@ -98,7 +98,11 @@ pub struct RpcServerState {
     /// `NativeInitCtx::mailer()`; the cap is single-threaded
     /// post-ADR-0038 so direct storage is fine.
     pub mailer: Arc<Mailer>,
-    pub bind_addr: String,
+    /// The bound address, or `None` when the cap was composed disabled
+    /// (ADR-0155 §3): a disabled server claims its mailbox but never
+    /// binds, so there is no address to reconnect for teardown and no
+    /// accept thread to unblock.
+    pub bind_addr: Option<String>,
     pub listener_port: u16,
     pub accept_shutdown: Arc<AtomicBool>,
     pub accept_thread: Option<JoinHandle<()>>,
@@ -352,7 +356,38 @@ impl NativeActor for RpcServerCapability {
     const NAMESPACE: &'static str = "aether.rpc.server";
 
     fn init(config: RpcServerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<RpcServerState, BootError> {
-        let listener = TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
+        let self_id = ctx.self_id();
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+
+        // ADR-0155 §3: the cap is always composed and always claims its
+        // mailbox; the resolved bind address gates only what Start does.
+        // A `None` bind address is the disabled state — claim the mailbox,
+        // bind no socket, spawn no accept thread, publish no handle. Mail
+        // arriving here is then answered (or intercepted by `on_any`)
+        // rather than warn-dropped at an unknown mailbox.
+        let Some(bind_addr) = config.bind_addr else {
+            tracing::info!(
+                target: "aether_substrate::rpc",
+                "rpc server composed disabled (no bind address); claiming mailbox, binding no socket",
+            );
+            return Ok(RpcServerState {
+                peer_kind: config.peer_kind,
+                self_mailbox: self_id,
+                route_target: config.route_target,
+                mailer: ctx.mailer(),
+                bind_addr: None,
+                listener_port: 0,
+                accept_shutdown: Arc::new(AtomicBool::new(false)),
+                accept_thread: None,
+                inbound_rx,
+                inbound_tx,
+                connections: HashMap::new(),
+                next_conn_id: 0,
+                in_flight: HashMap::new(),
+            });
+        };
+
+        let listener = TcpListener::bind(&bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
         let local_addr = listener.local_addr().map_err(|e| BootError::Other(Box::new(e)))?;
         let port = local_addr.port();
         listener.set_nonblocking(false).map_err(|e| BootError::Other(Box::new(e)))?;
@@ -360,11 +395,9 @@ impl NativeActor for RpcServerCapability {
         let accept_shutdown = Arc::new(AtomicBool::new(false));
         let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
 
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         let inbound_tx_for_thread = inbound_tx.clone();
 
         let mailer: Arc<Mailer> = ctx.mailer();
-        let self_id = ctx.self_id();
         let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
 
         // Transport thread below the mail layer — it accepts sockets that carry
@@ -392,7 +425,7 @@ impl NativeActor for RpcServerCapability {
 
         tracing::info!(
             target: "aether_substrate::rpc",
-            addr = %config.bind_addr,
+            addr = %bind_addr,
             port = port,
             "rpc server bound",
         );
@@ -404,7 +437,7 @@ impl NativeActor for RpcServerCapability {
             self_mailbox: self_id,
             route_target: config.route_target,
             mailer: ctx.mailer(),
-            bind_addr: config.bind_addr,
+            bind_addr: Some(bind_addr),
             listener_port: port,
             accept_shutdown,
             accept_thread: Some(thread),
@@ -418,10 +451,15 @@ impl NativeActor for RpcServerCapability {
 
     //noinspection DuplicatedCode -- RPC and HTTP own distinct connection state and shutdown semantics.
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        // A disabled server (ADR-0155 §3) bound no socket and spawned no
+        // accept thread, so there is nothing to unblock or join.
+        let Some(bind_addr) = state.bind_addr.clone() else {
+            return;
+        };
         // Stop the accept thread; self-connect to unblock its blocking
         // `accept()`.
         state.accept_shutdown.store(true, Ordering::Release);
-        let wake_addr = teardown_connect_addr(&state.bind_addr, state.listener_port);
+        let wake_addr = teardown_connect_addr(&bind_addr, state.listener_port);
         if let Err(error) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100)) {
             tracing::warn!(
                 target: "aether_substrate::rpc",

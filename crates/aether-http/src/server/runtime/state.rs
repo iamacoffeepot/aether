@@ -148,6 +148,32 @@ fn refuse_connection(mut stream: TcpStream, status: u16, message: &str) {
 }
 
 impl HttpSupervisorState {
+    /// Build the disabled supervisor state (ADR-0155 §3). The cap is
+    /// composed and claims `aether.http.server`, but binds no socket and
+    /// spawns no accept thread, so the listener port is `0`, there is no
+    /// accept thread, and the route / shard / monitor tables start empty.
+    /// `init` returns this when the resolved config is disabled; the
+    /// route-registration handlers then fail fast with an `Err` reply
+    /// rather than the mail warn-dropping at an unknown mailbox.
+    pub fn disabled(config: HttpServerConfig, mailer: Arc<Mailer>) -> Self {
+        let (_inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+        Self {
+            config,
+            routes: Arc::new(RwLock::new(Vec::new())),
+            live_connections: Arc::new(AtomicUsize::new(0)),
+            mailer,
+            listener_port: 0,
+            accept_shutdown: Arc::new(AtomicBool::new(false)),
+            accept_thread: None,
+            inbound_rx,
+            wake_dirty: Arc::new(AtomicBool::new(false)),
+            shards: Vec::new(),
+            next_shard: 0,
+            next_stream_id: Arc::new(AtomicU64::new(0)),
+            monitors: HashMap::new(),
+        }
+    }
+
     /// Spawn the dispatch shards (ADR-0135) — deferred to the first accepted
     /// connection because `init` has no dispatcher ctx to spawn children
     /// from. `dispatch_shards == 0` sizes automatically, mirroring the
