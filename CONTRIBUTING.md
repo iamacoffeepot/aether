@@ -22,10 +22,10 @@ cargo clippy --all-targets -- -D warnings
 
 GitHub Actions is the full build engine and merge gate. It owns the expensive
 workspace tests, docs, marker/feature boundaries, wasm packaging, duplicate-code
-and unused-dependency checks, and other applicable contract jobs. Keep the PR draft while those facts and, for a
-same-repository branch, the automated review/dogfood results accumulate. Fork
-PRs do not receive repository secrets, so a maintainer must provide the
-corresponding review or deliberately dispatch the trusted workflow.
+and unused-dependency checks, and other applicable contract jobs. The required
+checks are `Lint title` and `CI pass`; see
+[.github/workflows/README.md](.github/workflows/README.md) for the CI
+conventions.
 
 If you want to reproduce a specific CI check locally before pushing, the
 workspace commands are:

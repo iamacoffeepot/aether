@@ -18,11 +18,9 @@ jobs:
             const issue = context.payload.issue;
             const labels = issue.labels.map(l => l.name);
 
-            // Machine-filed tickets are not work items, and the lint's success
-            // path auto-applies type:* labels — which is precisely what they
-            // must never carry: type-label ABSENCE is how the tick knows not to
-            // scope a machine-filed issue (#3181's alert fix). Alerts (alert) are
-            // named by their filing workflows. Exempt them — and clean up any
+            // Machine-filed triage tickets (the nightlies' `alert` issues) are
+            // not work items: their titles are generated, not conventional, so
+            // linting them just files noise. Exempt them — and clean up any
             // residue a pre-exemption run left (an invalid-title label and a bot
             // comment), so an exempted issue self-heals on its next event.
             const EXEMPT = ['alert'];
