@@ -42,7 +42,7 @@ pub struct HttpConfig {
     /// side.
     #[cfg_attr(feature = "runtime", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
-    /// Reject plain-text http:// URLs and allow only https.
+    /// Reject plaintext HTTP URLs and allow only HTTPS.
     ///
     /// An `http://` URL is rejected with `HttpError::InvalidUrl`.
     #[cfg_attr(feature = "runtime", config(default = false))]
