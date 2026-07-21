@@ -260,8 +260,9 @@ mod checkability_tests {
     #[test]
     fn derived_flag_help_carries_doc_env_and_default() {
         // Tripwire: the `#[derive(Config)]` overlay must forward the domain
-        // field's first rustdoc line and append the confique-resolved env
-        // key plus the declared default onto each flag's clap help, and
+        // field's first rustdoc sentence (joined across the source hard-wrap,
+        // cut at the first sentence boundary) and append the confique-resolved
+        // env key plus the declared default onto each flag's clap help, and
         // stamp the ms_duration hint's typed value name (issue 3862). clap
         // sees none of these on its own — env resolution is confique-side,
         // the default lives on the Layer, and the value name would default
@@ -274,7 +275,12 @@ mod checkability_tests {
             .find(|arg| arg.get_long() == Some("http-timeout-ms"))
             .expect("--http-timeout-ms is present");
         let help = arg.get_help().map(ToString::to_string).expect("flag carries help");
-        assert!(help.contains("per-request timeout"), "domain rustdoc forwarded: {help}");
+        // The summary sentence spans a source line wrap ("`Fetch.timeout_ms` is"
+        // / "`None`.") — the full sentence must survive the join, not truncate.
+        assert!(
+            help.contains("Default per-request timeout when `Fetch.timeout_ms` is `None`."),
+            "first sentence joined across the source wrap: {help}"
+        );
         assert!(help.contains("[env: AETHER_HTTP_TIMEOUT_MS]"), "resolved env key annotated: {help}");
         assert!(help.contains("[default: 30000]"), "declared default annotated (separators stripped): {help}");
         let value_names: Vec<String> =

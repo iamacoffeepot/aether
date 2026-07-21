@@ -351,7 +351,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     let resolved_parse = resolve_parse_env(&attr);
     let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), resolved_parse.as_ref());
     // Per-flag `--help` text (issue 3862): the domain field's first
-    // rustdoc line — the consumer-grade summary under the first-line
+    // rustdoc sentence — the consumer-grade summary under the first-sentence
     // convention — followed by the confique-resolved env key and declared
     // default. clap can't see either — env resolution is confique-side and
     // the default lives on the Layer — so both are stated in the text.
@@ -450,16 +450,16 @@ fn build_overlay_attrs(
 }
 
 /// Assemble the overlay field's clap `help` string: the domain field's
-/// first rustdoc line (the consumer-grade summary under the first-line
-/// convention) followed by the confique-resolved env key and, where
-/// declared, the default. Both annotations are invisible to clap on their
-/// own — env resolution is confique-side and the default lives on the
-/// Layer field — so they ride the help text (issue 3862). Help/metadata
-/// only: resolution order and resolved values are untouched.
+/// first rustdoc sentence (the consumer-grade summary under the
+/// first-sentence convention) followed by the confique-resolved env key
+/// and, where declared, the default. Both annotations are invisible to
+/// clap on their own — env resolution is confique-side and the default
+/// lives on the Layer field — so they ride the help text (issue 3862).
+/// Help/metadata only: resolution order and resolved values are untouched.
 fn build_overlay_help(field_attrs: &[Attribute], env_key: &str, default: Option<&Expr>) -> String {
     use std::fmt::Write as _;
 
-    let mut help = first_doc_line(field_attrs).unwrap_or_default();
+    let mut help = first_doc_sentence(field_attrs).unwrap_or_default();
     if !help.is_empty() {
         help.push(' ');
     }
@@ -470,11 +470,16 @@ fn build_overlay_help(field_attrs: &[Attribute], env_key: &str, default: Option<
     help
 }
 
-/// The first non-empty rustdoc line of a field, trimmed. Under the
-/// first-line convention that lead line is the consumer-grade summary;
-/// the maintainer detail lives in the following paragraphs and stays out
-/// of `--help`. `None` for an undocumented field.
-fn first_doc_line(attrs: &[Attribute]) -> Option<String> {
+/// The first sentence of a field's leading rustdoc paragraph. Consecutive
+/// doc lines up to the first blank line are trimmed and joined with single
+/// spaces (rustdoc hard-wraps at source width, so a summary sentence spans
+/// several lines), then cut at the first `. ` boundary with the period
+/// kept — the whole paragraph when it holds no sentence boundary. Under
+/// the first-sentence convention that lead sentence is the consumer-grade
+/// summary; the maintainer detail in the following paragraphs stays out of
+/// `--help`. `None` for an undocumented field.
+fn first_doc_sentence(attrs: &[Attribute]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
     for attr in attrs {
         if !attr.path().is_ident("doc") {
             continue;
@@ -485,21 +490,38 @@ fn first_doc_line(attrs: &[Attribute]) -> Option<String> {
         let Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else {
             continue;
         };
-        let line = s.value();
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
+        let trimmed = s.value().trim().to_string();
+        if trimmed.is_empty() {
+            if lines.is_empty() {
+                continue;
+            }
+            break;
         }
+        lines.push(trimmed);
     }
-    None
+    if lines.is_empty() {
+        return None;
+    }
+    let paragraph = lines.join(" ");
+    let sentence = match paragraph.find(". ") {
+        Some(end) => paragraph[..=end].trim_end().to_string(),
+        None => paragraph,
+    };
+    Some(sentence)
 }
 
 /// Render a declared default for the `[default: …]` help annotation.
-/// Numeric literals drop their digit separators (`30_000` → `30000`) so
-/// the shown value matches what a user would type; strings keep their
-/// quotes (an empty-string default reads as `""`, not a blank); anything
-/// else falls back to its token text.
+/// An empty collection literal (`[]`) reads as `empty` rather than the
+/// bare brackets; numeric literals drop their digit separators
+/// (`30_000` → `30000`) so the shown value matches what a user would type;
+/// strings keep their quotes (an empty-string default reads as `""`, not a
+/// blank); anything else falls back to its token text.
 fn render_default(default: &Expr) -> String {
+    if let Expr::Array(arr) = default
+        && arr.elems.is_empty()
+    {
+        return "empty".to_string();
+    }
     if let Expr::Lit(syn::ExprLit { lit, .. }) = default {
         match lit {
             syn::Lit::Int(i) => return i.base10_digits().to_string(),
