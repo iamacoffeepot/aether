@@ -20,9 +20,7 @@ use std::time::Duration;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostParams;
-use aether_contentgen::ContentGenConfig;
 use aether_data::Kind;
-use aether_fs::NamespaceRoots;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_kinds::BinaryManifest;
@@ -37,21 +35,17 @@ use aether_window::HeadlessWindowCapability;
 use aether_chassis::TickConfig;
 
 use super::driver::HeadlessTimerDriverCapability;
-use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
+use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
-    chassis_residual_knobs, install_frame_size, load_chassis_config, tick_only_lifecycle_params, with_common_caps,
+    CommonEnv, chassis_residual_knobs, load_chassis_config, tick_only_lifecycle_params, with_common_caps,
     with_rpc_server,
 };
 use aether_chassis::cli::HeadlessCli;
-use aether_substrate::config::{
-    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, StageArgv, validate_env,
-};
+use aether_substrate::config::{ConfigError, ConfigManifest, ConfigSources, StageArgv, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use aether_substrate::runtime::log_install::apply_filter;
-use std::path::Path;
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -132,40 +126,15 @@ impl HeadlessChassis {
 /// (the derived staging root's inputs), the driver-only tick cadence, and the
 /// pool / ring / scheduler / teardown knobs.
 pub struct HeadlessEnv {
-    /// The config source stack (file + per-cap argv overlays) the builder
-    /// resolves each composed cap's `Config` off (ADR-0156 §5).
-    pub sources: ConfigSources,
-    pub namespace_roots: NamespaceRoots,
-    /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
-    /// into the staging root in `with_common_caps`.
-    pub generated_asset_staging: ContentGenConfig,
+    /// The config fields every full-stack chassis shares (source stack, fs roots,
+    /// content-gen staging, runtime knobs, pool / ring / scheduler / teardown
+    /// knobs). Resolved by [`CommonEnv::resolve`] — the single declaration, so a
+    /// shared knob can't exist on one chassis and silently not the other.
+    pub common: CommonEnv,
+    /// Headless tick cadence (the std-timer driver's period). Resolved through
+    /// `TickConfig` (argv > env > default 60 Hz); its `nonzero` lowering maps 0
+    /// to the default. Driver-only — the desktop chassis frame-drives instead.
     pub tick_period: Duration,
-    /// The substrate runtime knobs (#3849), resolved off the source stack. Only
-    /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
-    /// the subscriber installs, in `HeadlessChassis::build_inner`); the field
-    /// carries the whole resolved member so its `[runtime]` file / env values
-    /// are resolved once. `aether.rpc.server`'s bind port rides the source stack
-    /// too now (`RpcServerConfig`), so there is no separate `rpc_address` field —
-    /// the builder resolves it (unset → claimed but unbound, ADR-0155 §3).
-    pub runtime: RuntimeConfig,
-    /// Issue 745: optional worker-pool size override. Populated from
-    /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
-    /// (`available_parallelism() - 1`, min 1).
-    pub workers: Option<usize>,
-    /// Issue 1990: per-actor ring capacities resolved from the
-    /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
-    /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
-    /// [`RingCapacities::default`] (the `aether-actor` const caps).
-    pub ring_capacities: RingCapacities,
-    /// Issue 2485: scheduler hot-path tuning resolved from the
-    /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
-    /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
-    /// [`SchedulerTuning::default`] (the built-in scheduler literals).
-    pub scheduler_tuning: SchedulerTuning,
-    /// Issue #2509: cumulative patience for the instanced-actor teardown
-    /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
-    /// `[settlement]`.
-    pub teardown_budget: Duration,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the components come up with no hub; the normal
     /// headless bin leaves it empty and loads components over the hub instead.
@@ -218,51 +187,19 @@ impl HeadlessEnv {
         let mut sources = ConfigSources::new(config_file);
         cli.stage(&mut sources);
 
-        // Chassis-side reads of resolved members (ADR-0156 §5) — resolved off
-        // the same stack via each member's `ConfigMember` section: the derived
-        // staging inputs (fs roots + content-gen), the driver-only tick cadence,
-        // and the non-cap pool / ring / scheduler / teardown knobs.
-        let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
-        let namespace_roots = sources.resolve::<NamespaceRoots>()?;
-        let generated_asset_staging = sources.resolve::<ContentGenConfig>()?;
-        // Tick cadence: resolved through `TickConfig` (argv > env > default).
-        // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
+        // Headless-only tick cadence: resolved through `TickConfig` (argv > env >
+        // default) off the shared stack. `nonzero` maps 0 to the default (60 Hz);
+        // a garbage value hard-errors. Resolved before the shared block: these
+        // are independent reads off the same stack, so the interleaving order is
+        // arbitrary.
         let tick_period = sources.resolve::<TickConfig>()?.to_tick_period();
-        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
-        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
-        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
-        // #3849: resolve the substrate runtime knobs (log filter + panic-hook
-        // knobs) off the same stack. `build_inner` re-applies `log_filter` once
-        // the subscriber is installed; the panic-hook knobs are declared members
-        // consumed by the panic hook's own env reads.
-        let runtime = sources.resolve::<RuntimeConfig>()?;
-        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
-        // here, before the RPC server binds and any framing runs — the codec
-        // cannot pull the knob itself.
-        install_frame_size(&mut sources)?;
 
-        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
-        // through `ChassisBootConfig`). When set, the listed components'
-        // wasm + config are read into the autoload list `build_inner`
-        // drains into `aether.component.load`; an unreadable manifest
-        // aborts boot (ADR-0090 §4) via `ConfigError`.
-        let autoload = match chassis_boot.boot_manifest.clone() {
-            Some(path) => boot_manifest_autoload(Path::new(&path))?,
-            None => Vec::new(),
-        };
-        let workers = chassis_boot.to_workers();
-        Ok(Self {
-            sources,
-            namespace_roots,
-            generated_asset_staging,
-            tick_period,
-            runtime,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            teardown_budget,
-            autoload,
-        })
+        // The shared block (fs roots, content-gen, runtime, pool / ring /
+        // scheduler / teardown knobs) plus the boot-manifest autoload list, both
+        // resolved by the single common resolver off the same stack.
+        let (common, autoload) = CommonEnv::resolve(sources)?;
+
+        Ok(Self { common, tick_period, autoload })
     }
 }
 
@@ -282,18 +219,7 @@ impl HeadlessChassis {
     /// and `autoload` (drained post-build) fields ride [`HeadlessEnv`] but
     /// take no part in the claim chain, so they are ignored here.
     fn compose(boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
-        let HeadlessEnv {
-            sources,
-            namespace_roots,
-            generated_asset_staging,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            teardown_budget,
-            tick_period: _,
-            runtime: _,
-            autoload: _,
-        } = env;
+        let HeadlessEnv { common, tick_period: _, autoload: _ } = env;
 
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -344,20 +270,12 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — `with_common_caps` runs log first so other
         // capabilities' boot tracing routes through the log capture.
-        let common = CommonBoot {
-            aborter,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            // Issue #2509: the instanced-actor teardown gate honors the
-            // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
-            // `0 → wait forever` sentinel) as the settlement gates.
-            teardown_budget,
-            component_host_params,
-            namespace_roots,
-            generated_asset_staging,
-            game_gateway_params: aether_game::GameGatewayParams::default(),
-        };
+        // `into_common_boot` reads the six env-sourced `CommonBoot` fields off
+        // the shared env in one place (the teardown budget honors the same
+        // `AETHER_SETTLEMENT_CAP_SECS` knob, `0 → wait forever` sentinel and all,
+        // as the settlement gates) and threads the source stack back out.
+        let (common, sources) =
+            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the driver broadcasts
@@ -385,7 +303,7 @@ impl HeadlessChassis {
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
         // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.runtime.log_filter);
+        apply_filter(&env.common.runtime.log_filter);
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let mailer = Arc::clone(&boot.queue);
 
@@ -393,8 +311,8 @@ impl HeadlessChassis {
         // `env`: the tick cadence rides the timer driver, the autoload list is
         // drained after build. The `Copy` knobs also feed the boot log line.
         let tick_period = env.tick_period;
-        let workers = env.workers;
-        let ring_capacities = env.ring_capacities;
+        let workers = env.common.workers;
+        let ring_capacities = env.common.ring_capacities;
         let autoload = mem::take(&mut env.autoload);
 
         // Tick rates are bounded well below `u32::MAX` Hz (typically

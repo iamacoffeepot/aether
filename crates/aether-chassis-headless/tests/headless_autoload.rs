@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::boot_manifest_autoload;
-use aether_chassis::boot::RuntimeConfig;
+use aether_chassis::boot::{CommonEnv, RuntimeConfig};
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
 use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
@@ -91,15 +91,17 @@ mod tests {
         // A hub-less headless env: no `rpc_address`, no hub connection, and
         // persistence off so the boot touches no shared on-disk state.
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
-            sources: default_sources(),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
+                sources: default_sources(),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(16),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
         };
 
@@ -158,15 +160,17 @@ mod tests {
         assert_eq!(autoload.len(), 1, "one component listed in the manifest");
 
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(sandbox),
-            sources: default_sources(),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                sources: default_sources(),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(16),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload,
         };
 
