@@ -36,7 +36,7 @@ use serde::Serialize;
 
 use crate::affected::AffectedArgs;
 use crate::inventory::{
-    BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, behavior_build_plans, build_plans, discover_behavior_variants,
+    BUNDLE_PACKAGE, BuildPlan, CHASSIS_BINS, Component, behavior_build_plans, build_plans, discover_behavior_variants,
     discover_behaviors, discover_components,
 };
 use crate::transform::TransformArgs;
@@ -412,7 +412,7 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
     // for `include_bytes!`.
     let bin = plan.chassis.bin_name();
     let mut bin_cmd = Command::new(cargo());
-    bin_cmd.args(["build", "-p", CHASSIS_PACKAGE, "--bin", bin]);
+    bin_cmd.args(["build", "-p", BUNDLE_PACKAGE, "--bin", bin]);
     if let Some(flag) = args.profile.cargo_flag() {
         bin_cmd.arg(flag);
     }
