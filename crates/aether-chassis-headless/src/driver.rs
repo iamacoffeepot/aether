@@ -31,6 +31,7 @@ use aether_kinds::LifecycleAdvance;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::{Mailer, SubstrateBoot, mail::MailboxId};
 
 use aether_chassis::next_chassis_correlation;
@@ -81,6 +82,14 @@ pub struct HeadlessTimerRunning {
 
 impl DriverCapability for HeadlessTimerDriverCapability {
     type Running = HeadlessTimerRunning;
+
+    /// ADR-0156 §4: the tick cadence knob (`AETHER_TICK_HZ`) belongs to the
+    /// headless timer driver — the driver that owns the std-timer loop — so
+    /// the chassis config aggregate carries it only where a timer composes it
+    /// (desktop, which drives from winit, declares no tick knob).
+    fn config_members() -> Vec<ConfigMemberRecord> {
+        <aether_chassis::TickConfig as ConfigMember>::members()
+    }
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self { boot, kind_tick: _, tick_period } = self;

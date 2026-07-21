@@ -12,7 +12,7 @@ pub use kinds::*;
 #[cfg(feature = "runtime")]
 mod config;
 #[cfg(feature = "runtime")]
-pub use config::ClipboardConfig;
+pub use config::ClipboardParams;
 
 use aether_actor::{WasmActorMailbox, actor};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]

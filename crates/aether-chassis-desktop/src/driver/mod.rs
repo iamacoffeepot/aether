@@ -34,6 +34,7 @@ use aether_substrate::actor::native::local;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
+use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{
     ChassisCtx, HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
@@ -991,6 +992,15 @@ impl DriverCapability for DesktopDriverCapability {
     /// `aether.window` on a headless host without an event loop.
     fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
         ctx.claim_driver_mailbox("aether.window")
+    }
+
+    /// ADR-0156 §4: the window boot knobs (`AETHER_WINDOW_MODE` /
+    /// `AETHER_WINDOW_TITLE` / `AETHER_WIREFRAME`) belong to the desktop
+    /// driver — the driver that owns the winit window — so the chassis config
+    /// aggregate carries them only where a window composes (headless, which
+    /// drives a std timer, declares no window knob).
+    fn config_members() -> Vec<ConfigMemberRecord> {
+        <aether_chassis::WindowConfig as ConfigMember>::members()
     }
 
     // One-shot boot wiring: kind-id lookups, mailbox claims, and the

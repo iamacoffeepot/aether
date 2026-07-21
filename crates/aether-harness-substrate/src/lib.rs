@@ -31,7 +31,7 @@ mod settlement_config;
 pub mod test_helpers;
 pub mod unsupported_cap;
 
-pub use cap::{SubstrateHarnessCapConfig, SubstrateHarnessCapability};
+pub use cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 pub use chassis::{
     BenchWiring, CaptureOutcome, ComposeFn, FrameHook, RenderExt, SubstrateHarnessBuild, SubstrateHarnessChassis,
     SubstrateHarnessEnv, WORKERS,

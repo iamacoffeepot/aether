@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
             Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>((), ())),
             Box::new(|b| b.with_actor::<aether_text::TextCapability>((), ())),
             Box::new(|b| {
-                b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardConfig::InMemory, ())
+                b.with_actor::<aether_clipboard::ClipboardCapability>((), aether_clipboard::ClipboardParams::InMemory)
             }),
             Box::new(|b| {
                 b.with_actor::<aether_game::GameGatewayCapability>(

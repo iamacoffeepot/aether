@@ -62,10 +62,13 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 
 #[actor(singleton)]
 impl NativeActor for ReplySink {
-    type Config = ReplyCells;
+    // ADR-0156 §3: the shared capture cells are construction wiring, not
+    // operator config, so they ride the `Params` channel; `Config` is `()`.
+    type Config = ();
+    type Params = ReplyCells;
     const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
 
-    fn init(cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { cells })
     }
 
@@ -95,7 +98,7 @@ fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer
     let cells = ReplyCells::default();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<EngineServer>(engine_config, ())
-        .with_actor::<ReplySink>(cells.clone(), ())
+        .with_actor::<ReplySink>((), cells.clone())
         .build_passive()
         .expect("caps boot");
     (chassis, mailer, cells)

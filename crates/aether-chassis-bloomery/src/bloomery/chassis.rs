@@ -18,7 +18,7 @@ use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
-use crate::api::{ApiConfig, BloomeryApiCapability};
+use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
@@ -261,7 +261,7 @@ impl BloomeryChassis {
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
                 (),
             )
-            .with_actor::<BloomeryApiCapability>(ApiConfig { approval_policy_file }, ())
+            .with_actor::<BloomeryApiCapability>((), ApiParams { approval_policy_file })
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {

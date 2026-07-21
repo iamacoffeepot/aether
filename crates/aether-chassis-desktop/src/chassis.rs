@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
-use aether_clipboard::{ClipboardCapability, ClipboardConfig};
+use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
@@ -42,12 +42,12 @@ use aether_chassis::WindowConfig;
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_residual_knobs, load_chassis_config,
     resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file, rpc_port_from_env, with_common_caps,
     with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, DesktopCli};
-use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
+use aether_substrate::config::{ConfigError, ConfigManifest, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::path::Path;
@@ -119,6 +119,32 @@ impl DesktopChassis {
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
+    }
+
+    /// The ADR-0156 §4 composition-derived config aggregate: resolve the
+    /// chassis config, compose the exact capability chain `build_inner` runs
+    /// (config only — the winit event loop / capture queue are Start-stage
+    /// handles), then read [`Builder::config_manifest`] — the sibling of
+    /// `describe_manifest`'s claim terminal. Desktop reports the window knobs
+    /// (its driver's members) but not the headless tick knob.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution or substrate boot fails.
+    pub fn config_manifest() -> Result<ConfigManifest, BootError> {
+        let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        Ok(Self::compose(&boot, env).config_manifest())
+    }
+
+    /// Render the `--print-config` discovery dump from the composition-derived
+    /// manifest plus the residual hand-registered knobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution or substrate boot fails.
+    pub fn config_dump() -> Result<String, BootError> {
+        Ok(Self::config_manifest()?.dump(&chassis_residual_knobs()))
     }
 }
 
@@ -230,8 +256,10 @@ impl DesktopEnv {
     ///
     /// See [`Self::from_env`].
     pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, ConfigError> {
-        // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var.
-        validate_env(&chassis_known_keys())?;
+        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
+        // where the composed builder's `config_manifest` supplies the
+        // per-chassis known-key set (desktop no longer "knows" the headless
+        // tick knob).
         let DesktopCli {
             common,
             audio: audio_overlay,
@@ -434,7 +462,7 @@ impl DesktopChassis {
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
             .with_actor::<AudioCapability>(audio, ())
-            .with_actor::<ClipboardCapability>(ClipboardConfig::System, ())
+            .with_actor::<ClipboardCapability>((), ClipboardParams::System)
             .with_actor::<RenderCapability>(render_tuning, render_params)
             .with_actor::<UnsupportedSubstrateHarnessCapability>((), ())
             .with_actor::<LifecycleCapability>(lifecycle, frame_lifecycle_params());
@@ -485,6 +513,11 @@ impl DesktopChassis {
         );
 
         let builder = Self::compose(&boot, env);
+        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
+        // var, sweeping against the composition-derived known-key set plus the
+        // residual hand records. Runs here (not in `from_env`) because the
+        // per-chassis known keys come from the composed builder's manifest.
+        validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         // Issue 552 stage 2d: render is a NativeActor. The chassis builder
         // constructs the cap inside `init` (called from
         // `with_actor::<RenderCapability>(config)`); `init` publishes the
@@ -509,5 +542,25 @@ impl DesktopChassis {
             mailer.push(autoload_mail(component));
         }
         Ok(built)
+    }
+}
+
+#[cfg(test)]
+mod config_manifest_tests {
+    use super::DesktopChassis;
+    use aether_chassis::boot::chassis_residual_knobs;
+
+    #[test]
+    fn desktop_known_keys_drop_tick_and_keep_window_audio_render() {
+        // ADR-0156 §4 acceptance: desktop drives from winit, not a std timer,
+        // so its aggregate no longer includes the headless tick knob (the old
+        // flat registry over-claimed it). Membership is asserted from the
+        // composition walk, not a hand list.
+        let manifest = DesktopChassis::config_manifest().expect("desktop config manifest");
+        let known = manifest.known_keys(&chassis_residual_knobs());
+        assert!(!known.contains("AETHER_TICK_HZ"), "desktop drives from winit — must not claim the headless tick knob");
+        assert!(known.contains("AETHER_WINDOW_MODE"), "desktop must claim its window-driver knob");
+        assert!(known.contains("AETHER_AUDIO_DISABLE"), "desktop must claim the composed audio cap knob");
+        assert!(known.contains("AETHER_RENDER_VERTEX_BUFFER_BYTES"), "desktop must claim the composed render cap knob");
     }
 }

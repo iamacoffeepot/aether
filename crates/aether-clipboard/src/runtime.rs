@@ -1,7 +1,7 @@
 //! Native runtime backends and handlers for `aether.clipboard`.
 
 use super::{
-    ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult, SetClipboardText,
+    ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult, SetClipboardText,
     SetClipboardTextResult,
 };
 use aether_actor::runtime;
@@ -61,16 +61,24 @@ pub struct ClipboardCapabilityState {
 #[runtime]
 impl NativeActor for ClipboardCapability {
     type State = ClipboardCapabilityState;
-    type Config = ClipboardConfig;
+    // ADR-0156 §3: the backend mode is a composer choice (desktop picks
+    // `System`, the substrate-harness `InMemory`), not an operator-resolvable
+    // knob — so it rides the `Params` channel and `Config` is `()`.
+    type Config = ();
+    type Params = ClipboardParams;
 
     const NAMESPACE: &'static str = "aether.clipboard";
 
-    fn init(config: ClipboardConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<ClipboardCapabilityState, BootError> {
+    fn init(
+        (): (),
+        config: ClipboardParams,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<ClipboardCapabilityState, BootError> {
         let backend: Box<dyn ClipboardBackend> = match config {
-            ClipboardConfig::System => {
+            ClipboardParams::System => {
                 Box::new(SystemClipboard::new().map_err(|error| BootError::Other(Box::new(error)))?)
             }
-            ClipboardConfig::InMemory => Box::new(InMemoryClipboard::default()),
+            ClipboardParams::InMemory => Box::new(InMemoryClipboard::default()),
         };
         Ok(ClipboardCapabilityState { backend })
     }

@@ -42,7 +42,7 @@ enum ObservedSimMail {
 
 pub struct TestTurnSim;
 
-pub struct TestTurnSimConfig {
+pub struct TestTurnSimParams {
     sim: SimConfig,
     retained: Vec<TickBundle>,
     observed: mpsc::Sender<ObservedSimMail>,
@@ -78,10 +78,14 @@ struct PublishBundle {
 #[actor(singleton)]
 impl NativeActor for TestTurnSim {
     type State = TestTurnSimState;
-    type Config = TestTurnSimConfig;
+    // ADR-0156 §3: the retained-bundle vec + observation channel are
+    // construction wiring, not operator config, so they ride the `Params`
+    // channel; `Config` is `()`.
+    type Config = ();
+    type Params = TestTurnSimParams;
     const NAMESPACE: &'static str = "aether.game.player.test.turn_sim";
 
-    fn init(config: TestTurnSimConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<TestTurnSimState, BootError> {
+    fn init((): (), config: TestTurnSimParams, _ctx: &mut NativeInitCtx<'_>) -> Result<TestTurnSimState, BootError> {
         Ok(TestTurnSimState {
             sim: config.sim,
             retained: config.retained,
@@ -173,13 +177,13 @@ fn boot_player_substrate_with_limits(
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
         .with_actor::<TcpCapability>((), ())
         .with_actor::<TestTurnSim>(
-            TestTurnSimConfig {
+            (),
+            TestTurnSimParams {
                 sim: SimConfig { fact_sink: Some(gateway_mailbox), ring_depth: 8, grid_bounds: GridBounds::default() },
                 retained: vec![bundle(1), bundle(2)],
                 observed: observed_tx,
                 defer_poll_result,
             },
-            (),
         )
         .with_actor::<GameGatewayCapability>(
             GameGatewayConfig {

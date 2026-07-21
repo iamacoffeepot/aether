@@ -104,13 +104,15 @@ const MAX_OPEN_SEALS: usize = 1024;
 /// membership is a handful; the ceiling is generous headroom over that.
 const MAX_SEAL_MEMBERS: usize = 256;
 
-/// Boot config for the REST control api cap: the tier-policy file the pre-seal
-/// approve gate loads at init (issue #3583). Threaded from the shared GitHub
-/// config's `approval_policy_file` at chassis build so one Bloomery configuration
-/// serves every reader. A policy that fails to load leaves the cap with no
-/// policy, so the gate fails **closed** — every member resolves `human` and its
-/// seal is refused, never silently `auto`.
-pub struct ApiConfig {
+/// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
+/// channel): the tier-policy file the pre-seal approve gate loads at init (issue
+/// #3583). Threaded from the shared GitHub config's `approval_policy_file` at
+/// chassis build so one Bloomery configuration serves every reader — a
+/// composer-computed value, not an operator-resolvable knob, so it is `Params`.
+/// A policy that fails to load leaves the cap with no policy, so the gate fails
+/// **closed** — every member resolves `human` and its seal is refused, never
+/// silently `auto`.
+pub struct ApiParams {
     /// Repository-relative path to the Bloomery-owned tier policy
     /// (`bloomery/approval-policy.yml`).
     pub approval_policy_file: String,
@@ -252,10 +254,14 @@ enum Routed {
 #[runtime]
 impl NativeActor for BloomeryApiCapability {
     type State = ApiCapabilityState;
-    type Config = ApiConfig;
+    // ADR-0156 §3: the approval-policy path is threaded from the shared
+    // Bloomery GitHub config at chassis build — composer-computed construction
+    // input, not an operator-resolvable knob — so it rides `Params`.
+    type Config = ();
+    type Params = ApiParams;
     const NAMESPACE: &'static str = "aether.bloomery.api";
 
-    fn init(config: ApiConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
+    fn init((): (), config: ApiParams, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
         // Load the tier policy once at init. An unreadable or malformed policy is
         // not a boot failure — it leaves the cap policy-less, and the pre-seal
         // gate then fails closed (every member resolves `human`, its seal is

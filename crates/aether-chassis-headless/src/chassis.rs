@@ -42,12 +42,12 @@ use aether_chassis::TickConfig;
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_residual_knobs, load_chassis_config,
     resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file, rpc_port_from_env,
     tick_only_lifecycle_params, with_common_caps, with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, HeadlessCli};
-use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
+use aether_substrate::config::{ConfigError, ConfigManifest, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -89,6 +89,33 @@ impl HeadlessChassis {
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
+    }
+
+    /// The ADR-0156 §4 composition-derived config aggregate: resolve the
+    /// chassis config, compose the exact capability chain `build_inner` runs
+    /// (via `compose`), then read [`Builder::config_manifest`] — the sibling
+    /// of `describe_manifest`'s claim terminal. The known-keys sweep and
+    /// `--print-config` dump read this walk, so headless reports only the
+    /// knobs it composes (no window / audio / render knobs).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution or substrate boot fails.
+    pub fn config_manifest() -> Result<ConfigManifest, BootError> {
+        let env = HeadlessEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
+        Ok(Self::compose(&boot, env).config_manifest())
+    }
+
+    /// Render the `--print-config` discovery dump from the composition-derived
+    /// manifest plus the residual hand-registered knobs. The bin prints this
+    /// and exits before boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution or substrate boot fails.
+    pub fn config_dump() -> Result<String, BootError> {
+        Ok(Self::config_manifest()?.dump(&chassis_residual_knobs()))
     }
 }
 
@@ -177,9 +204,10 @@ impl HeadlessEnv {
     /// argv overlay value) holds an unparseable value (ADR-0090 §4).
     pub fn from_env_with_argv(cli: HeadlessCli) -> Result<Self, ConfigError> {
         use std::net::{IpAddr, Ipv4Addr};
-        // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var before
-        // resolving — a typo / stale export is loud but non-fatal.
-        validate_env(&chassis_known_keys())?;
+        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
+        // where the composed builder's `config_manifest` supplies the
+        // per-chassis known-key set (headless no longer "knows" the window /
+        // audio / render knobs it never composes).
         let HeadlessCli {
             common,
             tick: tick_overlay,
@@ -409,6 +437,11 @@ impl HeadlessChassis {
         );
 
         let builder = Self::compose(&boot, env);
+        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
+        // var, sweeping against the composition-derived known-key set plus the
+        // residual hand records. Runs here (not in `from_env`) because the
+        // per-chassis known keys come from the composed builder's manifest.
+        validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
@@ -420,5 +453,31 @@ impl HeadlessChassis {
             mailer.push(autoload_mail(component));
         }
         Ok(built)
+    }
+}
+
+#[cfg(test)]
+mod config_manifest_tests {
+    use super::HeadlessChassis;
+    use aether_chassis::boot::chassis_residual_knobs;
+
+    #[test]
+    fn headless_known_keys_drop_window_and_audio_and_keep_tick() {
+        // ADR-0156 §4 acceptance: the aggregate is derived from what headless
+        // actually composes, so the over-claim of the old flat registry dies —
+        // headless composes no window driver and no audio cap, so its known
+        // keys no longer include those knobs (a stale `AETHER_WINDOW_MODE` on a
+        // headless box now fails the sweep honestly). Membership is asserted
+        // from the composition walk, not a hand list.
+        let manifest = HeadlessChassis::config_manifest().expect("headless config manifest");
+        let known = manifest.known_keys(&chassis_residual_knobs());
+        assert!(!known.contains("AETHER_WINDOW_MODE"), "headless must not claim the desktop window-driver knob");
+        assert!(
+            !known.contains("AETHER_AUDIO_DISABLE"),
+            "headless must not claim the audio cap knob it never composes"
+        );
+        assert!(known.contains("AETHER_TICK_HZ"), "headless must claim its own timer-driver tick knob");
+        assert!(known.contains("AETHER_HTTP_DISABLE"), "headless must claim a composed common-cap knob");
+        assert!(known.contains("AETHER_MAX_FRAME_SIZE"), "headless must fold in the residual infra knob");
     }
 }

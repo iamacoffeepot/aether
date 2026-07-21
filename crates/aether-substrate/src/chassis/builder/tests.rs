@@ -19,6 +19,13 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+// ADR-0156 §3: these builder-test caps carry shared counters / a raw sentinel
+// as construction wiring, not operator config. The composition boundary bounds
+// `Config` by `ConfigMember`, so each cap keeps `Config = ()` and moves its
+// wiring onto the `Params` channel (#3851) — its semantically correct home —
+// rather than stamp an empty member impl (which the required-method `members`
+// forbids by design).
+
 macro_rules! pod_kind {
     ($type:ident { $field:ident: $field_ty:ty }, $name:literal, $id:expr) => {
         #[repr(C)]
@@ -59,13 +66,13 @@ macro_rules! count_on_kind_actor {
         impl HandlesKind<$kind> for $type {}
 
         impl aether_actor::Lifecycle<Self> for $type {
-            type Config = Arc<AtomicU32>;
-            type Params = ();
+            type Config = ();
+            type Params = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
             type Ctx<'a> = NativeCtx<'a>;
 
-            fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { $field: config })
             }
         }
@@ -104,13 +111,13 @@ macro_rules! close_observed_state {
         }
 
         impl aether_actor::Lifecycle<Self> for $type {
-            type Config = Arc<AtomicU32>;
-            type Params = ();
+            type Config = ();
+            type Params = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
             type Ctx<'a> = NativeCtx<'a>;
 
-            fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { close_observed: config })
             }
 
@@ -346,12 +353,12 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Lifecycle<Self> for InitTripwireCap {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             config.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(Self { _init_count: config })
         }
@@ -380,7 +387,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
 
     let claimed = Builder::<DrivenTestChassis<ClaimingDriver>>::new(registry, Arc::clone(&mailer))
         .with_actor::<StubLog>((), ())
-        .with_actor::<InitTripwireCap>(Arc::clone(&init_count), ())
+        .with_actor::<InitTripwireCap>((), Arc::clone(&init_count))
         .claim_namespaces()
         .expect("claim-only succeeds");
 
@@ -572,12 +579,12 @@ fn with_actor_boots_dispatches_and_tears_down() {
     impl HandlesKind<Ping> for ProbeCap {}
 
     impl aether_actor::Lifecycle<Self> for ProbeCap {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: config })
         }
     }
@@ -609,7 +616,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     let received = Arc::new(AtomicU32::new(0));
 
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ProbeCap>(Arc::clone(&received), ())
+        .with_actor::<ProbeCap>((), Arc::clone(&received))
         .build_passive()
         .expect("with_actor boot succeeds");
 
@@ -681,12 +688,12 @@ fn with_actor_stamps_local_for_init_and_handler() {
     struct Counter(u32);
 
     impl aether_actor::Lifecycle<Self> for LocalProbe {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             // Init runs inside the chassis builder's stamp guard
             // — write a sentinel so the handler test below proves
             // the same slots are reused across init→dispatch.
@@ -720,7 +727,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     let (registry, mailer) = bare_substrate();
     let observed = Arc::new(AtomicU32::new(0));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<LocalProbe>(Arc::clone(&observed), ())
+        .with_actor::<LocalProbe>((), Arc::clone(&observed))
         .build_passive()
         .expect("LocalProbe boots");
 
@@ -782,14 +789,14 @@ fn ctx_spawn_child_routes_through_handler() {
     }
     impl HandlesKind<Hatch> for ParentCap {}
     impl aether_actor::Lifecycle<Self> for ParentCap {
-        type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
-        type Params = ();
+        type Config = ();
+        type Params = (Arc<AtomicU32>, Arc<AtomicU32>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init(
-            (spawn_count, child_received): Self::Config,
-            _params: (),
+            (): (),
+            (spawn_count, child_received): Self::Params,
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             Ok(Self { spawn_count, child_received })
@@ -808,7 +815,7 @@ fn ctx_spawn_child_routes_through_handler() {
             if kind.0 == Hatch::ID.0 {
                 let _ = Hatch::decode_from_bytes(payload)?;
                 let _id = ctx
-                    .spawn_child::<ChildCap>(Subname::Counter, Arc::clone(&state.child_received), ())
+                    .spawn_child::<ChildCap>(Subname::Counter, (), Arc::clone(&state.child_received))
                     .after_init(Ping { tag: 42 })
                     .finish()
                     .expect("spawn_child must succeed");
@@ -824,7 +831,7 @@ fn ctx_spawn_child_routes_through_handler() {
     let child_received = Arc::new(AtomicU32::new(0));
 
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&child_received)), ())
+        .with_actor::<ParentCap>((), (Arc::clone(&spawn_count), Arc::clone(&child_received)))
         .build_passive()
         .expect("ParentCap boots");
 
@@ -889,7 +896,7 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
         .expect("empty chassis boots");
 
     let id = chassis
-        .spawn_actor::<Closer>(Subname::Counter, Arc::clone(&close_observed), ())
+        .spawn_actor::<Closer>(Subname::Counter, (), Arc::clone(&close_observed))
         .finish()
         .expect("spawn instanced actor");
 
@@ -929,7 +936,7 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     // id, not collide); reuse the same `Named` subname to land
     // back at the tombstoned id.
     let err = chassis
-        .spawn_actor::<Closer>(Subname::Named("0"), Arc::clone(&close_observed), ())
+        .spawn_actor::<Closer>(Subname::Named("0"), (), Arc::clone(&close_observed))
         .finish()
         .expect_err("retired subname must reject");
     assert!(matches!(err, SpawnError::SubnameRetired { .. }), "expected SubnameRetired, got {err:?}");
@@ -964,13 +971,13 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     impl HandlesKind<CostQuit> for SpawnCostProbe {}
 
     impl aether_actor::Lifecycle<Self> for SpawnCostProbe {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
 
-        fn init(ping_count: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), ping_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { ping_count })
         }
     }
@@ -1029,7 +1036,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         .build_passive()
         .expect("empty chassis boots");
     let id = chassis
-        .spawn_actor::<SpawnCostProbe>(Subname::Named("measured"), Arc::clone(&ping_count), ())
+        .spawn_actor::<SpawnCostProbe>(Subname::Named("measured"), (), Arc::clone(&ping_count))
         .finish()
         .expect("spawn cost probe");
 
@@ -1110,7 +1117,7 @@ fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
         .expect("empty chassis boots");
 
     let id = chassis
-        .spawn_actor::<Quiet>(Subname::Counter, Arc::clone(&close_observed), ())
+        .spawn_actor::<Quiet>(Subname::Counter, (), Arc::clone(&close_observed))
         .finish()
         .expect("spawn instanced actor");
 
@@ -1158,7 +1165,7 @@ fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
     for (i, counter) in counters.iter().enumerate() {
         let name = format!("inst-{i}");
         chassis
-            .spawn_actor::<Quiet>(Subname::Named(&name), Arc::clone(counter), ())
+            .spawn_actor::<Quiet>(Subname::Named(&name), (), Arc::clone(counter))
             .finish()
             .expect("spawn instanced actor");
     }
@@ -1304,12 +1311,12 @@ fn ctx_monitor_fires_notice_at_target_close() {
     impl HandlesKind<WatchOrder> for Watcher {}
     impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
-        type Config = (Arc<AtomicU32>, Arc<AtomicU64>);
-        type Params = ();
+        type Config = ();
+        type Params = (Arc<AtomicU32>, Arc<AtomicU64>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { notice_count: config.0, last_target: config.1, handle: Mutex::new(None) })
         }
     }
@@ -1352,7 +1359,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     let notice_count = Arc::new(AtomicU32::new(0));
     let last_target = Arc::new(AtomicU64::new(0));
     let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, (Arc::clone(&notice_count), Arc::clone(&last_target)), ())
+        .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&notice_count), Arc::clone(&last_target)))
         .finish()
         .expect("spawn watcher");
 
@@ -1485,12 +1492,12 @@ fn watcher_close_prunes_targets_forward_index() {
     impl HandlesKind<WatchOrder> for Watcher {}
     impl HandlesKind<Quit> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { handle: Mutex::new(None), close_observed: config })
         }
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -1531,7 +1538,7 @@ fn watcher_close_prunes_targets_forward_index() {
     let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish().expect("spawn target");
     let close_observed = Arc::new(AtomicU32::new(0));
     let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, Arc::clone(&close_observed), ())
+        .spawn_actor::<Watcher>(Subname::Counter, (), Arc::clone(&close_observed))
         .finish()
         .expect("spawn watcher");
 
@@ -1621,12 +1628,12 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     }
     impl HandlesKind<Quit> for Member {}
     impl aether_actor::Lifecycle<Self> for Member {
-        type Config = u32;
-        type Params = ();
+        type Config = ();
+        type Params = u32;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(tag: u32, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), tag: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { tag })
         }
     }
@@ -1654,9 +1661,9 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let id_a = chassis.spawn_actor::<Member>(Subname::Named("a"), 1, ()).finish().expect("spawn a");
-    let _id_b = chassis.spawn_actor::<Member>(Subname::Named("b"), 2, ()).finish().expect("spawn b");
-    let id_c = chassis.spawn_actor::<Member>(Subname::Named("c"), 3, ()).finish().expect("spawn c");
+    let id_a = chassis.spawn_actor::<Member>(Subname::Named("a"), (), 1).finish().expect("spawn a");
+    let _id_b = chassis.spawn_actor::<Member>(Subname::Named("b"), (), 2).finish().expect("spawn b");
+    let id_c = chassis.spawn_actor::<Member>(Subname::Named("c"), (), 3).finish().expect("spawn c");
 
     // Issue 629 / Phase A: resolve_actor returns the address
     // (`MailboxId`), not `Arc<A>`. Verify the address resolves and
@@ -1754,12 +1761,12 @@ fn instanced_can_spawn_grandchild() {
     }
     impl HandlesKind<Ping> for Grandchild {}
     impl aether_actor::Lifecycle<Self> for Grandchild {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: config })
         }
     }
@@ -1792,12 +1799,12 @@ fn instanced_can_spawn_grandchild() {
     impl HandlesKind<Hatch> for Parent {}
     impl HandlesKind<Quit> for Parent {}
     impl aether_actor::Lifecycle<Self> for Parent {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { grandchild_received: config })
         }
     }
@@ -1818,7 +1825,7 @@ fn instanced_can_spawn_grandchild() {
                 // first envelope dispatches without an external
                 // mail step.
                 let _id = ctx
-                    .spawn_child::<Grandchild>(Subname::Named("only"), Arc::clone(&state.grandchild_received), ())
+                    .spawn_child::<Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
                     .after_init(Ping { tag: 0xCAFE })
                     .finish()
                     .expect("recursive spawn must succeed");
@@ -1840,7 +1847,7 @@ fn instanced_can_spawn_grandchild() {
 
     let grandchild_received = Arc::new(AtomicU32::new(0));
     let parent_id = chassis
-        .spawn_actor::<Parent>(Subname::Named("p1"), Arc::clone(&grandchild_received), ())
+        .spawn_actor::<Parent>(Subname::Named("p1"), (), Arc::clone(&grandchild_received))
         .finish()
         .expect("spawn parent");
 
@@ -1962,12 +1969,12 @@ fn spawn_actor_runs_wire_once_after_init() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Lifecycle<Self> for WireSpawnProbe {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_count: config })
         }
         fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -1995,7 +2002,7 @@ fn spawn_actor_runs_wire_once_after_init() {
         .expect("empty chassis boots");
 
     let id = chassis
-        .spawn_actor::<WireSpawnProbe>(Subname::Counter, Arc::clone(&wire_count), ())
+        .spawn_actor::<WireSpawnProbe>(Subname::Counter, (), Arc::clone(&wire_count))
         .finish()
         .expect("spawn instanced actor");
 
@@ -2020,12 +2027,12 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Lifecycle<Self> for WireProbe {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_count: config })
         }
         fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -2049,7 +2056,7 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
     let (registry, mailer) = bare_substrate();
     let wire_count = Arc::new(AtomicU32::new(0));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<WireProbe>(Arc::clone(&wire_count), ())
+        .with_actor::<WireProbe>((), Arc::clone(&wire_count))
         .build_passive()
         .expect("with_actor boot succeeds");
 
@@ -2077,12 +2084,12 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Lifecycle<Self> for Pinger {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_ran: config })
         }
         fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
@@ -2113,12 +2120,12 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     }
     impl HandlesKind<WireBarrierPing> for Ponger {}
     impl aether_actor::Lifecycle<Self> for Ponger {
-        type Config = Arc<AtomicU32>;
-        type Params = ();
+        type Config = ();
+        type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: config })
         }
     }
@@ -2147,9 +2154,9 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
 
     let builder = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer));
     let builder = if pinger_first {
-        builder.with_actor::<Pinger>(Arc::clone(&wire_ran), ()).with_actor::<Ponger>(Arc::clone(&received), ())
+        builder.with_actor::<Pinger>((), Arc::clone(&wire_ran)).with_actor::<Ponger>((), Arc::clone(&received))
     } else {
-        builder.with_actor::<Ponger>(Arc::clone(&received), ()).with_actor::<Pinger>(Arc::clone(&wire_ran), ())
+        builder.with_actor::<Ponger>((), Arc::clone(&received)).with_actor::<Pinger>((), Arc::clone(&wire_ran))
     };
     let chassis = builder.build_passive().expect("multi-pass boot succeeds");
 

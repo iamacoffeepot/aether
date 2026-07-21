@@ -7,7 +7,7 @@
 //! no wgpu gate.
 
 use aether_clipboard::{
-    ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability,
+    ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability,
     SetClipboardText, SetClipboardTextResult,
 };
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -17,7 +17,7 @@ const CLIPBOARD_MAILBOX: &str = "aether.clipboard";
 #[test]
 fn clipboard_set_then_get_round_trips_in_memory() {
     let mut harness = SubstrateHarness::builder()
-        .with_actor::<ClipboardCapability>(ClipboardConfig::InMemory, ())
+        .with_actor::<ClipboardCapability>((), ClipboardParams::InMemory)
         .build()
         .expect("boot");
 
