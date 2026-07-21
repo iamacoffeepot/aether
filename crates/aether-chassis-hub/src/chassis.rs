@@ -20,15 +20,15 @@ use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
+use aether_substrate::config::{ConfigError, ConfigManifest, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::rpc_port_from_env;
 use aether_chassis::boot::{
-    ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config, resolve_env_with_file,
-    resolve_teardown_cap_with_file, resolve_with_file,
+    ActorRingConfig, SchedulerTuningConfig, hub_residual_knobs, load_chassis_config, resolve_env_with_file,
+    resolve_teardown_cap_with_file, resolve_with_file, with_hub_fleet_passthrough,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -68,6 +68,33 @@ impl HubChassis {
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
+    }
+
+    /// The ADR-0156 §4 composition-derived config aggregate: resolve the hub
+    /// config, compose the exact capability chain `build_inner` runs (via
+    /// `compose` — including the declared fleet pass-through), then read
+    /// [`Builder::config_manifest`]. The hub's manifest is a deliberate
+    /// superset of what it wires itself — spawned substrates inherit its env,
+    /// so it declares the full fleet knob set as its one over-approximation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution or substrate boot fails.
+    pub fn config_manifest() -> Result<ConfigManifest, BootError> {
+        let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        Ok(Self::compose(&boot, env).config_manifest())
+    }
+
+    /// Render the `--print-config` discovery dump from the hub's
+    /// composition-derived manifest plus the hub residual hand-registered
+    /// knobs (the engines-cap store-root override).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution or substrate boot fails.
+    pub fn config_dump() -> Result<String, BootError> {
+        Ok(Self::config_manifest()?.dump(&hub_residual_knobs()))
     }
 }
 
@@ -116,9 +143,9 @@ impl HubEnv {
     /// call-site change, matching desktop / headless.
     pub fn from_env_with_argv(cli: &HubCli) -> Result<Self, ConfigError> {
         use std::net::{IpAddr, Ipv4Addr};
-        // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var before
-        // resolving — a typo / stale export is loud but non-fatal.
-        validate_env(&hub_known_keys())?;
+        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
+        // where the composed builder's `config_manifest` (including the
+        // declared fleet pass-through) supplies the hub's known-key set.
         let config_file = load_chassis_config(cli.config.clone())?;
         let config_file = config_file.as_ref();
         let rpc_port = cli.rpc_port.or_else(rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
@@ -147,7 +174,11 @@ impl HubChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
-        Builder::<Self>::new(registry, mailer)
+        // ADR-0156 §4: declare the hub's fleet pass-through set — the full
+        // fleet knobs a hub-spawned substrate inherits from the hub's env, the
+        // one documented over-approximation in the aggregate. The engines cap
+        // (`EngineConfig`) declares its own member via `with_actor` below.
+        with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer))
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_cap(teardown_cap)
@@ -172,6 +203,10 @@ impl HubChassis {
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let builder = Self::compose(&boot, env);
+        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
+        // var, sweeping against the composition-derived known-key set (the
+        // declared fleet pass-through) plus the hub residual hand records.
+        validate_env(&builder.config_manifest().known_keys(&hub_residual_knobs()))?;
         let driver = HubServerDriverCapability { boot };
         builder.driver(driver).build()
     }
@@ -264,4 +299,26 @@ fn shutdown_signal() -> &'static str {
     }
     let _ = rx.recv();
     "Ctrl-C"
+}
+
+#[cfg(test)]
+mod config_manifest_tests {
+    use super::HubChassis;
+    use aether_chassis::boot::hub_residual_knobs;
+
+    #[test]
+    fn hub_known_keys_carry_fleet_passthrough_engine_and_store_root() {
+        // ADR-0156 §4 acceptance: the hub composes only trace+engine+rpc, but
+        // a hub-spawned substrate inherits its env, so the hub declares the
+        // full fleet knob set as its one documented over-approximation. Its own
+        // engines-cap knob rides `with_actor`; the store-root override folds in
+        // as a residual hand record.
+        let manifest = HubChassis::config_manifest().expect("hub config manifest");
+        let known = manifest.known_keys(&hub_residual_knobs());
+        assert!(known.contains("AETHER_AUDIO_DISABLE"), "hub declares the fleet audio knob as pass-through");
+        assert!(known.contains("AETHER_WINDOW_MODE"), "hub declares the fleet window knob as pass-through");
+        assert!(known.contains("AETHER_TICK_HZ"), "hub declares the fleet tick knob as pass-through");
+        assert!(known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"), "hub claims its own composed engines-cap knob");
+        assert!(known.contains("AETHER_ENGINE_STORE_ROOT"), "hub folds in the store-root residual knob");
+    }
 }

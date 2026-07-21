@@ -30,6 +30,11 @@ use syn::{
 struct ContainerAttr {
     env_prefix: String,
     cli_prefix: String,
+    /// `#[config(section = "...")]` — the sectioned-TOML config-file
+    /// section this config reads (ADR-0156 §4). Defaults to `cli_prefix`
+    /// when omitted (the two align for most caps); an explicit override
+    /// pins a historical section name that differs from the CLI prefix.
+    section: Option<String>,
     /// `#[config(skip_from_layer)]` — opt the cap out of the
     /// auto-emitted `FromArgvThenEnv` impl when its `from_layer` body
     /// can't be assembled mechanically (`NamespaceRoots`'s
@@ -129,18 +134,25 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
     let inherent_impl = emit_inherent_impl(domain_ident, &layer_ident);
     let overlay_struct = emit_overlay_struct(&overlay_ident, &layer_ident, vis, &fields);
+    // ADR-0156 §4: section defaults from `cli_prefix` where the two align;
+    // an explicit `#[config(section = "...")]` pins a historical section
+    // name that differs from the CLI prefix.
+    let section = container.section.clone().unwrap_or_else(|| container.cli_prefix.clone());
+    let member_impl = emit_member_impl(domain_ident, &layer_ident, &section);
 
     Ok(quote! {
         #layer_struct
         #trait_impl
         #inherent_impl
         #overlay_struct
+        #member_impl
     })
 }
 
 fn parse_container_attr(attrs: &[Attribute]) -> syn::Result<ContainerAttr> {
     let mut env_prefix: Option<String> = None;
     let mut cli_prefix: Option<String> = None;
+    let mut section: Option<String> = None;
     let mut skip_from_layer = false;
 
     for attr in attrs {
@@ -154,6 +166,9 @@ fn parse_container_attr(attrs: &[Attribute]) -> syn::Result<ContainerAttr> {
             } else if meta.path.is_ident("cli_prefix") {
                 cli_prefix = Some(meta.value()?.parse::<LitStr>()?.value());
                 Ok(())
+            } else if meta.path.is_ident("section") {
+                section = Some(meta.value()?.parse::<LitStr>()?.value());
+                Ok(())
             } else if meta.path.is_ident("skip_from_layer") {
                 skip_from_layer = true;
                 Ok(())
@@ -161,7 +176,7 @@ fn parse_container_attr(attrs: &[Attribute]) -> syn::Result<ContainerAttr> {
                 Err(meta.error(
                     "unknown container attribute; expected one of \
                      `env_prefix = \"...\"`, `cli_prefix = \"...\"`, \
-                     `skip_from_layer`",
+                     `section = \"...\"`, `skip_from_layer`",
                 ))
             }
         })?;
@@ -176,7 +191,7 @@ fn parse_container_attr(attrs: &[Attribute]) -> syn::Result<ContainerAttr> {
         syn::Error::new(span, "missing `#[config(cli_prefix = \"...\")]` container attribute")
     })?;
 
-    Ok(ContainerAttr { env_prefix, cli_prefix, skip_from_layer })
+    Ok(ContainerAttr { env_prefix, cli_prefix, section, skip_from_layer })
 }
 
 fn parse_field_attr(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
@@ -540,6 +555,23 @@ fn emit_trait_impl(domain_ident: &Ident, layer_ident: &Ident, fields: &[FieldInf
                 Self {
                     #( #body, )*
                 }
+            }
+        }
+    }
+}
+
+/// ADR-0156 §4: emit the `ConfigMember` impl carrying this config's TOML
+/// section name and its confique layer `Meta`. `Builder::config_manifest`
+/// walks these off the composed `with_actor` chain to derive the chassis
+/// config aggregate (known-keys sweep + `--print-config`).
+fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str) -> TokenStream2 {
+    quote! {
+        impl ::aether_substrate::config::ConfigMember for #domain_ident {
+            fn members() -> ::std::vec::Vec<::aether_substrate::config::ConfigMemberRecord> {
+                ::std::vec![::aether_substrate::config::ConfigMemberRecord {
+                    section: #section,
+                    meta: &<#layer_ident as ::confique::Config>::META,
+                }]
             }
         }
     }

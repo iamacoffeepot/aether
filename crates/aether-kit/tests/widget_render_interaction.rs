@@ -44,7 +44,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_clipboard::{ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult};
+use aether_clipboard::{ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -158,7 +158,7 @@ fn build_bench() -> SubstrateHarness {
         .with_component_host()
         .with_actor::<InputCapability>((), ())
         .with_actor::<TextCapability>((), ())
-        .with_actor::<ClipboardCapability>(ClipboardConfig::InMemory, ())
+        .with_actor::<ClipboardCapability>((), ClipboardParams::InMemory)
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .namespace_roots(roots)
         .build()

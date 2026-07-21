@@ -38,6 +38,7 @@ use crate::actor::native::{NativeActor, TaskCompletionWake};
 use crate::chassis::Chassis;
 use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use crate::chassis::error::BootError;
+use crate::config::ConfigMember;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::Registry;
@@ -105,6 +106,7 @@ pub fn boot_test_chassis_with<A>(
 ) -> PassiveChassis<TestChassis>
 where
     A: NativeActor,
+    A::Config: ConfigMember,
 {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
         .with_actor::<A>(config, params)

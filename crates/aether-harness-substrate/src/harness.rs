@@ -44,6 +44,7 @@ use crate::settlement_config::SettlementConfig;
 use aether_actor::Addressable;
 use aether_fs::NamespaceRoots;
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
+use aether_substrate::config::ConfigMember;
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
     Source, SourceAddr, SubstrateBoot,
@@ -365,7 +366,7 @@ impl SubstrateHarnessBuilder {
     pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
     where
         A: NativeActor,
-        A::Config: Send + 'static,
+        A::Config: Send + 'static + ConfigMember,
         A::Params: Send + 'static,
     {
         self.compose.push(Box::new(move |builder| builder.with_actor::<A>(config, params)));

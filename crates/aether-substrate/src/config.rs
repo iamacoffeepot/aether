@@ -505,6 +505,115 @@ pub fn dump_config(metas: &[&'static Meta], records: &[KnobRecord]) -> String {
     out
 }
 
+/// One config member's compose-stage declaration (ADR-0156 §4): the TOML
+/// config-file section it reads and the confique [`Meta`] carrying its
+/// `AETHER_*` keys, defaults, and docs. Both fields are `'static`, so the
+/// record is `Copy` and rides the [`Builder`](crate::chassis::builder::Builder)'s
+/// accumulator as an ordinary value.
+#[derive(Clone, Copy, Debug)]
+pub struct ConfigMemberRecord {
+    /// The `[section]` name this member reads from the sectioned TOML
+    /// chassis config file (e.g. `"http"`, `"scheduler"`). Declared on the
+    /// config type via the derive's `#[config(section = "...")]` (defaulting
+    /// to `cli_prefix` where they align).
+    pub section: &'static str,
+    /// The confique layer `Meta` — the walk reads its leaves for the env
+    /// keys, defaults, and docs.
+    pub meta: &'static Meta,
+}
+
+/// ADR-0156 §4 member trait: a config type's contribution to the
+/// composition-derived chassis config aggregate. `#[derive(aether_substrate::Config)]`
+/// emits the impl (one member carrying the type's section + `META`). The
+/// composition boundary ([`Builder::with_actor`](crate::chassis::builder::Builder::with_actor))
+/// bounds a cap's `Config` by this trait, so a cap that smuggles construction
+/// wiring into `Config` (a live handle, a resolved `MailboxId`) — a type the
+/// derive can't apply to — stops compiling at the compose site rather than
+/// drifting silently out of the aggregate.
+///
+/// [`members`](Self::members) is a **required method with no default** — a
+/// blanket empty default would make the bound vacuous (any `impl ConfigMember
+/// for T {}` one-liner would satisfy it, re-opening the exact wiring-in-`Config`
+/// escape hatch the bound exists to close). Rust cannot seal a trait a derive
+/// must implement downstream, so the required-method shape is the enforcement:
+/// the only hand-written impls in the workspace are the two sanctioned ones
+/// below (`()` and `RpcServerConfig`), everything else is derive-emitted or
+/// moved its wiring to `Params` (`Config = ()`).
+pub trait ConfigMember {
+    /// The member records this config declares. A derive-`Config` type returns
+    /// its one section + `META` record; the two sanctioned hand impls return
+    /// empty.
+    #[must_use]
+    fn members() -> Vec<ConfigMemberRecord>;
+}
+
+/// The configless-cap case: a cap whose `Config = ()` declares no aggregate
+/// member. The one sanctioned empty hand impl (beside `RpcServerConfig`'s
+/// pre-#3849 bridge); every other non-derive `Config` moved its wiring onto
+/// the `Params` channel rather than stamp an empty member impl here.
+impl ConfigMember for () {
+    fn members() -> Vec<ConfigMemberRecord> {
+        Vec::new()
+    }
+}
+
+/// The composition-derived chassis config aggregate (ADR-0156 §4): the
+/// union of every composed cap's [`ConfigMember`] declaration, the driver's,
+/// and the chassis-declared non-cap members (workers / ring capacities /
+/// scheduler tuning / teardown cap), assembled by
+/// [`Builder::config_manifest`](crate::chassis::builder::Builder::config_manifest).
+/// The known-keys sweep and `--print-config` dump read this walk instead of a
+/// hand-maintained registry, so a chassis knows exactly the knobs it composes
+/// — headless stops "knowing" the window/audio knobs it never wires, desktop
+/// stops "knowing" the headless tick knob.
+#[derive(Clone, Debug, Default)]
+pub struct ConfigManifest {
+    members: Vec<ConfigMemberRecord>,
+}
+
+impl ConfigManifest {
+    /// Assemble a manifest from a member list (the builder's accumulator
+    /// plus the driver's members).
+    #[must_use]
+    pub fn from_members(members: Vec<ConfigMemberRecord>) -> Self {
+        Self { members }
+    }
+
+    /// The declared members, in composition order.
+    #[must_use]
+    pub fn members(&self) -> &[ConfigMemberRecord] {
+        &self.members
+    }
+
+    /// Every member's confique `Meta`, for the [`known_keys`] / [`dump_config`]
+    /// walks.
+    #[must_use]
+    pub fn metas(&self) -> Vec<&'static Meta> {
+        self.members.iter().map(|record| record.meta).collect()
+    }
+
+    /// The file-section vocabulary the composed members declare.
+    pub fn sections(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.members.iter().map(|record| record.section)
+    }
+
+    /// Assemble the [`KnownKeys`] set for the unknown-`AETHER_*` sweep from
+    /// this walk plus the residual hand-registered knobs (the chassis-direct
+    /// records the aggregate doesn't yet own — the RPC port, frame size,
+    /// runtime log/panic knobs; ADR-0156 §6 folds those in on later slices).
+    #[must_use]
+    pub fn known_keys(&self, records: &[KnobRecord]) -> KnownKeys {
+        known_keys(&self.metas(), records)
+    }
+
+    /// Render the `--print-config` discovery dump from this walk plus the
+    /// residual hand-registered knobs.
+    #[must_use]
+    pub fn dump(&self, records: &[KnobRecord]) -> String {
+        dump_config(&self.metas(), records)
+    }
+}
+
 /// A boot-time config fault (ADR-0090 §4). Distinct from
 /// [`BootError`] so the chassis env resolvers can surface a
 /// config-specific error before the generic boot path; it

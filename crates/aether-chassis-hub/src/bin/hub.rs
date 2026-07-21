@@ -11,14 +11,16 @@
 #![allow(clippy::print_stdout)]
 
 use aether_chassis::cli::HubCli;
-use aether_chassis::hub_config_dump;
 use aether_chassis_hub::{Chassis, HubChassis, HubEnv};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
     let cli = HubCli::parse();
     if cli.print_config {
-        print!("{}", hub_config_dump());
+        // ADR-0156 §4: the dump is the hub's composition-derived aggregate
+        // (including the declared fleet pass-through) plus the hub residual
+        // hand records, so it resolves the hub config the same way a boot does.
+        print!("{}", HubChassis::config_dump()?);
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —

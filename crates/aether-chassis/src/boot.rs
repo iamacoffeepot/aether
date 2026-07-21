@@ -22,39 +22,31 @@ use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
-use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLayer};
-use aether_audio::AudioConfigLayer;
+use aether_anthropic::{AnthropicCapability, AnthropicConfig};
+use aether_audio::AudioConfig;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
-use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
-use aether_engine::EngineConfigLayer;
-use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
-use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayConfigLayer, GameGatewayParams};
-use aether_gemini::{GeminiCapability, GeminiConfig, GeminiConfigLayer, GeminiParams};
-use aether_http::HttpConfigLayer;
-use aether_http::HttpServerConfigLayer;
-use aether_http::{HttpCapability, HttpConfig};
+use aether_contentgen::ContentGenConfig;
+use aether_fs::{FsCapability, NamespaceRoots};
+use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayParams};
+use aether_gemini::{GeminiCapability, GeminiConfig, GeminiParams};
+use aether_http::{HttpCapability, HttpConfig, HttpServerConfig};
 use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
-use aether_lifecycle::{LifecycleConfigLayer, LifecycleGraphData, LifecycleParams};
-use aether_render::RenderTuningConfigLayer;
+use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
+use aether_render::RenderTuningConfig;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
-use aether_substrate::config::{
-    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config,
-    known_keys,
-};
+use aether_substrate::config::{ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
-use confique::Config as _;
-use confique::meta::Meta;
 
-use crate::tick::TickConfigLayer;
-use crate::window::WindowConfigLayer;
+use crate::tick::TickConfig;
+use crate::window::WindowConfig;
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -482,81 +474,29 @@ impl ChassisBootConfig {
     }
 }
 
-/// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
-/// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
-/// render / lifecycle / game-gateway / actor-ring / scheduler-tuning /
-/// chassis-boot / window / tick) plus
-/// the hand-registered chassis knobs ([`CHASSIS_KNOBS`] — the RPC port
-/// and the orphaned frame-size knob) and the runtime log-filter /
-/// panic-hook knobs (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
-/// [`validate_env`](aether_substrate::config::validate_env) sweeps the
-/// process env against this; e2's `--print-config` dump walks the same
-/// metas + records.
-///
-/// Lives bundle-side rather than in `aether-substrate::config` because
-/// the cap layer types live in the per-cap crates, which depend on
-/// `aether-substrate` (not the reverse) — the generic `known_keys`
-/// assembly fn is in `config`; the concrete chassis registry is here.
+/// The residual hand-registered knobs the composition-derived
+/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) doesn't yet
+/// own (ADR-0156 §6 folds these in on later slices): the chassis-direct
+/// records ([`CHASSIS_KNOBS`] — the config-file path, RPC port, orphaned
+/// frame-size knob) plus the runtime log-filter / panic-hook knobs
+/// (`aether_substrate::runtime::RUNTIME_KNOBS`). Folded in beside the
+/// manifest metas by every chassis's known-keys sweep and `--print-config`
+/// dump ([`ConfigManifest::known_keys`](aether_substrate::config::ConfigManifest::known_keys)
+/// / [`dump`](aether_substrate::config::ConfigManifest::dump)).
 #[must_use]
-pub fn chassis_known_keys() -> KnownKeys {
-    let (metas, records) = chassis_registry();
-    known_keys(metas, &records)
-}
-
-/// The chassis-wide config registry: the migrated cap layer `Meta`s
-/// (including the scheduler hot-path knobs' `SchedulerTuningConfigLayer`)
-/// plus the hand-registered knob records (`CHASSIS_KNOBS` +
-/// `aether_substrate::runtime::RUNTIME_KNOBS`). Shared by
-/// [`chassis_known_keys`] (e1's sweep) and [`chassis_config_dump`] (e2's
-/// `--print-config`) so both read one source of truth.
-fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
-    const METAS: &[&Meta] = &[
-        &HttpConfigLayer::META,
-        &HttpServerConfigLayer::META,
-        &GeminiConfigLayer::META,
-        &ContentGenConfigLayer::META,
-        &AnthropicConfigLayer::META,
-        &AudioConfigLayer::META,
-        &NamespaceRootsLayer::META,
-        &RenderTuningConfigLayer::META,
-        &LifecycleConfigLayer::META,
-        &GameGatewayConfigLayer::META,
-        &ActorRingConfigLayer::META,
-        &SchedulerTuningConfigLayer::META,
-        &SettlementConfigLayer::META,
-        &ChassisBootConfigLayer::META,
-        &WindowConfigLayer::META,
-        &TickConfigLayer::META,
-    ];
+pub fn chassis_residual_knobs() -> Vec<KnobRecord> {
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
     records.extend_from_slice(RUNTIME_KNOBS);
-    (METAS, records)
+    records
 }
 
-/// Render the `--print-config` discovery dump for the full-stack chassis
-/// (ADR-0090 §4): every cap layer knob + hand-registered knob with its
-/// live source-resolved value, default, and doc. The chassis bins call
-/// this when `--print-config` is passed and exit before boot.
+/// The hub's residual knobs: the shared [`chassis_residual_knobs`] plus the
+/// hub-only `AETHER_ENGINE_STORE_ROOT` hand knob (the engines cap's inline
+/// ops override, issue 1968 — a knob with no confique `Meta`, so it stays a
+/// hand record rather than an aggregate member).
 #[must_use]
-pub fn chassis_config_dump() -> String {
-    let (metas, records) = chassis_registry();
-    dump_config(metas, &records)
-}
-
-/// The hub chassis config registry: the full shared `chassis_registry`
-/// plus the two hub-only additions — `EngineConfigLayer::META` (the
-/// engines-cap heartbeat / proxy / disk-budget knobs only the hub wires)
-/// and the `AETHER_ENGINE_STORE_ROOT` hand knob (the engines cap's
-/// inline ops override, issue 1968). The hub reads the *full fleet* set
-/// rather than only its own knobs because a hub-spawned substrate
-/// inherits the hub's process environment, so fleet-wide cap knobs
-/// legitimately sit in the hub's env destined for the spawned engine.
-/// Shared by [`hub_known_keys`] (e1's sweep) and [`hub_config_dump`]
-/// (e2's `--print-config`) so both read one source of truth (ADR-0090 §4).
-fn hub_chassis_registry() -> (Vec<&'static Meta>, Vec<KnobRecord>) {
-    let (metas, mut records) = chassis_registry();
-    let mut metas: Vec<&'static Meta> = metas.to_vec();
-    metas.push(&EngineConfigLayer::META);
+pub fn hub_residual_knobs() -> Vec<KnobRecord> {
+    let mut records = chassis_residual_knobs();
     records.push(KnobRecord {
         env_key: "AETHER_ENGINE_STORE_ROOT",
         doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
@@ -564,27 +504,40 @@ fn hub_chassis_registry() -> (Vec<&'static Meta>, Vec<KnobRecord>) {
         default: None,
         kind: KnobKind::HandRegistered,
     });
-    (metas, records)
+    records
 }
 
-/// Assemble the hub chassis [`KnownKeys`] set (ADR-0090 §4): the full
-/// fleet registry (`hub_chassis_registry`). The hub's boot sweep
-/// (`HubEnv::from_env_with_argv`) validates the process env against
-/// this, mirroring the desktop / headless sweeps.
+/// Declare the hub's fleet pass-through config members (ADR-0156 §4) — the
+/// **one documented over-approximation** in the aggregate. The hub composes
+/// only its own thin cap set (trace dispatcher, engines cap, RPC server), but
+/// a hub-spawned substrate inherits the hub's process environment, so the
+/// full fleet cap knobs legitimately sit in the hub's env destined for the
+/// spawned engine. Rather than derive that set from a composition the hub
+/// never runs, the hub declares it explicitly here: every operator-resolvable
+/// cap `Config` a full-stack substrate composes, plus the chassis-declared
+/// non-cap members. This is deliberately a superset of what the hub itself
+/// wires — the union of every substrate profile's knobs — so the hub's
+/// unknown-`AETHER_*` sweep never flags a fleet knob an operator legitimately
+/// sets for the substrates it spawns.
 #[must_use]
-pub fn hub_known_keys() -> KnownKeys {
-    let (metas, records) = hub_chassis_registry();
-    known_keys(&metas, &records)
-}
-
-/// Render the `--print-config` discovery dump for the hub chassis
-/// (ADR-0090 §4): the full fleet registry plus the hub-only engine
-/// knobs, so an operator sees every knob that will take effect on the
-/// hub and the substrates it spawns.
-#[must_use]
-pub fn hub_config_dump() -> String {
-    let (metas, records) = hub_chassis_registry();
-    dump_config(&metas, &records)
+pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C> {
+    builder
+        .with_config_member::<HttpConfig>()
+        .with_config_member::<HttpServerConfig>()
+        .with_config_member::<GeminiConfig>()
+        .with_config_member::<ContentGenConfig>()
+        .with_config_member::<AnthropicConfig>()
+        .with_config_member::<AudioConfig>()
+        .with_config_member::<NamespaceRoots>()
+        .with_config_member::<RenderTuningConfig>()
+        .with_config_member::<LifecycleConfig>()
+        .with_config_member::<GameGatewayConfig>()
+        .with_config_member::<WindowConfig>()
+        .with_config_member::<TickConfig>()
+        .with_config_member::<ChassisBootConfig>()
+        .with_config_member::<ActorRingConfig>()
+        .with_config_member::<SchedulerTuningConfig>()
+        .with_config_member::<SettlementConfig>()
 }
 
 /// Build the single-stage lifecycle params the headless chassis runs
@@ -596,7 +549,7 @@ pub fn hub_config_dump() -> String {
 /// instead.
 ///
 /// The advance timeout is resolved separately through the
-/// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) `Config` channel.
+/// [`LifecycleConfig`] `Config` channel.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
@@ -673,6 +626,19 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_ring_caps(boot.ring_caps)
         .with_scheduler_tuning(boot.scheduler_tuning)
         .with_teardown_cap(boot.teardown_cap)
+        // ADR-0156 §4: the chassis-declared non-cap members — knobs that
+        // configure the shared base rather than any single cap, so they ride
+        // the dedicated builder seams above (`with_workers` / `with_ring_caps`
+        // / `with_scheduler_tuning` / `with_teardown_cap`) instead of a
+        // `with_actor` entry, and declare their aggregate membership here.
+        // `ContentGenConfig` joins them: its `AETHER_GEN_DIR` staging knob is
+        // folded into `GeminiParams::gen_root` below rather than composed as a
+        // cap, so it too has no `with_actor` entry to ride.
+        .with_config_member::<ChassisBootConfig>()
+        .with_config_member::<ActorRingConfig>()
+        .with_config_member::<SchedulerTuningConfig>()
+        .with_config_member::<SettlementConfig>()
+        .with_config_member::<ContentGenConfig>()
         .with_actor::<TraceDispatchCapability>((), ())
         .with_actor::<InputCapability>((), ())
         .with_actor::<ComponentHostCapability>((), boot.component_host_params)
@@ -756,7 +722,7 @@ mod tests {
     use super::ActorRingConfigLayer;
     use super::ChassisBootConfig;
     use super::SchedulerTuningConfigLayer;
-    use super::chassis_known_keys;
+    use super::chassis_residual_knobs;
     use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
@@ -847,16 +813,6 @@ mod tests {
     }
 
     #[test]
-    fn actor_ring_keys_are_known() {
-        // The two ring env keys join the chassis known-key set so the
-        // unknown-AETHER_* sweep (e1) doesn't warn on them.
-        let known = chassis_known_keys();
-        assert!(known.contains("AETHER_ACTOR_LOG_RING_SIZE"));
-        assert!(known.contains("AETHER_ACTOR_TRACE_RING_SIZE"));
-        assert!(known.contains("AETHER_ACTOR_TRACE_RING_MAX_SIZE"));
-    }
-
-    #[test]
     fn scheduler_tuning_defaults_match() {
         use confique::Config as _;
         // Tripwire: the `SchedulerTuningConfigLayer` `default = ...`
@@ -881,40 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_tuning_keys_are_known() {
-        // The nine scheduler hot-path env keys join the chassis known-key
-        // set via `SchedulerTuningConfigLayer::META` (they rode
-        // `SCHEDULER_KNOBS` before issue 2485), so the unknown-AETHER_*
-        // sweep (e1) doesn't flag them and the `--print-config` dump lists them.
-        let known = chassis_known_keys();
-        for key in [
-            "AETHER_SPIN_WINDOW_USEC",
-            "AETHER_LOCAL_STICKY_MAX",
-            "AETHER_LOCAL_TIME_BUDGET_US",
-            "AETHER_PEER_STEAL",
-            "AETHER_LOCAL_CHAIN_BACKSTOP",
-            "AETHER_HANDOFF_COST_NS",
-            "AETHER_BLOB_RECRUIT_MIN",
-            "AETHER_BLOB_RECRUIT_MAX",
-            "AETHER_WAKE_COST_NANOS",
-        ] {
-            assert!(known.contains(key), "{key} must be a known scheduler key");
-        }
-    }
-
-    #[test]
-    fn settlement_key_is_known() {
-        // Guards the one-line registration of `SettlementConfigLayer::META`
-        // in the chassis registry: without it the cap env key trips the
-        // unknown-AETHER_* boot warn (e1). The production desktop/headless
-        // gates don't read the knob yet (issue 2062 §Side findings: a
-        // follow-up adopts it), so this registration is the only thing
-        // keeping the key claimed.
-        let known = chassis_known_keys();
-        assert!(known.contains("AETHER_SETTLEMENT_CAP_SECS"));
-    }
-
-    #[test]
     fn to_workers_none_returns_none() {
         // No workers knob set — pool uses PoolConfig::default.
         assert_eq!(ChassisBootConfig::default().to_workers(), None);
@@ -933,62 +855,38 @@ mod tests {
         let cfg = ChassisBootConfig { workers: Some(0), ..ChassisBootConfig::default() };
         assert_eq!(cfg.to_workers(), Some(1));
     }
-    #[test]
-    fn chassis_known_keys_includes_scheduler_hot_path_knobs() {
-        // ADR-0090 unit b2: the scheduler hot-path knobs join the
-        // known-key set, so e1's unknown-AETHER_ sweep doesn't flag them.
-        let known = chassis_known_keys();
-        for key in
-            ["AETHER_LOCAL_STICKY_MAX", "AETHER_LOCAL_TIME_BUDGET_US", "AETHER_PEER_STEAL", "AETHER_HANDOFF_COST_NS"]
-        {
-            assert!(known.contains(key), "chassis_known_keys missing {key}");
-        }
-    }
 
     #[test]
-    fn chassis_known_keys_includes_infra_knobs() {
-        // Tripwire: catches a future registry refactor that drops the
-        // RUNTIME_KNOBS extend or the frame-size record, re-introducing
-        // the false `validate_env` "unknown key" warning for these five
-        // legitimately-documented process-level knobs.
-        let known = chassis_known_keys();
+    fn residual_knobs_carry_the_infra_records() {
+        // Tripwire: the composition-derived aggregate doesn't yet own the
+        // chassis-direct records (config-file path, RPC port, frame size) or
+        // the runtime log/panic knobs — they ride `chassis_residual_knobs`,
+        // folded into every chassis's known-keys sweep beside the manifest
+        // metas (ADR-0156 §6 relocates them onto members on later slices).
+        // Catches a refactor that drops the `RUNTIME_KNOBS` extend or a
+        // `CHASSIS_KNOBS` record, re-introducing a false unknown-key warning.
+        let keys: Vec<&str> = chassis_residual_knobs().iter().map(|record| record.env_key).collect();
         for key in [
+            "AETHER_CONFIG_FILE",
+            "AETHER_RPC_PORT",
+            "AETHER_MAX_FRAME_SIZE",
             "AETHER_LOG_FILTER",
             "AETHER_BACKTRACE",
             "AETHER_CRASH_LOG_DISABLE",
             "AETHER_CRASH_LOG_DIR",
-            "AETHER_MAX_FRAME_SIZE",
         ] {
-            assert!(known.contains(key), "chassis_known_keys missing {key}");
+            assert!(keys.contains(&key), "chassis_residual_knobs missing {key}");
         }
     }
 
     #[test]
-    fn hub_known_keys_includes_engine_and_fleet_and_store_root() {
-        // The hub composition this crate owns: the shared registry
-        // unioned with the two hub-only additions — the engines-cap
-        // `EngineConfigLayer::META` keys, the `AETHER_ENGINE_STORE_ROOT`
-        // hand knob, and (because a hub-spawned substrate inherits the
-        // hub's env) the fleet cap keys the shared registry carries.
-        let known = super::hub_known_keys();
-        assert!(
-            known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"),
-            "AETHER_HUB_HEARTBEAT_INTERVAL_SECS must be a known hub key",
-        );
-        assert!(known.contains("AETHER_ENGINE_STORE_ROOT"), "AETHER_ENGINE_STORE_ROOT must be a known hub key");
-        assert!(
-            known.contains("AETHER_AUDIO_DISABLE"),
-            "fleet cap keys must stay in the hub known-key set (spawned substrates inherit \
-             the hub's env)",
-        );
-    }
-
-    #[test]
-    fn hub_config_dump_lists_an_engine_knob() {
-        // e2's hub `--print-config` walks the same registry as e1's sweep, so
-        // the hub-only engine knobs render in the dump.
-        let dump = super::hub_config_dump();
-        assert!(dump.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"));
+    fn hub_residual_knobs_add_the_engine_store_root() {
+        // The hub folds one extra hand record over the shared residual set:
+        // the engines-cap `AETHER_ENGINE_STORE_ROOT` ops override (a knob with
+        // no confique `Meta`, so it stays a hand record rather than a member).
+        let keys: Vec<&str> = super::hub_residual_knobs().iter().map(|record| record.env_key).collect();
+        assert!(keys.contains(&"AETHER_ENGINE_STORE_ROOT"), "hub residual knobs must carry AETHER_ENGINE_STORE_ROOT");
+        assert!(keys.contains(&"AETHER_CONFIG_FILE"), "hub residual knobs must extend the shared residual set");
     }
 
     #[test]
@@ -1005,63 +903,6 @@ mod tests {
         let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let layer = LifecycleConfigLayer::builder().load().expect("defaults load");
         assert_eq!(layer.advance_timeout_millis, LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT);
-    }
-
-    #[test]
-    fn chassis_boot_config_keys_are_known() {
-        // Guards the two `ChassisBootConfigLayer::META` keys joining the
-        // chassis known-key set, plus `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
-        // which now rides `LifecycleConfigLayer::META` (ADR-0156 §3 relocated
-        // it off `ChassisBootConfig` into the lifecycle cap's own config).
-        let known = chassis_known_keys();
-        assert!(known.contains("AETHER_WORKERS"), "AETHER_WORKERS must be a known key");
-        assert!(known.contains("AETHER_BOOT_MANIFEST"), "AETHER_BOOT_MANIFEST must be a known key");
-        assert!(
-            known.contains("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS"),
-            "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS must be a known key",
-        );
-    }
-
-    #[test]
-    fn chassis_known_keys_includes_a_representative_cap_key() {
-        // The cap layer META walk lands the per-cap env keys (a
-        // representative from each migrated cap) plus the derive-Config
-        // chassis knobs — the set is non-empty and covers more than scheduler.
-        let known = chassis_known_keys();
-        assert!(known.contains("AETHER_HTTP_DISABLE"));
-        assert!(known.contains("AETHER_GEN_DIR"));
-        assert!(known.contains("AETHER_WORKERS"));
-        assert!(!known.is_empty());
-    }
-
-    #[test]
-    fn chassis_known_keys_includes_http_server_keys() {
-        // Issue 1761: `HttpServerConfigLayer::META` must join the
-        // chassis registry so the unknown-AETHER_* sweep (e1) doesn't
-        // flag `AETHER_HTTP_SERVER_*` env vars set by operators.
-        let known = chassis_known_keys();
-        assert!(known.contains("AETHER_HTTP_SERVER_ENABLED"), "AETHER_HTTP_SERVER_ENABLED must be a known key");
-        assert!(known.contains("AETHER_HTTP_SERVER_BIND_ADDR"), "AETHER_HTTP_SERVER_BIND_ADDR must be a known key");
-    }
-
-    #[test]
-    fn chassis_config_dump_lists_a_knob_from_each_cap_plus_scheduler() {
-        // ADR-0090 §4 `--print-config`: the dump walks the same registry as
-        // the sweep, so it lists a representative knob from each cap, a
-        // chassis-boot knob, and a scheduler hot-path knob — with a
-        // header row.
-        let dump = super::chassis_config_dump();
-        assert!(dump.contains("KEY"));
-        assert!(dump.contains("AETHER_HTTP_DISABLE")); // http cap
-        assert!(dump.contains("AETHER_HTTP_SERVER_BIND_ADDR")); // http server cap
-        assert!(dump.contains("AETHER_GEMINI_TIMEOUT_MS")); // gemini cap
-        // Tripwire: the content-gen staging knob is only in the dump if
-        // `ContentGenConfigLayer::META` stays registered in `chassis_registry`.
-        assert!(dump.contains("AETHER_GEN_DIR")); // content-gen staging cap
-        assert!(dump.contains("AETHER_AUDIO_DISABLE")); // audio cap
-        assert!(dump.contains("AETHER_WORKERS")); // chassis-boot derive-Config knob
-        assert!(dump.contains("AETHER_LOCAL_STICKY_MAX")); // scheduler knob
-        assert!(dump.contains("AETHER_LOG_FILTER")); // runtime knob
     }
 
     #[test]

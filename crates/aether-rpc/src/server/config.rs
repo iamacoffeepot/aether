@@ -1,5 +1,6 @@
 use crate::wire::PeerKind;
 use aether_data::MailboxId;
+use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 
 /// Init config for `RpcServerCapability`.
 ///
@@ -18,6 +19,20 @@ use aether_data::MailboxId;
 /// is composer-supplied and rides [`RpcServerParams`] instead.
 pub struct RpcServerConfig {
     pub bind_addr: Option<String>,
+}
+
+// ADR-0156 §4: `RpcServerConfig` is the one composed `Config` that is neither
+// a `#[derive(aether_substrate::Config)]` type nor `()` — `bind_addr` is
+// resolved from `AETHER_RPC_PORT` outside the derive path, and migrating that
+// resolution into a derive-`Config` member (with its own `META` + `[rpc]`
+// section) is the `AETHER_RPC_PORT` slice owned by #3849. This is the pre-#3849
+// bridge: the one sanctioned non-`()` hand impl (explicitly empty), and it dies
+// when the port knob migrates onto a derive-`Config` member. Until then the
+// port key stays claimed via the `CHASSIS_KNOBS` hand record.
+impl ConfigMember for RpcServerConfig {
+    fn members() -> Vec<ConfigMemberRecord> {
+        Vec::new()
+    }
 }
 
 /// Composer-supplied construction params for `RpcServerCapability`

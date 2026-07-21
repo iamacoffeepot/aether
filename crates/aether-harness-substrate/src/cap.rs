@@ -28,11 +28,12 @@ use aether_kinds::Advance;
 // root.
 use crate::events::EventSender;
 
-/// Configuration for [`SubstrateHarnessCapability`]. Carries the
-/// `EventSender` the embedder loop reads on, so the handler can hand
-/// the embedder a request + reply target. Always-on at file root — it
-/// names no `aether_substrate` type.
-pub struct SubstrateHarnessCapConfig {
+/// Composer-supplied params for [`SubstrateHarnessCapability`] (ADR-0156 §3
+/// `Params` channel). Carries the `EventSender` the embedder loop reads on, so
+/// the handler can hand the embedder a request + reply target — construction
+/// wiring, not an operator-resolvable knob. Always-on at file root — it names
+/// no `aether_substrate` type.
+pub struct SubstrateHarnessCapParams {
     pub events: EventSender,
 }
 
@@ -60,12 +61,16 @@ use runtime::*;
 impl NativeActor for SubstrateHarnessCapability {
     type State = SubstrateHarnessCapabilityState;
 
-    type Config = SubstrateHarnessCapConfig;
+    // ADR-0156 §3: the embedder `EventSender` is construction wiring, not
+    // operator config, so it rides the `Params` channel; `Config` is `()`.
+    type Config = ();
+    type Params = SubstrateHarnessCapParams;
 
     const NAMESPACE: &'static str = "aether.substrate_harness";
 
     fn init(
-        config: SubstrateHarnessCapConfig,
+        (): (),
+        params: SubstrateHarnessCapParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<SubstrateHarnessCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
@@ -75,7 +80,7 @@ impl NativeActor for SubstrateHarnessCapability {
                  the Builder chain)",
             )))
         })?;
-        Ok(SubstrateHarnessCapabilityState { events: config.events, outbound })
+        Ok(SubstrateHarnessCapabilityState { events: params.events, outbound })
     }
 
     /// Push `ChassisEvent::Advance` onto the embedder loop. If the

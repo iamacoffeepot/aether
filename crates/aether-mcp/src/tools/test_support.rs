@@ -33,7 +33,7 @@ use aether_substrate::chassis::error::BootError;
 /// by value into the fixture so a test both controls the widened schema
 /// the refresh observes and asserts the refresh fired exactly once.
 #[derive(Clone)]
-pub(super) struct RouteLoopbackConfig {
+pub(super) struct RouteLoopbackParams {
     pub(super) reply: ListKindsResult,
     pub(super) calls: Arc<AtomicUsize>,
 }
@@ -78,7 +78,7 @@ pub(super) struct TerrainRouteReply {
 /// descriptors come only from `inventory`; request envelopes and reply bytes
 /// remain opaque so the test never copies the kit's Rust wire vocabulary.
 #[derive(Clone)]
-pub(super) struct TerrainRouteLoopbackConfig {
+pub(super) struct TerrainRouteLoopbackParams {
     inventory: ListKindsResult,
     calls: Arc<Mutex<Vec<RouteEnvelope>>>,
     replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
@@ -93,11 +93,14 @@ pub(super) struct TerrainRouteSink {
 
 #[actor(singleton)]
 impl NativeActor for TerrainRouteSink {
-    type Config = TerrainRouteLoopbackConfig;
+    // ADR-0156 §3: the canned replies + shared capture cells are construction
+    // wiring, not operator config, so they ride the `Params` channel.
+    type Config = ();
+    type Params = TerrainRouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.engine";
 
-    fn init(config: TerrainRouteLoopbackConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { inventory: config.inventory, calls: config.calls, replies: config.replies, mailer: ctx.mailer() })
+    fn init((): (), params: TerrainRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { inventory: params.inventory, calls: params.calls, replies: params.replies, mailer: ctx.mailer() })
     }
 
     #[handler::single]
@@ -142,13 +145,16 @@ impl NativeActor for TerrainRouteSink {
 
 #[actor(singleton)]
 impl NativeActor for RouteInventorySink {
-    type Config = RouteLoopbackConfig;
+    // ADR-0156 §3: the canned reply + shared call counter are construction
+    // wiring, not operator config, so they ride the `Params` channel.
+    type Config = ();
+    type Params = RouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.engine";
 
-    fn init(config: RouteLoopbackConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), params: RouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
-            reply: config.reply,
-            calls: config.calls,
+            reply: params.reply,
+            calls: params.calls,
             // Cached like the real engines cap does (its `on_route`
             // propagates the inbound reply-to, which `NativeCtx` sends
             // would overwrite with this cap as sender).
@@ -317,7 +323,7 @@ pub(super) fn boot_hub_with_route_loopback(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<RouteInventorySink>(RouteLoopbackConfig { reply, calls }, ())
+        .with_actor::<RouteInventorySink>((), RouteLoopbackParams { reply, calls })
         .with_actor::<RpcServerCapability>(
             RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
             RpcServerParams {
@@ -351,7 +357,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<TerrainRouteSink>(TerrainRouteLoopbackConfig { inventory, calls, replies }, ())
+        .with_actor::<TerrainRouteSink>((), TerrainRouteLoopbackParams { inventory, calls, replies })
         .with_actor::<RpcServerCapability>(
             RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
             RpcServerParams {

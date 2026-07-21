@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
+use crate::config::ConfigMemberRecord;
 use crate::mail::mailer::Mailer;
 
 #[derive(Debug)]
@@ -71,6 +72,20 @@ pub trait DriverCapability: 'static {
     fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
         let _ = ctx;
         Ok(())
+    }
+
+    /// ADR-0156 §4: the driver's operator-resolvable config members — the
+    /// tick knob for the headless timer driver, the window knobs for the
+    /// desktop driver. Type-level like [`Self::claim`] (no driver value, no
+    /// runtime handles), so
+    /// [`Builder::config_manifest`](crate::chassis::builder::Builder::config_manifest)
+    /// folds them into the aggregate without constructing the driver — the
+    /// same reason the tick knob belongs to the headless driver and the
+    /// window knobs to the desktop driver rather than a shared chassis list.
+    /// Default: no members (hub / `NeverDriver` own no operator config).
+    #[must_use]
+    fn config_members() -> Vec<ConfigMemberRecord> {
+        Vec::new()
     }
 
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError>;

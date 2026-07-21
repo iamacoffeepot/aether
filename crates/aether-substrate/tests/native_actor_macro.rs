@@ -65,18 +65,21 @@ struct MacroProbeCap {
 /// would write `()`, but here we thread shared atomic counters in
 /// so the test can observe each handler's effect.
 #[derive(Clone)]
-struct ProbeConfig {
+struct ProbeParams {
     greet_total: Arc<AtomicU32>,
     ping_total: Arc<AtomicU32>,
 }
 
 #[aether_actor::actor]
 impl NativeActor for MacroProbeCap {
-    type Config = ProbeConfig;
+    // ADR-0156 §3: the shared probe counters are construction wiring, not
+    // operator config, so they ride the `Params` channel; `Config` is `()`.
+    type Config = ();
+    type Params = ProbeParams;
     const NAMESPACE: &'static str = "test.macro_native_actor.probe";
 
-    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { greet_total: config.greet_total, ping_total: config.ping_total })
+    fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { greet_total: params.greet_total, ping_total: params.ping_total })
     }
 
     /// Handles structured-shape `Greet` mail.
@@ -131,8 +134,8 @@ fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(
-            ProbeConfig { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
             (),
+            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
         )
         .build_passive()
         .expect("macro-emitted cap boots");
@@ -164,8 +167,8 @@ fn seize_and_run_dispatches_seed_in_place() {
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(
-            ProbeConfig { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
             (),
+            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
         )
         .build_passive()
         .expect("macro-emitted cap boots");
@@ -226,8 +229,8 @@ fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(
-            ProbeConfig { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
             (),
+            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
         )
         .build_passive()
         .expect("macro-emitted cap boots");
@@ -254,7 +257,7 @@ fn macro_routes_task_completions_by_output_type() {
     };
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TaskRouteCap>(obs.clone(), ())
+        .with_actor::<TaskRouteCap>((), obs.clone())
         .build_passive()
         .expect("task-routing cap boots");
 
@@ -304,7 +307,7 @@ fn macro_pending_request_borrow_completion_replies_once() {
     let caller = registry.register_inbox("test.macro_native_actor.deferred_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<DeferredReplyCap>(obs.clone(), ())
+        .with_actor::<DeferredReplyCap>((), obs.clone())
         .build_passive()
         .expect("deferred-reply cap boots");
 
@@ -343,7 +346,7 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
     let caller = registry.register_inbox("test.macro_native_actor.deferred_silent_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<DeferredReplyCap>(obs.clone(), ())
+        .with_actor::<DeferredReplyCap>((), obs.clone())
         .build_passive()
         .expect("deferred-reply cap boots");
 
@@ -398,8 +401,8 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<MacroProbeCap>(
-            ProbeConfig { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
             (),
+            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
         )
         .build_passive()
         .expect("macro-emitted cap boots");
@@ -462,6 +465,8 @@ struct KickB {
 /// Where each task handler records what it observed, so the test can
 /// assert routing landed on the correct handler with the correct value.
 #[derive(Clone)]
+// ADR-0156 §4: a test-probe `Config` carrying shared counters (wiring, not
+// operator data) — declares no aggregate member (see impl below the struct).
 struct TaskObservations {
     /// How many times each kick handler dispatched a worker, so the cap's
     /// mail handlers touch `self` (and the test can sanity-check the
@@ -482,11 +487,14 @@ struct TaskRouteCap {
 
 #[aether_actor::actor]
 impl NativeActor for TaskRouteCap {
-    type Config = TaskObservations;
+    // ADR-0156 §3: the shared observation counters are construction wiring, not
+    // operator config, so they ride the `Params` channel; `Config` is `()`.
+    type Config = ();
+    type Params = TaskObservations;
     const NAMESPACE: &'static str = "test.macro_native_actor.task_route";
 
-    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { obs: config })
+    fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { obs: params })
     }
 
     /// Dispatch a worker that produces a `ResultA`. The completion routes
@@ -705,11 +713,14 @@ struct DeferredReplyCap {
 
 #[aether_actor::actor]
 impl NativeActor for DeferredReplyCap {
-    type Config = DeferredObs;
+    // ADR-0156 §3: the shared deferred-reply counters are construction wiring,
+    // not operator config, so they ride the `Params` channel; `Config` is `()`.
+    type Config = ();
+    type Params = DeferredObs;
     const NAMESPACE: &'static str = "test.macro_native_actor.deferred";
 
-    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { obs: config })
+    fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { obs: params })
     }
 
     /// Reply path: `-> Pending<EchoReply>` declares the deferred reply

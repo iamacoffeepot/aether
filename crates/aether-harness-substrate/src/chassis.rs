@@ -27,7 +27,7 @@ use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, 
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
-use super::cap::{SubstrateHarnessCapConfig, SubstrateHarnessCapability};
+use super::cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 use super::events::{ChassisEvent, EventSender};
 use aether_lifecycle::{LifecycleConfig, frame_lifecycle_params};
 use aether_substrate::mail::registry::MailDispatch;
@@ -337,7 +337,7 @@ impl SubstrateHarnessChassis {
         // `aether.substrate_harness`. The cap pushes `ChassisEvent::Advance`
         // onto the embedder loop just like the retired
         // `chassis_handler` closure did.
-        let substrate_harness_cap_config = SubstrateHarnessCapConfig { events: events_tx.clone() };
+        let substrate_harness_cap_config = SubstrateHarnessCapParams { events: events_tx.clone() };
 
         // Pre-validate fs roots if supplied. Pre-validation
         // mirrors what `LocalFileAdapter::new` does inside
@@ -436,7 +436,7 @@ impl SubstrateHarnessChassis {
         }
         builder = builder
             .with_actor::<HeadlessWindowCapability>((), ())
-            .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config, ())
+            .with_actor::<SubstrateHarnessCapability>((), substrate_harness_cap_config)
             .with_actor::<LifecycleCapability>(LifecycleConfig::default(), frame_lifecycle_params());
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots, ());

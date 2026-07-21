@@ -34,10 +34,13 @@ pub struct EngineCapSink {
 
 #[actor(singleton)]
 impl NativeActor for EngineCapSink {
-    type Config = EngineCapCells;
+    // ADR-0156 §3: the shared capture cells are construction wiring, not
+    // operator config, so they ride the `Params` channel; `Config` is `()`.
+    type Config = ();
+    type Params = EngineCapCells;
     const NAMESPACE: &'static str = "aether.engine";
 
-    fn init(cells: EngineCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), cells: EngineCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { cells })
     }
 
@@ -62,10 +65,14 @@ pub struct ProxyReplySink {
 
 #[actor(singleton)]
 impl NativeActor for ProxyReplySink {
-    type Config = Arc<Mutex<Option<u64>>>;
+    // ADR-0156 §3/§4: the shared recording cell is construction wiring (a live
+    // handle), not operator config, so it rides the `Params` channel; `Config`
+    // is `()`, which declares no aggregate member.
+    type Config = ();
+    type Params = Arc<Mutex<Option<u64>>>;
     const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
 
-    fn init(recorded: Arc<Mutex<Option<u64>>>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), recorded: Arc<Mutex<Option<u64>>>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { recorded })
     }
 

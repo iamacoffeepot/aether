@@ -13,7 +13,7 @@ use crate::actor::native::NativeActor;
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
-use crate::config::{RingCapacities, SchedulerTuning};
+use crate::config::{ConfigManifest, ConfigMember, ConfigMemberRecord, RingCapacities, SchedulerTuning};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -112,6 +112,13 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// read (via `SettlementConfig::to_cap`, including its `0 → MAX`
     /// sentinel); tests / `SubstrateHarness` inherit the default.
     teardown_cap: Duration,
+    /// ADR-0156 §4: the composition-derived config aggregate accumulator.
+    /// [`Self::with_actor`] pushes each composed cap's [`ConfigMember`]
+    /// declaration (type-level — the config *value* is never read here) and
+    /// [`Self::with_config_member`] pushes the chassis-declared non-cap
+    /// members (workers / ring capacities / scheduler tuning / teardown cap);
+    /// [`Self::config_manifest`] reads it plus the driver's members.
+    config_members: Vec<ConfigMemberRecord>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -133,6 +140,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             ring_caps: RingCapacities::default(),
             scheduler_tuning: SchedulerTuning::default(),
             teardown_cap: DEFAULT_TEARDOWN_CAP,
+            config_members: Vec::new(),
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -166,6 +174,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             ring_caps: self.ring_caps,
             scheduler_tuning: self.scheduler_tuning,
             teardown_cap: self.teardown_cap,
+            config_members: self.config_members,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -228,15 +237,39 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
 
     /// Declare a native actor to boot with the chassis, configured per
     /// ADR-0090's derive-`Config` path and constructed with the ADR-0156
-    /// composer-supplied `params`. This slice threads the channel through
-    /// every call site as `()`; a later slice moves real construction input
-    /// off `Config` and onto `Params`.
+    /// composer-supplied `params`.
+    ///
+    /// ADR-0156 §4: the composition boundary bounds `A::Config` by
+    /// [`ConfigMember`], so composing a cap accumulates its config member
+    /// (section + `META`) into the aggregate [`Self::config_manifest`] walks
+    /// — the config *value* is never read here, only the type-level
+    /// declaration. A cap that smuggles construction wiring into `Config` (a
+    /// live handle, a resolved `MailboxId`) has no derive-emitted
+    /// `ConfigMember` and stops compiling at this call site.
     #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
     where
         A: NativeActor,
+        A::Config: ConfigMember,
     {
+        self.config_members.extend(<A::Config as ConfigMember>::members());
         self.passives.push(Box::new(NativeActorBoot::<A>::new(config, params)));
+        self
+    }
+
+    /// Declare a non-cap config member on the aggregate (ADR-0156 §4): the
+    /// chassis-wide knobs resolved outside the `with_actor` chain and threaded
+    /// through the dedicated builder seams — workers / boot manifest
+    /// (`ChassisBootConfig`), ring capacities ([`Self::with_ring_caps`]),
+    /// scheduler tuning ([`Self::with_scheduler_tuning`]), teardown cap
+    /// ([`Self::with_teardown_cap`]) — plus the hub's declared fleet
+    /// pass-through set. These configure the shared base rather than any
+    /// single cap, so they have no `with_actor` entry to ride; this is the
+    /// smallest seam that folds their section + `META` into the same walk.
+    /// Purely type-level (`M::members()`), so no value is required.
+    #[must_use]
+    pub fn with_config_member<M: ConfigMember>(mut self) -> Self {
+        self.config_members.extend(M::members());
         self
     }
 
@@ -316,6 +349,27 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         claim_only(&self.registry, &self.mailer, &self.aborter, self.ring_caps, self.passives, |ctx| {
             <C::Driver as DriverCapability>::claim(ctx)
         })
+    }
+
+    /// ADR-0156 §4 compose-stage terminal, sibling to [`Self::claim_namespaces`]:
+    /// the composition-derived chassis config aggregate. Reads the config
+    /// members accumulated off the composed `with_actor` chain plus the
+    /// chassis-declared non-cap members ([`Self::with_config_member`]) and the
+    /// driver type's value-free [`DriverCapability::config_members`] — the
+    /// same three contributors [`Self::claim_namespaces`] runs, read as config
+    /// declarations rather than claimed namespaces.
+    ///
+    /// Reads declarations only (sections, `META`s, env keys, defaults, docs) —
+    /// no config value is resolved here, and the driver value is never
+    /// constructed (`C::Driver` is known from the chassis, so this borrows
+    /// `&self` in [`NoDriver`] state the same way describe composes without a
+    /// driver). The known-keys sweep and `--print-config` dump read this walk,
+    /// so a chassis knows exactly the knobs it composes.
+    #[must_use]
+    pub fn config_manifest(&self) -> ConfigManifest {
+        let mut members = self.config_members.clone();
+        members.extend(<C::Driver as DriverCapability>::config_members());
+        ConfigManifest::from_members(members)
     }
 }
 

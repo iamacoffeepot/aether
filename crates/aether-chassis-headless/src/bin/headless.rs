@@ -8,7 +8,6 @@
 // (ADR-0090 §4 / e2).
 #![allow(clippy::print_stdout)]
 
-use aether_chassis::chassis_config_dump;
 use aether_chassis::cli::HeadlessCli;
 use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate::Chassis;
@@ -17,7 +16,10 @@ use clap::Parser as _;
 fn main() -> anyhow::Result<()> {
     let cli = HeadlessCli::parse();
     if cli.print_config {
-        print!("{}", chassis_config_dump());
+        // ADR-0156 §4: the dump is the composition-derived aggregate plus the
+        // residual hand records, so it resolves the chassis config the same
+        // way a boot does (a garbage known value surfaces as a `ConfigError`).
+        print!("{}", HeadlessChassis::config_dump()?);
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
