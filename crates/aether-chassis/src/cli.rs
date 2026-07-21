@@ -74,7 +74,7 @@ pub struct CommonOverlay {
     pub gemini: GeminiOverlay,
     /// Content-gen staging root: `--gen-dir` / `AETHER_GEN_DIR`.
     #[command(flatten)]
-    pub contentgen: ContentGenOverlay,
+    pub generated_asset_staging: ContentGenOverlay,
     /// Shared chassis boot knobs: `--workers`, `--boot-manifest`.
     #[command(flatten)]
     pub chassis_boot: ChassisBootOverlay,

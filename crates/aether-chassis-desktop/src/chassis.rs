@@ -168,7 +168,7 @@ pub struct DesktopEnv {
     pub namespace_roots: NamespaceRoots,
     /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
     /// into the staging root in `with_common_caps`.
-    pub contentgen: ContentGenConfig,
+    pub generated_asset_staging: ContentGenConfig,
     /// Lowered desktop window boot knobs (mode / size / title / wireframe),
     /// grouped into one embedded unit like the other knob groups and
     /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
@@ -257,7 +257,7 @@ impl DesktopEnv {
             fs,
             anthropic,
             gemini,
-            contentgen,
+            generated_asset_staging,
             chassis_boot: chassis_boot_overlay,
             lifecycle: lifecycle_overlay,
             rpc: rpc_overlay,
@@ -274,7 +274,7 @@ impl DesktopEnv {
         sources.set_argv::<NamespaceRoots>(fs.into_layer());
         sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
         sources.set_argv::<GeminiConfig>(gemini.into_layer());
-        sources.set_argv::<ContentGenConfig>(contentgen.into_layer());
+        sources.set_argv::<ContentGenConfig>(generated_asset_staging.into_layer());
         sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
         sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
         sources.set_argv::<AudioConfig>(audio_overlay.into_layer());
@@ -290,7 +290,7 @@ impl DesktopEnv {
         // resolves off the same stack via its `ConfigMember` section.
         let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
         let namespace_roots = sources.resolve::<NamespaceRoots>()?;
-        let contentgen = sources.resolve::<ContentGenConfig>()?;
+        let generated_asset_staging = sources.resolve::<ContentGenConfig>()?;
         let window_config = sources.resolve::<WindowConfig>()?;
         let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
@@ -324,7 +324,7 @@ impl DesktopEnv {
         Ok(Self {
             sources,
             namespace_roots,
-            contentgen,
+            generated_asset_staging,
             window,
             runtime,
             workers,
@@ -355,7 +355,7 @@ impl DesktopChassis {
         let DesktopEnv {
             sources,
             namespace_roots,
-            contentgen,
+            generated_asset_staging,
             workers,
             ring_capacities,
             scheduler_tuning,
@@ -408,7 +408,7 @@ impl DesktopChassis {
             teardown_budget,
             component_host_params,
             namespace_roots,
-            contentgen,
+            generated_asset_staging,
             game_gateway_params: aether_game::GameGatewayParams::default(),
         };
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
