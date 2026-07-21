@@ -350,7 +350,12 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
 
     let resolved_parse = resolve_parse_env(&attr);
     let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), resolved_parse.as_ref());
-    let overlay_attrs = build_overlay_attrs(&cli_id, &cli_long, is_bool);
+    // Per-flag `--help` text (issue 3862): the domain field's rustdoc
+    // summary followed by the confique-resolved env key and declared
+    // default. clap can't see either — env resolution is confique-side
+    // and the default lives on the Layer — so both are stated in the text.
+    let overlay_help = build_overlay_help(&field.attrs, &env_key, attr.default.as_ref());
+    let overlay_attrs = build_overlay_attrs(&cli_id, &cli_long, is_bool, &overlay_help);
 
     // Resolve the `from_layer` body shape (priority-ordered): the typed
     // shapes first, then the hint-driven coercions, then a plain move.
@@ -405,21 +410,71 @@ fn build_layer_attrs(env_key: &str, default: Option<&Expr>, parse: Option<&Path>
     quote! { #[config(#inner)] }
 }
 
-fn build_overlay_attrs(cli_id: &str, cli_long: &str, is_bool: bool) -> TokenStream2 {
+fn build_overlay_attrs(cli_id: &str, cli_long: &str, is_bool: bool, help: &str) -> TokenStream2 {
     if is_bool {
         quote! {
             #[arg(
                 id = #cli_id,
                 long = #cli_long,
+                help = #help,
                 num_args = 0..=1,
                 default_missing_value = "true"
             )]
         }
     } else {
         quote! {
-            #[arg(id = #cli_id, long = #cli_long)]
+            #[arg(id = #cli_id, long = #cli_long, help = #help)]
         }
     }
+}
+
+/// Assemble the overlay field's clap `help` string: the domain field's
+/// rustdoc summary (its first paragraph, newlines collapsed) followed by
+/// the confique-resolved env key and, where declared, the default. Both
+/// annotations are invisible to clap on their own — env resolution is
+/// confique-side and the default lives on the Layer field — so they ride
+/// the help text (issue 3862). Help/metadata only: resolution order and
+/// resolved values are untouched.
+fn build_overlay_help(field_attrs: &[Attribute], env_key: &str, default: Option<&Expr>) -> String {
+    let mut help = doc_summary(field_attrs).unwrap_or_default();
+    if !help.is_empty() {
+        help.push(' ');
+    }
+    help.push_str(&format!("[env: {env_key}]"));
+    if let Some(default) = default {
+        help.push_str(&format!(" [default: {}]", quote!(#default)));
+    }
+    help
+}
+
+/// The first rustdoc paragraph of a field, trimmed per line and joined
+/// with single spaces — the same summary clap would derive from a doc
+/// comment it owned. Stops at the first blank doc line so only the lead
+/// sentence(s) become the flag description. `None` for an undocumented
+/// field.
+fn doc_summary(attrs: &[Attribute]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            continue;
+        };
+        let Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else {
+            continue;
+        };
+        let line = s.value();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if lines.is_empty() {
+                continue;
+            }
+            break;
+        }
+        lines.push(trimmed.to_string());
+    }
+    (!lines.is_empty()).then(|| lines.join(" "))
 }
 
 /// Which `from_layer` body a field gets — resolved from its type +

@@ -95,7 +95,11 @@ pub struct CommonOverlay {
 #[derive(Parser, Debug, Default, Clone)]
 #[command(
     name = "aether-substrate",
-    about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090."
+    about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.",
+    long_about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.\n\n\
+        Each flag below carries its resolved env key and default in brackets; unset flags fall \
+        through to env then the default. For the full source-resolved value of every knob use \
+        --print-config, and for this binary's linked caps and build provenance use --describe."
 )]
 pub struct DesktopCli {
     #[command(flatten)]
@@ -128,7 +132,11 @@ pub struct DesktopCli {
 #[derive(Parser, Debug, Default, Clone)]
 #[command(
     name = "aether-substrate-headless",
-    about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090."
+    about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.",
+    long_about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.\n\n\
+        Each flag below carries its resolved env key and default in brackets; unset flags fall \
+        through to env then the default. For the full source-resolved value of every knob use \
+        --print-config, and for this binary's linked caps and build provenance use --describe."
 )]
 pub struct HeadlessCli {
     #[command(flatten)]
@@ -159,7 +167,11 @@ pub struct HeadlessCli {
 #[derive(Parser, Debug, Default, Clone)]
 #[command(
     name = "aether-substrate-hub",
-    about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073."
+    about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.",
+    long_about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.\n\n\
+        Each flag below carries its resolved env key and default in brackets; unset flags fall \
+        through to env then the default. For the full source-resolved value of every knob use \
+        --print-config, and for this binary's linked caps and build provenance use --describe."
 )]
 pub struct HubCli {
     /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
@@ -201,7 +213,9 @@ mod checkability_tests {
     //! to a chassis's composition without flattening its overlay into the root
     //! (or a stale flag left in the root) fails the assertion honestly.
 
-    use super::{CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HubCli, RpcServerOverlay, TickOverlay};
+    use super::{
+        CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HttpOverlay, HubCli, RpcServerOverlay, TickOverlay,
+    };
     use crate::window::WindowOverlay;
     use aether_audio::AudioOverlay;
     use clap::{Args, CommandFactory};
@@ -241,6 +255,27 @@ mod checkability_tests {
         expected.extend(overlay_flags::<TickOverlay>());
         expected.extend(meta_flags());
         assert_eq!(long_flags(&HeadlessCli::command()), expected);
+    }
+
+    #[test]
+    fn derived_flag_help_carries_doc_env_and_default() {
+        // Tripwire: the `#[derive(Config)]` overlay must forward the domain
+        // field's rustdoc summary and append the confique-resolved env key
+        // plus the declared default onto each flag's clap help (issue 3862).
+        // clap sees neither the env key (confique resolves it) nor the
+        // default (it lives on the Layer), so both ride the help text — a
+        // regression that dropped forwarding would leave a bare `--flag
+        // <FLAG>`. Walked through the same clap introspection a `--help`
+        // render uses, on the ms_duration flag that carries all three parts.
+        let help = HttpOverlay::augment_args(clap::Command::new("probe"))
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("http-timeout-ms"))
+            .and_then(clap::Arg::get_help)
+            .map(ToString::to_string)
+            .expect("--http-timeout-ms is present and carries help");
+        assert!(help.contains("per-request timeout"), "domain rustdoc forwarded: {help}");
+        assert!(help.contains("[env: AETHER_HTTP_TIMEOUT_MS]"), "resolved env key annotated: {help}");
+        assert!(help.contains("[default: 30_000]"), "declared default annotated: {help}");
     }
 
     #[test]
