@@ -587,7 +587,7 @@ mod tests {
 
     fn host(script: ScriptSource) -> BehaviorHost {
         let mut init_ctx = WasmInitCtx::__new(0x10);
-        BehaviorHost::init(config(script), &mut init_ctx).expect("test setup: host inits")
+        BehaviorHost::init(config(script), (), &mut init_ctx).expect("test setup: host inits")
     }
 
     fn load_context(origin: ScriptLoadOrigin, namespace: &str, path: &str) -> ScriptLoadContext {
