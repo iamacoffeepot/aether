@@ -1,6 +1,6 @@
 # ADR-0156: Composition-Derived Chassis Config and the Config Params Split
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped 2026-07-21 — PRs #3851–#3856)
 - **Date:** 2026-07-21
 
 ## Context
@@ -36,6 +36,14 @@ Make the chassis config a value derived from Compose: every composed actor decla
 - The per-chassis Env bags dissolve (the ADR-0155 forecast): `from_env_with_argv` shrinks to CLI parse + file load + handing the builder the source stack.
 - `config_manifest()` is pre-boot only. Live config introspection over mail becomes reachable but is a named non-goal here.
 - Follow-on work this creates: the codec frame-size push (set-once install replacing env pull-reads) and replica identity as the first wasm `Params` payload.
+
+## Implementation notes (2026-07-21)
+
+The arc landed as decided, with four recorded deltas:
+
+- **§2** — the `ConfigMember` bound is enforced at `Builder::with_actor` (the composition boundary, where the aggregate derives) rather than as a `NativeActor` supertrait bound: instanced and test actors never join a chassis composition, and a global bound would have dragged orphan-blocked foreign config types into the arc for no aggregate benefit.
+- **§5** — the paired `with_actor_configured(params, config)` is the only public form for supplying an explicit config; a detached type-keyed staging call was built, censused at zero genuine cross-helper uses, and cut — so an orphaned or aliased override is unconstructable through the public builder API. `ConfigSources` (bulk file + argv handoff, hermetic mode for harnesses) carries the source stack.
+- **§6** — the frame-size member lives in `aether-rpc` (the one wire crate the chassis and `aether-mcp` share; declaration into the aggregate stays chassis-side); the RPC knob is `port: Option<u16>` (localhost-only bind — the never-used arbitrary-host capability was dropped, re-addable when a multi-host fleet exists); the panic-hook knobs are declared aggregate members whose consumption remains the hook's own pre-config env reads (the hook installs below the config layer); the hub's `AETHER_ENGINE_STORE_ROOT` ops escape hatch remains a hand record beside the `--config` meta-knob.
 
 ## Alternatives considered
 
