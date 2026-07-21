@@ -2,9 +2,9 @@
 //!
 //! Standard Cargo layout:
 //!
-//! - `src/bin/` — the standalone bundle and perf bins. The desktop,
-//!   headless, hub, and harness chassis live in their own
-//!   `aether-chassis-*` crates.
+//! - `src/bin/` — the standalone bundle bins. The desktop, headless,
+//!   hub, and harness chassis live in their own `aether-chassis-*`
+//!   crates; the perf tooling lives in `aether-harness-perf`.
 //!
 //! The shared chassis-composition layer — boot fragments, config
 //! registry, CLI roots, autoload, the bundle-pack format — lives in

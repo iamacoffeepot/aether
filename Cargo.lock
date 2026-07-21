@@ -542,6 +542,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-harness-perf"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-harness-substrate",
+ "plotters",
+ "png",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aether-harness-substrate"
 version = "0.3.0-alpha"
 dependencies = [
@@ -846,16 +857,11 @@ dependencies = [
  "aether-chassis-desktop",
  "aether-chassis-headless",
  "aether-component",
- "aether-harness-fleet",
- "aether-harness-substrate",
  "aether-substrate",
  "anyhow",
- "plotters",
- "png",
  "serde",
  "serde_json",
  "tracing",
- "wasmtime",
 ]
 
 [[package]]

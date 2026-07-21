@@ -1,0 +1,45 @@
+[package]
+name = "aether-harness-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Perf-comparison tooling over the substrate harness (issue #3814;
+# iamacoffeepot/aether#1077). `aether-perf-trial` runs one latency sweep and
+# emits a TrialReport JSON; `aether-perf-compare` interleaves K
+# base/candidate trials and renders the noise-aware paired comparison
+# (ADR-0085); `aether-perf-plot` renders per-cell sample distributions
+# to PNGs (iamacoffeepot/aether#1155). Binary names unchanged across the move
+# from the chassis bundle.
+
+[[bin]]
+name = "aether-perf-trial"
+path = "src/bin/perf-trial.rs"
+
+[[bin]]
+name = "aether-perf-compare"
+path = "src/bin/perf-compare.rs"
+
+[[bin]]
+name = "aether-perf-plot"
+path = "src/bin/perf-plot.rs"
+
+[dependencies]
+# The mail-latency harness + trial-report vocabulary the bins drive.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+serde = { workspace = true, features = ["derive", "std"] }
+# Trial reports + comparison output are JSON (#1077).
+serde_json = { workspace = true }
+png = { workspace = true }
+# Distribution-plot rendering for `aether-perf-plot`. `ab_glyph` keeps
+# fonts pure-Rust (no font-kit / system freetype — headless-CI
+# friendly); we render to an RGB buffer and encode with the `png` dep
+# above.
+plotters = { version = "0.3", default-features = false, features = [
+    "bitmap_backend",
+    "ab_glyph",
+    "line_series",
+] }
+
+[lints]
+workspace = true

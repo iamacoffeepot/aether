@@ -37,7 +37,7 @@ const NBINS: usize = 48;
 /// Roboto Mono (SIL OFL 1.1 — see `assets/fonts/OFL.txt`); a variable
 /// TTF, rendered at its default (Regular) instance. Embedding keeps the
 /// render deterministic with zero system-font / CI dependency.
-const FONT: &[u8] = include_bytes!("../../assets/fonts/RobotoMono.ttf");
+const FONT: &[u8] = include_bytes!("../../../aether-text/assets/fonts/RobotoMono.ttf");
 
 /// iamacoffeepot/aether#1158: the `construct` span's plot color. Orange,
 /// clearly distinct from the queued/drain/handler `BLUE`/`RED`/`GREEN`.

@@ -13,7 +13,7 @@
 //! through the `assets` namespace.
 //!
 //! The font is the workspace's vendored Roboto Mono (SIL OFL 1.1) at
-//! `crates/aether-substrate-bundle/assets/fonts/RobotoMono.ttf` — the
+//! `crates/aether-text/assets/fonts/RobotoMono.ttf` — the
 //! `assets` namespace root points straight at that in-repo home (the
 //! same file `aether-text`'s runtime unit tests and the bundle's widget
 //! scenarios read) rather than copying the binary next to this test.
@@ -51,18 +51,11 @@ use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, Load
 /// Namespace-relative path of the vendored font under the `assets` root.
 const FONT_PATH: &str = "fonts/RobotoMono.ttf";
 
-/// The workspace's shared font-asset home:
-/// `crates/aether-substrate-bundle/assets` (which holds
-/// `fonts/RobotoMono.ttf`). Resolved from this crate's manifest dir the
-/// same way the harness helpers locate the workspace root.
+/// The workspace's shared font-asset home: this crate's own `assets`
+/// dir (which holds `fonts/RobotoMono.ttf` — rehomed from the chassis
+/// bundle at the by-chassis split, #3814).
 fn font_assets_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root reachable from CARGO_MANIFEST_DIR")
-        .join("crates")
-        .join("aether-substrate-bundle")
-        .join("assets")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
 /// `NamespaceRoots` for these scenarios: `assets` points at the in-repo

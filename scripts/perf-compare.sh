@@ -135,7 +135,7 @@ echo "[perf-compare] baseline = merge-base $base_short; K=$K (light) / $K_trend 
 # emit `aether-perf-trial` at the same path — copying the candidate out
 # first keeps the base build from clobbering it.
 echo "[perf-compare] building candidate (PR) binaries…"
-cargo build --release -p aether-substrate-bundle \
+cargo build --release -p aether-harness-perf \
     --bin aether-perf-trial --bin aether-perf-compare --bin aether-perf-plot
 cp "$ROOT/target/release/aether-perf-trial" "$cand_trial"
 cp "$ROOT/target/release/aether-perf-compare" "$compare_bin"
@@ -160,7 +160,7 @@ else
 
     echo "[perf-compare] building base ($base_short) trial binary (shared target)…"
     if (cd "$base_wt" && CARGO_TARGET_DIR="$ROOT/target" \
-            cargo build --release -p aether-substrate-bundle --bin aether-perf-trial); then
+            cargo build --release -p aether-harness-perf --bin aether-perf-trial); then
         built="$ROOT/target/release/aether-perf-trial"
         if [ -n "$base_cache" ]; then
             mkdir -p "$(dirname "$base_cache")"
