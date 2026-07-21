@@ -43,7 +43,7 @@ use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, SettlementConfig, chassis_residual_knobs,
-    load_chassis_config, rpc_port_from_env, with_common_caps, with_rpc_server,
+    install_frame_size, load_chassis_config, rpc_port_from_env, with_common_caps, with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, DesktopCli};
 use aether_substrate::config::{
@@ -291,6 +291,10 @@ impl DesktopEnv {
         let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
+        // ADR-0156 §6: push the resolved wire-frame cap into the codec here,
+        // before the RPC server binds and any framing runs — the codec cannot
+        // pull the knob itself.
+        install_frame_size(&mut sources)?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
         // through `ChassisBootConfig`). When set, the listed components'

@@ -175,7 +175,7 @@ pub enum RpcError {
     /// framing cap (`aether_codec::frame::max_frame_size`, see
     /// ADR-0072). Carries the announced `size` and the active `max` so
     /// the caller can decide how to react (build a release wasm, raise
-    /// the cap via `AETHER_MAX_FRAME_SIZE`, etc.) instead of seeing a
+    /// the frame-size config member, etc.) instead of seeing a
     /// bare `Connection reset by peer`. Widths are `u64` rather than
     /// `usize` so the wire encoding is stable across 32 / 64-bit peers.
     FrameTooLarge { size: u64, max: u64 },

@@ -11,6 +11,9 @@
 //! defaults to a distinct port so the two coexist.
 
 use std::env;
+
+use aether_codec::frame::install_max_frame_size;
+use aether_rpc::FrameSizeConfig;
 use tokio::net::TcpListener;
 use tokio::task;
 
@@ -51,6 +54,13 @@ async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_env("AETHER_LOG_FILTER")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // ADR-0156 §6: aether-mcp frames RPC `Call`s to the hub, so it honors the
+    // same wire-frame cap the hub does. It resolves the shared `FrameSizeConfig`
+    // member through its own config path — env only, no chassis source stack in
+    // this process — and pushes the value set-once into the codec before dialing,
+    // so the two ends of the wire agree on the cap.
+    install_max_frame_size(FrameSizeConfig::try_from_env()?.to_max_frame_size());
 
     // Top-level process config for the MCP binary (the hub address it dials and
     // its own bind port) — process wiring in main, not a capability reading config.

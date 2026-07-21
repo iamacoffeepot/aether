@@ -72,7 +72,7 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtu
 # coupling is cargo-visible even though nothing links the host rlib.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
 # `aether_codec::frame::max_frame_size` bounds the test's frame bodies
-# against the active `AETHER_MAX_FRAME_SIZE` cap.
+# against the active max frame size cap.
 aether-codec = { path = "../aether-codec" }
 # The load test serializes its diagnostic metrics report
 # (`target/fleetharness-metrics/tcp-load.json`).

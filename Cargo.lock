@@ -167,6 +167,7 @@ dependencies = [
  "aether-actor",
  "aether-anthropic",
  "aether-audio",
+ "aether-codec",
  "aether-component",
  "aether-contentgen",
  "aether-data",
@@ -369,6 +370,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -824,6 +826,8 @@ dependencies = [
  "aether-test-fixtures-kinds",
  "aether-trace",
  "aether-window",
+ "clap",
+ "confique",
  "inventory",
  "serde",
  "tracing",

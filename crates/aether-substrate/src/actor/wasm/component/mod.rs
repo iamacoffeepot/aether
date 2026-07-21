@@ -43,7 +43,7 @@ const SMALL_REGION_BYTES: usize = 8 * 1024;
 /// rejected (config / state) with a loud log rather than asking the guest to
 /// allocate a buffer that could exhaust its memory and trap. The wire frame cap
 /// bounds arrivals upstream — this is defense in depth. 64 MiB matches the
-/// default `AETHER_MAX_FRAME_SIZE`.
+/// codec's default max frame size (`aether_codec::frame::MAX_FRAME_SIZE`).
 const MAX_DELIVERABLE_MAIL_BYTES: usize = 64 << 20;
 
 /// Contract with the guest: it exports a

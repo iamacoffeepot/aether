@@ -27,6 +27,10 @@ path = "src/lib.rs"
 aether-data = { path = "../aether-data" }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
+# Frame-size install (ADR-0156 §6) warns when a second, differing cap push
+# races the set-once install — a boot-ordering bug the codec detects but must
+# not abort a process over. Log-only; no subscriber pulled in here.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Round-trip tests in this crate encode JSON params via the schema

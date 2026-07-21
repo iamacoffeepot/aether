@@ -35,6 +35,12 @@ aether-kinds = { path = "../aether-kinds" }
 aether-substrate = { path = "../aether-substrate" }
 serde = { workspace = true, features = ["derive", "alloc"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+# `FrameSizeConfig`'s `#[derive(aether_substrate::Config)]` emits a
+# `#[derive(confique::Config)]` layer struct and a `#[derive(clap::Args)]`
+# overlay (ADR-0090); both are reached only through the macro-emitted paths, so
+# the source-only unused-deps scan can't see them (ignored below).
+clap = { workspace = true }
+confique = { workspace = true }
 
 # ADR-0121: the `Kind` derive (`kinds.rs`, `wire.rs`) emits a
 # `cfg(not(target_family = "wasm"))`-gated `inventory::submit!` per kind, so
@@ -71,9 +77,11 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtu
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
 
 # The probe wasm coupling above is load-by-stem only — no source import —
-# so the source-scanning unused-deps gate cannot see it.
+# so the source-scanning unused-deps gate cannot see it. `clap` / `confique`
+# are reached only through the `#[derive(aether_substrate::Config)]`-emitted
+# paths on `FrameSizeConfig`, invisible to the same source-only scan.
 [package.metadata.cargo-machete]
-ignored = ["aether-test-fixtures-bundle"]
+ignored = ["aether-test-fixtures-bundle", "clap", "confique"]
 
 [lints]
 workspace = true

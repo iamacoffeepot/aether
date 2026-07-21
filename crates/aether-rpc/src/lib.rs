@@ -15,9 +15,18 @@
 //!
 //! See issues 750 and 763 for the full design, ADR-0124 for the layout.
 
+// The frame-size config member (ADR-0156 §6) is native-only config machinery:
+// its `#[derive(aether_substrate::Config)]` emits a confique layer + clap
+// overlay that never build for a wasm guest (which never frames anyway), so the
+// module is gated like the `RpcServerConfig` re-export below.
+#[cfg(not(target_family = "wasm"))]
+pub mod frame_size;
 pub mod kinds;
 pub mod server;
 pub mod wire;
+
+#[cfg(not(target_family = "wasm"))]
+pub use frame_size::FrameSizeConfig;
 
 // The cap's own mail vocabulary (`RpcInboundReady`) lives in `kinds`
 // (ADR-0121); re-export at the module root so
