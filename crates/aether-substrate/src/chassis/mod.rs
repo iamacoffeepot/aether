@@ -27,11 +27,24 @@ pub mod settlement;
 pub mod settlement_counter;
 pub mod settlement_table;
 
+use crate::chassis::builder::{BuiltChassis, DriverCapability};
+use crate::chassis::error::BootError;
+
+// The boot ceremony (`BootableChassis` + the describe / config helpers) is
+// only meaningful when the substrate runtime is linked: it stands up a
+// `SubstrateBoot`, which — like the `boot` module itself — lives behind the
+// `wasm` feature. A `wasm`-less consumer (e.g. the derive crate's trybuild
+// fixtures compiling `aether-substrate` bare) never runs a chassis boot, so the
+// ceremony surface is gated off there rather than referencing a type that isn't
+// linked.
+#[cfg(feature = "wasm")]
 use std::collections::BTreeSet;
 
+#[cfg(feature = "wasm")]
 use crate::SubstrateBoot;
-use crate::chassis::builder::{Builder, BuiltChassis, DriverCapability};
-use crate::chassis::error::BootError;
+#[cfg(feature = "wasm")]
+use crate::chassis::builder::Builder;
+#[cfg(feature = "wasm")]
 use crate::config::{ConfigError, ConfigManifest, KnobRecord};
 
 /// The composition contract a concrete chassis implements. Each
@@ -117,6 +130,7 @@ pub fn engine_name<C: Chassis>() -> String {
 /// every entry point from the one `compose` declaration. A chassis that changes
 /// its chain edits `compose` alone; `--describe` and `--print-config` follow
 /// from it and can no longer drift (the parallel-edit hazard of #3859).
+#[cfg(feature = "wasm")]
 pub trait BootableChassis: Chassis {
     /// Resolve this chassis's env — the config *data* a real boot takes — off
     /// the argv/env/file source stack. The single env-reading edge (ADR-0070);
@@ -157,6 +171,7 @@ pub trait BootableChassis: Chassis {
 ///
 /// Returns [`BootError`] when env resolution, substrate boot, or the claim pass
 /// fails.
+#[cfg(feature = "wasm")]
 pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError> {
     let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
@@ -172,6 +187,7 @@ pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError
 /// # Errors
 ///
 /// Returns [`BootError`] when env resolution or substrate boot fails.
+#[cfg(feature = "wasm")]
 pub fn config_manifest<C: BootableChassis>() -> Result<ConfigManifest, BootError> {
     let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
