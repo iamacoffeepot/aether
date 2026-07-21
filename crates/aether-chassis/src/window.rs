@@ -5,7 +5,10 @@
 //! (`resolve_fullscreen`, video-mode matching) stays desktop-side —
 //! this module is env/argv grammar only.
 
+use std::io;
+
 use aether_kinds::WindowMode;
+use aether_substrate::config::ConfigError;
 
 /// Desktop window boot knobs (ADR-0090 §1/§2 applied to the chassis's
 /// own window knobs). The `#[derive(aether_substrate::Config)]` emits
@@ -24,8 +27,8 @@ pub struct WindowConfig {
     ///
     /// Accepts `windowed`, `windowed:WxH`, `fullscreen-borderless`, or
     /// `exclusive:WxH@HZ`. Lowered via [`Self::lower`], which delegates to
-    /// [`parse_window_mode_env`] and soft-falls back to `Windowed` on a
-    /// bad value (keeping the pre-migration behaviour).
+    /// [`parse_window_mode_env`]; a present-but-unparseable value hard-errors
+    /// the boot (ADR-0090 §4), while an absent value resolves to `Windowed`.
     pub mode: Option<String>,
     /// Window title at boot; unset uses "aether".
     ///
@@ -42,13 +45,13 @@ pub struct WindowConfig {
     pub wireframe: Option<String>,
 }
 
-/// Lowered desktop window boot knobs — the unit `DesktopEnv.window` carries
-/// and the chassis threads to the desktop driver and the bundle bins.
+/// The typed settings the window opens with — the unit `DesktopEnv.window`
+/// carries and the chassis threads to the desktop driver and the bundle bins.
 /// Mirrors the other embedded knob groups (`RingCapacities`,
 /// `SchedulerTuning`, `RenderTuningConfig`) rather than riding as loose
 /// fields. Produced by [`WindowConfig::lower`].
 #[derive(Clone, Debug)]
-pub struct WindowBoot {
+pub struct WindowSettings {
     /// Desktop window mode at boot, lowered from `WindowConfig::mode`.
     pub mode: WindowMode,
     /// Initial windowed size (`Some` only for a `windowed:WxH` mode).
@@ -61,32 +64,35 @@ pub struct WindowBoot {
 }
 
 impl WindowConfig {
-    /// Lower the resolved window knobs into the [`WindowBoot`] unit the
+    /// Lower the resolved window knobs into the [`WindowSettings`] unit the
     /// chassis threads into `DesktopEnv`. Subsumes the mode + title lowering:
-    /// `mode` delegates to [`parse_window_mode_env`], warn-logging and
-    /// falling back to `Windowed` on a bad value (preserving the
-    /// pre-migration soft-fallback for `AETHER_WINDOW_MODE`); `title`
-    /// maps `None` (unset or empty — the derive filters empty → `None`) to
-    /// `"aether"` and passes a provided value through verbatim; `wireframe`
-    /// rides through unchanged.
-    #[must_use]
-    pub fn lower(self) -> WindowBoot {
-        let (mode, size) =
-            self.mode.as_ref().map_or((WindowMode::Windowed, None), |s| match parse_window_mode_env(s) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::boot",
-                        value = %s,
-                        error = %e,
-                        "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
-                    );
-                    (WindowMode::Windowed, None)
-                }
-            });
+    /// `mode` delegates to [`parse_window_mode_env`], and a present-but-bad
+    /// `AETHER_WINDOW_MODE` value hard-errors the boot (ADR-0090 §4) rather
+    /// than silently defaulting; an absent value resolves to `Windowed`.
+    /// `title` maps `None` (unset or empty — the derive filters empty →
+    /// `None`) to `"aether"` and passes a provided value through verbatim;
+    /// `wireframe` rides through unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns a hard [`ConfigError`] naming the offending value and the
+    /// accepted grammar when `mode` is present but unparseable.
+    pub fn lower(self) -> Result<WindowSettings, ConfigError> {
+        let (mode, size) = match self.mode.as_deref() {
+            None => (WindowMode::Windowed, None),
+            Some(s) => parse_window_mode_env(s).map_err(|e| {
+                ConfigError::unparseable(
+                    "AETHER_WINDOW_MODE",
+                    s,
+                    io::Error::other(format!(
+                        "{e}; accepted: windowed[:WxH] | fullscreen-borderless | exclusive:WxH@HZ"
+                    )),
+                )
+            })?,
+        };
         let title = self.title.unwrap_or_else(|| "aether".to_owned());
 
-        WindowBoot { mode, size, title, wireframe: self.wireframe }
+        Ok(WindowSettings { mode, size, title, wireframe: self.wireframe })
     }
 }
 
@@ -133,14 +139,26 @@ mod tests {
     #[test]
     fn lower_title_none_returns_default() {
         // Unset title → "aether" default.
-        assert_eq!(WindowConfig::default().lower().title, "aether");
+        assert_eq!(WindowConfig::default().lower().expect("default config lowers cleanly").title, "aether");
     }
 
     #[test]
     fn lower_title_some_returns_value() {
         // Provided title passes through verbatim.
         let cfg = WindowConfig { mode: None, title: Some("my game".to_owned()), wireframe: None };
-        assert_eq!(cfg.lower().title, "my game");
+        assert_eq!(cfg.lower().expect("no mode set, so lowering succeeds").title, "my game");
+    }
+
+    #[test]
+    fn lower_bad_mode_hard_errors_naming_the_value() {
+        // A present-but-unparseable AETHER_WINDOW_MODE aborts the boot (ADR-0090
+        // §4) instead of silently falling back to Windowed. The rendered error
+        // must name the offending value so the operator can spot the typo.
+        let cfg = WindowConfig { mode: Some("windoze".to_owned()), title: None, wireframe: None };
+        let err = cfg.lower().expect_err("a bad window mode must be a hard config error");
+        let rendered = err.to_string();
+        assert!(rendered.contains("windoze"), "error must name the offending value, got: {rendered}");
+        assert!(rendered.contains("fullscreen-borderless"), "error must name the accepted grammar, got: {rendered}");
     }
 
     #[test]
