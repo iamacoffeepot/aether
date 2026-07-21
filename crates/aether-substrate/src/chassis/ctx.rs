@@ -321,6 +321,20 @@ pub struct ChassisCtx<'a> {
     /// go through `Registry::register_inline` directly and do *not*
     /// land here — they're not actors.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
+    /// ADR-0155 §4: driver-as-actor mailboxes reserved at the Claim stage
+    /// by [`crate::chassis::builder::DriverCapability::claim`] (via
+    /// [`Self::claim_driver_mailbox`]), stashed here so the driver's
+    /// Start-stage `boot` can recover the live [`MailboxClaim`] — inbox,
+    /// actor slots, wake slot — through
+    /// [`crate::chassis::builder::DriverCtx::take_claimed_mailbox`]. The
+    /// Claim hook is value-free (it runs at `--describe` time on a headless
+    /// host without the driver value), so the reservation it makes cannot
+    /// ride the driver struct; it rides this ctx-threaded accumulator
+    /// instead, mirroring `claimed_actor_mailboxes`. Empty for every chassis
+    /// whose driver claims nothing (the default no-op hook), and drained by
+    /// the describe path — which reads only the claimed namespaces off the
+    /// registry — when it drops.
+    reserved_driver_mailboxes: &'a mut Vec<(String, MailboxClaim)>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
     /// [`crate::Spawner`], cloned into every booted actor's
     /// [`crate::NativeBinding`] (via [`crate::NativeBinding::from_ctx`])
@@ -340,8 +354,9 @@ impl<'a> ChassisCtx<'a> {
         aborter: &'a Arc<dyn FatalAborter>,
         claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
         spawner: &'a Arc<crate::Spawner>,
+        reserved_driver_mailboxes: &'a mut Vec<(String, MailboxClaim)>,
     ) -> Self {
-        Self { registry, mailer, fallback, aborter, claimed_actor_mailboxes, spawner }
+        Self { registry, mailer, fallback, aborter, claimed_actor_mailboxes, reserved_driver_mailboxes, spawner }
     }
 
     /// Register a `MailboxEntry::Inbox` under `C::NAMESPACE` and
@@ -427,6 +442,39 @@ impl<'a> ChassisCtx<'a> {
             actor_slots: SharedActorSlots::new(),
             wake_slot,
         })
+    }
+
+    /// ADR-0155 §4 Claim-stage reservation for a driver-as-actor mailbox.
+    /// The chassis driver's value-free
+    /// [`crate::chassis::builder::DriverCapability::claim`] hook calls this
+    /// to reserve its inbox during the Claim stage — the same registry
+    /// reservation [`Self::claim_mailbox_with_override`] performs — and the
+    /// produced [`MailboxClaim`] is stashed on the ctx so the driver's
+    /// Start-stage `boot` recovers it via
+    /// [`crate::chassis::builder::DriverCtx::take_claimed_mailbox`]. This
+    /// splits the registry reservation (Claim, value-free — it runs at
+    /// `--describe` time without the driver) from the Start-stage
+    /// consumption of the inbox / actor slots / wake slot. The claimed
+    /// namespace lands in the registry the same way a passive cap's claim
+    /// does, so it appears in the claim-derived describe roster; the
+    /// [`MailboxId`] also lands in `claimed_actor_mailboxes`, exactly as it
+    /// would have when the driver claimed the inbox inline at Start.
+    pub fn claim_driver_mailbox(&mut self, name: &str) -> Result<(), BootError> {
+        let claim = self.claim_mailbox_with_override(name)?;
+        self.reserved_driver_mailboxes.push((name.to_owned(), claim));
+        Ok(())
+    }
+
+    /// Recover a driver-as-actor [`MailboxClaim`] reserved at the Claim
+    /// stage by [`Self::claim_driver_mailbox`]. Returns the claim (removing
+    /// it from the stash) or `None` when the driver reserved no mailbox
+    /// under `name`. Called by
+    /// [`crate::chassis::builder::DriverCtx::take_claimed_mailbox`] on the
+    /// Start path; a chassis whose driver claims nothing never populates the
+    /// stash, so this always returns `None` there.
+    pub(crate) fn take_claimed_mailbox(&mut self, name: &str) -> Option<MailboxClaim> {
+        let idx = self.reserved_driver_mailboxes.iter().position(|(n, _)| n == name)?;
+        Some(self.reserved_driver_mailboxes.swap_remove(idx).1)
     }
 
     /// Variant of [`Self::claim_mailbox`] that returns a strong
@@ -620,8 +668,16 @@ mod tests {
         let (registry, mailer, spawner, aborter, _pool) = test_infra();
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-        let mut ctx =
-            ChassisCtx::new(&registry, &mailer, &mut fallback, &aborter, &mut claimed_actor_mailboxes, &spawner);
+        let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+        let mut ctx = ChassisCtx::new(
+            &registry,
+            &mailer,
+            &mut fallback,
+            &aborter,
+            &mut claimed_actor_mailboxes,
+            &spawner,
+            &mut reserved_driver_mailboxes,
+        );
 
         let claim = ctx.claim_mailbox_with_override("test.iamacoffeepot.1272.driver").expect("first claim succeeds");
 
@@ -707,8 +763,16 @@ mod tests {
         {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-            let mut ctx =
-                ChassisCtx::new(&registry, &mailer, &mut fallback, &aborter, &mut claimed_actor_mailboxes, &spawner);
+            let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+            let mut ctx = ChassisCtx::new(
+                &registry,
+                &mailer,
+                &mut fallback,
+                &aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+                &mut reserved_driver_mailboxes,
+            );
             let claim =
                 ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone").expect("claim succeeds");
             claim_id = claim.id;
@@ -737,8 +801,16 @@ mod tests {
         {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-            let mut ctx =
-                ChassisCtx::new(&registry, &mailer, &mut fallback, &aborter, &mut claimed_actor_mailboxes, &spawner);
+            let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+            let mut ctx = ChassisCtx::new(
+                &registry,
+                &mailer,
+                &mut fallback,
+                &aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+                &mut reserved_driver_mailboxes,
+            );
             let claim =
                 ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.receiver_gone").expect("claim succeeds");
             claim_id = claim.id;

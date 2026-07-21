@@ -13,8 +13,7 @@
 //! drains the `aether.window` inbox when window-control mail arrives at
 //! an occluded window (iamacoffeepot/aether#1318).
 
-use std::error::Error as StdError;
-use std::fmt;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,12 +32,11 @@ use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_config};
-use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderTuningConfig};
+use aether_render::{RenderCapability, RenderConfig, RenderTuningConfig};
 use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
-use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use aether_chassis::WindowConfig;
@@ -56,51 +54,6 @@ use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use std::path::Path;
 use winit::event_loop::ControlFlow;
-
-/// Desktop chassis env-resolution failure (ADR-0090 §4 / issue #571).
-/// Widens the historic `EventLoopError`-only return so the desktop
-/// resolver can surface both the winit event-loop fault *and* a config
-/// fault (an unparseable known `AETHER_*` env value). Both arms
-/// `From`-convert in, and the whole enum `From`-converts into
-/// `anyhow::Error` via its `StdError` impl so `main()` keeps using `?`.
-#[derive(Debug)]
-pub enum DesktopBootError {
-    /// winit `EventLoop::build` failed.
-    EventLoop(EventLoopError),
-    /// A known `AETHER_*` env var (or argv overlay value) was
-    /// unparseable (ADR-0090 §4 hard-error half).
-    Config(ConfigError),
-}
-
-impl fmt::Display for DesktopBootError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EventLoop(e) => write!(f, "desktop event loop build failed: {e}"),
-            Self::Config(e) => write!(f, "desktop config resolution failed: {e}"),
-        }
-    }
-}
-
-impl StdError for DesktopBootError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            Self::EventLoop(e) => Some(e),
-            Self::Config(e) => Some(e),
-        }
-    }
-}
-
-impl From<EventLoopError> for DesktopBootError {
-    fn from(e: EventLoopError) -> Self {
-        Self::EventLoop(e)
-    }
-}
-
-impl From<ConfigError> for DesktopBootError {
-    fn from(e: ConfigError) -> Self {
-        Self::Config(e)
-    }
-}
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Just one variant today: a wake-up so the loop picks up a queued
@@ -168,17 +121,18 @@ impl DesktopChassis {
     }
 }
 
-/// Bag of resolved configs the desktop chassis takes at build time.
+/// Bag of resolved config *data* the desktop chassis takes at build time.
 /// `main()` populates it from env vars (per ADR-0070's "substrate-core
 /// never reads env" invariant); tests construct one directly.
 ///
-/// `event_loop` and `capture_queue` come in pre-built so `main()`
-/// owns the winit + capture handoff plumbing — winit's `EventLoop`
-/// is `!Send` on macOS and is the chassis's main thread in any
-/// case, which keeps construction local to `main`.
+/// ADR-0155 §4: this is config only — every field resolves through the
+/// argv/env/file path a real boot uses, so `--describe` can resolve it on
+/// a headless host. The Start-stage runtime handles that used to ride here
+/// — the winit `EventLoop` and the capture-handoff `CaptureQueue` — are not
+/// config: they are constructed on the boot path in `DesktopChassis::build_inner`
+/// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
+/// thread, so it stays local to the boot call `main()` makes).
 pub struct DesktopEnv {
-    pub event_loop: EventLoop<UserEvent>,
-    pub capture_queue: CaptureQueue,
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConf,
     /// ADR-0050 `aether.anthropic` cap config (issue 1014). Resolved
@@ -242,23 +196,22 @@ pub struct DesktopEnv {
 }
 
 impl DesktopEnv {
-    /// Read every chassis-relevant env var into a fresh `DesktopEnv`,
-    /// constructing the winit `EventLoop` + `CaptureQueue` along the
-    /// way. The single env-reading edge for the desktop chassis (per
-    /// issue 464). Tests bypass this by constructing `DesktopEnv`
+    /// Resolve every chassis-relevant env var into a fresh `DesktopEnv` of
+    /// config *data*. The single env-reading edge for the desktop chassis
+    /// (per issue 464). Tests bypass this by constructing `DesktopEnv`
     /// directly.
     ///
-    /// The fallible steps are `EventLoop::build` (winit) and the
-    /// ADR-0090 §4 config validation / parse path; both ride
-    /// [`DesktopBootError`] (issue #571 named the winit fault; e1
-    /// widens it to carry the config fault too).
+    /// ADR-0155 §4: env resolution produces config only — the winit
+    /// `EventLoop` and the capture `CaptureQueue` are Start-stage runtime
+    /// handles constructed on the boot path in
+    /// `DesktopChassis::build_inner`, not here — so the only fallible step
+    /// is the ADR-0090 §4 config validation / parse path.
     ///
     /// # Errors
     ///
-    /// Returns [`DesktopBootError::EventLoop`] when winit's event loop
-    /// fails to build, or [`DesktopBootError::Config`] when a known
-    /// `AETHER_*` env var holds an unparseable value.
-    pub fn from_env() -> Result<Self, DesktopBootError> {
+    /// Returns [`ConfigError`] when a known `AETHER_*` env var (or argv
+    /// overlay value) holds an unparseable value.
+    pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_argv(DesktopCli::default())
     }
 
@@ -271,7 +224,7 @@ impl DesktopEnv {
     /// # Errors
     ///
     /// See [`Self::from_env`].
-    pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, DesktopBootError> {
+    pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, ConfigError> {
         // ADR-0090 §4 (e1): warn on any unknown AETHER_ env var.
         validate_env(&chassis_known_keys())?;
         let DesktopCli {
@@ -310,10 +263,6 @@ impl DesktopEnv {
             Some(path) => boot_manifest_autoload(Path::new(&path))?,
             None => Vec::new(),
         };
-
-        let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-        event_loop.set_control_flow(ControlFlow::Poll);
-        let capture_queue = CaptureQueue::new();
 
         let http = resolve_with_file::<HttpConf>(http.into_layer(), config_file, "http")?;
         let anthropic = resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
@@ -360,8 +309,6 @@ impl DesktopEnv {
         let render_tuning = resolve_env_with_file::<RenderTuningConfig>(config_file, "render")?;
 
         Ok(Self {
-            event_loop,
-            capture_queue,
             namespace_roots,
             http,
             anthropic,
@@ -396,8 +343,6 @@ impl DesktopChassis {
     /// The trait method [`Chassis::build`] forwards here.
     fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<Self>, BootError> {
         let DesktopEnv {
-            event_loop,
-            capture_queue,
             namespace_roots,
             http,
             http_server,
@@ -419,6 +364,20 @@ impl DesktopChassis {
             autoload,
         } = env;
 
+        // ADR-0155 §4: the winit `EventLoop` and the capture `CaptureQueue`
+        // are Start-stage runtime handles, not config — construct them here
+        // on the boot path (`main()` calls this on the chassis main thread,
+        // where winit's `!Send` `EventLoop` must live). `--describe` never
+        // reaches this method, so it opens no event loop. The `EventLoop`
+        // build fault (never `Send + Sync` across winit's platform impls) is
+        // stringified into `BootError::Other`, the same shape a wasmtime boot
+        // fault takes.
+        let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
+            BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
+        })?;
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let capture_queue = CaptureQueue::new();
+
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
 
         let component_host_config = ComponentHostConfig {
@@ -427,24 +386,17 @@ impl DesktopChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
         let input_config = InputConfig::default();
-        // Capture handoff lives on `RenderCapability` post-issue-603
-        // Phase 2. The cap dispatcher runs `on_capture_frame`, parks
-        // the request on `capture_queue`, and pokes `UserEvent::Capture`
-        // so `RedrawRequested` picks it up on the next frame.
-        let proxy_for_render = event_loop.create_proxy();
+        // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
+        // config field. The driver builds it from the `CaptureQueue` +
+        // `EventLoopProxy` wake + reply egress and installs it into the
+        // published `RenderHandles` in its `boot` (Start), so the cap's
+        // `on_capture_frame` reads it there. The render *config* stays pure
+        // data.
         let render_config = RenderConfig {
             // Issue 2706: the resolved vertex-buffer cap sizes both the
             // cap accumulator's truncation and (via `RenderHandles`)
             // the GPU vertex buffer the driver creates.
             vertex_buffer_bytes: render_tuning.vertex_buffer_bytes,
-            capture_backend: Some(CaptureBackend {
-                queue: capture_queue.clone(),
-                wake: Arc::new(move || {
-                    let _ = proxy_for_render.send_event(UserEvent::Capture);
-                    Ok(())
-                }),
-                outbound: Arc::clone(&boot.outbound),
-            }),
             // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
             // reads its reference image from the same `assets` root the fs
             // cap serves, so the render cap loads it off the hot path.

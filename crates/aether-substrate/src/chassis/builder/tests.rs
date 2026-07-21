@@ -12,6 +12,7 @@ use aether_actor::{Addressable, HandlesKind};
 use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -394,6 +395,73 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
         0,
         "claim-only stops at Claim — no cap's init runs, so no OS resource is touched and no pool starts",
     );
+}
+
+/// Test driver whose value-free ADR-0155 §4 `claim` hook reserves a
+/// driver-as-actor mailbox with `claim_driver_mailbox`, and whose
+/// Start-stage `boot` recovers the live claim with
+/// `DriverCtx::take_claimed_mailbox` — the desktop `aether.window` split's
+/// shape. `boot` records the recovered mailbox id so the test can assert it
+/// is the mailbox the Claim hook reserved.
+struct ReserveRecoverDriver {
+    recovered: Arc<Mutex<Option<MailboxId>>>,
+}
+struct ReserveRecoverDriverRunning;
+
+impl DriverCapability for ReserveRecoverDriver {
+    type Running = ReserveRecoverDriverRunning;
+
+    fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        ctx.claim_driver_mailbox("test.reserve_recover.window")
+    }
+
+    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        let claim = ctx.take_claimed_mailbox("test.reserve_recover.window").ok_or_else(|| {
+            BootError::Other(Box::new(io::Error::other(
+                "reserve/recover: the Claim-stage reservation was missing at Start",
+            )))
+        })?;
+        *self.recovered.lock().expect("recovered mutex is never poisoned") = Some(claim.id);
+        Ok(ReserveRecoverDriverRunning)
+    }
+}
+
+impl DriverRunning for ReserveRecoverDriverRunning {
+    fn run(self: Box<Self>) -> Result<(), RunError> {
+        Ok(())
+    }
+}
+
+/// ADR-0155 §4 Claim-reserve / Start-recover handoff. The fused `build()`
+/// path must run the driver's value-free `claim` hook in the Claim stage
+/// (Pass 1 of `boot_passives`) and thread the reserved `MailboxClaim` to the
+/// driver's Start-stage `boot`, which recovers it via
+/// `DriverCtx::take_claimed_mailbox`. Tripwire: the recovered claim's id
+/// must be the id the registry registered for the reserved namespace — so
+/// the reservation and the recovery address the same mailbox. A broken
+/// handoff (the driver claim never running at Claim, the claim not stashed,
+/// or `take` not finding it) leaves `boot` with `None` and aborts the build.
+#[test]
+fn driver_claim_reserved_at_claim_is_recovered_at_start() {
+    let (registry, mailer) = bare_substrate();
+    let registry_probe = Arc::clone(&registry);
+    let recovered = Arc::new(Mutex::new(None));
+
+    let chassis = Builder::<DrivenTestChassis<ReserveRecoverDriver>>::new(registry, mailer)
+        .driver(ReserveRecoverDriver { recovered: Arc::clone(&recovered) })
+        .build()
+        .expect("build succeeds — the driver recovered its Claim-stage reservation at Start");
+
+    let expected_id = registry_probe
+        .list_mailbox_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.name == "test.reserve_recover.window")
+        .map(|descriptor| descriptor.id)
+        .expect("the reserved namespace is registered on the chassis registry");
+    let recovered_id = recovered.lock().expect("recovered mutex is never poisoned").expect("boot recovered a claim");
+    assert_eq!(recovered_id, expected_id, "the recovered claim addresses the reserved mailbox");
+
+    chassis.run().expect("driver run succeeds");
 }
 
 /// Boot-time mailbox-claim collision aborts the build (and runs

@@ -189,6 +189,9 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // keeps the manual-drive path light; the perf benches that want a
         // real pool already pass `.with_workers(_)` explicitly, which wins.
         let workers = self.workers.or(Some(PASSIVE_DEFAULT_WORKERS));
+        // ADR-0155 §4: the no-driver path still runs the Claim stage over
+        // `C::Driver`'s value-free hook — for a passive chassis that is
+        // `NeverDriver`, whose default hook reserves nothing.
         let booted = boot_passives(
             &self.registry,
             &self.mailer,
@@ -198,6 +201,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             self.scheduler_tuning,
             self.teardown_cap,
             self.passives,
+            <C::Driver as DriverCapability>::claim,
         )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing` and there is no
@@ -338,8 +342,21 @@ impl<C: Chassis> Builder<C, HasDriver> {
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
-        let mut booted =
-            boot_passives(&registry, &mailer, &aborter, workers, ring_caps, scheduler_tuning, teardown_cap, passives)?;
+        // ADR-0155 §4: `<C::Driver>::claim` runs in Pass 1 of `boot_passives`
+        // (the Claim stage), reserving the driver-as-actor mailboxes onto
+        // `booted.reserved_driver_mailboxes` before any Init. The driver's
+        // Start-stage `boot` below recovers them through the `DriverCtx`.
+        let mut booted = boot_passives(
+            &registry,
+            &mailer,
+            &aborter,
+            workers,
+            ring_caps,
+            scheduler_tuning,
+            teardown_cap,
+            passives,
+            <C::Driver as DriverCapability>::claim,
+        )?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing`.
         let driver_running = {
@@ -350,6 +367,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &booted.aborter,
                 &mut booted.claimed_actor_mailboxes,
                 &booted.spawner,
+                &mut booted.reserved_driver_mailboxes,
             );
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles);
             driver_boot(&mut driver_ctx)?

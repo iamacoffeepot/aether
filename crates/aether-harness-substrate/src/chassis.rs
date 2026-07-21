@@ -151,6 +151,18 @@ pub trait RenderExt: Send {
         wiring: &BenchWiring,
         builder: Builder<SubstrateHarnessChassis>,
     ) -> Builder<SubstrateHarnessChassis>;
+
+    /// ADR-0155 §4: install the driver-side capture backend into the booted
+    /// chassis's published `RenderHandles` — the Start-stage handoff that
+    /// replaces the retired `RenderConfig.capture_backend`. Called after
+    /// `build_passive`, once the render cap has published its handles: the
+    /// impl builds the `CaptureBackend` from `wiring` (capture queue +
+    /// embedder-loop wake + reply egress) and installs it, so the cap's
+    /// `capture_frame` handler reaches it the same way the desktop driver's
+    /// Start-stage install does. The core stays render-free by naming only
+    /// [`BenchWiring`] and [`PassiveChassis`]; the render types live in the
+    /// impl.
+    fn install_capture_backend(&self, wiring: &BenchWiring, passive: &PassiveChassis<SubstrateHarnessChassis>);
 }
 
 /// Bag of resolved configs the substrate-harness chassis takes at build
@@ -427,6 +439,14 @@ impl SubstrateHarnessChassis {
             builder = builder.with_actor::<FsCapability>(roots);
         }
         let passive = builder.build_passive()?;
+
+        // ADR-0155 §4: with the render cap booted and its `RenderHandles`
+        // published, install the capture backend from the boot wiring — the
+        // Start-stage handoff that replaces `RenderConfig.capture_backend`.
+        // Mirrors the desktop driver installing its backend in `boot`.
+        if let Some(ext) = &render_ext {
+            ext.install_capture_backend(&wiring, &passive);
+        }
 
         // The cap config already cloned `events_tx`; dropping the
         // local copy lets the receiver hang up cleanly once every

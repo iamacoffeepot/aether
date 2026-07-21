@@ -29,14 +29,14 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, TextInput, Tick, WindowMode, WindowSize,
 };
-use aether_render::RenderHandles;
+use aether_render::{CaptureBackend, RenderHandles};
 use aether_substrate::actor::native::local;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{
-    HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
+    ChassisCtx, HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
@@ -981,6 +981,18 @@ pub struct DesktopDriverRunning {
 impl DriverCapability for DesktopDriverCapability {
     type Running = DesktopDriverRunning;
 
+    /// ADR-0155 §4 / issue #3834: reserve the `aether.window` inbox at the
+    /// Claim stage. The desktop driver is the cap for `aether.window` (issue
+    /// 603 Phase 3), but its winit `EventLoop` does not exist at claim time —
+    /// so this value-free hook only reserves the registry slot, stashing the
+    /// live `MailboxClaim` for [`Self::boot`] to recover at Start (where the
+    /// event loop exists) and install the `EventLoopProxy` wake. Splitting
+    /// the reservation off Start is what lets `--describe` claim
+    /// `aether.window` on a headless host without an event loop.
+    fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        ctx.claim_driver_mailbox("aether.window")
+    }
+
     // One-shot boot wiring: kind-id lookups, mailbox claims, and the
     // `App` construction all thread through a single flat sequence;
     // splitting would just pass the same dozen fields through a helper.
@@ -1003,6 +1015,24 @@ impl DriverCapability for DesktopDriverCapability {
         })?;
         let triangles_rendered = Arc::clone(&render_handles.triangles_rendered);
 
+        // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
+        // `RenderConfig` field. Build it from the capture queue + an
+        // `EventLoopProxy` wake + the reply egress and install it into the
+        // published `RenderHandles`, so the render cap's `on_capture_frame`
+        // parks its request here and pokes `UserEvent::Capture` for the next
+        // `RedrawRequested` to service. The winit event loop that could not
+        // exist at claim time is present here at Start — which is exactly why
+        // this wiring is Start-stage and not config.
+        let capture_proxy = event_loop.create_proxy();
+        render_handles.install_capture_backend(CaptureBackend {
+            queue: capture_queue.clone(),
+            wake: Arc::new(move || {
+                let _ = capture_proxy.send_event(UserEvent::Capture);
+                Ok(())
+            }),
+            outbound: Arc::clone(&boot.outbound),
+        });
+
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
         let kind_key_release = boot.registry.kind_id(KeyRelease::NAME).expect("KeyRelease registered");
@@ -1020,17 +1050,27 @@ impl DriverCapability for DesktopDriverCapability {
         let kind_focus_window = boot.registry.kind_id(FocusWindow::NAME).expect("FocusWindow registered");
 
         // Issue 603 Phase 3: the desktop driver is the cap for
-        // `aether.window`. Claim the inbox here; the receiver lives on
-        // `App` and `about_to_wait` drains it inline between frames.
+        // `aether.window`. ADR-0155 §4: the inbox was reserved at the Claim
+        // stage by `DesktopDriverCapability::claim`; recover the live
+        // `MailboxClaim` here at Start rather than re-claiming (a second
+        // claim would collide). The receiver lives on `App` and
+        // `about_to_wait` drains it inline between frames.
         //
         // iamacoffeepot/aether#1318: install an `EventLoopProxy` wake on
-        // the claim so window-control mail (`focus` / `set_mode` /
+        // the recovered claim so window-control mail (`focus` / `set_mode` /
         // `set_title`) arriving at an occluded window pokes
         // `UserEvent::WindowMail`, letting winit run `about_to_wait` and
         // drain even under `ControlFlow::Wait`. The proxy is minted here
         // while `event_loop` is still owned by the capability (it moves
-        // into `DesktopDriverRunning` after `boot`).
-        let window_claim = ctx.claim_mailbox("aether.window")?;
+        // into `DesktopDriverRunning` after `boot`) — the winit event loop
+        // that could not exist at claim time is present at Start, which is
+        // exactly why the wake install is Start-stage.
+        let window_claim = ctx.take_claimed_mailbox("aether.window").ok_or_else(|| {
+            BootError::Other(Box::new(io::Error::other(
+                "DesktopDriverCapability::boot: the aether.window claim is missing — \
+                 DriverCapability::claim must reserve it at the Claim stage before boot (ADR-0155 §4)",
+            )))
+        })?;
         let window_mail_proxy = event_loop.create_proxy();
         window_claim.wake_slot.set(Arc::new(move || {
             let _ = window_mail_proxy.send_event(UserEvent::WindowMail);

@@ -139,6 +139,11 @@ impl NativeActor for RenderCapability {
             textures: Arc::new(Mutex::new(TextureRegistry::new())),
             gpu: Arc::new(OnceLock::new()),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
+            // ADR-0155 §4: the driver installs the capture backend into this
+            // shared slot at Start (via the published `RenderHandles`); the
+            // cap boots it empty so env-resolved config carries no runtime
+            // handle.
+            capture_backend: Arc::new(OnceLock::new()),
         };
         let mailer = ctx.mailer();
         let registry = Arc::clone(mailer.registry());
@@ -232,7 +237,11 @@ impl NativeActor for RenderCapability {
         }
 
         let sender = ctx.reply_target();
-        let Some(backend) = state.config.capture_backend.as_ref() else {
+        // ADR-0155 §4: the capture backend is a Start-stage handoff the driver
+        // installs into the published `RenderHandles`, not a `RenderConfig`
+        // field. Absent until installed — a chassis with no render thread
+        // (the in-crate tests) never installs one and replies `Err`.
+        let Some(backend) = state.handles.capture_backend() else {
             tracing::warn!(
                 target: "aether_render",
                 "RenderCapability received capture_frame without capture_backend; replying Err",

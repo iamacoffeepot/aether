@@ -5,7 +5,7 @@ use aether_kinds::trace::Settled;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use crate::actor::native::ExportedHandles;
-use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
+use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::config::{RingCapacities, SchedulerTuning};
@@ -36,6 +36,14 @@ pub(super) struct BootedPassives {
     /// installing every actor's `LogDrainSlot` to the chassis-declared
     /// drain.
     pub(super) claimed_actor_mailboxes: Vec<MailboxId>,
+    /// ADR-0155 §4: driver-as-actor mailboxes the driver's Claim hook
+    /// reserved during Pass 1, each a live [`MailboxClaim`] keyed by name.
+    /// `Builder::build` threads this onto the [`ChassisCtx`] it hands the
+    /// driver's Start-stage `boot`, which recovers the inbox / actor slots /
+    /// wake slot via `DriverCtx::take_claimed_mailbox`. Empty for a chassis
+    /// whose driver claims nothing (the default no-op hook) and for the
+    /// no-driver `build_passive` path.
+    pub(super) reserved_driver_mailboxes: Vec<(String, MailboxClaim)>,
     /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
     /// lifecycle registry, plus the spawn machinery that writes into
     /// it. Both built once at boot; `Spawner` carries `Arc` clones of
@@ -127,11 +135,21 @@ pub(super) fn boot_passives(
     scheduler_tuning: SchedulerTuning,
     teardown_cap: Duration,
     passives: Vec<Box<dyn PassiveBoot>>,
+    // ADR-0155 §4: the driver type's value-free Claim hook, run in Pass 1
+    // alongside the passives' claims (before any Init). `Builder::build`
+    // passes `<C::Driver>::claim`; the no-driver `build_passive` passes the
+    // same for `C::Driver = NeverDriver`, whose default hook reserves
+    // nothing.
+    driver_claim: impl FnOnce(&mut ChassisCtx<'_>) -> Result<(), BootError>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut fallback: Option<FallbackRouter> = None;
     let mut handles = ExportedHandles::new();
     let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+    // ADR-0155 §4: the driver Claim hook stashes its reserved mailboxes here;
+    // moved onto `BootedPassives` at return so the driver's Start-stage boot
+    // recovers them.
+    let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
     let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
     // The pool's wake sink is cloned into the Spawner (for instanced
@@ -227,7 +245,15 @@ pub(super) fn boot_passives(
     // borrowed slots (e.g., claim pushes into `claimed_actor_mailboxes`).
     macro_rules! build_ctx {
         () => {
-            ChassisCtx::new(registry, mailer, &mut fallback, aborter, &mut claimed_actor_mailboxes, &spawner)
+            ChassisCtx::new(
+                registry,
+                mailer,
+                &mut fallback,
+                aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+                &mut reserved_driver_mailboxes,
+            )
         };
     }
 
@@ -251,8 +277,20 @@ pub(super) fn boot_passives(
         for shutdown in already_spawned.into_iter().rev() {
             shutdown.shutdown_dyn();
         }
+        // ADR-0155 §4: `cleanup_after_failure` never touches driver-reserved
+        // mailboxes (they belong to the driver's Claim hook, not a passive),
+        // so the ctx borrows a throwaway stash the rollback drops.
+        let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
         for boot in booted.into_iter().rev() {
-            let mut ctx = ChassisCtx::new(registry, mailer, fallback, aborter, claimed_actor_mailboxes, spawner);
+            let mut ctx = ChassisCtx::new(
+                registry,
+                mailer,
+                fallback,
+                aborter,
+                claimed_actor_mailboxes,
+                spawner,
+                &mut reserved_driver_mailboxes,
+            );
             boot.cleanup_after_failure(&mut ctx);
         }
     }
@@ -278,6 +316,29 @@ pub(super) fn boot_passives(
                 );
                 return Err(e);
             }
+        }
+    }
+
+    // ADR-0155 §4: still the Claim stage — the driver-as-actor claim hook
+    // reserves its mailboxes alongside the passives, before any Init. The
+    // produced `MailboxClaim`s ride `reserved_driver_mailboxes` to the
+    // driver's Start-stage `boot` (`DriverCtx::take_claimed_mailbox`). A
+    // failure here rolls the already-claimed passives back, exactly as a
+    // passive claim failure does.
+    {
+        let mut ctx = build_ctx!();
+        if let Err(e) = driver_claim(&mut ctx) {
+            rollback(
+                registry,
+                mailer,
+                &mut fallback,
+                aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+                booted,
+                Vec::new(),
+            );
+            return Err(e);
         }
     }
 
@@ -348,6 +409,7 @@ pub(super) fn boot_passives(
         handles,
         aborter: Arc::clone(aborter),
         claimed_actor_mailboxes,
+        reserved_driver_mailboxes,
         actor_registry,
         spawner,
         _pool: pool,
