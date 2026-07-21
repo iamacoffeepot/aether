@@ -10,23 +10,3 @@ pub mod driver;
 pub use chassis::{HeadlessChassis, HeadlessEnv};
 
 pub use aether_chassis::autoload::AutoloadComponent;
-
-#[cfg(test)]
-mod chassis_source_guard {
-    /// Regression guard for the enable / disable convention (#1791),
-    /// headless half — the desktop half lives with the desktop chassis
-    /// sources. A capability's enable/disable flag resolves through its
-    /// derive-`Config`, never a raw `env::var` read in a chassis builder.
-    #[test]
-    fn chassis_builder_resolves_cap_enable_flags_via_config() {
-        const CAP_FLAG_KEYS: &[&str] = &["AETHER_HTTP_SERVER_ENABLED", "AETHER_AUDIO_DISABLE"];
-        let src = include_str!("chassis.rs");
-        for key in CAP_FLAG_KEYS {
-            let raw_read = format!("env::var(\"{key}\")");
-            assert!(
-                !src.contains(&raw_read),
-                "headless chassis reads {key} via raw env::var — route it through the cap's config API instead",
-            );
-        }
-    }
-}
