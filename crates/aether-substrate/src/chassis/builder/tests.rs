@@ -549,20 +549,30 @@ fn failed_singleton_init_releases_namespace_and_sink() {
     );
 }
 
-/// ADR-0156 §5: a `with_config` override staged for a type no composed member
-/// declares as its `Config` is a hard boot error naming the type — the
-/// staged-but-never-composed coherence guard. A composed cap plus a matching
-/// override boots fine (the paired-form path); an orphan `with_config` aborts.
+/// ADR-0156 §5: an override staged for a type no composed member declares as
+/// its `Config` is a hard boot error naming the type — the
+/// staged-but-never-composed coherence guard (defense-in-depth on the
+/// `ConfigSources` bulk path). The paired [`Builder::with_actor_configured`]
+/// makes an orphan *unconstructable* through the public builder API — an
+/// override always composes its actor — so the orphan case is reachable only by
+/// staging directly into a `ConfigSources` and handing it over via
+/// `with_config_sources` (the chassis's argv/file bulk path), which is what
+/// this test does. A composed cap with no orphan override boots.
 #[test]
 fn build_passive_rejects_staged_but_never_composed_override() {
+    use crate::config::ConfigSources;
+
     // A distinctive marker type that is never any cap's `Config`.
     #[derive(Debug)]
     struct OrphanKnob;
 
+    let mut orphan_sources = ConfigSources::hermetic();
+    orphan_sources.set_override(OrphanKnob);
+
     let (registry, mailer) = bare_substrate();
     let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_config_sources(orphan_sources)
         .with_actor::<StubLog>(())
-        .with_config(OrphanKnob)
         .build_passive()
         .expect_err("a staged-but-never-composed override must abort boot");
     assert!(

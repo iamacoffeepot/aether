@@ -134,15 +134,17 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     let mut harness = SubstrateHarness::builder()
         .with_component_host()
         .with_actor::<TcpCapability>(())
-        .with_config(GameGatewayConfig {
-            listener_addr: Some("127.0.0.1:0".into()),
-            listener_name: LISTENER_NAME.into(),
+        .with_actor_configured::<GameGatewayCapability>(
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
+            GameGatewayConfig {
+                listener_addr: Some("127.0.0.1:0".into()),
+                listener_name: LISTENER_NAME.into(),
 
-            interval_nanos: INTERVAL_NANOS,
-            max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
-            max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
-        })
-        .with_actor::<GameGatewayCapability>(GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) })
+                interval_nanos: INTERVAL_NANOS,
+                max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+                max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
+            },
+        )
         .build()
         .expect("boot active game gateway SubstrateHarness");
     let listener_port = gateway_listener_port(&mut harness);

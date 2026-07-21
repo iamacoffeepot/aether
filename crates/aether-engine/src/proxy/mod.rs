@@ -162,8 +162,10 @@ mod tests {
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TestEchoActor>(())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
-            .with_config(RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) })
-            .with_actor::<RpcServerCapability>(RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None })
+            .with_actor_configured::<RpcServerCapability>(
+                RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None },
+                RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            )
             .build_passive()
             .expect("caps boot");
 

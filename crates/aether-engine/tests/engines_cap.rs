@@ -97,8 +97,7 @@ fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let cells = ReplyCells::default();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_config(engine_config)
-        .with_actor::<EngineServer>(())
+        .with_actor_configured::<EngineServer>((), engine_config)
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");

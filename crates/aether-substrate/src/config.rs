@@ -733,8 +733,8 @@ pub fn file_section<C: FromArgvThenEnv>(
 /// through to the lower layers, matching how resolution treats it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigProvenance {
-    /// A programmatic explicit value (`Builder::with_config`) — the top layer,
-    /// how the harnesses and tests construct configs in code.
+    /// A programmatic explicit value (`Builder::with_actor_configured`) — the
+    /// top layer, how the harnesses and tests construct configs in code.
     Programmatic,
     /// A non-empty argv overlay staged for this member.
     Argv,
@@ -772,8 +772,9 @@ impl fmt::Display for ConfigProvenance {
 ///
 /// The programmatic layer is an explicit-value layer *inside* the stack rather
 /// than a bypass around it: `SubstrateHarness` and unit tests stage config
-/// values here (via `Builder::with_config`) and resolution short-circuits to
-/// them, so an in-code construction never reads process env.
+/// values here (via `Builder::with_actor_configured`, which composes the actor
+/// and stages its value together) and resolution short-circuits to them, so an
+/// in-code construction never reads process env.
 #[derive(Default)]
 pub struct ConfigSources {
     file: Option<toml::Table>,
@@ -825,15 +826,18 @@ impl ConfigSources {
     }
 
     /// Stage a programmatic explicit value for member `C` — the top layer of
-    /// the stack. Backs `Builder::with_config`.
+    /// the stack. The internal mechanism `Builder::with_actor_configured` rides
+    /// (which also composes the actor, so the override is never orphaned); a
+    /// chassis test may also call it directly on a `ConfigSources` handed over
+    /// via `with_config_sources`.
     pub fn set_override<C: 'static>(&mut self, value: C) {
         self.overrides.insert(TypeId::of::<C>(), Box::new(value));
         self.override_names.insert(TypeId::of::<C>(), type_name::<C>());
     }
 
     /// Stage member `C`'s argv overlay layer (its `Overlay::into_layer`
-    /// output). Backs `Builder::with_config_argv` — the typed argv handoff the
-    /// chassis makes adjacent to composition.
+    /// output) — the typed argv handoff the chassis makes adjacent to
+    /// composition, folded into the bulk stack that rides `Builder::with_config_sources`.
     pub fn set_argv<C: FromArgvThenEnv + 'static>(&mut self, layer: <C::Layer as confique::Config>::Layer) {
         self.argv.insert(TypeId::of::<C>(), Box::new(layer));
     }
@@ -995,10 +999,13 @@ pub enum ConfigError {
         /// The underlying TOML decode error.
         source: Box<dyn StdError + Send + Sync + 'static>,
     },
-    /// ADR-0156 §5: a programmatic `with_config::<T>(value)` override was staged
-    /// on the builder whose config type `T` matches no composed member — a
-    /// typo'd or orphaned override that would otherwise be silently left behind.
-    /// A hard boot error naming `T` (via [`ConfigSources::validate_overrides`]).
+    /// ADR-0156 §5: a programmatic override was staged on the source stack whose
+    /// config type `T` matches no composed member — a typo'd or orphaned
+    /// override that would otherwise be silently left behind. The paired
+    /// `Builder::with_actor_configured` makes this unconstructable (an override
+    /// always composes its actor); this defends the `ConfigSources` bulk path
+    /// (`set_override` + `with_config_sources`) a chassis test can drive. A hard
+    /// boot error naming `T` (via [`ConfigSources::validate_overrides`]).
     OrphanOverride {
         /// The `type_name` of the staged override that matches no composed member.
         type_name: String,
@@ -1062,8 +1069,8 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "programmatic config override for `{type_name}` matches no composed member \
-                     — staged via with_config but no composed actor declares it as its Config \
-                     (typo? removed cap? wrong type?)"
+                     — staged as a source-stack override but no composed actor declares it as its \
+                     Config (typo? removed cap? wrong type?)"
                 )
             }
         }

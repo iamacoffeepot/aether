@@ -204,72 +204,63 @@ impl BloomeryChassis {
 
         Builder::<Self>::new(registry, mailer)
             .with_actor::<TraceDispatchCapability>(())
-            .with_config(store)
-            .with_actor::<StoreCapability>(())
+            .with_actor_configured::<StoreCapability>((), store)
             // The single-writer control core (ADR-0149 §The control core): owns the
             // live snapshot, drives `reduce`, commits through the store, and gates
             // seals on the source claim refs. Native since the wasm-boundary
             // retirement — the api and reactors address it as a typed peer.
             .with_actor::<ControlCore>(())
-            .with_config(artifacts)
-            .with_actor::<ArtifactsCapability>(())
-            .with_config(github.clone())
-            .with_actor::<MirrorReactorCapability>(())
+            .with_actor_configured::<ArtifactsCapability>((), artifacts)
+            .with_actor_configured::<MirrorReactorCapability>((), github.clone())
             // The executor dispatch reactor (#3505): drains the reducer's
             // dispatch-topic decisions, submits them through the
             // executor port, and admits matched results back to the control core.
             // Reuses the one GitHub-connection config the mirror + source caps do.
-            .with_config(github.clone())
-            .with_actor::<ExecutorReactorCapability>(())
+            .with_actor_configured::<ExecutorReactorCapability>((), github.clone())
             // The land reactor (#3559, ADR-0149 migration step 3): drains the
             // reducer's `aether.bloomery.land` decisions, issues the source-port
             // compare-and-swap that is now the landing of record, and admits
             // `Fact::Land` back to the control core. Reuses the one
             // GitHub-connection config the mirror + executor + source caps do.
-            .with_config(github.clone())
-            .with_actor::<LandReactorCapability>(())
+            .with_actor_configured::<LandReactorCapability>((), github.clone())
             // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`
             // back to the control core. Reuses the same GitHub-connection config.
-            .with_config(github.clone())
-            .with_actor::<IntegrateReactorCapability>(())
+            .with_actor_configured::<IntegrateReactorCapability>((), github.clone())
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
             // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
             // in-process `TokenSource` the port shells' client pulls from in
             // `connect_client`, reading the App key and failing fast there
             // (ADR-0150). This cap wires that same shared github config into the
             // source shell.
-            .with_config(github)
-            .with_actor::<SourceCapability>(())
-            .with_config(session)
-            .with_actor::<SessionPoolCapability>(())
+            .with_actor_configured::<SourceCapability>((), github)
+            .with_actor_configured::<SessionPoolCapability>((), session)
             // The statement-signature custody point (ADR-0149 step 3): the
             // answer gate dials it to verify author signatures against the
             // host-local allowlist rather than the fake always-valid provider.
-            .with_config(signing)
-            .with_actor::<SigningCapability>(())
+            .with_actor_configured::<SigningCapability>((), signing)
             .with_actor::<ComponentHostCapability>(component_host)
-            .with_config(RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) })
-            .with_actor::<RpcServerCapability>(RpcServerParams {
-                peer_kind: PeerKind::Substrate {
-                    engine_name: "aether-bloomery".into(),
-                    engine_version: env!("CARGO_PKG_VERSION").into(),
-                    kinds: vec![],
+            .with_actor_configured::<RpcServerCapability>(
+                RpcServerParams {
+                    peer_kind: PeerKind::Substrate {
+                        engine_name: "aether-bloomery".into(),
+                        engine_version: env!("CARGO_PKG_VERSION").into(),
+                        kinds: vec![],
+                    },
+                    // The bloomery host fields no engine-addressed forwards
+                    // (it wires no engines cap), so it needs no route target.
+                    route_target: None,
                 },
-                // The bloomery host fields no engine-addressed forwards
-                // (it wires no engines cap), so it needs no route target.
-                route_target: None,
-            })
+                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
+            )
             // The REST control ingress (ADR-0149 §Packaging, #3498): the HTTP
             // server cap binds localhost, and the api cap claims the control
             // routes on it. RPC stays mounted above for fleet plumbing.
-            .with_config(HttpServerConfig {
-                enabled: true,
-                bind_addr: http_addr.to_string(),
-                ..HttpServerConfig::default()
-            })
-            .with_actor::<HttpServerCapability>(())
+            .with_actor_configured::<HttpServerCapability>(
+                (),
+                HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
+            )
             .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file })
     }
 

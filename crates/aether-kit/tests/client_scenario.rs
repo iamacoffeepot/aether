@@ -352,15 +352,17 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
         .with_actor::<InputCapability>(())
         .with_actor::<TcpCapability>(())
         .size(FRAME_WIDTH, FRAME_HEIGHT)
-        .with_config(GameGatewayConfig {
-            listener_addr: Some("127.0.0.1:0".into()),
-            listener_name: LISTENER_NAME.into(),
+        .with_actor_configured::<GameGatewayCapability>(
+            GameGatewayParams { turn_sim_mailbox: Some(sim_mailbox) },
+            GameGatewayConfig {
+                listener_addr: Some("127.0.0.1:0".into()),
+                listener_name: LISTENER_NAME.into(),
 
-            interval_nanos: INTERVAL_NANOS,
-            max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
-            max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
-        })
-        .with_actor::<GameGatewayCapability>(GameGatewayParams { turn_sim_mailbox: Some(sim_mailbox) })
+                interval_nanos: INTERVAL_NANOS,
+                max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+                max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
+            },
+        )
         .build()
         .expect("boot active gateway SubstrateHarness");
     let listener_port = gateway_listener_port(&mut harness);

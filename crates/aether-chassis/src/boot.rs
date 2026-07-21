@@ -601,8 +601,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
         // Programmatic: the fs cap uses the exact roots the staging root was
         // derived from (resolved chassis-side, above).
-        .with_config(boot.namespace_roots)
-        .with_actor::<FsCapability>(())
+        .with_actor_configured::<FsCapability>((), boot.namespace_roots)
         .with_actor::<TextCapability>(())
         .with_actor::<InventoryCapability>(())
         // Builder-resolved off the source stack: `HttpConfig`, `AnthropicConfig`,
@@ -611,8 +610,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<TcpCapability>(())
         // Programmatic default (byte-identical to the pre-inversion `::default()`
         // compose): no `AETHER_GAME_*` env opens a listener on the common chassis.
-        .with_config(GameGatewayConfig::default())
-        .with_actor::<GameGatewayCapability>(boot.game_gateway_params)
+        .with_actor_configured::<GameGatewayCapability>(boot.game_gateway_params, GameGatewayConfig::default())
         .with_actor::<AnthropicCapability>(())
         .with_actor::<GeminiCapability>(GeminiParams { gen_root: staging_root })
 }
@@ -656,9 +654,8 @@ pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketA
     // `bind_addr` is resolved from `AETHER_RPC_PORT` outside the derive path
     // (#3849 migrates it onto a derive member), so it rides the builder's
     // programmatic layer rather than the source stack.
-    builder
-        .with_config(RpcServerConfig { bind_addr: rpc_addr.map(|addr| addr.to_string()) })
-        .with_actor::<RpcServerCapability>(RpcServerParams {
+    builder.with_actor_configured::<RpcServerCapability>(
+        RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: engine_name.into(),
                 engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -667,7 +664,9 @@ pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketA
             // A forked substrate peer never fields engine-addressed forwards
             // (only the hub does), so it needs no route target.
             route_target: None,
-        })
+        },
+        RpcServerConfig { bind_addr: rpc_addr.map(|addr| addr.to_string()) },
+    )
 }
 
 /// Parse the `AETHER_RPC_PORT` env var into an optional port number

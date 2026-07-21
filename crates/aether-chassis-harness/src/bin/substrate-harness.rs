@@ -77,8 +77,10 @@ fn main() -> anyhow::Result<()> {
                 b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardParams::InMemory)
             }),
             Box::new(|b| {
-                b.with_config(aether_game::GameGatewayConfig::default())
-                    .with_actor::<aether_game::GameGatewayCapability>(aether_game::GameGatewayParams::default())
+                b.with_actor_configured::<aether_game::GameGatewayCapability>(
+                    aether_game::GameGatewayParams::default(),
+                    aether_game::GameGatewayConfig::default(),
+                )
             }),
         ],
         // Issue #2509: the standalone binary is an env-reading edge, so

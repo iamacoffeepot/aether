@@ -361,8 +361,8 @@ impl SubstrateHarnessBuilder {
     /// in push order, between the harness basics and lifecycle.
     ///
     /// ADR-0156 §5: mirrors `Builder::with_actor` — it carries only `params`
-    /// (the composer-supplied construction input), and a cap's operator-resolvable
-    /// `Config` rides the builder's programmatic layer via [`Self::with_config`].
+    /// (the composer-supplied construction input). To also supply a cap's
+    /// operator-resolvable `Config`, use the paired [`Self::with_actor_configured`].
     #[must_use]
     pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
@@ -388,19 +388,6 @@ impl SubstrateHarnessBuilder {
         A::Params: Send + 'static,
     {
         self.compose.push(Box::new(move |builder| builder.with_actor_configured::<A>(params, config)));
-        self
-    }
-
-    /// ADR-0156 §5: stage a programmatic explicit config value onto the chassis
-    /// builder's source stack — the mirror of `Builder::with_config`, the
-    /// cross-helper override seam. Prefer [`Self::with_actor_configured`] when a
-    /// scenario composes an actor and supplies its config together; reach for
-    /// this only to override the `Config` of a member composed inside a shared
-    /// fragment. A staged override matching no composed member is a hard boot
-    /// error at build time.
-    #[must_use]
-    pub fn with_config<T: Send + 'static>(mut self, value: T) -> Self {
-        self.compose.push(Box::new(move |builder| builder.with_config(value)));
         self
     }
 

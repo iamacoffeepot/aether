@@ -15,8 +15,7 @@ use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
 use crate::config::{
-    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, FromArgvThenEnv, RingCapacities,
-    SchedulerTuning,
+    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, RingCapacities, SchedulerTuning,
 };
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
@@ -126,16 +125,16 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// ADR-0156 §5: the builder's config source stack (programmatic > argv >
     /// env > file > default). The chassis hands over the file + per-member argv
     /// overlays via [`Self::with_config_sources`]; tests / `SubstrateHarness`
-    /// stage explicit programmatic values via [`Self::with_config`]. The Pass 0
-    /// resolve loop in `boot_passives` resolves each composed cap's `Config` off
-    /// it ahead of `init`.
+    /// stage explicit programmatic values via [`Self::with_actor_configured`].
+    /// The Pass 0 resolve loop in `boot_passives` resolves each composed cap's
+    /// `Config` off it ahead of `init`.
     config_sources: ConfigSources,
     /// ADR-0156 §5: the `TypeId`s of every composed member's `Config` — each
     /// [`Self::with_actor`]'s `A::Config` (including `()` and the
     /// `RpcServerConfig` bridge, whose `members()` is empty) and each
     /// [`Self::with_config_member`]. Folded with the driver's members at build /
-    /// claim to reject a `with_config` override that matches no composed member
-    /// (a staged-but-never-composed override is a hard boot error).
+    /// claim to reject a staged override that matches no composed member (a
+    /// staged-but-never-composed override is a hard boot error).
     composed_config_types: HashSet<TypeId>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
@@ -289,21 +288,26 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     }
 
     /// ADR-0156 §5: the paired form — compose actor `A` and stage its explicit
-    /// `config` in one compiler-checked call. This is the primary API for a
-    /// **direct composition site** (a chassis / harness / test that composes an
-    /// actor *and* supplies its config value together): the `A::Config` type
-    /// binds `config` to the actor at the call, so a mismatched value is a type
-    /// error rather than a silent orphan. Equivalent to
-    /// `self.with_config::<A::Config>(config).with_actor::<A>(params)` with the
-    /// two halves guaranteed coherent. Prefer it over the split
-    /// `with_config` + `with_actor` pair wherever both are known at the site.
+    /// `config` in one compiler-checked call. This is **the** way to supply a
+    /// composed actor's config value: the `A::Config` type binds `config` to the
+    /// actor at the call (a mismatched value is a type error), and because
+    /// staging an override always composes its actor, an orphaned override is
+    /// unconstructable through the public builder API. The config rides the
+    /// source stack's programmatic layer (top of programmatic > argv > env >
+    /// file > default), so a paired value never reads argv/env/file.
+    ///
+    /// (The owner's adjacency census found every override site sits immediately
+    /// beside its `with_actor`, so the detached `with_config` seam had no users
+    /// and was cut; the bulk `with_config_sources` handoff — file + argv layers,
+    /// used by the chassis mains — is the remaining source-staging seam.)
     #[must_use]
-    pub fn with_actor_configured<A>(self, params: A::Params, config: A::Config) -> Self
+    pub fn with_actor_configured<A>(mut self, params: A::Params, config: A::Config) -> Self
     where
         A: NativeActor,
         A::Config: ConfigMember + 'static,
     {
-        self.with_config::<A::Config>(config).with_actor::<A>(params)
+        self.config_sources.set_override::<A::Config>(config);
+        self.with_actor::<A>(params)
     }
 
     /// ADR-0156 §5: hand the builder the config source stack the chassis
@@ -313,54 +317,11 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// `init`, so the per-cap `resolve_with_file::<C>(argv, file, "section")`
     /// lines and chassis-side section strings disappear — section identity
     /// comes from each member's [`ConfigMember`] declaration. Replaces the
-    /// whole stack; the per-value [`Self::with_config`] override stacks on top
-    /// of whatever this installs.
+    /// whole stack; the per-value programmatic overrides staged by
+    /// [`Self::with_actor_configured`] stack on top of whatever this installs.
     #[must_use]
     pub fn with_config_sources(mut self, sources: ConfigSources) -> Self {
         self.config_sources = sources;
-        self
-    }
-
-    /// ADR-0156 §5: stage a programmatic explicit value for config type `T` —
-    /// the top layer of the source stack (above argv). Resolution
-    /// short-circuits to it, so the staged value never reads argv/env/file.
-    ///
-    /// This is the **cross-helper override** seam — use it to override the
-    /// `Config` of a member composed *elsewhere* (inside `with_common_caps`,
-    /// `with_hub_fleet_passthrough`, a shared boot fragment). When a site
-    /// composes an actor *and* supplies its config together, prefer the paired
-    /// [`Self::with_actor_configured`], which binds the value to the actor's
-    /// `Config` type at the call.
-    ///
-    /// The override is keyed by `TypeId::of::<T>()`, so it is **type-aliasing**:
-    /// two composed actors that share one `Config` type share this one override
-    /// (the last `with_config::<T>` staged wins for both). At build / claim, an
-    /// override whose `T` matches no composed member is a hard
-    /// [`BootError`](crate::chassis::error::BootError) naming `T` — a
-    /// staged-but-never-composed override cannot be left behind silently.
-    ///
-    /// `with_config::<()>(())` is a no-op: `()`'s resolution ignores overrides
-    /// (it resolves to `()` unconditionally), so the staged unit is never read.
-    /// It still validates (`()` is a composed member type on any chassis that
-    /// wires a config-less cap).
-    #[must_use]
-    pub fn with_config<T: 'static>(mut self, value: T) -> Self {
-        self.config_sources.set_override(value);
-        self
-    }
-
-    /// ADR-0156 §5: stage config type `C`'s typed argv overlay layer (its
-    /// `Overlay::into_layer` output) into the source stack — the argv layer,
-    /// below any programmatic override and above env. The one-shot
-    /// [`Self::with_config_sources`] bulk handoff is the usual chassis path;
-    /// this is the per-member seam for a composer that stages argv overlays
-    /// incrementally.
-    #[must_use]
-    pub fn with_config_argv<T: FromArgvThenEnv + 'static>(
-        mut self,
-        layer: <T::Layer as confique::Config>::Layer,
-    ) -> Self {
-        self.config_sources.set_argv::<T>(layer);
         self
     }
 

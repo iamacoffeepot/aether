@@ -203,8 +203,8 @@ impl HubChassis {
             .with_teardown_cap(teardown_cap)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<EngineServer>(())
-            .with_config(RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) })
-            .with_actor::<RpcServerCapability>(RpcServerParams {
+            .with_actor_configured::<RpcServerCapability>(
+                RpcServerParams {
                 peer_kind: PeerKind::Substrate {
                     engine_name: "aether-hub".into(),
                     engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -212,7 +212,9 @@ impl HubChassis {
                 },
                 #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
                 route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
-            })
+            },
+                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
+            )
     }
 
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {

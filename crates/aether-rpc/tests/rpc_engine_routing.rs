@@ -56,17 +56,18 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_config(engine_config)
-        .with_actor::<EngineServer>(())
-        .with_config(RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) })
-        .with_actor::<RpcServerCapability>(RpcServerParams {
-            peer_kind: PeerKind::Substrate {
-                engine_name: "test-hub".into(),
-                engine_version: "0.1.0".into(),
-                kinds: vec![],
+        .with_actor_configured::<EngineServer>((), engine_config)
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+                route_target: Some(mailbox_id_from_name("aether.engine")),
             },
-            route_target: Some(mailbox_id_from_name("aether.engine")),
-        })
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+        )
         .build_passive()
         .expect("hub caps boot");
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;

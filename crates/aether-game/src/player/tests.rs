@@ -182,15 +182,17 @@ fn boot_player_substrate_with_limits(
             observed: observed_tx,
             defer_poll_result,
         })
-        .with_config(GameGatewayConfig {
-            listener_addr: Some("127.0.0.1:0".into()),
-            listener_name: LISTENER_NAME.into(),
+        .with_actor_configured::<GameGatewayCapability>(
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
+            GameGatewayConfig {
+                listener_addr: Some("127.0.0.1:0".into()),
+                listener_name: LISTENER_NAME.into(),
 
-            interval_nanos: INTERVAL_NANOS,
-            max_active_sessions,
-            max_pending_live_bundles,
-        })
-        .with_actor::<GameGatewayCapability>(GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) })
+                interval_nanos: INTERVAL_NANOS,
+                max_active_sessions,
+                max_pending_live_bundles,
+            },
+        )
         .build_passive()
         .expect("player test chassis boots");
     let listener_port = await_player_listener_port(&registry, &outbound_replies);
@@ -338,15 +340,17 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
 
     let turn_sim_mailbox = MailboxId(0xfeed_beef);
     let _chassis = Builder::<TestChassis>::new(registry, mailer)
-        .with_config(GameGatewayConfig {
-            listener_addr: Some("127.0.0.1:0".into()),
-            listener_name: LISTENER_NAME.into(),
+        .with_actor_configured::<GameGatewayCapability>(
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
+            GameGatewayConfig {
+                listener_addr: Some("127.0.0.1:0".into()),
+                listener_name: LISTENER_NAME.into(),
 
-            interval_nanos: INTERVAL_NANOS,
-            max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
-            max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
-        })
-        .with_actor::<GameGatewayCapability>(GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) })
+                interval_nanos: INTERVAL_NANOS,
+                max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+                max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
+            },
+        )
         .build_passive()
         .expect("gateway observer chassis boots");
 
