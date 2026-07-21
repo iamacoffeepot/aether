@@ -377,6 +377,18 @@ impl WakeSink {
         Self { injector, spin, workers }
     }
 
+    /// A wake sink backed by a fresh injector and no workers — no pool
+    /// stands behind it, so a scheduled slot would sit in the injector
+    /// forever. Built for the ADR-0155 claim-only builder terminal, whose
+    /// Claim stage never schedules a dispatcher slot: the sink is a purely
+    /// structural placeholder that lets the terminal build a `Spawner`
+    /// (the claim path reaches it through `ChassisCtx::spawner_arc`)
+    /// without `Pool::start` spawning any worker thread.
+    #[must_use]
+    pub fn detached() -> Self {
+        Self::new(Arc::new(Injector::new()), Arc::new(SpinPark::new()), 0)
+    }
+
     /// Schedule a runnable `slot`: push to the current worker's own deque
     /// when this runs on a pool worker and the keep-local budget says to
     /// keep it (the affinity warm path — no notify, the same worker drains
