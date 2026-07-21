@@ -20,9 +20,10 @@ use aether_kinds::WindowMode;
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_WINDOW", cli_prefix = "window")]
 pub struct WindowConfig {
-    /// Window mode at boot: windowed, windowed:WxH, fullscreen-borderless, or exclusive:WxH@HZ.
+    /// Window mode at boot: windowed, fullscreen-borderless, or exclusive fullscreen.
     ///
-    /// Lowered via [`Self::lower`], which delegates to
+    /// Accepts `windowed`, `windowed:WxH`, `fullscreen-borderless`, or
+    /// `exclusive:WxH@HZ`. Lowered via [`Self::lower`], which delegates to
     /// [`parse_window_mode_env`] and soft-falls back to `Windowed` on a
     /// bad value (keeping the pre-migration behaviour).
     pub mode: Option<String>,

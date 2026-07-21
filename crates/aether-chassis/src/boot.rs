@@ -314,10 +314,11 @@ pub use aether_harness_substrate::{SettlementConfig, SettlementConfigLayer};
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_SUBSTRATE_HARNESS", cli_prefix = "substrate-harness")]
 pub struct RenderSizeConfig {
-    /// Offscreen render size as WxH pixels; unset falls back to 800x600.
+    /// Offscreen render width and height in pixels; unset falls back to 800x600.
     ///
-    /// Render dimensions for the offscreen wgpu surface. Falls back to
-    /// `800x600` on missing/unparseable input with a warn log.
+    /// Render dimensions for the offscreen wgpu surface, given as
+    /// `width x height`. Falls back to `800x600` on missing/unparseable
+    /// input with a warn log.
     #[config(env = "AETHER_SUBSTRATE_HARNESS_SIZE")]
     pub size: Option<String>,
 }
