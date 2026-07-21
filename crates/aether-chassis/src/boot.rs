@@ -605,7 +605,7 @@ pub fn tick_only_lifecycle_params() -> LifecycleParams {
 /// seams) plus two chassis-side-resolved members the derived staging root and
 /// the fs cap both read: `namespace_roots` (also passed programmatically so the
 /// fs cap uses the exact value the staging root was derived from) and
-/// `contentgen`.
+/// `generated_asset_staging`.
 pub struct CommonBoot {
     pub aborter: Arc<dyn FatalAborter>,
     pub workers: Option<usize>,
@@ -632,7 +632,7 @@ pub struct CommonBoot {
     /// Content-gen staging config (ADR-0090). `with_common_caps` folds
     /// its `gen_dir` override (else the resolved `save`-namespace root)
     /// into the staging root threaded into the gemini cap.
-    pub contentgen: ContentGenConfig,
+    pub generated_asset_staging: ContentGenConfig,
     /// Resolved `TurnSim` wiring for the game gateway (ADR-0156 §3 `Params`).
     /// The default has no configured `TurnSim`, so merely linking the common
     /// chassis opens no player listener.
@@ -663,7 +663,8 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
     // else staging tracks the `save`-namespace root the fs cap already owns
     // (preserving its `AETHER_SAVE_DIR` → platform fallback without re-reading
     // env). Threaded into the gemini cap via `GeminiParams`.
-    let staging_root = boot.contentgen.gen_dir.clone().unwrap_or_else(|| boot.namespace_roots.save.clone());
+    let staging_root =
+        boot.generated_asset_staging.gen_dir.clone().unwrap_or_else(|| boot.namespace_roots.save.clone());
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)

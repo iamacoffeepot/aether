@@ -93,7 +93,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
             sources: default_sources(),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
             runtime: RuntimeConfig::default(),
             workers: None,
@@ -160,7 +160,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             sources: default_sources(),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
             runtime: RuntimeConfig::default(),
             workers: None,

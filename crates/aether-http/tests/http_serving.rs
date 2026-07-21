@@ -362,7 +362,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             sources: base_sources(server_config),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             runtime: RuntimeConfig::default(),
             workers: None,
@@ -470,7 +470,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             sources: base_sources(server_config),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             runtime: RuntimeConfig::default(),
             workers: None,
@@ -573,7 +573,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             sources: base_sources(server_config),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             runtime: RuntimeConfig::default(),
             workers: None,
@@ -681,7 +681,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             sources: base_sources(server_config),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             runtime: RuntimeConfig::default(),
             workers: None,
@@ -903,7 +903,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             sources: base_sources(server_config),
-            contentgen: ContentGenConfig::default(),
+            generated_asset_staging: ContentGenConfig::default(),
             tick_period: Duration::from_millis(100),
             runtime: RuntimeConfig::default(),
             workers: None,

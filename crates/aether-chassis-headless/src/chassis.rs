@@ -140,7 +140,7 @@ pub struct HeadlessEnv {
     pub namespace_roots: NamespaceRoots,
     /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
     /// into the staging root in `with_common_caps`.
-    pub contentgen: ContentGenConfig,
+    pub generated_asset_staging: ContentGenConfig,
     pub tick_period: Duration,
     /// The substrate runtime knobs (#3849), resolved off the source stack. Only
     /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
@@ -220,7 +220,7 @@ impl HeadlessEnv {
             fs,
             anthropic,
             gemini,
-            contentgen,
+            generated_asset_staging,
             chassis_boot: chassis_boot_overlay,
             lifecycle: lifecycle_overlay,
             rpc: rpc_overlay,
@@ -238,7 +238,7 @@ impl HeadlessEnv {
         sources.set_argv::<NamespaceRoots>(fs.into_layer());
         sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
         sources.set_argv::<GeminiConfig>(gemini.into_layer());
-        sources.set_argv::<ContentGenConfig>(contentgen.into_layer());
+        sources.set_argv::<ContentGenConfig>(generated_asset_staging.into_layer());
         sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
         sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
         sources.set_argv::<TickConfig>(tick_overlay.into_layer());
@@ -253,7 +253,7 @@ impl HeadlessEnv {
         // and the non-cap pool / ring / scheduler / teardown knobs.
         let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
         let namespace_roots = sources.resolve::<NamespaceRoots>()?;
-        let contentgen = sources.resolve::<ContentGenConfig>()?;
+        let generated_asset_staging = sources.resolve::<ContentGenConfig>()?;
         // Tick cadence: resolved through `TickConfig` (argv > env > default).
         // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
         let tick_period = sources.resolve::<TickConfig>()?.to_tick_period();
@@ -283,7 +283,7 @@ impl HeadlessEnv {
         Ok(Self {
             sources,
             namespace_roots,
-            contentgen,
+            generated_asset_staging,
             tick_period,
             runtime,
             workers,
@@ -314,7 +314,7 @@ impl HeadlessChassis {
         let HeadlessEnv {
             sources,
             namespace_roots,
-            contentgen,
+            generated_asset_staging,
             workers,
             ring_capacities,
             scheduler_tuning,
@@ -384,7 +384,7 @@ impl HeadlessChassis {
             teardown_budget,
             component_host_params,
             namespace_roots,
-            contentgen,
+            generated_asset_staging,
             game_gateway_params: aether_game::GameGatewayParams::default(),
         };
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
