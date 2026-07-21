@@ -14,13 +14,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_engine::{EngineConfig, EngineServer};
+use aether_engine::EngineServer;
 use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{
-    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, validate_env,
+    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, StageArgv, validate_env,
 };
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
@@ -29,7 +29,7 @@ use aether_trace::TraceDispatchCapability;
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
     ActorRingConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, install_frame_size,
-    load_chassis_config, stage_rpc_argv, with_hub_fleet_passthrough,
+    load_chassis_config, with_hub_fleet_passthrough,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -168,9 +168,12 @@ impl HubEnv {
         // the non-cap ring / scheduler / teardown / runtime knobs and the
         // RPC-server port below off the same stack via their `ConfigMember`
         // sections.
+        // ADR-0156 §5 (issue 3872): stage the engines-cap and RPC-server argv
+        // overlays in one derived `StageArgv` call off the CLI declaration
+        // (`cli` is borrowed so the bin keeps it for `--print-config`; clone to
+        // stage by value). No hand-maintained per-cap `set_argv` block to forget.
         let mut sources = ConfigSources::new(config_file);
-        sources.set_argv::<EngineConfig>(cli.engine.clone().into_layer());
-        stage_rpc_argv(&mut sources, cli.rpc.clone());
+        cli.clone().stage(&mut sources);
         let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();

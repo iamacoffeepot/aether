@@ -18,17 +18,15 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_anthropic::AnthropicConfig;
-use aether_audio::{AudioCapability, AudioConfig};
+use aether_audio::AudioCapability;
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
-use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
-use aether_http::{HttpConfig, HttpServerCapability, HttpServerConfig};
+use aether_http::HttpServerCapability;
 use aether_kinds::BinaryManifest;
-use aether_lifecycle::{LifecycleCapability, LifecycleConfig, frame_lifecycle_params};
+use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
 use aether_render::{RenderCapability, RenderParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -42,11 +40,11 @@ use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
-    chassis_residual_knobs, install_frame_size, load_chassis_config, stage_rpc_argv, with_common_caps, with_rpc_server,
+    chassis_residual_knobs, install_frame_size, load_chassis_config, with_common_caps, with_rpc_server,
 };
-use aether_chassis::cli::{CommonOverlay, DesktopCli};
+use aether_chassis::cli::DesktopCli;
 use aether_substrate::config::{
-    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, validate_env,
+    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, StageArgv, validate_env,
 };
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -240,49 +238,21 @@ impl DesktopEnv {
         // where the composed builder's `config_manifest` supplies the
         // per-chassis known-key set (desktop no longer "knows" the headless
         // tick knob).
-        let DesktopCli {
-            common,
-            audio: audio_overlay,
-            window: window_overlay,
-            // The bin handles `--print-config` / `--describe` (print + exit)
-            // before this resolver runs.
-            config,
-            print_config: _,
-            describe: _,
-        } = cli;
-        let config_file = load_chassis_config(config)?;
-        let CommonOverlay {
-            http,
-            http_server: http_server_overlay,
-            fs,
-            anthropic,
-            gemini,
-            generated_asset_staging,
-            chassis_boot: chassis_boot_overlay,
-            lifecycle: lifecycle_overlay,
-            rpc: rpc_overlay,
-        } = common;
+        // The bin handles `--print-config` / `--describe` (print + exit) before
+        // this resolver runs; `config` names the file source and takes no part
+        // in staging.
+        let config_file = load_chassis_config(cli.config.clone())?;
 
-        // ADR-0156 §5: assemble the source stack — the loaded config file plus
-        // each cap member's typed argv overlay. The builder resolves the
-        // composed cap configs (http / http-server / audio / render tuning /
-        // lifecycle) off this; section identity comes from each member's
-        // `ConfigMember` declaration, so no chassis-side section string survives.
+        // ADR-0156 §5 (issue 3872): assemble the source stack — the loaded
+        // config file plus every cap member's typed argv overlay, staged in one
+        // derived `StageArgv` call off the CLI declaration itself (each `*Overlay`
+        // carries a leaf `StageArgv` and each root delegates to its fields). No
+        // hand-maintained per-cap `set_argv` block to forget, and a
+        // staged-but-never-composed overlay fails boot loudly. Section identity
+        // comes from each member's `ConfigMember` declaration, so no chassis-side
+        // section string survives.
         let mut sources = ConfigSources::new(config_file);
-        sources.set_argv::<HttpConfig>(http.into_layer());
-        sources.set_argv::<HttpServerConfig>(http_server_overlay.into_layer());
-        sources.set_argv::<NamespaceRoots>(fs.into_layer());
-        sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
-        sources.set_argv::<GeminiConfig>(gemini.into_layer());
-        sources.set_argv::<ContentGenConfig>(generated_asset_staging.into_layer());
-        sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
-        sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
-        sources.set_argv::<AudioConfig>(audio_overlay.into_layer());
-        sources.set_argv::<WindowConfig>(window_overlay.into_layer());
-        // #3849: `aether.rpc.server`'s bind port resolves through the source
-        // stack like any member — stage the `--rpc-port` overlay so the builder
-        // resolves it (argv > `AETHER_RPC_PORT` > `[rpc]` file > unset/unbound).
-        stage_rpc_argv(&mut sources, rpc_overlay);
+        cli.stage(&mut sources);
 
         // Chassis-side reads of resolved members (ADR-0156 §5): the derived
         // staging inputs (fs roots + content-gen), the driver-only window boot

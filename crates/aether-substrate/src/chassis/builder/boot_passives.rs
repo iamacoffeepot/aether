@@ -309,6 +309,14 @@ pub(super) fn boot_passives(
         boot.resolve(sources)?;
     }
 
+    // ADR-0156 §5 converse tripwire (issue 3872): with every composed member's
+    // layer now consumed (Pass 0 above plus the chassis-side member resolves
+    // that precede it), an argv layer still staged was staged for a config type
+    // no composed member resolves — the argv analogue of the OrphanOverride
+    // guard the build/claim paths already run. A hard boot error naming the
+    // orphaned type, before any mailbox is claimed, so nothing needs rollback.
+    sources.validate_no_orphan_argv()?;
+
     let mut booted: Vec<Box<dyn PassiveBoot>> = Vec::with_capacity(passives.len());
 
     // Pass 1 — claim.

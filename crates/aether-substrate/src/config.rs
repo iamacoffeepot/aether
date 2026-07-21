@@ -621,6 +621,35 @@ impl ConfigMember for () {
     }
 }
 
+/// ADR-0156 §5 (issue 3872): an argv overlay's own knowledge of which config
+/// domain it stages onto the source stack. Closes the last hand-maintained edge
+/// of the chassis config flow — the per-cap
+/// `sources.set_argv::<HttpConfig>(http.into_layer())` block each chassis used
+/// to assemble by hand (and could silently forget, discarding the operator's
+/// flag).
+///
+/// Two derives emit the impls, so staging is derived from the declarations that
+/// already exist:
+///
+/// - `#[derive(aether_substrate::Config)]` emits the **leaf** impl on each cap's
+///   `*Overlay`, calling [`ConfigSources::set_argv`] with the domain type.
+/// - `#[derive(aether_substrate::StageArgv)]` emits the **container** impl on
+///   each hand-written chassis CLI root ([`crate::config`] docs), delegating to
+///   every field's [`stage`](Self::stage). A field that is not stageable must
+///   carry an explicit `#[stage(skip)]` or fail to compile — the hole cannot
+///   reopen through the derive itself.
+///
+/// A chassis then stages its whole CLI in one `cli.stage(&mut sources)` call:
+/// adding an overlay field to a root IS staging it, and the converse
+/// [`ConfigSources::validate_no_orphan_argv`] tripwire makes a
+/// staged-but-never-composed layer a hard boot error.
+pub trait StageArgv {
+    /// Stage this overlay's argv layer(s) onto `sources`. A leaf overlay stages
+    /// its own member (`sources.set_argv::<Domain>(self.into_layer())`); a
+    /// container delegates to each of its fields' `stage`.
+    fn stage(self, sources: &mut ConfigSources);
+}
+
 /// The composition-derived chassis config aggregate (ADR-0156 §4): the
 /// union of every composed cap's [`ConfigMember`] declaration, the driver's,
 /// and the chassis-declared non-cap members (workers / ring capacities /
@@ -795,8 +824,12 @@ pub struct ConfigSources {
     /// Per-member argv overlay layers keyed by config `TypeId`. Each holds the
     /// member's `<C::Layer as confique::Config>::Layer` produced by its
     /// `Overlay::into_layer` (a confique partial layer, not necessarily
-    /// `Send`).
+    /// `Send`). The parallel `argv_names` keeps each staged layer's `type_name`
+    /// for the staged-but-never-composed boot error, mirroring
+    /// `override_names`; both are kept in lockstep by `set_argv` / `take_argv`,
+    /// so a layer still present after resolution names its orphaned config type.
     argv: HashMap<TypeId, Box<dyn Any>>,
+    argv_names: HashMap<TypeId, &'static str>,
 }
 
 impl ConfigSources {
@@ -805,7 +838,14 @@ impl ConfigSources {
     /// full stack — programmatic > argv > env > file > default.
     #[must_use]
     pub fn new(file: Option<toml::Table>) -> Self {
-        Self { file, hermetic: false, overrides: HashMap::new(), override_names: HashMap::new(), argv: HashMap::new() }
+        Self {
+            file,
+            hermetic: false,
+            overrides: HashMap::new(),
+            override_names: HashMap::new(),
+            argv: HashMap::new(),
+            argv_names: HashMap::new(),
+        }
     }
 
     /// ADR-0156 §5: a **hermetic** source stack — no env layer, no file layer.
@@ -823,6 +863,7 @@ impl ConfigSources {
             overrides: HashMap::new(),
             override_names: HashMap::new(),
             argv: HashMap::new(),
+            argv_names: HashMap::new(),
         }
     }
 
@@ -841,6 +882,7 @@ impl ConfigSources {
     /// composition, folded into the bulk stack that rides `Builder::with_config_sources`.
     pub fn set_argv<C: FromArgvThenEnv + 'static>(&mut self, layer: <C::Layer as confique::Config>::Layer) {
         self.argv.insert(TypeId::of::<C>(), Box::new(layer));
+        self.argv_names.insert(TypeId::of::<C>(), type_name::<C>());
     }
 
     /// Resolve member `C` off the stack. Sugar for
@@ -861,6 +903,9 @@ impl ConfigSources {
     }
 
     fn take_argv<C: FromArgvThenEnv + 'static>(&mut self) -> Option<<C::Layer as confique::Config>::Layer> {
+        // Drop the name in lockstep with the layer so the orphan-argv tripwire
+        // only ever sees layers no member consumed.
+        self.argv_names.remove(&TypeId::of::<C>());
         self.argv.remove(&TypeId::of::<C>()).map(|boxed| *boxed.downcast().expect("argv-layer TypeId keys C"))
     }
 
@@ -876,10 +921,16 @@ impl ConfigSources {
     /// is malformed.
     pub fn resolve_layered<C: FromArgvThenEnv + 'static>(&mut self, section: &str) -> Result<C, ConfigError> {
         use confique::Layer as _;
+        // Consume the staged argv layer unconditionally — even when a
+        // programmatic override outranks it — so the orphan-argv tripwire
+        // (which keys off layers left behind) never mistakes a legitimately
+        // shadowed layer for an orphan. The override still wins; the argv value
+        // is dropped, exactly as it was when the override short-circuited before.
+        let argv = self.take_argv::<C>();
         if let Some(value) = self.take_override::<C>() {
             return Ok(value);
         }
-        let argv = self.take_argv::<C>().unwrap_or_else(<<C::Layer as confique::Config>::Layer>::empty);
+        let argv = argv.unwrap_or_else(<<C::Layer as confique::Config>::Layer>::empty);
         // Hermetic mode (`SubstrateHarness`) skips both the env and the file
         // layers, so an unstaged member resolves to its compiled default.
         if self.hermetic {
@@ -909,6 +960,29 @@ impl ConfigSources {
             if !composed.contains(type_id) {
                 return Err(ConfigError::OrphanOverride { type_name: (*name).to_owned() });
             }
+        }
+        Ok(())
+    }
+
+    /// ADR-0156 §5 converse tripwire (issue 3872): reject any staged argv layer
+    /// that no composed member consumed. The resolve path removes each layer as
+    /// its member resolves (`take_argv`), so a layer still present after boot
+    /// resolution was staged for a config type no composed member resolves — a
+    /// typo'd or orphaned `set_argv` (or, now, a `stage` delegating to a field
+    /// whose overlay was flattened into a root the chassis never composes). The
+    /// argv analogue of [`Self::validate_overrides`], failing as loudly rather
+    /// than silently discarding the operator's flag (which resolution would
+    /// otherwise treat as indistinguishable from the flag never being passed).
+    /// Run once, after the Pass 0 resolve loop consumes every composed member's
+    /// layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::OrphanArgv`] naming the first argv layer left
+    /// unconsumed.
+    pub fn validate_no_orphan_argv(&self) -> Result<(), ConfigError> {
+        if let Some(name) = self.argv_names.values().next() {
+            return Err(ConfigError::OrphanArgv { type_name: (*name).to_owned() });
         }
         Ok(())
     }
@@ -1003,6 +1077,18 @@ pub enum ConfigError {
         /// The `type_name` of the staged override that matches no composed member.
         type_name: String,
     },
+    /// ADR-0156 §5 (issue 3872): an argv overlay layer was staged on the source
+    /// stack (`ConfigSources::set_argv`, via a chassis CLI root's derived
+    /// `StageArgv`) whose config type `T` no composed member ever resolves — a
+    /// flag the chassis parses and stages but then silently drops. The converse
+    /// of [`OrphanOverride`](Self::OrphanOverride) on the argv channel: a hard
+    /// boot error naming `T` (via [`ConfigSources::validate_no_orphan_argv`]),
+    /// so a staged-but-never-composed argv layer fails as loudly as the override
+    /// channel already does.
+    OrphanArgv {
+        /// The `type_name` of the staged argv layer that no composed member consumed.
+        type_name: String,
+    },
 }
 
 impl ConfigError {
@@ -1066,6 +1152,15 @@ impl fmt::Display for ConfigError {
                      Config (typo? removed cap? wrong type?)"
                 )
             }
+            Self::OrphanArgv { type_name } => {
+                write!(
+                    f,
+                    "argv overlay staged for `{type_name}` matches no composed member \
+                     — the chassis parsed and staged its flag(s) but no composed actor declares it \
+                     as its Config, so the value would be silently discarded (a cap overlay \
+                     flattened into a CLI root the chassis never composes? removed cap? wrong type?)"
+                )
+            }
         }
     }
 }
@@ -1076,7 +1171,7 @@ impl StdError for ConfigError {
             Self::UnparseableKnown { source, .. }
             | Self::ConfigFile { source, .. }
             | Self::ConfigSection { source, .. } => Some(&**source),
-            Self::OrphanOverride { .. } => None,
+            Self::OrphanOverride { .. } | Self::OrphanArgv { .. } => None,
         }
     }
 }
@@ -1413,6 +1508,30 @@ mod tests {
             }
             other => panic!("expected OrphanOverride, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn orphan_argv_layer_is_rejected_then_cleared_by_resolution() {
+        use confique::Layer as _;
+        // Tripwire (issue 3872): the converse of the override guard on the argv
+        // channel. A staged argv layer no member consumes is a hard `OrphanArgv`
+        // naming the config type — the silent-drop the ADR-0156 §5 inversion
+        // closes — and resolving the member consumes the layer so the stack is
+        // then clean. Hermetic so the resolve never touches env (no race).
+        // Drifts if `set_argv` / `take_argv` stop tracking the name in lockstep,
+        // or `validate_no_orphan_argv` stops reporting a leftover layer.
+        let mut sources = ConfigSources::hermetic();
+        sources.set_argv::<HermeticFixture>(<HermeticFixture as confique::Config>::Layer::empty());
+
+        match sources.validate_no_orphan_argv() {
+            Err(ConfigError::OrphanArgv { type_name }) => {
+                assert!(type_name.contains("HermeticFixture"), "the error names the orphan type: {type_name}");
+            }
+            other => panic!("expected OrphanArgv for a staged-but-unconsumed layer, got {other:?}"),
+        }
+
+        sources.resolve_layered::<HermeticFixture>("hermetic_fixture").expect("resolves off the staged layer");
+        sources.validate_no_orphan_argv().expect("no orphan once the member consumed its layer");
     }
 
     #[test]

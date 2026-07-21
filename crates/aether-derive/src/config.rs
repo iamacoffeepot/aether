@@ -139,6 +139,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // name that differs from the CLI prefix.
     let section = container.section.clone().unwrap_or_else(|| container.cli_prefix.clone());
     let member_impl = emit_member_impl(domain_ident, &layer_ident, &section);
+    // ADR-0156 §5 (issue 3872): the leaf `StageArgv` impl on the overlay, so a
+    // chassis CLI root's derived container `StageArgv` can stage this cap by
+    // delegating to the field rather than the chassis hand-writing
+    // `sources.set_argv::<Domain>(overlay.into_layer())`.
+    let stage_argv_impl = emit_stage_argv_impl(domain_ident, &overlay_ident);
 
     Ok(quote! {
         #layer_struct
@@ -146,6 +151,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #inherent_impl
         #overlay_struct
         #member_impl
+        #stage_argv_impl
     })
 }
 
@@ -693,6 +699,24 @@ fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str) ->
                 sources: &mut ::aether_substrate::config::ConfigSources,
             ) -> ::core::result::Result<Self, ::aether_substrate::config::ConfigError> {
                 sources.resolve_layered::<Self>(#section)
+            }
+        }
+    }
+}
+
+/// ADR-0156 §5 (issue 3872): emit the leaf `StageArgv` impl on the overlay. It
+/// stages this cap's argv layer onto the source stack by calling
+/// `ConfigSources::set_argv::<Domain>(self.into_layer())` — the exact line the
+/// chassis used to hand-maintain per cap. A chassis CLI root's container
+/// `StageArgv` (the sibling `#[derive(aether_substrate::StageArgv)]`) delegates
+/// to this per field, so the whole staging block collapses to one
+/// `cli.stage(&mut sources)` call and a forgotten cap is a compile error rather
+/// than a silently-dropped flag.
+fn emit_stage_argv_impl(domain_ident: &Ident, overlay_ident: &Ident) -> TokenStream2 {
+    quote! {
+        impl ::aether_substrate::config::StageArgv for #overlay_ident {
+            fn stage(self, sources: &mut ::aether_substrate::config::ConfigSources) {
+                sources.set_argv::<#domain_ident>(self.into_layer());
             }
         }
     }
