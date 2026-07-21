@@ -23,10 +23,10 @@ use aether_component::ComponentHostParams;
 use aether_data::Kind;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
-use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
+use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
@@ -41,7 +41,7 @@ use aether_chassis::boot::{
     with_rpc_server,
 };
 use aether_chassis::cli::HeadlessCli;
-use aether_substrate::config::{ConfigError, ConfigManifest, ConfigSources, StageArgv, validate_env};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -63,53 +63,102 @@ impl Chassis for HeadlessChassis {
     }
 }
 
-impl HeadlessChassis {
-    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the
-    /// chassis profile, the mailbox namespaces this binary claims, and the
-    /// `build.rs` provenance. Resolves the chassis config the same
-    /// argv/env/file way a real boot does, composes the exact capability
-    /// chain `build_inner` runs (via `compose` — including the
-    /// `aether.audio` fail-fast inline sink), then runs the ADR-0155
-    /// claim-only terminal and reads the claimed namespaces straight off
-    /// the registry. `--describe` stops before Init, so it opens no audio
-    /// device / filesystem roots and binds no socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution ([`HeadlessEnv::from_env`]),
-    /// substrate boot, or the claim pass fails.
-    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
-        let env = HeadlessEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        let caps = Self::compose(&boot, env).claim_namespaces()?;
-        Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
+impl BootableChassis for HeadlessChassis {
+    fn resolve_env() -> Result<Self::Env, ConfigError> {
+        HeadlessEnv::from_env()
     }
 
-    /// The ADR-0156 §4 composition-derived config aggregate: resolve the
-    /// chassis config, compose the exact capability chain `build_inner` runs
-    /// (via `compose`), then read [`Builder::config_manifest`] — the sibling
-    /// of `describe_manifest`'s claim terminal. The known-keys sweep and
-    /// `--print-config` dump read this walk, so headless reports only the
-    /// knobs it composes (no window / audio / render knobs).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution or substrate boot fails.
-    pub fn config_manifest() -> Result<ConfigManifest, BootError> {
-        let env = HeadlessEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        Ok(Self::compose(&boot, env).config_manifest())
+    fn residual_knobs() -> Vec<KnobRecord> {
+        chassis_residual_knobs()
     }
 
-    /// Render the `--print-config` discovery dump from the composition-derived
-    /// manifest plus the residual hand-registered knobs. The bin prints this
-    /// and exits before boot.
+    /// Compose the headless capability chain — the single claim/build path
+    /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
+    /// so the manifest roster can never drift from what boots. Registers the
+    /// `aether.audio` fail-fast inline sink on the shared registry, then composes
+    /// the common caps plus the headless render / clipboard / window /
+    /// substrate-harness / lifecycle caps and the always-claim RPC + HTTP servers
+    /// (ADR-0155 §3). Returns the composed builder before the driver is installed:
+    /// `build_inner` adds the timer driver and starts, while the describe / config
+    /// helpers read the claim / config terminals off it.
     ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution or substrate boot fails.
-    pub fn config_dump() -> Result<String, BootError> {
-        Ok(Self::config_manifest()?.dump(&chassis_residual_knobs()))
+    /// Takes the boot handle by reference — `build_inner` moves the same
+    /// `boot` into the timer driver afterward. The `tick_period` (driver-only)
+    /// and `autoload` (drained post-build) fields ride [`HeadlessEnv`] but
+    /// take no part in the claim chain, so they are ignored here.
+    fn compose(boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
+        let HeadlessEnv { common, tick_period: _, autoload: _ } = env;
+
+        let component_host_params = ComponentHostParams {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+        };
+
+        // Audio nop sink — NoteOn/NoteOff fall through silently;
+        // SetMasterGain replies Err so agents fail fast rather than
+        // hang on a chassis with no audio device.
+        //
+        // Issue 838: registered as `Sink` (not `Closure`) so the
+        // `Mailer::push` route brackets the inline handler with
+        // `Received`/`Finished`. The handler does its work
+        // synchronously (calls `send_reply` directly); there's no
+        // actor dispatch loop behind it, so without the bracket
+        // any chain that mails `aether.audio` from the headless
+        // chassis leaks `in_flight` and never settles. Same shape
+        // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_inline`.
+        //
+        // ADR-0155: registering the sink here (Compose) is what puts
+        // `aether.audio` in the claim-derived `--describe` roster — an
+        // inline sink is a claim like any other.
+        let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
+        let outbound_for_audio_sink = Arc::clone(&boot.outbound);
+        boot.registry.register_inline(
+            "aether.audio",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                if dispatch.kind == kind_set_master_gain {
+                    outbound_for_audio_sink.send_reply(
+                        dispatch.sender,
+                        &SetMasterGainResult::Err {
+                            error: "unsupported on headless chassis — no audio device".to_owned(),
+                        },
+                    );
+                }
+            }),
+        );
+
+        let registry = Arc::clone(&boot.registry);
+        let mailer = Arc::clone(&boot.queue);
+        // ADR-0063: production chassis configures the fatal-abort
+        // aborter so a wasm guest trap exits the substrate via
+        // `lifecycle::fatal_abort` instead of unwinding.
+        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
+
+        // ADR-0071 phase B: io / http / log compose through the
+        // chassis_builder `.with()` chain. Boot order is declaration
+        // order — `with_common_caps` runs log first so other
+        // capabilities' boot tracing routes through the log capture.
+        // `into_common_boot` reads the six env-sourced `CommonBoot` fields off
+        // the shared env in one place (the teardown budget honors the same
+        // `AETHER_SETTLEMENT_CAP_SECS` knob, `0 → wait forever` sentinel and all,
+        // as the settlement gates) and threads the source stack back out.
+        let (common, sources) =
+            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
+        // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
+        // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
+        // the timer pushes `LifecycleAdvance` and the driver broadcasts
+        // Tick to `aether.input` via the relay subscriber.
+        //
+        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
+        // so it resolves each composed cap's `Config` (http / http-server /
+        // lifecycle) off it; the caps compose with `with_actor(params)` alone.
+        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_actor::<HeadlessClipboardCapability>(())
+            .with_actor::<HeadlessWindowCapability>(())
+            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
+        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
     }
 }
 
@@ -203,95 +252,6 @@ impl HeadlessEnv {
 }
 
 impl HeadlessChassis {
-    /// Compose the headless capability chain — the single claim/build path
-    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
-    /// run, so the manifest roster can never drift from what boots. Registers
-    /// the `aether.audio` fail-fast inline sink on the shared registry, then
-    /// composes the common caps plus the headless render / clipboard / window
-    /// / substrate-harness / lifecycle caps and the always-claim RPC + HTTP
-    /// servers (ADR-0155 §3). Returns the composed builder before the driver
-    /// is installed: `build_inner` adds the timer driver and starts, while
-    /// `describe_manifest` calls `claim_namespaces` on it.
-    ///
-    /// Takes the boot handle by reference — `build_inner` moves the same
-    /// `boot` into the timer driver afterward. The `tick_period` (driver-only)
-    /// and `autoload` (drained post-build) fields ride [`HeadlessEnv`] but
-    /// take no part in the claim chain, so they are ignored here.
-    fn compose(boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
-        let HeadlessEnv { common, tick_period: _, autoload: _ } = env;
-
-        let component_host_params = ComponentHostParams {
-            engine: Arc::clone(&boot.engine),
-            linker: Arc::clone(&boot.linker),
-            hub_outbound: Arc::clone(&boot.outbound),
-        };
-
-        // Audio nop sink — NoteOn/NoteOff fall through silently;
-        // SetMasterGain replies Err so agents fail fast rather than
-        // hang on a chassis with no audio device.
-        //
-        // Issue 838: registered as `Sink` (not `Closure`) so the
-        // `Mailer::push` route brackets the inline handler with
-        // `Received`/`Finished`. The handler does its work
-        // synchronously (calls `send_reply` directly); there's no
-        // actor dispatch loop behind it, so without the bracket
-        // any chain that mails `aether.audio` from the headless
-        // chassis leaks `in_flight` and never settles. Same shape
-        // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_inline`.
-        //
-        // ADR-0155: registering the sink here (Compose) is what puts
-        // `aether.audio` in the claim-derived `--describe` roster — an
-        // inline sink is a claim like any other.
-        let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
-        let outbound_for_audio_sink = Arc::clone(&boot.outbound);
-        boot.registry.register_inline(
-            "aether.audio",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                if dispatch.kind == kind_set_master_gain {
-                    outbound_for_audio_sink.send_reply(
-                        dispatch.sender,
-                        &SetMasterGainResult::Err {
-                            error: "unsupported on headless chassis — no audio device".to_owned(),
-                        },
-                    );
-                }
-            }),
-        );
-
-        let registry = Arc::clone(&boot.registry);
-        let mailer = Arc::clone(&boot.queue);
-        // ADR-0063: production chassis configures the fatal-abort
-        // aborter so a wasm guest trap exits the substrate via
-        // `lifecycle::fatal_abort` instead of unwinding.
-        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
-
-        // ADR-0071 phase B: io / http / log compose through the
-        // chassis_builder `.with()` chain. Boot order is declaration
-        // order — `with_common_caps` runs log first so other
-        // capabilities' boot tracing routes through the log capture.
-        // `into_common_boot` reads the six env-sourced `CommonBoot` fields off
-        // the shared env in one place (the teardown budget honors the same
-        // `AETHER_SETTLEMENT_CAP_SECS` knob, `0 → wait forever` sentinel and all,
-        // as the settlement gates) and threads the source stack back out.
-        let (common, sources) =
-            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
-        // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
-        // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
-        // the timer pushes `LifecycleAdvance` and the driver broadcasts
-        // Tick to `aether.input` via the relay subscriber.
-        //
-        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
-        // so it resolves each composed cap's `Config` (http / http-server /
-        // lifecycle) off it; the caps compose with `with_actor(params)` alone.
-        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
-            .with_actor::<HeadlessRenderCapability>(())
-            .with_actor::<HeadlessClipboardCapability>(())
-            .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
-        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
-    }
-
     /// Build the headless chassis: stand up substrate-core internals,
     /// compose the capability chain via [`Self::compose`], then wrap the
     /// timer in a [`HeadlessTimerDriverCapability`] and hand it to the
@@ -333,7 +293,7 @@ impl HeadlessChassis {
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `from_env`) because the
         // per-chassis known keys come from the composed builder's manifest.
-        validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
+        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
         let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
@@ -352,6 +312,7 @@ impl HeadlessChassis {
 mod config_manifest_tests {
     use super::HeadlessChassis;
     use aether_chassis::boot::chassis_residual_knobs;
+    use aether_substrate::chassis::config_manifest;
 
     #[test]
     fn headless_known_keys_drop_window_and_audio_and_keep_tick() {
@@ -361,7 +322,7 @@ mod config_manifest_tests {
         // keys no longer include those knobs (a stale `AETHER_WINDOW_MODE` on a
         // headless box now fails the sweep honestly). Membership is asserted
         // from the composition walk, not a hand list.
-        let manifest = HeadlessChassis::config_manifest().expect("headless config manifest");
+        let manifest = config_manifest::<HeadlessChassis>().expect("headless config manifest");
         let known = manifest.known_keys(&chassis_residual_knobs());
         assert!(!known.contains("AETHER_WINDOW_MODE"), "headless must not claim the desktop window-driver knob");
         assert!(

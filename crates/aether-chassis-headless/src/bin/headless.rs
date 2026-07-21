@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         // ADR-0156 §4: the dump is the composition-derived aggregate plus the
         // residual hand records, so it resolves the chassis config the same
         // way a boot does (a garbage known value surfaces as a `ConfigError`).
-        print!("{}", HeadlessChassis::config_dump()?);
+        print!("{}", aether_chassis::config_dump::<HeadlessChassis>()?);
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
     // before boot. The hub's binary store forks `<binary> --describe`
     // once at upload time to capture exactly this.
     if cli.describe {
-        println!("{}", serde_json::to_string(&HeadlessChassis::describe_manifest()?)?);
+        println!("{}", serde_json::to_string(&aether_chassis::describe_manifest::<HeadlessChassis>()?)?);
         return Ok(());
     }
     let env = HeadlessEnv::from_env_with_argv(cli)?;

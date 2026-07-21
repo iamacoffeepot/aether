@@ -22,9 +22,9 @@ use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
-use aether_kinds::BinaryManifest;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
 use aether_render::{RenderCapability, RenderParams};
+use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::runtime::log_install::apply_filter;
@@ -37,7 +37,7 @@ use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
 use aether_chassis::boot::{CommonEnv, chassis_residual_knobs, load_chassis_config, with_common_caps, with_rpc_server};
 use aether_chassis::cli::DesktopCli;
-use aether_substrate::config::{ConfigError, ConfigManifest, ConfigSources, StageArgv, validate_env};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use winit::event_loop::ControlFlow;
@@ -85,55 +85,89 @@ impl Chassis for DesktopChassis {
     }
 }
 
-impl DesktopChassis {
-    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the
-    /// chassis profile, the mailbox namespaces this binary claims, and the
-    /// `build.rs` provenance. Resolves the chassis config the same
-    /// argv/env/file way a real boot does (config only — the winit event
-    /// loop and capture queue are Start-stage handles, ADR-0155 §4), composes
-    /// the exact capability chain `build_inner` runs (via `compose`), then
-    /// runs the ADR-0155 claim-only terminal and
-    /// reads the claimed namespaces off the registry — the driver's
-    /// `aether.window` claim rides the `DriverCapability::claim` hook, so it
-    /// appears without an event loop. `--describe` therefore captures a
-    /// desktop binary's manifest on a headless host, opening no window and
-    /// binding no socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution ([`DesktopEnv::from_env`]),
-    /// substrate boot, or the claim pass fails.
-    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
-        let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        let caps = Self::compose(&boot, env).claim_namespaces()?;
-        Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
+impl BootableChassis for DesktopChassis {
+    fn resolve_env() -> Result<Self::Env, ConfigError> {
+        DesktopEnv::from_env()
     }
 
-    /// The ADR-0156 §4 composition-derived config aggregate: resolve the
-    /// chassis config, compose the exact capability chain `build_inner` runs
-    /// (config only — the winit event loop / capture queue are Start-stage
-    /// handles), then read [`Builder::config_manifest`] — the sibling of
-    /// `describe_manifest`'s claim terminal. Desktop reports the window knobs
-    /// (its driver's members) but not the headless tick knob.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution or substrate boot fails.
-    pub fn config_manifest() -> Result<ConfigManifest, BootError> {
-        let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        Ok(Self::compose(&boot, env).config_manifest())
+    fn residual_knobs() -> Vec<KnobRecord> {
+        chassis_residual_knobs()
     }
 
-    /// Render the `--print-config` discovery dump from the composition-derived
-    /// manifest plus the residual hand-registered knobs.
+    /// Compose the desktop capability chain — the single claim/build path
+    /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
+    /// so the manifest roster can never drift from what boots. Composes the
+    /// common caps plus the audio / clipboard / render / substrate-harness /
+    /// lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3).
+    /// Returns the composed builder before the driver is installed:
+    /// `build_inner` adds the desktop driver and starts (the driver's
+    /// `aether.window` claim rides its Claim-stage hook either way), while the
+    /// describe / config helpers read the claim / config terminals off it.
     ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution or substrate boot fails.
-    pub fn config_dump() -> Result<String, BootError> {
-        Ok(Self::config_manifest()?.dump(&chassis_residual_knobs()))
+    /// Takes the boot handle by reference — `build_inner` moves the same
+    /// `boot` into the driver afterward. The window boot knobs (mode / size /
+    /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
+    /// no part in the claim chain, so they are ignored here.
+    fn compose(boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
+        let DesktopEnv { common, window: _, autoload: _ } = env;
+
+        let component_host_params = ComponentHostParams {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+        };
+        // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
+        // config field. The driver builds it from the `CaptureQueue` +
+        // `EventLoopProxy` wake + reply egress and installs it into the
+        // published `RenderHandles` in its `boot` (Start), so the cap's
+        // `on_capture_frame` reads it there. Issue 2706: the resolved
+        // vertex-buffer cap (`RenderTuningConfig`) sizes both the cap
+        // accumulator's truncation and (via `RenderHandles`) the GPU vertex
+        // buffer the driver creates; the assets-root wiring rides `RenderParams`.
+        let render_params = RenderParams {
+            // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
+            // reads its reference image from the same `assets` root the fs
+            // cap serves, so the render cap loads it off the hot path.
+            assets_dir: Some(common.namespace_roots.assets.clone()),
+            ..RenderParams::default()
+        };
+
+        let registry = Arc::clone(&boot.registry);
+        let mailer = Arc::clone(&boot.queue);
+        // ADR-0063: production chassis configures the fatal-abort
+        // aborter so a wasm guest trap exits the substrate via
+        // `lifecycle::fatal_abort` instead of unwinding.
+        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
+
+        // Boot order is declaration order — `with_common_caps` runs
+        // log first so other capabilities' boot tracing routes
+        // through the log capture; render last so it claims its
+        // mailboxes after every other chassis cap. `into_common_boot` reads the
+        // six env-sourced `CommonBoot` fields off the shared env in one place
+        // (the teardown budget honors the same `AETHER_SETTLEMENT_CAP_SECS` knob,
+        // `0 → wait forever` sentinel and all, as the settlement gates) and
+        // threads the source stack back out for the builder.
+        let (common, sources) =
+            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
+        // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
+        // `Tick → Render → Present → Tick` frame graph, with the `Quit`
+        // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
+        // in-flight frame before shutting down (see the driver's
+        // `CloseRequested` → `Quit` bridge and terminal-reached exit).
+        //
+        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
+        // so it resolves each composed cap's `Config` (audio / render tuning /
+        // lifecycle / http-server) off it; the caps compose with
+        // `with_actor(params)` alone. `RenderParams` (the assets root) is
+        // composer-supplied construction input derived from the resolved fs
+        // roots, so it still rides `with_actor`.
+        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
+            .with_actor::<AudioCapability>(())
+            .with_actor::<ClipboardCapability>(ClipboardParams::System)
+            .with_actor::<RenderCapability>(render_params)
+            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
+            .with_actor::<LifecycleCapability>(frame_lifecycle_params());
+        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
     }
 }
 
@@ -235,82 +269,6 @@ impl DesktopEnv {
 }
 
 impl DesktopChassis {
-    /// Compose the desktop capability chain — the single claim/build path
-    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
-    /// run, so the manifest roster can never drift from what boots. Composes
-    /// the common caps plus the audio / clipboard / render / substrate-harness
-    /// / lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3).
-    /// Returns the composed builder before the driver is installed:
-    /// `build_inner` adds the desktop driver and starts (the driver's
-    /// `aether.window` claim rides its Claim-stage hook either way), while
-    /// `describe_manifest` calls `claim_namespaces` on it.
-    ///
-    /// Takes the boot handle by reference — `build_inner` moves the same
-    /// `boot` into the driver afterward. The window boot knobs (mode / size /
-    /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
-    /// no part in the claim chain, so they are ignored here.
-    fn compose(boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
-        let DesktopEnv { common, window: _, autoload: _ } = env;
-
-        let component_host_params = ComponentHostParams {
-            engine: Arc::clone(&boot.engine),
-            linker: Arc::clone(&boot.linker),
-            hub_outbound: Arc::clone(&boot.outbound),
-        };
-        // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
-        // config field. The driver builds it from the `CaptureQueue` +
-        // `EventLoopProxy` wake + reply egress and installs it into the
-        // published `RenderHandles` in its `boot` (Start), so the cap's
-        // `on_capture_frame` reads it there. Issue 2706: the resolved
-        // vertex-buffer cap (`RenderTuningConfig`) sizes both the cap
-        // accumulator's truncation and (via `RenderHandles`) the GPU vertex
-        // buffer the driver creates; the assets-root wiring rides `RenderParams`.
-        let render_params = RenderParams {
-            // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
-            // reads its reference image from the same `assets` root the fs
-            // cap serves, so the render cap loads it off the hot path.
-            assets_dir: Some(common.namespace_roots.assets.clone()),
-            ..RenderParams::default()
-        };
-
-        let registry = Arc::clone(&boot.registry);
-        let mailer = Arc::clone(&boot.queue);
-        // ADR-0063: production chassis configures the fatal-abort
-        // aborter so a wasm guest trap exits the substrate via
-        // `lifecycle::fatal_abort` instead of unwinding.
-        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
-
-        // Boot order is declaration order — `with_common_caps` runs
-        // log first so other capabilities' boot tracing routes
-        // through the log capture; render last so it claims its
-        // mailboxes after every other chassis cap. `into_common_boot` reads the
-        // six env-sourced `CommonBoot` fields off the shared env in one place
-        // (the teardown budget honors the same `AETHER_SETTLEMENT_CAP_SECS` knob,
-        // `0 → wait forever` sentinel and all, as the settlement gates) and
-        // threads the source stack back out for the builder.
-        let (common, sources) =
-            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
-        // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
-        // `Tick → Render → Present → Tick` frame graph, with the `Quit`
-        // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
-        // in-flight frame before shutting down (see the driver's
-        // `CloseRequested` → `Quit` bridge and terminal-reached exit).
-        //
-        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
-        // so it resolves each composed cap's `Config` (audio / render tuning /
-        // lifecycle / http-server) off it; the caps compose with
-        // `with_actor(params)` alone. `RenderParams` (the assets root) is
-        // composer-supplied construction input derived from the resolved fs
-        // roots, so it still rides `with_actor`.
-        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
-            .with_actor::<AudioCapability>(())
-            .with_actor::<ClipboardCapability>(ClipboardParams::System)
-            .with_actor::<RenderCapability>(render_params)
-            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_params());
-        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
-    }
-
     /// Build the desktop chassis: construct the Start-stage runtime handles
     /// (winit event loop + capture queue), stand up substrate-core internals,
     /// compose the capability chain via [`Self::compose`], then wrap
@@ -361,7 +319,7 @@ impl DesktopChassis {
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `from_env`) because the
         // per-chassis known keys come from the composed builder's manifest.
-        validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
+        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
         // Issue 552 stage 2d: render is a NativeActor. The chassis builder
         // constructs the cap inside `init` (called from
         // `with_actor::<RenderCapability>(config)`); `init` publishes the
@@ -385,6 +343,7 @@ impl DesktopChassis {
 mod config_manifest_tests {
     use super::DesktopChassis;
     use aether_chassis::boot::chassis_residual_knobs;
+    use aether_substrate::chassis::config_manifest;
 
     #[test]
     fn desktop_known_keys_drop_tick_and_keep_window_audio_render() {
@@ -392,7 +351,7 @@ mod config_manifest_tests {
         // so its aggregate no longer includes the headless tick knob (the old
         // flat registry over-claimed it). Membership is asserted from the
         // composition walk, not a hand list.
-        let manifest = DesktopChassis::config_manifest().expect("desktop config manifest");
+        let manifest = config_manifest::<DesktopChassis>().expect("desktop config manifest");
         let known = manifest.known_keys(&chassis_residual_knobs());
         assert!(!known.contains("AETHER_TICK_HZ"), "desktop drives from winit — must not claim the headless tick knob");
         assert!(known.contains("AETHER_WINDOW_MODE"), "desktop must claim its window-driver knob");

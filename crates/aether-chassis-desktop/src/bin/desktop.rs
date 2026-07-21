@@ -20,14 +20,14 @@ fn main() -> anyhow::Result<()> {
         // ADR-0156 §4: the dump is the composition-derived aggregate plus the
         // residual hand records, so it resolves the chassis config the same
         // way a boot does (a garbage known value surfaces as a `ConfigError`).
-        print!("{}", DesktopChassis::config_dump()?);
+        print!("{}", aether_chassis::config_dump::<DesktopChassis>()?);
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
     // chassis kind, linked caps, build provenance — as JSON, then exit
     // before boot (no winit event loop opened).
     if cli.describe {
-        println!("{}", serde_json::to_string(&DesktopChassis::describe_manifest()?)?);
+        println!("{}", serde_json::to_string(&aether_chassis::describe_manifest::<DesktopChassis>()?)?);
         return Ok(());
     }
     let env = DesktopEnv::from_env_with_argv(cli)?;
