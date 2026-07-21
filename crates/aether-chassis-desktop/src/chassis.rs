@@ -129,7 +129,7 @@ impl DesktopChassis {
 /// argv/env/file path a real boot uses, so `--describe` can resolve it on
 /// a headless host. The Start-stage runtime handles that used to ride here
 /// — the winit `EventLoop` and the capture-handoff `CaptureQueue` — are not
-/// config: they are constructed on the boot path in [`DesktopChassis::build_inner`]
+/// config: they are constructed on the boot path in `DesktopChassis::build_inner`
 /// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
 /// thread, so it stays local to the boot call `main()` makes).
 pub struct DesktopEnv {
@@ -204,7 +204,7 @@ impl DesktopEnv {
     /// ADR-0155 §4: env resolution produces config only — the winit
     /// `EventLoop` and the capture `CaptureQueue` are Start-stage runtime
     /// handles constructed on the boot path in
-    /// [`DesktopChassis::build_inner`], not here — so the only fallible step
+    /// `DesktopChassis::build_inner`, not here — so the only fallible step
     /// is the ADR-0090 §4 config validation / parse path.
     ///
     /// # Errors
