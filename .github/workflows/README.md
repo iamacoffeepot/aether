@@ -13,7 +13,7 @@ each file opens with one.
 | `ci.yml` | `CI pass` | fmt, clippy, rustdoc lints, workspace tests, duplicate-code (jscpd), unused-deps (cargo-machete) |
 | `lint-title.yml` | `Lint title` | Conventional Commit titles (main squash-merges with the title as the commit subject) |
 
-**Advisory PR checks** — run on PRs but never block a merge:
+**Advisory checks** — run on pull requests but never block a merge:
 
 | Workflow | Fires on | Purpose |
 | --- | --- | --- |
@@ -47,11 +47,11 @@ each file opens with one.
 1. **Two required checks, ever.** Branch protection requires exactly
    `Lint title` and `CI pass`. A new merge-gating signal on the tree
    becomes a job wired into `ci.yml`'s `ci-pass` aggregator — never a third
-   required context. A required context that stops reporting holds every PR
-   at "Expected" forever, so the required set stays small and lives in one
-   place. A future check on PR metadata rather than the tree follows the
-   `Lint <thing>` naming of the title lint (`lint-<thing>.yml`, workflow =
-   job = check name).
+   required context. A required context that stops reporting holds every
+   pull request at "Expected" forever, so the required set stays small and
+   lives in one place. A future check on pull-request metadata rather than
+   the tree follows the `Lint <thing>` naming of the title lint
+   (`lint-<thing>.yml`, workflow = job = check name).
 2. **Header comment contract.** Every workflow opens with a comment saying
    what it does and whether it gates merges. A reader should never need the
    Actions tab to understand a file's role.
@@ -60,7 +60,7 @@ each file opens with one.
    with a comment saying why.
 4. **Pinned actions.** Third-party actions are pinned to a full commit SHA
    with a trailing version comment (`# v4`).
-5. **Concurrency.** PR-triggered workflows cancel a superseded run when the
+5. **Concurrency.** Pull-request-triggered workflows cancel a superseded run when the
    branch is pushed again. Main runs are never cancelled — each merge wants
    its full cache-save and signal — and are grouped by sha so back-to-back
    merges don't serialize.
