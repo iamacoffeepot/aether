@@ -108,8 +108,11 @@ where
     A: NativeActor,
     A::Config: ConfigMember,
 {
+    // ADR-0156 §5: the cap `Config` rides the programmatic layer of the source
+    // stack (`with_config`); `with_actor` carries only the params.
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
-        .with_actor::<A>(config, params)
+        .with_config::<A::Config>(config)
+        .with_actor::<A>(params)
         .build_passive()
         .expect("test chassis boots")
 }

@@ -133,10 +133,10 @@ fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
     let ping_total = Arc::new(AtomicU32::new(0));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<MacroProbeCap>(
-            (),
-            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
-        )
+        .with_actor::<MacroProbeCap>(ProbeParams {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
         .build_passive()
         .expect("macro-emitted cap boots");
 
@@ -166,10 +166,10 @@ fn seize_and_run_dispatches_seed_in_place() {
     let ping_total = Arc::new(AtomicU32::new(0));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<MacroProbeCap>(
-            (),
-            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
-        )
+        .with_actor::<MacroProbeCap>(ProbeParams {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
         .build_passive()
         .expect("macro-emitted cap boots");
 
@@ -228,10 +228,10 @@ fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
     let ping_total = Arc::new(AtomicU32::new(0));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<MacroProbeCap>(
-            (),
-            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
-        )
+        .with_actor::<MacroProbeCap>(ProbeParams {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
         .build_passive()
         .expect("macro-emitted cap boots");
 
@@ -257,7 +257,7 @@ fn macro_routes_task_completions_by_output_type() {
     };
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TaskRouteCap>((), obs.clone())
+        .with_actor::<TaskRouteCap>(obs.clone())
         .build_passive()
         .expect("task-routing cap boots");
 
@@ -307,7 +307,7 @@ fn macro_pending_request_borrow_completion_replies_once() {
     let caller = registry.register_inbox("test.macro_native_actor.deferred_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<DeferredReplyCap>((), obs.clone())
+        .with_actor::<DeferredReplyCap>(obs.clone())
         .build_passive()
         .expect("deferred-reply cap boots");
 
@@ -346,7 +346,7 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
     let caller = registry.register_inbox("test.macro_native_actor.deferred_silent_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<DeferredReplyCap>((), obs.clone())
+        .with_actor::<DeferredReplyCap>(obs.clone())
         .build_passive()
         .expect("deferred-reply cap boots");
 
@@ -400,10 +400,10 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
     let ping_total = Arc::new(AtomicU32::new(0));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<MacroProbeCap>(
-            (),
-            ProbeParams { greet_total: Arc::clone(&greet_total), ping_total: Arc::clone(&ping_total) },
-        )
+        .with_actor::<MacroProbeCap>(ProbeParams {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
         .build_passive()
         .expect("macro-emitted cap boots");
 

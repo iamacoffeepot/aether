@@ -42,12 +42,13 @@ use aether_chassis::TickConfig;
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_residual_knobs, load_chassis_config,
-    resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file, rpc_port_from_env,
-    tick_only_lifecycle_params, with_common_caps, with_rpc_server,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, SettlementConfig, chassis_residual_knobs,
+    load_chassis_config, rpc_port_from_env, tick_only_lifecycle_params, with_common_caps, with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, HeadlessCli};
-use aether_substrate::config::{ConfigError, ConfigManifest, RingCapacities, SchedulerTuning, validate_env};
+use aether_substrate::config::{
+    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, validate_env,
+};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
@@ -119,30 +120,27 @@ impl HeadlessChassis {
     }
 }
 
-/// Bag of resolved configs the headless chassis takes at build time.
-/// `main()` populates it from env vars (per ADR-0070's "substrate-core
-/// never reads env" invariant); tests construct one directly.
+/// Bag of build-time inputs the headless chassis takes. `main()` populates it
+/// from env vars (per ADR-0070's "substrate-core never reads env" invariant);
+/// tests construct one directly.
+///
+/// ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
+/// `HttpServerConfig`, `AnthropicConfig`, `GeminiConfig`, `LifecycleConfig`) no
+/// longer ride as fields — the builder resolves each off [`Self::sources`]. A
+/// test constructs one by staging programmatic overrides into `sources`
+/// (`ConfigSources::set_override`). What remains as fields is the source stack
+/// plus the chassis-side reads of resolved members: the fs roots + content-gen
+/// (the derived staging root's inputs), the driver-only tick cadence, and the
+/// pool / ring / scheduler / teardown knobs.
 pub struct HeadlessEnv {
+    /// The config source stack (file + per-cap argv overlays) the builder
+    /// resolves each composed cap's `Config` off (ADR-0156 §5).
+    pub sources: ConfigSources,
     pub namespace_roots: NamespaceRoots,
-    pub http: HttpConf,
-    /// ADR-0050 `aether.anthropic` cap config (issue 1014). Resolved
-    /// from `ANTHROPIC_API_KEY` + `AETHER_ANTHROPIC_*`.
-    pub anthropic: AnthropicConfig,
-    /// ADR-0050 `aether.gemini` cap config (issue 1015). Resolved from
-    /// `GEMINI_API_KEY` + `AETHER_GEMINI_*`.
-    pub gemini: GeminiConfig,
-    /// Content-gen staging config (ADR-0090). Resolved from
-    /// `AETHER_GEN_DIR` / `--gen-dir`; folded into the staging root in
-    /// `with_common_caps`.
+    /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
+    /// into the staging root in `with_common_caps`.
     pub contentgen: ContentGenConfig,
     pub tick_period: Duration,
-    /// The resolved `aether.http.server` init config (ADR-0108, ADR-0155 §3).
-    /// The cap is always composed and always claims `aether.http.server`;
-    /// its `enabled` flag (`AETHER_HTTP_SERVER_ENABLED` /
-    /// `--http-server-enabled`, default off) gates only whether Start binds
-    /// the socket, so an unconfigured chassis binds no HTTP port yet still
-    /// answers mail rather than warn-dropping it.
-    pub http_server: HttpServerConfig,
     /// The resolved `aether.rpc.server` bind address (ADR-0155 §3). The cap
     /// is always composed and always claims `aether.rpc.server`; the
     /// address (from `AETHER_RPC_PORT`) gates only whether Start binds the
@@ -166,11 +164,6 @@ pub struct HeadlessEnv {
     /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
     /// `[settlement]`.
     pub teardown_cap: Duration,
-    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` — timeout for one lifecycle
-    /// advance step (Tick) before the scheduler logs a slow-frame warning.
-    /// ADR-0156 §3: resolved through the lifecycle cap's own `LifecycleConfig`
-    /// (relocated off `ChassisBootConfig`); default is 1000 ms.
-    pub lifecycle: LifecycleConfig,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the components come up with no hub; the normal
     /// headless bin leaves it empty and loads components over the hub instead.
@@ -218,7 +211,6 @@ impl HeadlessEnv {
             describe: _,
         } = cli;
         let config_file = load_chassis_config(config)?;
-        let config_file = config_file.as_ref();
         let CommonOverlay {
             http,
             http_server: http_server_overlay,
@@ -231,10 +223,36 @@ impl HeadlessEnv {
             rpc_port: cli_rpc_port,
         } = common;
 
-        let chassis_boot =
-            resolve_with_file::<ChassisBootConfig>(chassis_boot_overlay.into_layer(), config_file, "chassis")?;
-        let lifecycle = resolve_with_file::<LifecycleConfig>(lifecycle_overlay.into_layer(), config_file, "lifecycle")?;
-        let tick_config = resolve_with_file::<TickConfig>(tick_overlay.into_layer(), config_file, "tick")?;
+        // ADR-0156 §5: assemble the source stack — the loaded config file plus
+        // each cap member's typed argv overlay (`Overlay::into_layer`). The
+        // builder resolves the composed cap configs (http / http-server /
+        // anthropic / gemini / lifecycle) off this ahead of `init`; section
+        // identity comes from each member's `ConfigMember` declaration, so no
+        // chassis-side section string survives.
+        let mut sources = ConfigSources::new(config_file);
+        sources.set_argv::<HttpConf>(http.into_layer());
+        sources.set_argv::<HttpServerConfig>(http_server_overlay.into_layer());
+        sources.set_argv::<NamespaceRoots>(fs.into_layer());
+        sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
+        sources.set_argv::<GeminiConfig>(gemini.into_layer());
+        sources.set_argv::<ContentGenConfig>(contentgen.into_layer());
+        sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
+        sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
+        sources.set_argv::<TickConfig>(tick_overlay.into_layer());
+
+        // Chassis-side reads of resolved members (ADR-0156 §5) — resolved off
+        // the same stack via each member's `ConfigMember` section: the derived
+        // staging inputs (fs roots + content-gen), the driver-only tick cadence,
+        // and the non-cap pool / ring / scheduler / teardown knobs.
+        let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
+        let namespace_roots = sources.resolve::<NamespaceRoots>()?;
+        let contentgen = sources.resolve::<ContentGenConfig>()?;
+        // Tick cadence: resolved through `TickConfig` (argv > env > default).
+        // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
+        let tick_period = sources.resolve::<TickConfig>()?.to_tick_period();
+        let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
+        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
+        let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
         // through `ChassisBootConfig`). When set, the listed components'
@@ -245,48 +263,19 @@ impl HeadlessEnv {
             Some(path) => boot_manifest_autoload(Path::new(&path))?,
             None => Vec::new(),
         };
-        let http = resolve_with_file::<HttpConf>(http.into_layer(), config_file, "http")?;
-        let anthropic = resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
-        let gemini = resolve_with_file::<GeminiConfig>(gemini.into_layer(), config_file, "gemini")?;
-        let contentgen = resolve_with_file::<ContentGenConfig>(contentgen.into_layer(), config_file, "contentgen")?;
-        let namespace_roots = resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
-        // ADR-0155 §3: the HTTP server cap is always composed and always
-        // claims its mailbox; its `enabled` flag (default off) gates only
-        // whether Start binds the socket. Resolve the whole config and hand
-        // it over — an unconfigured chassis binds no HTTP port but still
-        // answers `aether.http.server` mail with a fail-fast `Err`.
-        let http_server =
-            resolve_with_file::<HttpServerConfig>(http_server_overlay.into_layer(), config_file, "http-server")?;
-        // Tick cadence: resolved through `TickConfig` (argv > env > default).
-        // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
-        let tick_period = tick_config.to_tick_period();
         let rpc_addr =
             cli_rpc_port.or_else(rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = chassis_boot.to_workers();
-        // Issue 1990: resolve the per-actor ring capacities from
-        // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
-        // an unparseable known value, surfaced as `ConfigError`).
-        let ring_caps = resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities();
-        // Issue 2485: resolve the scheduler hot-path tuning (ADR-0090 §4
-        // hard-error on an unparseable known value, surfaced as
-        // `ConfigError`).
-        let scheduler_tuning =
-            resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?.to_scheduler_tuning();
-        let teardown_cap = resolve_teardown_cap_with_file(config_file)?;
         Ok(Self {
+            sources,
             namespace_roots,
-            http,
-            anthropic,
-            gemini,
             contentgen,
             tick_period,
-            http_server,
             rpc_addr,
             workers,
             ring_caps,
             scheduler_tuning,
             teardown_cap,
-            lifecycle,
             autoload,
         })
     }
@@ -309,18 +298,14 @@ impl HeadlessChassis {
     /// take no part in the claim chain, so they are ignored here.
     fn compose(boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
         let HeadlessEnv {
+            sources,
             namespace_roots,
-            http,
-            http_server,
-            anthropic,
-            gemini,
             contentgen,
             rpc_addr,
             workers,
             ring_caps,
             scheduler_tuning,
             teardown_cap,
-            lifecycle,
             tick_period: _,
             autoload: _,
         } = env;
@@ -385,24 +370,24 @@ impl HeadlessChassis {
             teardown_cap,
             component_host_params,
             namespace_roots,
-            http,
-            anthropic,
-            gemini,
             contentgen,
-            game_gateway: aether_game::GameGatewayConfig::default(),
             game_gateway_params: aether_game::GameGatewayParams::default(),
         };
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the driver broadcasts
         // Tick to `aether.input` via the relay subscriber.
-        let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
-            .with_actor::<HeadlessRenderCapability>((), ())
-            .with_actor::<HeadlessClipboardCapability>((), ())
-            .with_actor::<HeadlessWindowCapability>((), ())
-            .with_actor::<UnsupportedSubstrateHarnessCapability>((), ())
-            .with_actor::<LifecycleCapability>(lifecycle, tick_only_lifecycle_params());
-        with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(http_server, ())
+        //
+        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
+        // so it resolves each composed cap's `Config` (http / http-server /
+        // lifecycle) off it; the caps compose with `with_actor(params)` alone.
+        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_actor::<HeadlessClipboardCapability>(())
+            .with_actor::<HeadlessWindowCapability>(())
+            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
+        with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(())
     }
 
     /// Build the headless chassis: stand up substrate-core internals,

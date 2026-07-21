@@ -70,17 +70,15 @@ fn main() -> anyhow::Result<()> {
         render_ext: Some(Box::new(GpuRenderExt)),
         component_host: true,
         compose: vec![
-            Box::new(|b| b.with_actor::<aether_input::InputCapability>((), ())),
-            Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>((), ())),
-            Box::new(|b| b.with_actor::<aether_text::TextCapability>((), ())),
+            Box::new(|b| b.with_actor::<aether_input::InputCapability>(())),
+            Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>(())),
+            Box::new(|b| b.with_actor::<aether_text::TextCapability>(())),
             Box::new(|b| {
-                b.with_actor::<aether_clipboard::ClipboardCapability>((), aether_clipboard::ClipboardParams::InMemory)
+                b.with_actor::<aether_clipboard::ClipboardCapability>(aether_clipboard::ClipboardParams::InMemory)
             }),
             Box::new(|b| {
-                b.with_actor::<aether_game::GameGatewayCapability>(
-                    aether_game::GameGatewayConfig::default(),
-                    aether_game::GameGatewayParams::default(),
-                )
+                b.with_config(aether_game::GameGatewayConfig::default())
+                    .with_actor::<aether_game::GameGatewayCapability>(aether_game::GameGatewayParams::default())
             }),
         ],
         // Issue #2509: the standalone binary is an env-reading edge, so

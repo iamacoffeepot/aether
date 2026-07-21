@@ -13,7 +13,9 @@ use crate::actor::native::NativeActor;
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
-use crate::config::{ConfigManifest, ConfigMember, ConfigMemberRecord, RingCapacities, SchedulerTuning};
+use crate::config::{
+    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigSources, FromArgvThenEnv, RingCapacities, SchedulerTuning,
+};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -119,6 +121,13 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// members (workers / ring capacities / scheduler tuning / teardown cap);
     /// [`Self::config_manifest`] reads it plus the driver's members.
     config_members: Vec<ConfigMemberRecord>,
+    /// ADR-0156 §5: the builder's config source stack (programmatic > argv >
+    /// env > file > default). The chassis hands over the file + per-member argv
+    /// overlays via [`Self::with_config_sources`]; tests / `SubstrateHarness`
+    /// stage explicit programmatic values via [`Self::with_config`]. The Pass 0
+    /// resolve loop in `boot_passives` resolves each composed cap's `Config` off
+    /// it ahead of `init`.
+    config_sources: ConfigSources,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -141,6 +150,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             scheduler_tuning: SchedulerTuning::default(),
             teardown_cap: DEFAULT_TEARDOWN_CAP,
             config_members: Vec::new(),
+            config_sources: ConfigSources::default(),
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -175,6 +185,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             scheduler_tuning: self.scheduler_tuning,
             teardown_cap: self.teardown_cap,
             config_members: self.config_members,
+            config_sources: self.config_sources,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -198,6 +209,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // keeps the manual-drive path light; the perf benches that want a
         // real pool already pass `.with_workers(_)` explicitly, which wins.
         let workers = self.workers.or(Some(PASSIVE_DEFAULT_WORKERS));
+        let mut config_sources = self.config_sources;
         // ADR-0155 §4: the no-driver path still runs the Claim stage over
         // `C::Driver`'s value-free hook — for a passive chassis that is
         // `NeverDriver`, whose default hook reserves nothing.
@@ -209,6 +221,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             self.ring_caps,
             self.scheduler_tuning,
             self.teardown_cap,
+            &mut config_sources,
             self.passives,
             <C::Driver as DriverCapability>::claim,
         )?;
@@ -247,13 +260,55 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// live handle, a resolved `MailboxId`) has no derive-emitted
     /// `ConfigMember` and stops compiling at this call site.
     #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
+    pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
         A: NativeActor,
         A::Config: ConfigMember,
     {
         self.config_members.extend(<A::Config as ConfigMember>::members());
-        self.passives.push(Box::new(NativeActorBoot::<A>::new(config, params)));
+        self.passives.push(Box::new(NativeActorBoot::<A>::new(params)));
+        self
+    }
+
+    /// ADR-0156 §5: hand the builder the config source stack the chassis
+    /// assembled adjacent to composition — the loaded config file plus each
+    /// composed member's argv overlay (`Overlay::into_layer`). The Pass 0
+    /// resolve loop resolves every composed cap's `Config` off it ahead of
+    /// `init`, so the per-cap `resolve_with_file::<C>(argv, file, "section")`
+    /// lines and chassis-side section strings disappear — section identity
+    /// comes from each member's [`ConfigMember`] declaration. Replaces the
+    /// whole stack; the per-value [`Self::with_config`] override stacks on top
+    /// of whatever this installs.
+    #[must_use]
+    pub fn with_config_sources(mut self, sources: ConfigSources) -> Self {
+        self.config_sources = sources;
+        self
+    }
+
+    /// ADR-0156 §5: stage a programmatic explicit value for config type `C` —
+    /// the top layer of the source stack (above argv). This is how
+    /// `SubstrateHarness` and unit tests keep constructing configs in code:
+    /// resolution short-circuits to the staged value, so an in-code
+    /// construction never reads process env. Pairs with [`Self::with_actor`],
+    /// which no longer carries the config value (ADR-0156 §5 inversion).
+    #[must_use]
+    pub fn with_config<T: 'static>(mut self, value: T) -> Self {
+        self.config_sources.set_override(value);
+        self
+    }
+
+    /// ADR-0156 §5: stage config type `C`'s typed argv overlay layer (its
+    /// `Overlay::into_layer` output) into the source stack — the argv layer,
+    /// below any programmatic override and above env. The one-shot
+    /// [`Self::with_config_sources`] bulk handoff is the usual chassis path;
+    /// this is the per-member seam for a composer that stages argv overlays
+    /// incrementally.
+    #[must_use]
+    pub fn with_config_argv<T: FromArgvThenEnv + 'static>(
+        mut self,
+        layer: <T::Layer as confique::Config>::Layer,
+    ) -> Self {
+        self.config_sources.set_argv::<T>(layer);
         self
     }
 
@@ -371,6 +426,19 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         members.extend(<C::Driver as DriverCapability>::config_members());
         ConfigManifest::from_members(members)
     }
+
+    /// ADR-0156 §5: the resolved-provenance rollup — for every composed member,
+    /// the highest-precedence source layer present in the builder's stack
+    /// (programmatic / argv / file / env / default). The sibling of
+    /// [`Self::config_manifest`]'s declaration walk that answers "which layer
+    /// won" per member, reading the same source stack the Pass 0 resolve loop
+    /// resolves cap configs against. Borrows `&self` in [`NoDriver`] state the
+    /// same way `config_manifest` does, so `--print-config` can report
+    /// provenance without a driver value.
+    #[must_use]
+    pub fn config_provenance(&self) -> Vec<(&'static str, crate::config::ConfigProvenance)> {
+        self.config_manifest().provenance(&self.config_sources)
+    }
 }
 
 impl<C: Chassis> Builder<C, HasDriver> {
@@ -395,6 +463,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             ring_caps,
             scheduler_tuning,
             teardown_cap,
+            config_sources: mut sources,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
@@ -411,6 +480,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             ring_caps,
             scheduler_tuning,
             teardown_cap,
+            &mut sources,
             passives,
             <C::Driver as DriverCapability>::claim,
         )?;

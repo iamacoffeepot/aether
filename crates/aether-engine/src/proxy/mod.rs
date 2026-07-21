@@ -159,13 +159,11 @@ mod tests {
             // TraceObserver produces the `Settled` mail RpcServer's
             // settlement subscription waits on; without it the `Call`
             // never closes with a `ReplyEnd`.
-            .with_actor::<TraceDispatchCapability>((), ())
-            .with_actor::<TestEchoActor>((), ())
-            .with_actor::<ProxyReplySink>((), Arc::clone(&recorded))
-            .with_actor::<RpcServerCapability>(
-                RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
-                RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None },
-            )
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<TestEchoActor>(())
+            .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
+            .with_config(RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) })
+            .with_actor::<RpcServerCapability>(RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None })
             .build_passive()
             .expect("caps boot");
 
@@ -315,7 +313,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let cells = EngineCapCells::default();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<EngineCapSink>((), cells.clone())
+            .with_actor::<EngineCapSink>(cells.clone())
             .build_passive()
             .expect("caps boot");
         let engine_id = EngineId(Uuid::from_u128(seed));

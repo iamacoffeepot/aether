@@ -49,6 +49,22 @@ impl DynShutdown for FallbackShutdown {
 /// passive) shut down via the [`DynShutdown`] handles the spawn pass
 /// produced.
 pub(super) trait PassiveBoot: Send {
+    /// Phase 0 (ADR-0156 §5) — resolve this passive's cap `Config` off the
+    /// builder's source stack (programmatic > argv > env > file > default),
+    /// ahead of Claim. Run in composition order over every passive before any
+    /// enters Claim, so a resolution fault aborts boot before a single mailbox
+    /// is reserved. Default no-op for non-actor passives (the fallback router)
+    /// and for the claim-only `--describe` path, which never resolves a value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a known env key, argv overlay value, or
+    /// config-file section holds an unparseable value (ADR-0090 §4).
+    fn resolve(&mut self, sources: &mut crate::config::ConfigSources) -> Result<(), crate::config::ConfigError> {
+        let _ = sources;
+        Ok(())
+    }
+
     /// Phase 1 — claim namespace + mailbox; build per-cap transport
     /// + binding; stash claim resources for later phases.
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError>;

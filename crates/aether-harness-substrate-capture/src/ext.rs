@@ -37,10 +37,12 @@ impl RenderExt for GpuRenderExt {
         wiring: &BenchWiring,
         builder: Builder<SubstrateHarnessChassis>,
     ) -> Builder<SubstrateHarnessChassis> {
-        builder.with_actor::<RenderCapability>(
-            RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES },
-            RenderParams { observed_kinds: wiring.observed_kinds.clone(), assets_dir: wiring.assets_dir.clone() },
-        )
+        builder
+            .with_config(RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES })
+            .with_actor::<RenderCapability>(RenderParams {
+                observed_kinds: wiring.observed_kinds.clone(),
+                assets_dir: wiring.assets_dir.clone(),
+            })
     }
 
     fn install_capture_backend(&self, wiring: &BenchWiring, passive: &PassiveChassis<SubstrateHarnessChassis>) {

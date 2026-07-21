@@ -182,7 +182,8 @@ mod tests {
     fn boot_render(params: RenderParams) -> (Arc<Registry>, PassiveChassis<TestChassis>) {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES }, params)
+            .with_config(RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES })
+            .with_actor::<RenderCapability>(params)
             .build_passive()
             .expect("build succeeds");
         (registry, chassis)

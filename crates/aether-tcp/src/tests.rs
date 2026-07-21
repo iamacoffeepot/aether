@@ -54,7 +54,7 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>
 fn boot_tcp_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>, PassiveChassis<TestChassis>) {
     let (registry, mailer, rx) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TcpCapability>((), ())
+        .with_actor::<TcpCapability>(())
         .build_passive()
         .expect("TcpCapability boots");
     (registry, mailer, rx, chassis)

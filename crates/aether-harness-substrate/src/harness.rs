@@ -356,20 +356,31 @@ impl SubstrateHarnessBuilder {
     /// its basics (trace dispatch, the harness cap, lifecycle, fail-fast
     /// headless window) and each scenario composes exactly the caps it
     /// needs on top (issue #3764); this is the generic surface for any
-    /// cap without boot-internal wiring — `.with_actor::<TextCapability>((), (), ())`,
-    /// `.with_actor::<InputCapability>(config, (), ())`, a scenario-local
-    /// `NativeActor`, and so on. Applied to the chassis builder in push
-    /// order, between the harness basics and lifecycle. `params` is the
-    /// ADR-0156 composer-supplied construction input, `()` for every cap in
-    /// this slice.
+    /// cap without boot-internal wiring — `harness.with_actor::<TextCapability>(())`,
+    /// a scenario-local `NativeActor`, and so on. Applied to the chassis builder
+    /// in push order, between the harness basics and lifecycle.
+    ///
+    /// ADR-0156 §5: mirrors `Builder::with_actor` — it carries only `params`
+    /// (the composer-supplied construction input), and a cap's operator-resolvable
+    /// `Config` rides the builder's programmatic layer via [`Self::with_config`].
     #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
+    pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
         A: NativeActor,
         A::Config: Send + 'static + ConfigMember,
         A::Params: Send + 'static,
     {
-        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(config, params)));
+        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(params)));
+        self
+    }
+
+    /// ADR-0156 §5: stage a programmatic explicit config value onto the chassis
+    /// builder's source stack — the mirror of `Builder::with_config`. Scenarios
+    /// pair it with [`Self::with_actor`] (`harness.with_config(cfg).with_actor::<A>(())`)
+    /// to construct a cap's `Config` in code without a process env read.
+    #[must_use]
+    pub fn with_config<T: Send + 'static>(mut self, value: T) -> Self {
+        self.compose.push(Box::new(move |builder| builder.with_config(value)));
         self
     }
 

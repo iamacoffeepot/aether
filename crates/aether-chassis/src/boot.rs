@@ -14,7 +14,6 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,7 +37,7 @@ use aether_render::RenderTuningConfig;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
-use aether_substrate::config::{ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
+use aether_substrate::config::{ConfigError, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_tcp::TcpCapability;
@@ -63,7 +62,8 @@ pub const CONFIG_FILE_ENV: &str = "AETHER_CONFIG_FILE";
 /// ADR-0090 §1/§4. The runtime (log / panic-hook) knobs are registered
 /// by `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler
 /// hot-path, chassis boot, window, and tick knobs are covered by the
-/// derive-emitted `*Layer::META`s in `chassis_registry`.
+/// derive-emitted `*Layer::META`s the composition-derived
+/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) walks.
 pub const CHASSIS_KNOBS: &[KnobRecord] = &[
     KnobRecord {
         env_key: CONFIG_FILE_ENV,
@@ -121,57 +121,6 @@ pub fn load_config_file(path: &Path) -> Result<toml::Table, ConfigError> {
 /// read or parsed.
 pub fn load_chassis_config(argv: Option<String>) -> Result<Option<toml::Table>, ConfigError> {
     chassis_config_path(argv).map(|path| load_config_file(&path)).transpose()
-}
-
-/// Extract one `[section]` from the parsed chassis config file and
-/// deserialize it into the target config's partial confique layer. An
-/// absent section is `None`; a present but malformed section is a hard
-/// boot error.
-///
-/// # Errors
-///
-/// Returns [`ConfigError`] when a present section is not a table or
-/// cannot deserialize into the target layer.
-pub fn file_section<C: FromArgvThenEnv>(
-    table: &toml::Table,
-    section: &str,
-) -> Result<Option<<C::Layer as confique::Config>::Layer>, ConfigError> {
-    let Some(value) = table.get(section) else {
-        return Ok(None);
-    };
-    if !matches!(value, toml::Value::Table(_)) {
-        let source = io::Error::new(io::ErrorKind::InvalidData, format!("expected [{section}] to be a TOML table"));
-        return Err(ConfigError::config_section(section, source));
-    }
-    value.clone().try_into().map(Some).map_err(|source| ConfigError::config_section(section, source))
-}
-
-/// Resolve a config from argv/env plus the optional file section named
-/// by `section`, preserving source priority argv > env > file > defaults.
-///
-/// # Errors
-///
-/// Returns [`ConfigError`] from section deserialization or config
-/// resolution.
-pub fn resolve_with_file<C: FromArgvThenEnv>(
-    argv: <C::Layer as confique::Config>::Layer,
-    file: Option<&toml::Table>,
-    section: &str,
-) -> Result<C, ConfigError> {
-    let file = file.map(|table| file_section::<C>(table, section)).transpose()?.flatten();
-    C::try_resolve(argv, file)
-}
-
-/// Resolve a config with no argv overlay, but with the optional file
-/// section below env.
-///
-/// # Errors
-///
-/// Returns [`ConfigError`] from section deserialization or config
-/// resolution.
-pub fn resolve_env_with_file<C: FromArgvThenEnv>(file: Option<&toml::Table>, section: &str) -> Result<C, ConfigError> {
-    let argv = <<C::Layer as confique::Config>::Layer as confique::Layer>::empty();
-    resolve_with_file::<C>(argv, file, section)
 }
 
 /// Per-actor ring-capacity knob (issue 1990, ADR-0081 / ADR-0086). The
@@ -413,17 +362,6 @@ pub fn resolve_teardown_cap() -> Duration {
     SettlementConfig::from_env().to_cap()
 }
 
-/// Resolve the teardown cap from argv/env plus the optional
-/// `[settlement]` config-file section.
-///
-/// # Errors
-///
-/// Returns [`ConfigError`] when the file section or env value is
-/// malformed.
-pub fn resolve_teardown_cap_with_file(file: Option<&toml::Table>) -> Result<Duration, ConfigError> {
-    Ok(resolve_env_with_file::<SettlementConfig>(file, "settlement")?.to_cap())
-}
-
 /// Shared boot knobs for the desktop and headless chassis
 /// (ADR-0090 §1/§2 applied to the chassis's own knobs). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -571,6 +509,16 @@ pub fn tick_only_lifecycle_params() -> LifecycleParams {
 /// Args every full-stack chassis hands to [`with_common_caps`]. Kept
 /// as a flat struct (no defaults) so an added cap forces the chassis
 /// builders to acknowledge it.
+///
+/// ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
+/// `AnthropicConfig`, `GeminiConfig`, …) no longer ride here — the builder
+/// resolves each off the source stack the chassis handed it via
+/// `Builder::with_config_sources`. What remains is the composer-supplied
+/// construction input (`Params`, the aborter, the pool/ring/scheduler/teardown
+/// seams) plus two chassis-side-resolved members the derived staging root and
+/// the fs cap both read: `namespace_roots` (also passed programmatically so the
+/// fs cap uses the exact value the staging root was derived from) and
+/// `contentgen`.
 pub struct CommonBoot {
     pub aborter: Arc<dyn FatalAborter>,
     pub workers: Option<usize>,
@@ -589,16 +537,15 @@ pub struct CommonBoot {
     /// Composer-supplied wasmtime / egress handles for the component host
     /// cap (ADR-0156 §3 `Params`); the cap's `Config` is `()`.
     pub component_host_params: ComponentHostParams,
+    /// The resolved `aether.fs` roots. Resolved chassis-side (its `save` root
+    /// is the fallback for the content-gen staging root, a value derived from
+    /// two resolved members), then passed to the fs cap via the builder's
+    /// programmatic layer so the cap uses the exact same value.
     pub namespace_roots: NamespaceRoots,
-    pub http: HttpConfig,
-    pub anthropic: AnthropicConfig,
-    pub gemini: GeminiConfig,
     /// Content-gen staging config (ADR-0090). `with_common_caps` folds
     /// its `gen_dir` override (else the resolved `save`-namespace root)
     /// into the staging root threaded into the gemini cap.
     pub contentgen: ContentGenConfig,
-    /// Operator-typable game-gateway listener/session config (ADR-0090).
-    pub game_gateway: GameGatewayConfig,
     /// Resolved `TurnSim` wiring for the game gateway (ADR-0156 §3 `Params`).
     /// The default has no configured `TurnSim`, so merely linking the common
     /// chassis opens no player listener.
@@ -608,6 +555,16 @@ pub struct CommonBoot {
 /// Wire the aborter, worker count, and the common caps every full-
 /// stack chassis carries. The renderer / window caps each chassis
 /// adds after this in `.with_actor::<_>()` chains.
+///
+/// ADR-0156 §5: every operator-resolvable cap `Config` is resolved by the
+/// builder off the source stack the chassis handed it (`with_config_sources`),
+/// so each cap composes with `with_actor::<_>(params)` alone — no per-cap
+/// config value, no chassis-side section string. The two exceptions ride the
+/// programmatic layer: the fs roots (resolved chassis-side to derive the
+/// staging root, then passed here so the cap uses the identical value) and the
+/// game gateway's `Config`, which stays a hardcoded default so the common
+/// chassis opens no player listener from a stray `AETHER_GAME_*` env var
+/// (byte-identical to the pre-inversion `GameGatewayConfig::default()`).
 ///
 /// Boot order is declaration order. ADR-0081 retired the central
 /// `LogCapability` — every actor owns its own per-actor log ring; no
@@ -639,17 +596,25 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_config_member::<SchedulerTuningConfig>()
         .with_config_member::<SettlementConfig>()
         .with_config_member::<ContentGenConfig>()
-        .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<InputCapability>((), ())
-        .with_actor::<ComponentHostCapability>((), boot.component_host_params)
-        .with_actor::<FsCapability>(boot.namespace_roots, ())
-        .with_actor::<TextCapability>((), ())
-        .with_actor::<InventoryCapability>((), ())
-        .with_actor::<HttpCapability>(boot.http, ())
-        .with_actor::<TcpCapability>((), ())
-        .with_actor::<GameGatewayCapability>(boot.game_gateway, boot.game_gateway_params)
-        .with_actor::<AnthropicCapability>(boot.anthropic, ())
-        .with_actor::<GeminiCapability>(boot.gemini, GeminiParams { gen_root: staging_root })
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<InputCapability>(())
+        .with_actor::<ComponentHostCapability>(boot.component_host_params)
+        // Programmatic: the fs cap uses the exact roots the staging root was
+        // derived from (resolved chassis-side, above).
+        .with_config(boot.namespace_roots)
+        .with_actor::<FsCapability>(())
+        .with_actor::<TextCapability>(())
+        .with_actor::<InventoryCapability>(())
+        // Builder-resolved off the source stack: `HttpConfig`, `AnthropicConfig`,
+        // `GeminiConfig`.
+        .with_actor::<HttpCapability>(())
+        .with_actor::<TcpCapability>(())
+        // Programmatic default (byte-identical to the pre-inversion `::default()`
+        // compose): no `AETHER_GAME_*` env opens a listener on the common chassis.
+        .with_config(GameGatewayConfig::default())
+        .with_actor::<GameGatewayCapability>(boot.game_gateway_params)
+        .with_actor::<AnthropicCapability>(())
+        .with_actor::<GeminiCapability>(GeminiParams { gen_root: staging_root })
 }
 
 /// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,
@@ -687,9 +652,13 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
 /// `HelloAck` peer-kind.
 #[must_use]
 pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketAddr>, engine_name: &str) -> Builder<C> {
-    builder.with_actor::<RpcServerCapability>(
-        RpcServerConfig { bind_addr: rpc_addr.map(|addr| addr.to_string()) },
-        RpcServerParams {
+    // ADR-0156 §5: `RpcServerConfig` is the programmatic-only bridge — its
+    // `bind_addr` is resolved from `AETHER_RPC_PORT` outside the derive path
+    // (#3849 migrates it onto a derive member), so it rides the builder's
+    // programmatic layer rather than the source stack.
+    builder
+        .with_config(RpcServerConfig { bind_addr: rpc_addr.map(|addr| addr.to_string()) })
+        .with_actor::<RpcServerCapability>(RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: engine_name.into(),
                 engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -698,8 +667,7 @@ pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketA
             // A forked substrate peer never fields engine-addressed forwards
             // (only the hub does), so it needs no route target.
             route_target: None,
-        },
-    )
+        })
 }
 
 /// Parse the `AETHER_RPC_PORT` env var into an optional port number
@@ -723,7 +691,6 @@ mod tests {
     use super::ChassisBootConfig;
     use super::SchedulerTuningConfigLayer;
     use super::chassis_residual_knobs;
-    use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_lifecycle::{LifecycleConfig, LifecycleConfigLayer};
@@ -918,20 +885,5 @@ mod tests {
         let result = super::load_config_file(&malformed);
         let _ = fs::remove_file(&malformed);
         assert!(matches!(result, Err(ConfigError::ConfigFile { .. })), "malformed config file must hard-error");
-    }
-
-    #[test]
-    fn file_section_absent_is_none_and_present_section_deserializes() {
-        let table = "[http]\ndisabled = true\n".parse::<toml::Table>().expect("parse table");
-        assert!(
-            file_section::<ActorRingConfig>(&table, "actor").expect("absent section ok").is_none(),
-            "absent sections fall through to env/defaults",
-        );
-
-        let table = "[actor]\nlog_ring_capacity = 2048\n".parse::<toml::Table>().expect("parse table");
-        let section = file_section::<ActorRingConfig>(&table, "actor")
-            .expect("present section decodes")
-            .expect("actor section present");
-        assert_eq!(section.log_ring_capacity, Some(2048));
     }
 }

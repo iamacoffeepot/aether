@@ -95,8 +95,9 @@ pub use chassis::ctx::{
 pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};
 pub use config::{
-    ConfigError, ConfigManifest, ConfigMember, ConfigMemberRecord, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys,
-    RingCapacities, SchedulerTuning, dump_config, known_keys, validate_env,
+    ConfigError, ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, FromArgvThenEnv,
+    KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config, file_section, known_keys,
+    validate_env,
 };
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};

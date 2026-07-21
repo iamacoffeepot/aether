@@ -999,26 +999,22 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<EngineServer>(
-            EngineConfig {
-                binary_store_dir: Some(binary_store_dir.to_string_lossy().into_owned()),
-                engine_store_root: Some(engine_store_root.to_string_lossy().into_owned()),
-                ..EngineConfig::default()
+        .with_actor::<TraceDispatchCapability>(())
+        .with_config(EngineConfig {
+            binary_store_dir: Some(binary_store_dir.to_string_lossy().into_owned()),
+            engine_store_root: Some(engine_store_root.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .with_actor::<EngineServer>(())
+        .with_config(RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) })
+        .with_actor::<RpcServerCapability>(RpcServerParams {
+            peer_kind: PeerKind::Substrate {
+                engine_name: "fleetharness-hub".into(),
+                engine_version: "0.1.0".into(),
+                kinds: vec![],
             },
-            (),
-        )
-        .with_actor::<RpcServerCapability>(
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
-            RpcServerParams {
-                peer_kind: PeerKind::Substrate {
-                    engine_name: "fleetharness-hub".into(),
-                    engine_version: "0.1.0".into(),
-                    kinds: vec![],
-                },
-                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
-            },
-        )
+            route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
+        })
         .build_passive()
         .expect("test setup: hub caps boot");
     let port = chassis.handle::<RpcServerHandle>().expect("test setup: RpcServerHandle published").local_port;

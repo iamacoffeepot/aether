@@ -186,3 +186,66 @@ pub struct HubCli {
     #[arg(long = "describe")]
     pub describe: bool,
 }
+
+#[cfg(test)]
+mod checkability_tests {
+    //! ADR-0156 §5: the CLI roots stay hand-written static clap structs, so
+    //! each carries a checkable invariant in place of the old lockstep comment
+    //! — its long-flag set equals the union of the flags declared by the
+    //! overlays of the members it composes (plus the meta flags that select the
+    //! source itself: `--config` / `--print-config` / `--describe`). A cap added
+    //! to a chassis's composition without flattening its overlay into the root
+    //! (or a stale flag left in the root) fails the assertion honestly.
+
+    use super::{CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HubCli, TickOverlay};
+    use crate::window::WindowOverlay;
+    use aether_audio::AudioOverlay;
+    use clap::{Args, CommandFactory};
+    use std::collections::BTreeSet;
+
+    /// Every `--long` flag a clap command declares.
+    fn long_flags(command: &clap::Command) -> BTreeSet<String> {
+        command.get_arguments().filter_map(|arg| arg.get_long().map(str::to_owned)).collect()
+    }
+
+    /// The long flags an [`Args`] overlay contributes, gathered by augmenting a
+    /// throwaway command with it — the same flags the chassis root gets by
+    /// `#[command(flatten)]`-ing the overlay.
+    fn overlay_flags<T: Args>() -> BTreeSet<String> {
+        long_flags(&T::augment_args(clap::Command::new("probe")))
+    }
+
+    /// The source-selecting meta flags every chassis root carries directly
+    /// (they name the file source and the print/describe exits, so they belong
+    /// to no cap member).
+    fn meta_flags() -> BTreeSet<String> {
+        ["config", "print-config", "describe"].into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn desktop_root_flags_equal_composed_overlay_set() {
+        let mut expected = overlay_flags::<CommonOverlay>();
+        expected.extend(overlay_flags::<AudioOverlay>());
+        expected.extend(overlay_flags::<WindowOverlay>());
+        expected.extend(meta_flags());
+        assert_eq!(long_flags(&DesktopCli::command()), expected);
+    }
+
+    #[test]
+    fn headless_root_flags_equal_composed_overlay_set() {
+        let mut expected = overlay_flags::<CommonOverlay>();
+        expected.extend(overlay_flags::<TickOverlay>());
+        expected.extend(meta_flags());
+        assert_eq!(long_flags(&HeadlessCli::command()), expected);
+    }
+
+    #[test]
+    fn hub_root_flags_equal_composed_overlay_set() {
+        // The hub composes only the engines cap; `--rpc-port` is a direct root
+        // flag (its per-chassis default differs) alongside the meta flags.
+        let mut expected = overlay_flags::<EngineOverlay>();
+        expected.insert("rpc-port".to_owned());
+        expected.extend(meta_flags());
+        assert_eq!(long_flags(&HubCli::command()), expected);
+    }
+}

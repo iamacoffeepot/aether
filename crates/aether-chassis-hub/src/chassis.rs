@@ -20,15 +20,17 @@ use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::config::{ConfigError, ConfigManifest, RingCapacities, SchedulerTuning, validate_env};
+use aether_substrate::config::{
+    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, validate_env,
+};
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::rpc_port_from_env;
 use aether_chassis::boot::{
-    ActorRingConfig, SchedulerTuningConfig, hub_residual_knobs, load_chassis_config, resolve_env_with_file,
-    resolve_teardown_cap_with_file, resolve_with_file, with_hub_fleet_passthrough,
+    ActorRingConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, load_chassis_config,
+    with_hub_fleet_passthrough,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -98,15 +100,19 @@ impl HubChassis {
     }
 }
 
-/// Resolved configuration the hub chassis takes at build time.
-/// `rpc_addr` is the `aether.rpc.server` bind — the target the
-/// out-of-process `aether-mcp` coordinator dials. `AETHER_RPC_PORT`
-/// overrides the port. `engine` is the engines-cap config — today the
-/// liveness-heartbeat tuning (issue 1339), resolved argv-then-env.
-#[derive(Clone)]
+/// Build-time inputs the hub chassis takes. `rpc_addr` is the
+/// `aether.rpc.server` bind — the target the out-of-process `aether-mcp`
+/// coordinator dials. `AETHER_RPC_PORT` overrides the port.
+///
+/// ADR-0156 §5: the engines-cap `Config` (`EngineConfig`, the liveness
+/// heartbeat tuning) no longer rides as a field — the builder resolves it off
+/// [`Self::sources`]. What remains is the source stack plus the chassis-side
+/// reads of the non-cap pool / ring / scheduler / teardown knobs.
 pub struct HubEnv {
+    /// The config source stack (file + the engines-cap argv overlay) the
+    /// builder resolves the composed `EngineServer`'s `Config` off (ADR-0156 §5).
+    pub sources: ConfigSources,
     pub rpc_addr: SocketAddr,
-    pub engine: EngineConfig,
     pub ring_caps: RingCapacities,
     pub scheduler_tuning: SchedulerTuning,
     pub teardown_cap: Duration,
@@ -147,15 +153,23 @@ impl HubEnv {
         // where the composed builder's `config_manifest` (including the
         // declared fleet pass-through) supplies the hub's known-key set.
         let config_file = load_chassis_config(cli.config.clone())?;
-        let config_file = config_file.as_ref();
+        // ADR-0156 §5: assemble the source stack — the loaded config file plus
+        // the engines-cap argv overlay. The builder resolves the composed
+        // `EngineServer`'s `EngineConfig` off this; the chassis resolves the
+        // non-cap ring / scheduler / teardown knobs below off the same stack via
+        // their `ConfigMember` sections.
+        let mut sources = ConfigSources::new(config_file);
+        sources.set_argv::<EngineConfig>(cli.engine.clone().into_layer());
+        let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
+        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
+        let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
         let rpc_port = cli.rpc_port.or_else(rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
         Ok(Self {
+            sources,
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
-            engine: resolve_with_file::<EngineConfig>(cli.engine.clone().into_layer(), config_file, "engine")?,
-            ring_caps: resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities(),
-            scheduler_tuning: resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?
-                .to_scheduler_tuning(),
-            teardown_cap: resolve_teardown_cap_with_file(config_file)?,
+            ring_caps,
+            scheduler_tuning,
+            teardown_cap,
         })
     }
 }
@@ -170,7 +184,7 @@ impl HubChassis {
     /// `claim_namespaces` on it. Takes the boot handle by reference so
     /// `build_inner` can move the same `boot` into the driver afterward.
     fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
-        let HubEnv { rpc_addr, engine, ring_caps, scheduler_tuning, teardown_cap } = env;
+        let HubEnv { sources, rpc_addr, ring_caps, scheduler_tuning, teardown_cap } = env;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
@@ -178,26 +192,27 @@ impl HubChassis {
         // fleet knobs a hub-spawned substrate inherits from the hub's env, the
         // one documented over-approximation in the aggregate. The engines cap
         // (`EngineConfig`) declares its own member via `with_actor` below.
-        with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer))
+        //
+        // ADR-0156 §5: hand the builder the source stack so it resolves the
+        // composed `EngineServer`'s `EngineConfig` (the liveness-heartbeat
+        // tuning, issue 1339) off it; the RPC server's `Config` stays the
+        // programmatic bridge (`with_config`).
+        with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_cap(teardown_cap)
-            .with_actor::<TraceDispatchCapability>((), ())
-            // Liveness-heartbeat tuning (issue 1339), resolved
-            // argv-then-env in `HubEnv::from_env_with_argv`.
-            .with_actor::<EngineServer>(engine, ())
-            .with_actor::<RpcServerCapability>(
-                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
-                RpcServerParams {
-                    peer_kind: PeerKind::Substrate {
-                        engine_name: "aether-hub".into(),
-                        engine_version: env!("CARGO_PKG_VERSION").into(),
-                        kinds: vec![],
-                    },
-                    #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
-                    route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<EngineServer>(())
+            .with_config(RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) })
+            .with_actor::<RpcServerCapability>(RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "aether-hub".into(),
+                    engine_version: env!("CARGO_PKG_VERSION").into(),
+                    kinds: vec![],
                 },
-            )
+                #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
+                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
+            })
     }
 
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {

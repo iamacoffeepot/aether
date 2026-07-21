@@ -205,8 +205,8 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
         .size(WIDTH, HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>((), ())
-        .with_actor::<TextCapability>((), ())
+        .with_actor::<InputCapability>(())
+        .with_actor::<TextCapability>(())
         .build()
         .expect("boot SubstrateHarness");
     let mark_book_mailbox = load_export(&mut harness, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME, Vec::new());
