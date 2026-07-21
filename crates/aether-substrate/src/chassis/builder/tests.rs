@@ -328,6 +328,7 @@ impl DriverRunning for ClaimingDriverRunning {
 /// terminal that stops before Init spawns no thread by construction.
 #[test]
 fn claim_namespaces_reports_all_contributors_and_skips_init() {
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
     // A cap whose `init` increments a counter — the tripwire for "Claim
@@ -377,7 +378,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
         .claim_namespaces()
         .expect("claim-only succeeds");
 
-    let expected: std::collections::BTreeSet<String> = [
+    let expected: BTreeSet<String> = [
         "test.chassis_builder.stub_log",
         "test.claim_only.init_tripwire",
         "test.claim_only.inline_sink",
