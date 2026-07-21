@@ -50,5 +50,11 @@ signal-hook = "0.4"
 [target.'cfg(windows)'.dependencies]
 ctrlc = "3"
 
+[dev-dependencies]
+# The binary-store proof (relocated from the bundle, #3812) drives the
+# real hub -> RPC -> engines-cap stack over FleetHarness and resolves
+# both uploaded chassis binaries through the dist manifest.
+aether-harness-fleet = { path = "../aether-harness-fleet" }
+
 [lints]
 workspace = true

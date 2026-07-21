@@ -11,8 +11,8 @@
 
 use aether_chassis::chassis_config_dump;
 use aether_chassis::cli::DesktopCli;
+use aether_chassis_desktop::{DesktopChassis, DesktopEnv};
 use aether_substrate::Chassis;
-use aether_substrate_bundle::desktop::{DesktopChassis, DesktopEnv};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {

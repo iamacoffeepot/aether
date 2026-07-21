@@ -42,7 +42,7 @@ pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
 /// #3809-#3816) spreads them over per-chassis crates. Each bin name is
 /// both the `--bin` selector and the output filename.
 pub const CHASSIS_BINS: &[(&str, &str)] = &[
-    (CHASSIS_PACKAGE, "aether-substrate"),
+    ("aether-chassis-desktop", "aether-substrate"),
     ("aether-chassis-headless", "aether-substrate-headless"),
     ("aether-chassis-hub", "aether-substrate-hub"),
 ];

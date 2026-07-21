@@ -2,11 +2,10 @@
 //!
 //! Standard Cargo layout:
 //!
-//! - `src/desktop/` — the desktop chassis (chassis impl, winit driver
-//!   capability, render plumbing). The hub and headless chassis live
-//!   in `aether-chassis-hub` / `aether-chassis-headless`.
-//! - `src/bin/<chassis>.rs` — minimal entry point per binary
-//!   (`aether-substrate`, `aether-substrate-harness`).
+//! - `src/bin/` — the `aether-substrate-harness` chassis entry point
+//!   plus the standalone bundle and perf bins. The desktop, headless,
+//!   and hub chassis live in `aether-chassis-desktop` /
+//!   `aether-chassis-headless` / `aether-chassis-hub`.
 //!
 //! The substrate-harness chassis machinery and the in-process
 //! `SubstrateHarness` live in the `aether-harness-substrate` crate
@@ -25,8 +24,6 @@
 //! `aether-substrate` — depend on that directly when you don't need
 //! chassis surface.
 
-pub mod desktop;
-
 pub use aether_component::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{
     Chassis, Component, ComponentCtx, HubOutbound, InboxHandler, InlineHandler, KindId, Mail, MailKind, MailboxEntry,
@@ -39,32 +36,3 @@ pub use aether_substrate::{
     mail::registry,
     runtime::log_install,
 };
-
-#[cfg(test)]
-mod chassis_source_guard {
-    /// Regression guard for the enable / disable convention (#1791): a
-    /// capability's enable/disable flag is resolved through its
-    /// derive-`Config` (`*Config::from_argv_then_env`), never a raw
-    /// `env::var` read in a chassis builder. This is the shape #1761 put
-    /// the http server on; the guard keeps a future cap from regressing to
-    /// presence-inference or a hand-rolled env read. The chassis window /
-    /// tick / boot knobs are now also derive-`Config` (`WindowConfig`,
-    /// `TickConfig`, `ChassisBootConfig`), so no raw `env::var` of any
-    /// known `AETHER_*` key should appear in the chassis builder sources.
-    #[test]
-    fn chassis_builders_resolve_cap_enable_flags_via_config() {
-        // Enable / disable env keys owned by a derive-`Config` cap. Add a
-        // cap's flag key here when a new opt-in / opt-out cap lands.
-        const CAP_FLAG_KEYS: &[&str] = &["AETHER_HTTP_SERVER_ENABLED", "AETHER_AUDIO_DISABLE"];
-        let desktop = include_str!("desktop/chassis.rs");
-        for key in CAP_FLAG_KEYS {
-            let raw_read = format!("env::var(\"{key}\")");
-            assert!(
-                !desktop.contains(&raw_read),
-                "desktop chassis reads {key} via raw env::var — route it through the \
-                 cap's config API instead (see the `config` module's \
-                 \"Enable / disable convention\")",
-            );
-        }
-    }
-}

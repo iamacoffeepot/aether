@@ -1,0 +1,68 @@
+[package]
+name = "aether-chassis-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The desktop chassis (issue #3812): winit window + wgpu render + cpal
+# audio. Produces the `aether-substrate` binary over the shared
+# `aether-chassis` composition layer.
+
+[[bin]]
+name = "aether-substrate"
+path = "src/bin/desktop.rs"
+
+# Same `runtime` convention as the other chassis crates (ADR-0122).
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-chassis = { path = "../aether-chassis" }
+aether-substrate = { path = "../aether-substrate", features = ["render"] }
+# The desktop cap set: the real render/window/audio/clipboard caps plus
+# the common-cap configs the env threads through `with_common_caps`.
+aether-render = { path = "../aether-render", features = ["runtime"] }
+aether-window = { path = "../aether-window", features = ["runtime"] }
+aether-audio = { path = "../aether-audio", features = ["runtime"] }
+aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+# Pre-existing seam carried from the bundle: `render.rs` composes the
+# capture crate's `visual` helpers for readback encoding. A
+# production→harness edge worth revisiting at the consolidation pass.
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+aether-lifecycle = { path = "../aether-lifecycle" }
+aether-component = { path = "../aether-component" }
+aether-http = { path = "../aether-http" }
+aether-fs = { path = "../aether-fs" }
+aether-input = { path = "../aether-input" }
+aether-game = { path = "../aether-game" }
+aether-rpc = { path = "../aether-rpc" }
+aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
+aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
+aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+# `--describe` prints the BinaryManifest as JSON (ADR-0115).
+serde_json = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+# The winit event loop + wgpu surface stack and the capture readback
+# PNG encode.
+winit = "0.30.13"
+wgpu = { workspace = true }
+pollster = "0.4.0"
+png = { workspace = true }
+
+# The desktop signal-watcher thread mirrors the headless shutdown flag:
+# signal-hook on Unix, the `ctrlc` Ctrl-C fallback on Windows.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
+
+[lints]
+workspace = true

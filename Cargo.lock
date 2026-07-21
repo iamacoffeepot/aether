@@ -225,6 +225,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-chassis-desktop"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-anthropic",
+ "aether-audio",
+ "aether-chassis",
+ "aether-clipboard",
+ "aether-component",
+ "aether-contentgen",
+ "aether-data",
+ "aether-fs",
+ "aether-game",
+ "aether-gemini",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-http",
+ "aether-input",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-render",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-window",
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "png",
+ "pollster",
+ "serde_json",
+ "signal-hook 0.4.4",
+ "tracing",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "aether-chassis-headless"
 version = "0.3.0-alpha"
 dependencies = [
@@ -265,6 +302,7 @@ dependencies = [
  "aether-chassis",
  "aether-data",
  "aether-engine",
+ "aether-harness-fleet",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
@@ -782,43 +820,32 @@ name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-anthropic",
- "aether-audio",
  "aether-chassis",
+ "aether-chassis-desktop",
  "aether-chassis-headless",
  "aether-clipboard",
  "aether-component",
- "aether-contentgen",
  "aether-data",
  "aether-fs",
  "aether-game",
- "aether-gemini",
  "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
- "aether-http",
  "aether-input",
  "aether-kinds",
  "aether-lifecycle",
  "aether-render",
- "aether-rpc",
  "aether-substrate",
  "aether-tcp",
  "aether-text",
- "aether-window",
  "anyhow",
- "clap",
- "ctrlc",
  "plotters",
  "png",
- "pollster",
  "serde",
  "serde_json",
- "signal-hook 0.4.4",
  "tracing",
  "wasmtime",
  "wgpu",
- "winit",
 ]
 
 [[package]]
