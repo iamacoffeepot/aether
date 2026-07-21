@@ -1,7 +1,7 @@
 //! The settlement-patience knob (issue 2062), rehomed beside its
 //! primary consumer — the harness's settlement gates — by the crate
 //! extraction (issue #3765). The chassis bundle re-imports it for the
-//! teardown-cap resolution, so one knob covers both.
+//! teardown-budget resolution, so one knob covers both.
 
 use std::time::Duration;
 

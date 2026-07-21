@@ -157,7 +157,7 @@ then resolves the overlay against the subsystem's explicit section in
 let config_file = load_chassis_config(config)?;
 let config_file = config_file.as_ref();
 
-let http = resolve_with_file::<HttpConf>(
+let http = resolve_with_file::<HttpConfig>(
     http.into_layer(),
     config_file,
     "http",

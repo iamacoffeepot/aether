@@ -76,17 +76,7 @@ pub struct SubstrateBoot {
     pub boot_descriptors: Vec<KindDescriptor>,
 }
 
-pub struct SubstrateBootBuilder;
-
 impl SubstrateBoot {
-    /// Begin a boot.
-    #[must_use]
-    pub fn builder() -> SubstrateBootBuilder {
-        SubstrateBootBuilder
-    }
-}
-
-impl SubstrateBootBuilder {
     /// Execute the boot: registers `aether_kinds::descriptors::all()`,
     /// wires the diagnostic sink, and prepares the runtime handles
     /// (engine, registry, mailer, linker, outbound, input subscribers)
@@ -105,7 +95,7 @@ impl SubstrateBootBuilder {
     /// locks are poisoned during the boot sequence — fail-fast per
     /// ADR-0063: both conditions indicate a substrate-level invariant
     /// violation discovered before any user code runs.
-    pub fn build(self) -> wasmtime::Result<SubstrateBoot> {
+    pub fn build() -> wasmtime::Result<Self> {
         // Issue #321: route panics through tracing so dispatcher-thread
         // crashes surface in `engine_logs` instead of vanishing to
         // stderr. Idempotent — chassis re-entries / repeated builds in
@@ -173,7 +163,7 @@ impl SubstrateBootBuilder {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        Ok(SubstrateBoot { engine, registry, linker, queue, outbound, boot_descriptors })
+        Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors })
     }
 }
 
@@ -194,7 +184,7 @@ mod tests {
     /// boot whose `outbound` is disconnected.
     #[test]
     fn build_does_not_dial_hub() {
-        let boot = SubstrateBoot::builder().build().expect("build must succeed without dialling the hub");
+        let boot = SubstrateBoot::build().expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry.register_inbox("test_chassis_sink", Arc::new(|_dispatch| {}));

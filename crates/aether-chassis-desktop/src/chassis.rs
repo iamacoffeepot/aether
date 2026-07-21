@@ -19,16 +19,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_anthropic::AnthropicConfig;
-use aether_audio::{AudioCapability, AudioConfig as AudioConf};
+use aether_audio::{AudioCapability, AudioConfig};
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
-use aether_http::{HttpConfig as HttpConf, HttpServerCapability, HttpServerConfig};
+use aether_http::{HttpConfig, HttpServerCapability, HttpServerConfig};
 use aether_kinds::BinaryManifest;
-use aether_kinds::WindowMode;
 use aether_lifecycle::{LifecycleCapability, LifecycleConfig, frame_lifecycle_params};
 use aether_render::{RenderCapability, RenderParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -37,7 +36,7 @@ use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::event_loop::EventLoop;
 
-use aether_chassis::WindowConfig;
+use aether_chassis::{WindowBoot, WindowConfig};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
@@ -117,7 +116,7 @@ impl DesktopChassis {
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
         let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
@@ -134,7 +133,7 @@ impl DesktopChassis {
     /// Returns [`BootError`] when config resolution or substrate boot fails.
     pub fn config_manifest() -> Result<ConfigManifest, BootError> {
         let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         Ok(Self::compose(&boot, env).config_manifest())
     }
 
@@ -170,19 +169,18 @@ pub struct DesktopEnv {
     /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
     /// into the staging root in `with_common_caps`.
     pub contentgen: ContentGenConfig,
-    pub boot_mode: WindowMode,
-    pub boot_size: Option<(u32, u32)>,
-    pub boot_title: String,
-    /// Resolved `AETHER_WIREFRAME` config value (`WindowConfig::wireframe`,
-    /// argv > env > default), threaded to `Gpu::new` at window creation.
-    /// `WireframeMode::from_config_value` owns the tri-state parse.
-    pub boot_wireframe: Option<String>,
+    /// Lowered desktop window boot knobs (mode / size / title / wireframe),
+    /// grouped into one embedded unit like the other knob groups and
+    /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
+    /// `wireframe` reaches `Gpu::new` via `WireframeMode::from_config_value`,
+    /// which owns the tri-state parse.
+    pub window: WindowBoot,
     /// The substrate runtime knobs (#3849), resolved off the source stack. Only
     /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
     /// the subscriber installs, in `DesktopChassis::build_inner`). The
     /// `aether.rpc.server` bind port rides the source stack too now
     /// (`RpcServerConfig`) — the builder resolves it (unset → claimed but
-    /// unbound, ADR-0155 §3), so there is no separate `rpc_addr` field.
+    /// unbound, ADR-0155 §3), so there is no separate `rpc_address` field.
     pub runtime: RuntimeConfig,
     /// Issue 745: optional worker-pool size override. Populated from
     /// `AETHER_WORKERS` / `--workers`; `None` keeps `PoolConfig::default()`
@@ -192,7 +190,7 @@ pub struct DesktopEnv {
     /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
-    pub ring_caps: RingCapacities,
+    pub ring_capacities: RingCapacities,
     /// Issue 2485: scheduler hot-path tuning resolved from the
     /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
     /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
@@ -201,7 +199,7 @@ pub struct DesktopEnv {
     /// Issue #2509: cumulative patience for the instanced-actor teardown
     /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
     /// `[settlement]`.
-    pub teardown_cap: Duration,
+    pub teardown_budget: Duration,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin
     /// leaves it empty and loads components over the hub instead.
@@ -271,7 +269,7 @@ impl DesktopEnv {
         // lifecycle) off this; section identity comes from each member's
         // `ConfigMember` declaration, so no chassis-side section string survives.
         let mut sources = ConfigSources::new(config_file);
-        sources.set_argv::<HttpConf>(http.into_layer());
+        sources.set_argv::<HttpConfig>(http.into_layer());
         sources.set_argv::<HttpServerConfig>(http_server_overlay.into_layer());
         sources.set_argv::<NamespaceRoots>(fs.into_layer());
         sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
@@ -279,7 +277,7 @@ impl DesktopEnv {
         sources.set_argv::<ContentGenConfig>(contentgen.into_layer());
         sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
         sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
-        sources.set_argv::<AudioConf>(audio_overlay.into_layer());
+        sources.set_argv::<AudioConfig>(audio_overlay.into_layer());
         sources.set_argv::<WindowConfig>(window_overlay.into_layer());
         // #3849: `aether.rpc.server`'s bind port resolves through the source
         // stack like any member — stage the `--rpc-port` overlay so the builder
@@ -294,9 +292,9 @@ impl DesktopEnv {
         let namespace_roots = sources.resolve::<NamespaceRoots>()?;
         let contentgen = sources.resolve::<ContentGenConfig>()?;
         let window_config = sources.resolve::<WindowConfig>()?;
-        let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
+        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
-        let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
+        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
         // #3849: resolve the substrate runtime knobs (log filter + panic-hook
         // knobs) off the same stack; `build_inner` re-applies `log_filter`.
         let runtime = sources.resolve::<RuntimeConfig>()?;
@@ -315,13 +313,11 @@ impl DesktopEnv {
             None => Vec::new(),
         };
 
-        // Window mode and title: resolved through `WindowConfig` (argv > env >
-        // default). `to_boot_mode` delegates to `parse_window_mode_env` and
-        // soft-falls back to `Windowed` on a bad value; `to_boot_title` maps
-        // `None` / empty to `"aether"`.
-        let (boot_mode, boot_size) = window_config.to_boot_mode();
-        let boot_title = window_config.to_boot_title();
-        let boot_wireframe = window_config.wireframe;
+        // Window boot knobs: resolved through `WindowConfig` (argv > env >
+        // default) and lowered as a unit. `lower` delegates the mode to
+        // `parse_window_mode_env` (soft-falling back to `Windowed` on a bad
+        // value) and maps `None` / empty title to `"aether"`.
+        let window = window_config.lower();
 
         let workers = chassis_boot.to_workers();
 
@@ -329,15 +325,12 @@ impl DesktopEnv {
             sources,
             namespace_roots,
             contentgen,
-            boot_mode,
-            boot_size,
-            boot_title,
-            boot_wireframe,
+            window,
             runtime,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
-            teardown_cap,
+            teardown_budget,
             autoload,
         })
     }
@@ -364,13 +357,10 @@ impl DesktopChassis {
             namespace_roots,
             contentgen,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
-            teardown_cap,
-            boot_mode: _,
-            boot_size: _,
-            boot_title: _,
-            boot_wireframe: _,
+            teardown_budget,
+            window: _,
             runtime: _,
             autoload: _,
         } = env;
@@ -410,12 +400,12 @@ impl DesktopChassis {
         let common = CommonBoot {
             aborter,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
             // Issue #2509: the instanced-actor teardown gate honors the
             // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
             // `0 → wait forever` sentinel) as the settlement gates.
-            teardown_cap,
+            teardown_budget,
             component_host_params,
             namespace_roots,
             contentgen,
@@ -465,7 +455,7 @@ impl DesktopChassis {
         event_loop.set_control_flow(ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
 
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
@@ -475,13 +465,10 @@ impl DesktopChassis {
 
         // Driver-only / post-build fields, read out before `compose` consumes
         // `env`: the window boot knobs ride the desktop driver, the autoload
-        // list is drained after build. `WindowMode` is `Clone` (not `Copy`);
-        // these are tiny, so the clones are free.
+        // list is drained after build. `WindowBoot` is `Clone` (not `Copy`);
+        // it is tiny, so the clone is free.
         let workers = env.workers;
-        let boot_mode = env.boot_mode.clone();
-        let boot_size = env.boot_size;
-        let boot_title = env.boot_title.clone();
-        let boot_wireframe = env.boot_wireframe.clone();
+        let window = env.window.clone();
         let autoload = mem::take(&mut env.autoload);
 
         tracing::info!(
@@ -502,15 +489,7 @@ impl DesktopChassis {
         // `RenderHandles` bundle on the exported-handle map, and the driver
         // fetches it via `DriverCtx::handle::<RenderHandles>()`. `boot` moves
         // into the driver here, after `compose` finished borrowing it.
-        let driver = DesktopDriverCapability {
-            event_loop,
-            boot,
-            capture_queue,
-            boot_mode,
-            boot_size,
-            boot_title,
-            boot_wireframe,
-        };
+        let driver = DesktopDriverCapability { event_loop, boot, capture_queue, window };
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load off

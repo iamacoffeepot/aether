@@ -188,7 +188,7 @@ pub struct SubstrateHarnessEnv {
     /// `ActorTraceRing`). `RingCapacities::default()` keeps the
     /// `aether-actor` const caps; a `SubstrateHarness` eviction test pins a small
     /// trace cap to observe `truncated_before`. Per-harness, no process env.
-    pub ring_caps: RingCapacities,
+    pub ring_capacities: RingCapacities,
     /// Issue 2485: scheduler hot-path tuning. `SchedulerTuning::default()`
     /// keeps the built-in scheduler literals / adaptive knobs. Per-harness,
     /// no process env.
@@ -236,7 +236,7 @@ pub struct SubstrateHarnessEnv {
     /// settlement-await loops read (honoring a programmatic
     /// `SubstrateHarness::settlement_cap` override), so a scenario's teardown
     /// gate uses the same patience as its settlement gates.
-    pub teardown_cap: Duration,
+    pub teardown_budget: Duration,
 }
 
 /// Output of [`SubstrateHarnessChassis::build_passive`]. Bundles the
@@ -262,7 +262,7 @@ pub struct SubstrateHarnessBuild {
 
 impl SubstrateHarnessChassis {
     /// Build the substrate-harness chassis: stand up substrate-core
-    /// internals via [`SubstrateBoot::builder`], boot the standard
+    /// internals via [`SubstrateBoot::build`], boot the standard
     /// passives + `SubstrateHarnessCapability` via the `chassis_builder`
     /// [`Builder`], and return a [`SubstrateHarnessBuild`] the embedder
     /// takes ownership of. The embedder is responsible for any
@@ -281,7 +281,7 @@ impl SubstrateHarnessChassis {
         let SubstrateHarnessEnv {
             workers,
             pool_workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
             observed_kinds,
             events_tx,
@@ -290,10 +290,10 @@ impl SubstrateHarnessChassis {
             render_ext,
             component_host,
             compose,
-            teardown_cap,
+            teardown_budget,
         } = env;
 
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         let _ = workers;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
@@ -414,9 +414,9 @@ impl SubstrateHarnessChassis {
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_config_sources(ConfigSources::hermetic())
             .with_workers(pool_workers)
-            .with_ring_caps(ring_caps)
+            .with_ring_capacities(ring_capacities)
             .with_scheduler_tuning(scheduler_tuning)
-            .with_teardown_cap(teardown_cap)
+            .with_teardown_budget(teardown_budget)
             .with_actor::<TraceDispatchCapability>(());
         if component_host {
             builder = builder.with_actor::<ComponentHostCapability>(ComponentHostParams {

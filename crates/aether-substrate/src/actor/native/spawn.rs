@@ -123,7 +123,7 @@ pub struct Spawner {
     /// `ActorSlots::new()`, so the chassis-wide knob reaches instanced
     /// actors (and the wasm trampolines that spawn through this same
     /// funnel) without per-spawn plumbing.
-    ring_caps: RingCapacities,
+    ring_capacities: RingCapacities,
 }
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
@@ -142,7 +142,7 @@ impl Spawner {
         mailer: Arc<Mailer>,
         aborter: Arc<dyn FatalAborter>,
         wake_sink: WakeSink,
-        ring_caps: RingCapacities,
+        ring_capacities: RingCapacities,
     ) -> Self {
         Self {
             registry,
@@ -152,7 +152,7 @@ impl Spawner {
             counter: AtomicU64::new(0),
             wake_sink,
             instanced_slots: Mutex::new(HashMap::new()),
-            ring_caps,
+            ring_capacities,
         }
     }
 
@@ -168,8 +168,8 @@ impl Spawner {
     /// off the shared `Spawner` so it seeds its `ActorSlots` rings at the
     /// same caps the instanced spawn funnel applies — one source of
     /// truth for both slot sites.
-    pub(crate) fn ring_caps(&self) -> RingCapacities {
-        self.ring_caps
+    pub(crate) fn ring_capacities(&self) -> RingCapacities {
+        self.ring_capacities
     }
 
     /// ADR-0097: allocate the next monotonic discriminator from the same
@@ -401,8 +401,8 @@ impl Spawner {
         // configured capacities before any handler dispatch, so the
         // first `Local::with_mut::<Ring>` finds them instead of building
         // the const-`Default` ring.
-        slots.seed(ActorLogRing::with_capacity(self.ring_caps.log));
-        slots.seed(ActorTraceRing::with_growth(self.ring_caps.trace, self.ring_caps.trace_max));
+        slots.seed(ActorLogRing::with_capacity(self.ring_capacities.log));
+        slots.seed(ActorTraceRing::with_growth(self.ring_capacities.trace, self.ring_capacities.trace_max));
 
         let actor = {
             // Instanced actors don't publish driver-facing sub-handles

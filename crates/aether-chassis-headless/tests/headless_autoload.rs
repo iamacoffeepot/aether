@@ -88,7 +88,7 @@ mod tests {
         };
         let decoded = decode_pack(&encode_pack(&pack)).expect("pack round trip");
 
-        // A hub-less headless env: no `rpc_addr`, no hub connection, and
+        // A hub-less headless env: no `rpc_address`, no hub connection, and
         // persistence off so the boot touches no shared on-disk state.
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
@@ -97,9 +97,9 @@ mod tests {
             tick_period: Duration::from_millis(16),
             runtime: RuntimeConfig::default(),
             workers: None,
-            ring_caps: aether_substrate::RingCapacities::default(),
+            ring_capacities: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_cap: Duration::from_millis(100),
+            teardown_budget: Duration::from_millis(100),
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
         };
 
@@ -164,9 +164,9 @@ mod tests {
             tick_period: Duration::from_millis(16),
             runtime: RuntimeConfig::default(),
             workers: None,
-            ring_caps: aether_substrate::RingCapacities::default(),
+            ring_capacities: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_cap: Duration::from_millis(100),
+            teardown_budget: Duration::from_millis(100),
             autoload,
         };
 

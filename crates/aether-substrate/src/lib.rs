@@ -83,7 +83,7 @@ pub use aether_actor::Addressable;
 pub use aether_actor::{Emit, Manual, Multi, ReplyMode, Single};
 pub use aether_derive::Config;
 #[cfg(feature = "wasm")]
-pub use boot::{SubstrateBoot, SubstrateBootBuilder};
+pub use boot::SubstrateBoot;
 pub use chassis::Chassis;
 pub use chassis::builder::{
     Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver, NeverDriver,

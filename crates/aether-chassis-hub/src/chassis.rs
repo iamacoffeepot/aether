@@ -66,7 +66,7 @@ impl HubChassis {
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
         let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
@@ -83,7 +83,7 @@ impl HubChassis {
     /// Returns [`BootError`] when config resolution or substrate boot fails.
     pub fn config_manifest() -> Result<ConfigManifest, BootError> {
         let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         Ok(Self::compose(&boot, env).config_manifest())
     }
 
@@ -122,9 +122,9 @@ pub struct HubEnv {
     /// The substrate runtime knobs (#3849); `build_inner` re-applies
     /// [`RuntimeConfig::log_filter`] after the subscriber installs.
     pub runtime: RuntimeConfig,
-    pub ring_caps: RingCapacities,
+    pub ring_capacities: RingCapacities,
     pub scheduler_tuning: SchedulerTuning,
-    pub teardown_cap: Duration,
+    pub teardown_budget: Duration,
 }
 
 impl HubEnv {
@@ -171,9 +171,9 @@ impl HubEnv {
         let mut sources = ConfigSources::new(config_file);
         sources.set_argv::<EngineConfig>(cli.engine.clone().into_layer());
         stage_rpc_argv(&mut sources, cli.rpc.clone());
-        let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
+        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
-        let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
+        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
         let runtime = sources.resolve::<RuntimeConfig>()?;
         // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
         // here, before the RPC server binds and any framing runs — the codec
@@ -185,7 +185,7 @@ impl HubEnv {
         // `compose` re-stages the resolved value as an explicit
         // `with_actor_configured` override so the builder binds it.
         let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
-        Ok(Self { sources, rpc_port, runtime, ring_caps, scheduler_tuning, teardown_cap })
+        Ok(Self { sources, rpc_port, runtime, ring_capacities, scheduler_tuning, teardown_budget })
     }
 }
 
@@ -199,7 +199,7 @@ impl HubChassis {
     /// `claim_namespaces` on it. Takes the boot handle by reference so
     /// `build_inner` can move the same `boot` into the driver afterward.
     fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
-        let HubEnv { sources, rpc_port, runtime: _, ring_caps, scheduler_tuning, teardown_cap } = env;
+        let HubEnv { sources, rpc_port, runtime: _, ring_capacities, scheduler_tuning, teardown_budget } = env;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
@@ -214,9 +214,9 @@ impl HubChassis {
         // derive member resolved off the stack; the hub always binds, so it
         // composes the resolved-with-default port as an explicit override.
         with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
-            .with_ring_caps(ring_caps)
+            .with_ring_capacities(ring_capacities)
             .with_scheduler_tuning(scheduler_tuning)
-            .with_teardown_cap(teardown_cap)
+            .with_teardown_budget(teardown_budget)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<EngineServer>(())
             .with_actor_configured::<RpcServerCapability>(
@@ -234,7 +234,7 @@ impl HubChassis {
     }
 
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
         // the subscriber is installed (env > `[runtime]` file > `info`).
         apply_filter(&env.runtime.log_filter);
