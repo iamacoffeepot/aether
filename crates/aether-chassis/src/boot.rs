@@ -38,7 +38,10 @@ use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerParams
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, Chassis, config_manifest, describe_caps};
-use aether_substrate::config::{ConfigError, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
+use aether_substrate::config::{
+    ConfigError, ConfigMember, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning,
+    render_env_only_help,
+};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 
 use aether_tcp::TcpCapability;
@@ -521,14 +524,50 @@ pub fn chassis_residual_knobs() -> Vec<KnobRecord> {
 #[must_use]
 pub fn hub_residual_knobs() -> Vec<KnobRecord> {
     let mut records = chassis_residual_knobs();
-    records.push(KnobRecord {
-        env_key: "AETHER_ENGINE_STORE_ROOT",
-        doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
-              hatch (unset falls back to the platform data dir, then the system temp dir).",
-        default: None,
-        kind: KnobKind::HandRegistered,
-    });
+    records.push(ENGINE_STORE_ROOT_KNOB);
     records
+}
+
+/// The engines cap's `AETHER_ENGINE_STORE_ROOT` ops escape hatch — a
+/// hand-registered [`KnobRecord`] (no confique `Meta`, so it rides the residual
+/// list rather than an aggregate member). Hub-only: it feeds both
+/// [`hub_residual_knobs`] and the hub's env-only `--help` section
+/// ([`hub_env_only_after_help`]).
+const ENGINE_STORE_ROOT_KNOB: KnobRecord = KnobRecord {
+    env_key: "AETHER_ENGINE_STORE_ROOT",
+    doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
+          hatch (unset falls back to the platform data dir, then the system temp dir).",
+    default: None,
+    kind: KnobKind::HandRegistered,
+};
+
+/// The confique `Meta`s of the env-only derive-`Config` members every full-stack
+/// and hub chassis resolves but exposes no flag for: [`RuntimeConfig`] (the
+/// `AETHER_LOG_FILTER` directive plus the three panic-hook knobs, read by the
+/// process-level panic hook directly, below the config layer) and
+/// [`FrameSizeConfig`] (`AETHER_MAX_FRAME_SIZE`, pushed into the codec by
+/// [`install_frame_size`]). Their overlays are deliberately not flattened into
+/// the CLI roots (issue 3882); this drives the `--help` after-help section
+/// instead, from the same registry `--print-config` walks.
+fn env_only_metas() -> Vec<&'static confique::meta::Meta> {
+    RuntimeConfig::members().into_iter().chain(FrameSizeConfig::members()).map(|record| record.meta).collect()
+}
+
+/// The desktop / headless clap `after_help`: the environment-only knobs that
+/// carry no flag ([`RuntimeConfig`] + [`FrameSizeConfig`]). Rendered from the
+/// registry ([`render_env_only_help`]) so it can never drift from the members
+/// `--print-config` dumps. Referenced from the CLI roots' `#[command(after_help
+/// = …)]` (issue 3882).
+#[must_use]
+pub fn env_only_after_help() -> String {
+    render_env_only_help(&env_only_metas(), &[])
+}
+
+/// The hub clap `after_help`: the shared env-only knobs ([`env_only_after_help`])
+/// plus the hub-only [`ENGINE_STORE_ROOT_KNOB`] residual, which also has no flag.
+#[must_use]
+pub fn hub_env_only_after_help() -> String {
+    render_env_only_help(&env_only_metas(), &[ENGINE_STORE_ROOT_KNOB])
 }
 
 /// Declare the hub's fleet pass-through config members (ADR-0156 §4) — the

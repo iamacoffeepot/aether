@@ -355,7 +355,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     let cli_id = cli_long.replace('-', "_");
 
     let resolved_parse = resolve_parse_env(&attr);
-    let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), resolved_parse.as_ref());
+    let layer_attrs = build_layer_attrs(&field.attrs, &env_key, attr.default.as_ref(), resolved_parse.as_ref());
     // Per-flag `--help` text (issue 3862): the domain field's first
     // rustdoc sentence — the consumer-grade summary under the first-sentence
     // convention — followed by the confique-resolved env key and declared
@@ -417,7 +417,12 @@ fn resolve_parse_env(attr: &FieldAttr) -> Option<Path> {
     attr.parse.clone().or_else(|| attr.csv_set.then(|| syn::parse_quote!(::aether_substrate::config::parse_csv_set)))
 }
 
-fn build_layer_attrs(env_key: &str, default: Option<&Expr>, parse: Option<&Path>) -> TokenStream2 {
+fn build_layer_attrs(
+    field_attrs: &[Attribute],
+    env_key: &str,
+    default: Option<&Expr>,
+    parse: Option<&Path>,
+) -> TokenStream2 {
     let mut inner = TokenStream2::new();
     inner.extend(quote! { env = #env_key });
     if let Some(parse) = parse {
@@ -426,7 +431,17 @@ fn build_layer_attrs(env_key: &str, default: Option<&Expr>, parse: Option<&Path>
     if let Some(default) = default {
         inner.extend(quote! { , default = #default });
     }
-    quote! { #[config(#inner)] }
+    // Forward the domain field's `#[doc]` comments onto the confique layer field
+    // so they populate `<Layer as confique::Config>::META`'s `doc` (issue 3882).
+    // Confique reads doc comments into its `Meta`; without this the layer field is
+    // undocumented and the `--print-config` DOC column (and the env-only after-help
+    // section that reads the same registry) render blank for every derive-`Config`
+    // knob. clap-side help is unaffected — the overlay builds its own help string.
+    let docs = field_attrs.iter().filter(|attr| attr.path().is_ident("doc"));
+    quote! {
+        #(#docs)*
+        #[config(#inner)]
+    }
 }
 
 fn build_overlay_attrs(
