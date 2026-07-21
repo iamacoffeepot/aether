@@ -70,7 +70,7 @@ impl NativeActor for SubstrateHarnessCapability {
 
     fn init(
         (): (),
-        config: SubstrateHarnessCapParams,
+        params: SubstrateHarnessCapParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<SubstrateHarnessCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
@@ -80,7 +80,7 @@ impl NativeActor for SubstrateHarnessCapability {
                  the Builder chain)",
             )))
         })?;
-        Ok(SubstrateHarnessCapabilityState { events: config.events, outbound })
+        Ok(SubstrateHarnessCapabilityState { events: params.events, outbound })
     }
 
     /// Push `ChassisEvent::Advance` onto the embedder loop. If the

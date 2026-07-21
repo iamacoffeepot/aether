@@ -85,12 +85,12 @@ impl NativeActor for TestTurnSim {
     type Params = TestTurnSimParams;
     const NAMESPACE: &'static str = "aether.game.player.test.turn_sim";
 
-    fn init((): (), config: TestTurnSimParams, _ctx: &mut NativeInitCtx<'_>) -> Result<TestTurnSimState, BootError> {
+    fn init((): (), params: TestTurnSimParams, _ctx: &mut NativeInitCtx<'_>) -> Result<TestTurnSimState, BootError> {
         Ok(TestTurnSimState {
-            sim: config.sim,
-            retained: config.retained,
-            observed: config.observed,
-            defer_poll_result: config.defer_poll_result,
+            sim: params.sim,
+            retained: params.retained,
+            observed: params.observed,
+            defer_poll_result: params.defer_poll_result,
         })
     }
 

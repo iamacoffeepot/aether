@@ -71,10 +71,10 @@ impl NativeActor for ClipboardCapability {
 
     fn init(
         (): (),
-        config: ClipboardParams,
+        params: ClipboardParams,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<ClipboardCapabilityState, BootError> {
-        let backend: Box<dyn ClipboardBackend> = match config {
+        let backend: Box<dyn ClipboardBackend> = match params {
             ClipboardParams::System => {
                 Box::new(SystemClipboard::new().map_err(|error| BootError::Other(Box::new(error)))?)
             }

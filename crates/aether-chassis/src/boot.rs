@@ -549,7 +549,7 @@ pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C>
 /// instead.
 ///
 /// The advance timeout is resolved separately through the
-/// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) `Config` channel.
+/// [`LifecycleConfig`] `Config` channel.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,

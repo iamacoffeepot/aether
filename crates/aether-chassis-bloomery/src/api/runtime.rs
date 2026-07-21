@@ -261,17 +261,17 @@ impl NativeActor for BloomeryApiCapability {
     type Params = ApiParams;
     const NAMESPACE: &'static str = "aether.bloomery.api";
 
-    fn init((): (), config: ApiParams, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
+    fn init((): (), params: ApiParams, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
         // Load the tier policy once at init. An unreadable or malformed policy is
         // not a boot failure — it leaves the cap policy-less, and the pre-seal
         // gate then fails closed (every member resolves `human`, its seal is
         // refused), which is the security-required posture: never silently `auto`.
-        let policy = match ApprovalPolicy::load(Path::new(&config.approval_policy_file)) {
+        let policy = match ApprovalPolicy::load(Path::new(&params.approval_policy_file)) {
             Ok(policy) => Some(policy),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::api",
-                    path = %config.approval_policy_file,
+                    path = %params.approval_policy_file,
                     ?error,
                     "approval policy unavailable; the pre-seal approve gate fails closed (no auto tier)"
                 );

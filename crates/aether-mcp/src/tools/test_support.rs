@@ -99,8 +99,8 @@ impl NativeActor for TerrainRouteSink {
     type Params = TerrainRouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.engine";
 
-    fn init((): (), config: TerrainRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { inventory: config.inventory, calls: config.calls, replies: config.replies, mailer: ctx.mailer() })
+    fn init((): (), params: TerrainRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { inventory: params.inventory, calls: params.calls, replies: params.replies, mailer: ctx.mailer() })
     }
 
     #[handler::single]
@@ -151,10 +151,10 @@ impl NativeActor for RouteInventorySink {
     type Params = RouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.engine";
 
-    fn init((): (), config: RouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), params: RouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
-            reply: config.reply,
-            calls: config.calls,
+            reply: params.reply,
+            calls: params.calls,
             // Cached like the real engines cap does (its `on_route`
             // propagates the inbound reply-to, which `NativeCtx` sends
             // would overwrite with this cap as sender).

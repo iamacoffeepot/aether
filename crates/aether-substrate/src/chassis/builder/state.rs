@@ -260,7 +260,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// Declare a non-cap config member on the aggregate (ADR-0156 §4): the
     /// chassis-wide knobs resolved outside the `with_actor` chain and threaded
     /// through the dedicated builder seams — workers / boot manifest
-    /// ([`ChassisBootConfig`]), ring capacities ([`Self::with_ring_caps`]),
+    /// (`ChassisBootConfig`), ring capacities ([`Self::with_ring_caps`]),
     /// scheduler tuning ([`Self::with_scheduler_tuning`]), teardown cap
     /// ([`Self::with_teardown_cap`]) — plus the hub's declared fleet
     /// pass-through set. These configure the shared base rather than any

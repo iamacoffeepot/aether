@@ -72,8 +72,8 @@ macro_rules! count_on_kind_actor {
             type InitCtx<'a> = NativeInitCtx<'a>;
             type Ctx<'a> = NativeCtx<'a>;
 
-            fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self { $field: config })
+            fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { $field: params })
             }
         }
 
@@ -117,8 +117,8 @@ macro_rules! close_observed_state {
             type InitCtx<'a> = NativeInitCtx<'a>;
             type Ctx<'a> = NativeCtx<'a>;
 
-            fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self { close_observed: config })
+            fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { close_observed: params })
             }
 
             fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -358,9 +358,9 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            config.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(Self { _init_count: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            params.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Self { _init_count: params })
         }
     }
     impl NativeActor for InitTripwireCap {
@@ -584,8 +584,8 @@ fn with_actor_boots_dispatches_and_tears_down() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { received: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received: params })
         }
     }
 
@@ -693,12 +693,12 @@ fn with_actor_stamps_local_for_init_and_handler() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             // Init runs inside the chassis builder's stamp guard
             // — write a sentinel so the handler test below proves
             // the same slots are reused across init→dispatch.
             Counter::with_mut(|c| c.0 = 100);
-            Ok(Self { observed: config })
+            Ok(Self { observed: params })
         }
     }
 
@@ -1316,8 +1316,8 @@ fn ctx_monitor_fires_notice_at_target_close() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { notice_count: config.0, last_target: config.1, handle: Mutex::new(None) })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { notice_count: params.0, last_target: params.1, handle: Mutex::new(None) })
         }
     }
     impl NativeActor for Watcher {
@@ -1497,8 +1497,8 @@ fn watcher_close_prunes_targets_forward_index() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { handle: Mutex::new(None), close_observed: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { handle: Mutex::new(None), close_observed: params })
         }
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
             state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
@@ -1766,8 +1766,8 @@ fn instanced_can_spawn_grandchild() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { received: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received: params })
         }
     }
     impl NativeActor for Grandchild {
@@ -1804,8 +1804,8 @@ fn instanced_can_spawn_grandchild() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { grandchild_received: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { grandchild_received: params })
         }
     }
     impl NativeActor for Parent {
@@ -1974,8 +1974,8 @@ fn spawn_actor_runs_wire_once_after_init() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { wire_count: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { wire_count: params })
         }
         fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
@@ -2032,8 +2032,8 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { wire_count: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { wire_count: params })
         }
         fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
@@ -2089,8 +2089,8 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { wire_ran: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { wire_ran: params })
         }
         fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
             ctx.send_to_named::<WireBarrierPing>(Ponger::NAMESPACE, &WireBarrierPing { tag: 1 });
@@ -2125,8 +2125,8 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), config: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { received: config })
+        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received: params })
         }
     }
     impl NativeActor for Ponger {
