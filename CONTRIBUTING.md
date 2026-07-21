@@ -23,7 +23,7 @@ cargo clippy --all-targets -- -D warnings
 GitHub Actions is the full build engine and merge gate. It owns the expensive
 workspace tests, docs, marker/feature boundaries, wasm packaging, duplicate-code
 and unused-dependency checks, and other applicable contract jobs. The required
-checks are `Lint PR title` and `CI pass`; see
+checks are `Lint title` and `CI pass`; see
 [.github/workflows/README.md](.github/workflows/README.md) for the CI
 conventions.
 
