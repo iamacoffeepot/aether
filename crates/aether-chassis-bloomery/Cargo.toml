@@ -91,7 +91,7 @@ aether-bloomery-github = { path = "../aether-bloomery-github", optional = true }
 # RS256 GitHub-App JWT minting for the `app_auth` installation-token custody
 # (ADR-0149 §Migration step 3). Uses `ring`, already in the dependency tree via
 # reqwest/rustls. Native-only — runtime-only, never in the wasm marker build.
-jsonwebtoken = { version = "9", optional = true }
+jsonwebtoken = { version = "10", optional = true }
 # SQLite in WAL mode: the durable single-writer journal / inbox / outbox /
 # active-membership store. `bundled` compiles SQLite from source.
 rusqlite = { workspace = true, optional = true }
