@@ -344,7 +344,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             http: HttpConfig::default(),
-            http_server: Some(server_config),
+            http_server: server_config,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),
@@ -456,7 +456,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             http: HttpConfig::default(),
-            http_server: Some(server_config),
+            http_server: server_config,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),
@@ -563,7 +563,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             http: HttpConfig::default(),
-            http_server: Some(server_config),
+            http_server: server_config,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),
@@ -675,7 +675,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             http: HttpConfig::default(),
-            http_server: Some(server_config),
+            http_server: server_config,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),
@@ -901,7 +901,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             http: HttpConfig::default(),
-            http_server: Some(server_config),
+            http_server: server_config,
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),

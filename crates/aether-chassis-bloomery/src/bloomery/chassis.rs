@@ -246,7 +246,7 @@ impl BloomeryChassis {
             .with_actor::<SigningCapability>(signing)
             .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: rpc_addr.to_string(),
+                bind_addr: Some(rpc_addr.to_string()),
                 peer_kind: PeerKind::Substrate {
                     engine_name: "aether-bloomery".into(),
                     engine_version: env!("CARGO_PKG_VERSION").into(),

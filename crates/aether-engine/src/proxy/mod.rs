@@ -163,7 +163,7 @@ mod tests {
             .with_actor::<TestEchoActor>(())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
             .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
+                bind_addr: Some("127.0.0.1:0".into()),
                 peer_kind: substrate_peer_kind(),
                 route_target: None,
             })

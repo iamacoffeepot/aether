@@ -27,7 +27,7 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: test_peer_kind(),
             route_target: None,
         })
@@ -49,7 +49,7 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<DeferredEchoActor>(())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: test_peer_kind(),
             route_target: None,
         })
@@ -68,7 +68,7 @@ fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<TestEchoActor>(())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: test_peer_kind(),
             route_target: None,
         })
@@ -136,6 +136,35 @@ fn handshake_hello_to_hello_ack_roundtrip() {
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }
+}
+
+/// ADR-0155 §3: a server composed with `bind_addr: None` is disabled —
+/// it still claims its `aether.rpc.server` mailbox (so mail to it is
+/// diagnosable rather than warn-dropped at an unknown mailbox), but binds
+/// no socket and spawns no accept thread, so no `RpcServerHandle` (and
+/// hence no listener port) is published.
+#[test]
+fn disabled_rpc_server_claims_mailbox_and_binds_nothing() {
+    use aether_actor::Addressable;
+
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<RpcServerCapability>(RpcServerConfig {
+            bind_addr: None,
+            peer_kind: test_peer_kind(),
+            route_target: None,
+        })
+        .build_passive()
+        .expect("disabled rpc server boots");
+
+    assert!(
+        registry.lookup(<RpcServerCapability as Addressable>::NAMESPACE).is_some(),
+        "a disabled rpc server still claims its mailbox",
+    );
+    assert!(
+        chassis.handle::<RpcServerHandle>().is_none(),
+        "a disabled rpc server binds no socket, so it publishes no handle",
+    );
 }
 
 /// `Ping(token)` round-trips as `Pong(token)`.
@@ -234,7 +263,7 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<HeadlessWindowCapability>(())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: test_peer_kind(),
             route_target: None,
         })
@@ -476,7 +505,7 @@ fn call_without_cid_is_fire_and_forget() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TestEchoActor>(())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: test_peer_kind(),
             route_target: None,
         })

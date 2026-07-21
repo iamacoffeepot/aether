@@ -148,7 +148,7 @@ impl HubChassis {
             // argv-then-env in `HubEnv::from_env_with_argv`.
             .with_actor::<EngineServer>(engine)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
-                bind_addr: rpc_addr.to_string(),
+                bind_addr: Some(rpc_addr.to_string()),
                 peer_kind: PeerKind::Substrate {
                     engine_name: "aether-hub".into(),
                     engine_version: env!("CARGO_PKG_VERSION").into(),

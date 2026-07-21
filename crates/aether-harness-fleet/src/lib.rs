@@ -1006,7 +1006,7 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
             ..EngineConfig::default()
         })
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: PeerKind::Substrate {
                 engine_name: "fleetharness-hub".into(),
                 engine_version: "0.1.0".into(),

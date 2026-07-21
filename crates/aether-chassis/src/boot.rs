@@ -32,7 +32,7 @@ use aether_game::{GameGatewayCapability, GameGatewayConfig};
 use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLayer};
 use aether_http::HttpConfigLayer;
 use aether_http::HttpServerConfigLayer;
-use aether_http::{HttpCapability, HttpConfig, HttpServerCapability, HttpServerConfig};
+use aether_http::{HttpCapability, HttpConfig};
 use aether_input::{InputCapability, InputConfig};
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
@@ -752,21 +752,18 @@ pub fn binary_manifest(chassis: &str, caps: Vec<&'static str>) -> BinaryManifest
     }
 }
 
-/// Issue 763 P2: boot the RPC server only when `rpc_addr` is set,
-/// mirroring the hub chassis. Substrate becomes an RPC server peer
-/// that a hub (or any client) connects out to. `engine_name`
-/// identifies the chassis profile in the `HelloAck` peer-kind.
+/// ADR-0155 §3: always compose the RPC server on the substrate chassis;
+/// the resolved `rpc_addr` gates only whether a socket binds. `Some(addr)`
+/// starts the listener (substrate becomes an RPC peer a hub or client
+/// dials); `None` composes the cap disabled — it still claims its
+/// `aether.rpc.server` mailbox, so mail to it is answered rather than
+/// warn-dropped, and the same binary claims the same namespaces wherever
+/// `--describe` runs. `engine_name` identifies the chassis profile in the
+/// `HelloAck` peer-kind.
 #[must_use]
-pub fn maybe_with_rpc_server<C: Chassis>(
-    builder: Builder<C>,
-    rpc_addr: Option<SocketAddr>,
-    engine_name: &str,
-) -> Builder<C> {
-    let Some(rpc_addr) = rpc_addr else {
-        return builder;
-    };
+pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketAddr>, engine_name: &str) -> Builder<C> {
     builder.with_actor::<RpcServerCapability>(RpcServerConfig {
-        bind_addr: rpc_addr.to_string(),
+        bind_addr: rpc_addr.map(|addr| addr.to_string()),
         peer_kind: PeerKind::Substrate {
             engine_name: engine_name.into(),
             engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -776,17 +773,6 @@ pub fn maybe_with_rpc_server<C: Chassis>(
         // (only the hub does), so it needs no route target.
         route_target: None,
     })
-}
-
-/// Issue 1761: boot the HTTP server only when `config` is `Some` (i.e.
-/// the cap's `enabled` flag is set). Mirrors [`maybe_with_rpc_server`]:
-/// an unconfigured chassis binds nothing.
-#[must_use]
-pub fn maybe_with_http_server<C: Chassis>(builder: Builder<C>, config: Option<HttpServerConfig>) -> Builder<C> {
-    let Some(config) = config else {
-        return builder;
-    };
-    builder.with_actor::<HttpServerCapability>(config)
 }
 
 /// Parse the `AETHER_RPC_PORT` env var into an optional port number

@@ -58,7 +58,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(engine_config)
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
                 engine_version: "0.1.0".into(),

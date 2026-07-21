@@ -33,7 +33,7 @@ use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
-use aether_http::HttpConfig;
+use aether_http::{HttpConfig, HttpServerConfig};
 use aether_substrate::Chassis as _;
 
 mod tests {
@@ -76,7 +76,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
             http: HttpConfig::default(),
-            http_server: None,
+            http_server: HttpServerConfig::default(),
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),
@@ -147,7 +147,7 @@ mod tests {
         let env = HeadlessEnv {
             namespace_roots: test_namespace_roots(sandbox),
             http: HttpConfig::default(),
-            http_server: None,
+            http_server: HttpServerConfig::default(),
             anthropic: AnthropicConfig::default(),
             gemini: GeminiConfig::default(),
             contentgen: ContentGenConfig::default(),

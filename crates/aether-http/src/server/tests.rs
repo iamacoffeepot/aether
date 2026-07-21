@@ -910,6 +910,7 @@ mod test_handlers {
 
 fn config_for(max_request_bytes: usize) -> HttpServerConfig {
     HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         max_request_bytes,
         request_timeout_millis: 5_000,
@@ -935,6 +936,7 @@ where
 
 fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
     boot_chassis::<FixedBodyHttpHandler>(HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
         dispatch_shards: 1,
@@ -974,6 +976,7 @@ where
 /// overruns it fast.
 fn stream_config_for(window: u32) -> HttpServerConfig {
     HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
         response_stream_window: window,
@@ -1070,6 +1073,29 @@ fn binds_and_publishes_port() {
         .build_passive()
         .expect("http server boots");
     assert!(port_of(&chassis) > 0, "bound to an OS-picked port");
+}
+
+/// ADR-0155 §3: a server composed disabled (`enabled: false`, the config
+/// default) still claims its `aether.http.server` mailbox — so mail to it
+/// is diagnosable rather than warn-dropped at an unknown mailbox — but
+/// binds no socket, so no `HttpServerHandle` (and hence no listener port)
+/// is published.
+#[test]
+fn disabled_http_server_claims_mailbox_and_binds_nothing() {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<HttpServerCapability>(HttpServerConfig::default())
+        .build_passive()
+        .expect("disabled http server boots");
+
+    assert!(
+        registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).is_some(),
+        "a disabled http server still claims its mailbox",
+    );
+    assert!(
+        chassis.handle::<HttpServerHandle>().is_none(),
+        "a disabled http server binds no socket, so it publishes no handle",
+    );
 }
 
 fn body_of(response: &str) -> &str {
@@ -1305,6 +1331,7 @@ fn head_response_suppresses_body() {
 fn over_capacity_connection_is_503() {
     let max_connections = 2;
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
         max_connections,
@@ -1350,6 +1377,7 @@ fn over_capacity_connection_is_503() {
 #[test]
 fn connections_distribute_across_shards() {
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
         dispatch_shards: 2,
@@ -1442,6 +1470,7 @@ fn over_window_flood_tears_the_stream_down() {
 /// test deliberately exceeds — streaming bypasses the buffered body cap.
 fn request_stream_config_for(window: u32) -> HttpServerConfig {
     HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
         request_stream_window: window,
@@ -1863,6 +1892,7 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
 #[test]
 fn stalled_peer_does_not_block_sibling_connections() {
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         // Short: the stalled write parks within milliseconds, and
         // teardown waits out at most one response deadline.
@@ -1982,6 +2012,7 @@ fn shared_route_spreads_across_members() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<HttpServerCapability>(HttpServerConfig {
+            enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
             request_timeout_millis: 5_000,
             dispatch_shards: 1,
@@ -2062,6 +2093,7 @@ fn self_unregister_releases_route() {
 /// idle-close test — every other field matches [`config_for`].
 fn keep_alive_config_for(keep_alive_timeout_millis: u64) -> HttpServerConfig {
     HttpServerConfig {
+        enabled: true,
         bind_addr: "127.0.0.1:0".to_string(),
         request_timeout_millis: 5_000,
         keep_alive_timeout_millis,

@@ -214,7 +214,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(EngineConfig::default())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
                 engine_version: "0.1.0".into(),
@@ -276,7 +276,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
         // the extra kinds into.
         .with_actor::<InventoryCapability>(())
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
                 engine_version: "0.1.0".into(),
@@ -315,7 +315,7 @@ pub(super) fn boot_hub_with_route_loopback(
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<RouteInventorySink>(RouteLoopbackConfig { reply, calls })
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
                 engine_version: "0.1.0".into(),
@@ -347,7 +347,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<TerrainRouteSink>(TerrainRouteLoopbackConfig { inventory, calls, replies })
         .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
             peer_kind: PeerKind::Substrate {
                 engine_name: "test-hub".into(),
                 engine_version: "0.1.0".into(),
