@@ -7,7 +7,7 @@ mod session;
 pub use frame::{PlayerFrame, WIRE_VERSION};
 pub use gateway::GameGatewayCapability;
 #[cfg(feature = "runtime")]
-pub use gateway::GameGatewayConfig;
+pub use gateway::{GameGatewayConfig, GameGatewayConfigLayer, GameGatewayOverlay, GameGatewayParams};
 pub use session::PlayerSessionActor;
 
 #[cfg(all(test, feature = "runtime"))]

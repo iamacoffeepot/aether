@@ -30,7 +30,7 @@ license.workspace = true
 
 [features]
 default = ["runtime"]
-runtime = ["aether-tcp/runtime", "dep:aether-substrate", "dep:aether-codec", "dep:tracing"]
+runtime = ["aether-tcp/runtime", "dep:aether-substrate", "dep:aether-codec", "dep:tracing", "dep:clap", "dep:confique"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -53,6 +53,13 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 # warn on a rejected lineage, a disallowed intent, or a decode failure.
 # Rides the `runtime` feature — those log sites are native-only.
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+# `GameGatewayConfig` derives `aether_substrate::Config` (ADR-0090 / ADR-0156),
+# which emits a clap-shaped `GameGatewayOverlay` (`#[derive(clap::Args)]`) and
+# a confique-shaped `GameGatewayConfigLayer` (`#[derive(confique::Config)]`),
+# so the runtime half needs both crates reachable. Both ride the `runtime`
+# feature (the derive is native-only).
+clap = { workspace = true, optional = true }
+confique = { workspace = true, optional = true }
 
 # The `Kind`/`Schema` derives and the `#[actor]` macro each emit a
 # `cfg(not(target_family = "wasm"))`-gated `inventory::submit!`, so native
@@ -76,6 +83,13 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-kit = { path = "../aether-kit" }
 # The test pins the loaded sim's mailbox via `resolve_embedded`.
 aether-component = { path = "../aether-component" }
+
+# cargo-machete scans source without expanding macros, so it cannot see that
+# `clap` and `confique` are used only through the `#[derive(aether_substrate::Config)]`
+# expansion on `GameGatewayConfig`. False positives, so ignored here rather
+# than dropped.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
 
 [lints]
 workspace = true

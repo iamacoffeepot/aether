@@ -41,6 +41,7 @@ use aether_gemini::GeminiConfig;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
+use aether_lifecycle::LifecycleConfig;
 use aether_substrate::Chassis as _;
 
 /// The `http_handler` fixture's `NAMESPACE` const — the subname under
@@ -354,7 +355,7 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle_advance_timeout_millis: 1_000,
+            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -466,7 +467,7 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle_advance_timeout_millis: 1_000,
+            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -573,7 +574,7 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle_advance_timeout_millis: 1_000,
+            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -685,7 +686,7 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle_advance_timeout_millis: 1_000,
+            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -911,7 +912,7 @@ mod tests {
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
-            lifecycle_advance_timeout_millis: 1_000,
+            lifecycle: LifecycleConfig { advance_timeout_millis: 1_000 },
             autoload: vec![
                 AutoloadComponent {
                     wasm: wasm.clone(),

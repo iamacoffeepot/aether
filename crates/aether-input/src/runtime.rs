@@ -24,8 +24,6 @@ pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 pub use std::collections::{BTreeSet, HashMap};
 pub use std::sync::Arc;
 
-pub use crate::config::InputConfig;
-
 /// `aether.input` runtime state (ADR-0021). Owns the substrate registry
 /// handle (for subscriber-mailbox validation) plus the subscriber table
 /// keyed by stream kind id. Plain-field shape (ADR-0078) — single-
@@ -96,10 +94,10 @@ impl NativeActor for InputCapability {
     /// registry handle + subscriber table.
     type State = InputCapabilityState;
 
-    type Config = InputConfig;
+    type Config = ();
     const NAMESPACE: &'static str = "aether.input";
 
-    fn init(_config: InputConfig, ctx: &mut NativeInitCtx<'_>) -> Result<InputCapabilityState, BootError> {
+    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<InputCapabilityState, BootError> {
         let registry = Arc::clone(ctx.mailer().registry());
         Ok(InputCapabilityState { registry, subscribers: HashMap::new(), monitors: HashMap::new() })
     }

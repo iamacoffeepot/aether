@@ -13,12 +13,14 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_component::ComponentHostCapability;
 use aether_component::component::resolve_embedded;
 use aether_data::{Kind, MailboxId};
-use aether_game::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+use aether_game::{
+    GameGatewayCapability, GameGatewayConfig, GameGatewayParams, PlayerFrame, PlayerSessionActor, WIRE_VERSION,
+};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
-use aether_input::{InputCapability, InputConfig};
+use aether_input::InputCapability;
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
 use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit::{
@@ -249,7 +251,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .with_actor::<TcpCapability>((), ())
         .build()
         .expect("boot controlled client SubstrateHarness");
@@ -347,19 +349,19 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     let sim_mailbox = resolve_embedded(SIM_NAME);
     let mut harness = SubstrateHarness::builder()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .with_actor::<TcpCapability>((), ())
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .with_actor::<GameGatewayCapability>(
             GameGatewayConfig {
                 listener_addr: Some("127.0.0.1:0".into()),
                 listener_name: LISTENER_NAME.into(),
-                turn_sim_mailbox: Some(sim_mailbox),
+
                 interval_nanos: INTERVAL_NANOS,
                 max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
                 max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
             },
-            (),
+            GameGatewayParams { turn_sim_mailbox: Some(sim_mailbox) },
         )
         .build()
         .expect("boot active gateway SubstrateHarness");

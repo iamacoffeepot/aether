@@ -28,7 +28,7 @@
 //!
 //! Extracted by the arc that dissolved the capabilities monolith
 //! (iamacoffeepot/aether#3747) as a leaf per-cap crate. Owns the full input stack: the subscribe-control mail kinds
-//! ([`kinds`]), the [`InputConfig`] init config, the [`InputCapability`]
+//! ([`kinds`]), the [`InputCapability`]
 //! identity + its subscriber-table runtime (`runtime`), and the
 //! send-side [`InputMailboxExt`] facade. It is a pure leaf — no other
 //! capability depends on it, so capabilities keeps no `aether-input`
@@ -39,14 +39,9 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-#[cfg(feature = "runtime")]
-mod config;
 pub mod kinds;
 
 pub use kinds::*;
-
-#[cfg(feature = "runtime")]
-pub use config::InputConfig;
 
 use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};

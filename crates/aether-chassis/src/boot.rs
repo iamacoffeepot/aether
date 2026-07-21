@@ -24,21 +24,21 @@ use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLayer};
 use aether_audio::AudioConfigLayer;
-use aether_component::{ComponentHostCapability, ComponentHostConfig};
+use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_engine::EngineConfigLayer;
 use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
-use aether_game::{GameGatewayCapability, GameGatewayConfig};
-use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLayer};
+use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayConfigLayer, GameGatewayParams};
+use aether_gemini::{GeminiCapability, GeminiConfig, GeminiConfigLayer, GeminiParams};
 use aether_http::HttpConfigLayer;
 use aether_http::HttpServerConfigLayer;
 use aether_http::{HttpCapability, HttpConfig};
-use aether_input::{InputCapability, InputConfig};
+use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
-use aether_lifecycle::{LifecycleConfig, LifecycleGraphData};
+use aether_lifecycle::{LifecycleConfigLayer, LifecycleGraphData, LifecycleParams};
 use aether_render::RenderTuningConfigLayer;
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
+use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
@@ -432,11 +432,6 @@ pub fn resolve_teardown_cap_with_file(file: Option<&toml::Table>) -> Result<Dura
     Ok(resolve_env_with_file::<SettlementConfig>(file, "settlement")?.to_cap())
 }
 
-/// Default lifecycle advance timeout in milliseconds. The literal
-/// `default = 1000` on [`ChassisBootConfig`] must equal this;
-/// `chassis_boot_config_defaults_match` guards the pair.
-const DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS: u64 = 1_000;
-
 /// Shared boot knobs for the desktop and headless chassis
 /// (ADR-0090 §1/§2 applied to the chassis's own knobs). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -447,7 +442,7 @@ const DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS: u64 = 1_000;
 /// `env_prefix = "AETHER"` joins the field env keys; explicit
 /// `cli_long` overrides pin the historical flag names so existing
 /// scripts and operators are unaffected.
-#[derive(Clone, Debug, aether_substrate::Config)]
+#[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "chassis")]
 pub struct ChassisBootConfig {
     /// `AETHER_WORKERS=<n>` worker-pool size override (unset →
@@ -463,27 +458,6 @@ pub struct ChassisBootConfig {
     /// filters empty → `None`, exactly matching `boot_manifest_from_env`.
     #[config(cli_long = "boot-manifest")]
     pub boot_manifest: Option<String>,
-    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS=<ms>` force-complete deadline
-    /// (ms) for a pending lifecycle advance's `Settled` (issue 1048,
-    /// ADR-0082). Default `DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS` (1 s).
-    /// A garbage value hard-errors at boot (ADR-0090 §4 strict path),
-    /// replacing the old soft-warn fallback.
-    #[config(
-        env = "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
-        cli_long = "lifecycle-advance-timeout-millis",
-        default = 1000
-    )]
-    pub lifecycle_advance_timeout_millis: u64,
-}
-
-impl Default for ChassisBootConfig {
-    fn default() -> Self {
-        Self {
-            workers: None,
-            boot_manifest: None,
-            lifecycle_advance_timeout_millis: DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
-        }
-    }
 }
 
 impl ChassisBootConfig {
@@ -510,8 +484,8 @@ impl ChassisBootConfig {
 
 /// Assemble the chassis-wide [`KnownKeys`] set (ADR-0090 §4): every
 /// migrated `*Layer::META` (http / gemini / anthropic / audio / fs /
-/// render / actor-ring / scheduler-tuning / chassis-boot / window /
-/// tick) plus
+/// render / lifecycle / game-gateway / actor-ring / scheduler-tuning /
+/// chassis-boot / window / tick) plus
 /// the hand-registered chassis knobs ([`CHASSIS_KNOBS`] — the RPC port
 /// and the orphaned frame-size knob) and the runtime log-filter /
 /// panic-hook knobs (`aether_substrate::runtime::RUNTIME_KNOBS`). e1's
@@ -545,6 +519,8 @@ fn chassis_registry() -> (&'static [&'static Meta], Vec<KnobRecord>) {
         &AudioConfigLayer::META,
         &NamespaceRootsLayer::META,
         &RenderTuningConfigLayer::META,
+        &LifecycleConfigLayer::META,
+        &GameGatewayConfigLayer::META,
         &ActorRingConfigLayer::META,
         &SchedulerTuningConfigLayer::META,
         &SettlementConfigLayer::META,
@@ -611,24 +587,23 @@ pub fn hub_config_dump() -> String {
     dump_config(&metas, &records)
 }
 
-/// Build the single-stage lifecycle config the headless chassis runs
+/// Build the single-stage lifecycle params the headless chassis runs
 /// (ADR-0082 PR 3b): a `Tick` self-loop with a `Quit` escape to a
 /// `Shutdown` terminal. Components subscribe the `Tick` stage directly
-/// on `aether.lifecycle` (ADR-0082 §7/§11), so the config wires no
+/// on `aether.lifecycle` (ADR-0082 §7/§11), so the params wire no
 /// initial subscribers. Desktop and `substrate_harness` run the three-stage
-/// `Tick → Render → Present` graph from `frame_lifecycle_config()`
-/// below instead.
+/// `Tick → Render → Present` graph from `frame_lifecycle_params()`
+/// instead.
 ///
-/// `advance_timeout_millis` is the resolved value from
-/// [`ChassisBootConfig::lifecycle_advance_timeout_millis`] (or
-/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`] for the substrate-harness).
+/// The advance timeout is resolved separately through the
+/// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) `Config` channel.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
 /// the shape is structurally valid; the `expect` documents the
 /// invariant.
 #[must_use]
-pub fn tick_only_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
+pub fn tick_only_lifecycle_params() -> LifecycleParams {
     let graph = LifecycleGraphData::builder()
         .state::<Tick>()
         .next::<Tick>()
@@ -637,7 +612,7 @@ pub fn tick_only_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfi
         .start::<Tick>()
         .build()
         .expect("tick-only lifecycle graph is structurally valid");
-    LifecycleConfig { graph, initial_subscribers: vec![], advance_timeout_millis }
+    LifecycleParams { graph, initial_subscribers: vec![] }
 }
 
 /// Args every full-stack chassis hands to [`with_common_caps`]. Kept
@@ -658,8 +633,9 @@ pub struct CommonBoot {
     /// [`SettlementConfig::to_cap`]), so one knob covers both. Threaded
     /// into the `Builder` via `with_teardown_cap`.
     pub teardown_cap: Duration,
-    pub input_config: InputConfig,
-    pub component_host_config: ComponentHostConfig,
+    /// Composer-supplied wasmtime / egress handles for the component host
+    /// cap (ADR-0156 §3 `Params`); the cap's `Config` is `()`.
+    pub component_host_params: ComponentHostParams,
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConfig,
     pub anthropic: AnthropicConfig,
@@ -668,9 +644,12 @@ pub struct CommonBoot {
     /// its `gen_dir` override (else the resolved `save`-namespace root)
     /// into the staging root threaded into the gemini cap.
     pub contentgen: ContentGenConfig,
-    /// Trusted player-session wiring. The default has no configured `TurnSim`,
-    /// so merely linking the common chassis opens no player listener.
+    /// Operator-typable game-gateway listener/session config (ADR-0090).
     pub game_gateway: GameGatewayConfig,
+    /// Resolved `TurnSim` wiring for the game gateway (ADR-0156 §3 `Params`).
+    /// The default has no configured `TurnSim`, so merely linking the common
+    /// chassis opens no player listener.
+    pub game_gateway_params: GameGatewayParams,
 }
 
 /// Wire the aborter, worker count, and the common caps every full-
@@ -686,7 +665,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
     // `NamespaceRoots.save` is in scope: the `AETHER_GEN_DIR` override wins,
     // else staging tracks the `save`-namespace root the fs cap already owns
     // (preserving its `AETHER_SAVE_DIR` → platform fallback without re-reading
-    // env). Threaded into the gemini cap via `GeminiBoot`.
+    // env). Threaded into the gemini cap via `GeminiParams`.
     let staging_root = boot.contentgen.gen_dir.clone().unwrap_or_else(|| boot.namespace_roots.save.clone());
     builder
         .with_aborter(boot.aborter)
@@ -695,16 +674,16 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_scheduler_tuning(boot.scheduler_tuning)
         .with_teardown_cap(boot.teardown_cap)
         .with_actor::<TraceDispatchCapability>((), ())
-        .with_actor::<InputCapability>(boot.input_config, ())
-        .with_actor::<ComponentHostCapability>(boot.component_host_config, ())
+        .with_actor::<InputCapability>((), ())
+        .with_actor::<ComponentHostCapability>((), boot.component_host_params)
         .with_actor::<FsCapability>(boot.namespace_roots, ())
         .with_actor::<TextCapability>((), ())
         .with_actor::<InventoryCapability>((), ())
         .with_actor::<HttpCapability>(boot.http, ())
         .with_actor::<TcpCapability>((), ())
-        .with_actor::<GameGatewayCapability>(boot.game_gateway, ())
+        .with_actor::<GameGatewayCapability>(boot.game_gateway, boot.game_gateway_params)
         .with_actor::<AnthropicCapability>(boot.anthropic, ())
-        .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root }, ())
+        .with_actor::<GeminiCapability>(boot.gemini, GeminiParams { gen_root: staging_root })
 }
 
 /// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,
@@ -743,8 +722,8 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
 #[must_use]
 pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketAddr>, engine_name: &str) -> Builder<C> {
     builder.with_actor::<RpcServerCapability>(
-        RpcServerConfig {
-            bind_addr: rpc_addr.map(|addr| addr.to_string()),
+        RpcServerConfig { bind_addr: rpc_addr.map(|addr| addr.to_string()) },
+        RpcServerParams {
             peer_kind: PeerKind::Substrate {
                 engine_name: engine_name.into(),
                 engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -754,7 +733,6 @@ pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketA
             // (only the hub does), so it needs no route target.
             route_target: None,
         },
-        (),
     )
 }
 
@@ -777,14 +755,12 @@ mod tests {
     use super::ActorRingConfig;
     use super::ActorRingConfigLayer;
     use super::ChassisBootConfig;
-    use super::ChassisBootConfigLayer;
-    use super::DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS;
     use super::SchedulerTuningConfigLayer;
     use super::chassis_known_keys;
     use super::file_section;
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
-    use aether_lifecycle::LifecycleConfig;
+    use aether_lifecycle::{LifecycleConfig, LifecycleConfigLayer};
     use aether_substrate::SchedulerTuning;
     use aether_substrate::config::ConfigError;
     use std::env;
@@ -939,30 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn chassis_boot_config_defaults_match() {
-        use confique::Config as _;
-        // No `.env()` source: literal defaults only — env-free. The
-        // `default = 1000` literal must equal `LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`
-        // so an unset knob reproduces the cap's const default.
-        // Tripwire: drifts when the producing const or the derive literal changes.
-        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let layer = ChassisBootConfigLayer::builder().load().expect("defaults load");
-        assert_eq!(
-            layer.lifecycle_advance_timeout_millis, DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
-            "derive default must match DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS",
-        );
-        assert_eq!(
-            DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
-            LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT,
-            "DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS must match LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT",
-        );
-        let default = ChassisBootConfig::default();
-        assert_eq!(default.lifecycle_advance_timeout_millis, DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,);
-        assert_eq!(default.workers, None);
-        assert_eq!(default.boot_manifest, None);
-    }
-
-    #[test]
     fn to_workers_none_returns_none() {
         // No workers knob set — pool uses PoolConfig::default.
         assert_eq!(ChassisBootConfig::default().to_workers(), None);
@@ -1040,12 +992,27 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_advance_timeout_default_matches_settlement_const() {
+        use confique::Config as _;
+        // Tripwire: the `LifecycleConfigLayer` `default = 1000` literal must
+        // equal the settlement-owned `ADVANCE_TIMEOUT_MS_DEFAULT` const
+        // (surfaced as `LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`), so an
+        // unset knob reproduces the cap's const default. Drifts when either the
+        // const or the derive literal changes. ADR-0156 §3 relocated this knob
+        // off `ChassisBootConfig` onto the lifecycle cap's own config, so the
+        // guard moves here with it. No `.env()` source: literal defaults only —
+        // env-free.
+        let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let layer = LifecycleConfigLayer::builder().load().expect("defaults load");
+        assert_eq!(layer.advance_timeout_millis, LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT);
+    }
+
+    #[test]
     fn chassis_boot_config_keys_are_known() {
-        // Guards the three `ChassisBootConfigLayer::META` keys joining
-        // the chassis known-key set. `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
-        // relocated here from the scheduler knob list (it was only
-        // registered scheduler-side because the old capabilities monolith
-        // couldn't hold it; the bundle can, so the workaround is gone).
+        // Guards the two `ChassisBootConfigLayer::META` keys joining the
+        // chassis known-key set, plus `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS`
+        // which now rides `LifecycleConfigLayer::META` (ADR-0156 §3 relocated
+        // it off `ChassisBootConfig` into the lifecycle cap's own config).
         let known = chassis_known_keys();
         assert!(known.contains("AETHER_WORKERS"), "AETHER_WORKERS must be a known key");
         assert!(known.contains("AETHER_BOOT_MANIFEST"), "AETHER_BOOT_MANIFEST must be a known key");

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_component::{ComponentHostCapability, ComponentHostConfig};
+use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
@@ -29,7 +29,7 @@ use aether_window::HeadlessWindowCapability;
 
 use super::cap::{SubstrateHarnessCapConfig, SubstrateHarnessCapability};
 use super::events::{ChassisEvent, EventSender};
-use aether_lifecycle::{LifecycleConfig, frame_lifecycle_config};
+use aether_lifecycle::{LifecycleConfig, frame_lifecycle_params};
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
 
@@ -420,12 +420,12 @@ impl SubstrateHarnessChassis {
             .with_actor::<TraceDispatchCapability>((), ());
         if component_host {
             builder = builder.with_actor::<ComponentHostCapability>(
-                ComponentHostConfig {
+                (),
+                ComponentHostParams {
                     engine: Arc::clone(&boot.engine),
                     linker: Arc::clone(&boot.linker),
                     hub_outbound: Arc::clone(&boot.outbound),
                 },
-                (),
             );
         }
         if let Some(ext) = &render_ext {
@@ -437,7 +437,7 @@ impl SubstrateHarnessChassis {
         builder = builder
             .with_actor::<HeadlessWindowCapability>((), ())
             .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config, ())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT), ());
+            .with_actor::<LifecycleCapability>(LifecycleConfig::default(), frame_lifecycle_params());
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots, ());
         }

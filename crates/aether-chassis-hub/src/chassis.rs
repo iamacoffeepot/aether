@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use aether_engine::{EngineConfig, EngineServer};
 use aether_kinds::BinaryManifest;
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
+use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
@@ -156,17 +156,16 @@ impl HubChassis {
             // argv-then-env in `HubEnv::from_env_with_argv`.
             .with_actor::<EngineServer>(engine, ())
             .with_actor::<RpcServerCapability>(
-                RpcServerConfig {
-                bind_addr: Some(rpc_addr.to_string()),
-                peer_kind: PeerKind::Substrate {
-                    engine_name: "aether-hub".into(),
-                    engine_version: env!("CARGO_PKG_VERSION").into(),
-                    kinds: vec![],
+                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
+                RpcServerParams {
+                    peer_kind: PeerKind::Substrate {
+                        engine_name: "aether-hub".into(),
+                        engine_version: env!("CARGO_PKG_VERSION").into(),
+                        kinds: vec![],
+                    },
+                    #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
+                    route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
                 },
-                #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
-                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
-            },
-                (),
             )
     }
 

@@ -3,10 +3,49 @@ use aether_kinds::{Present, Render, Shutdown, Tick};
 
 use super::super::LifecycleGraphData;
 
-/// Construction-time configuration for `LifecycleCapability`.
-/// Carries the compiled data graph + the initial subscriber wiring.
-/// Built per-chassis at builder time and consumed by `init`.
+/// Operator-resolvable config for `LifecycleCapability` (ADR-0156 §3 /
+/// ADR-0090). Carries the force-complete deadline for a pending advance's
+/// `Settled` (iamacoffeepot/aether#1048); the stage graph + initial subscriber
+/// wiring are composer construction input and ride the separate
+/// [`LifecycleParams`] channel instead.
+///
+/// The `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `LifecycleConfigLayer`, the clap-shaped `LifecycleOverlay`, the
+/// `FromArgvThenEnv` impl, and the inherent `from_env` / `from_argv_then_env`
+/// shims. `env_prefix = "AETHER_LIFECYCLE"` joins the field env keys; the
+/// explicit `env` / `cli_long` overrides pin the historical key shape the
+/// knob carried when it rode `ChassisBootConfig`.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_LIFECYCLE", cli_prefix = "lifecycle")]
 pub struct LifecycleConfig {
+    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS=<ms>` force-complete deadline
+    /// (ms) for a pending advance's `Settled` (iamacoffeepot/aether#1048,
+    /// ADR-0082). Default [`Self::ADVANCE_TIMEOUT_MS_DEFAULT`] (1 s). A
+    /// garbage value hard-errors at boot (ADR-0090 §4 strict path).
+    #[config(
+        env = "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
+        cli_long = "lifecycle-advance-timeout-millis",
+        default = 1000
+    )]
+    pub advance_timeout_millis: u64,
+}
+
+impl LifecycleConfig {
+    /// Default force-complete deadline (ms) for a pending advance.
+    /// Chassis builders that don't override use this.
+    pub const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = super::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self { advance_timeout_millis: Self::ADVANCE_TIMEOUT_MS_DEFAULT }
+    }
+}
+
+/// Composer-supplied construction params for `LifecycleCapability`
+/// (ADR-0156 §3). Carries the compiled data graph + the initial subscriber
+/// wiring. Built per-chassis at compose time and consumed by `init`.
+pub struct LifecycleParams {
     /// The compiled lifecycle graph. Built via
     /// [`LifecycleGraphData::builder`](LifecycleGraphData::builder)
     /// on the chassis side.
@@ -19,21 +58,9 @@ pub struct LifecycleConfig {
     /// verifies this and returns `BootError` otherwise, so
     /// misconfiguration fails fast at chassis-build.
     pub initial_subscribers: Vec<(KindId, DataMailboxId)>,
-    /// Force-complete deadline for a pending advance's `Settled`
-    /// (iamacoffeepot/aether#1048), in milliseconds. Resolved
-    /// chassis-side (env override over [`Self::ADVANCE_TIMEOUT_MS_DEFAULT`])
-    /// rather than read from the environment in `init`, so the cap
-    /// configures through this struct rather than a naked env read.
-    pub advance_timeout_millis: u64,
 }
 
-impl LifecycleConfig {
-    /// Default force-complete deadline (ms) for a pending advance.
-    /// Chassis builders that don't override use this.
-    pub const ADVANCE_TIMEOUT_MS_DEFAULT: u64 = super::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
-}
-
-/// Build the three-stage frame lifecycle config the display-driving
+/// Build the three-stage frame lifecycle params the display-driving
 /// chassis share (ADR-0082 §11, issues 1378 + 1489):
 /// `Tick → Render → Present → Tick` (looping), with the `Quit` escape to
 /// a `Shutdown` terminal on the `Present` stage. The chassis drives a
@@ -53,20 +80,20 @@ impl LifecycleConfig {
 /// producer needs a post-`Render` hook.
 ///
 /// Components subscribe the `Tick` (and `Render`) stage directly on
-/// `aether.lifecycle` (ADR-0082 §7/§11), so the config wires no initial
+/// `aether.lifecycle` (ADR-0082 §7/§11), so the params wire no initial
 /// subscribers. The desktop chassis and the substrate harness adopt this
 /// graph; headless stays on its tick-only graph (its render cap is a
 /// no-op, so a `Render` / `Present` stage would settle to no GPU work).
 ///
-/// `advance_timeout_millis` is the chassis-resolved deadline (or
-/// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`]).
+/// The advance timeout is resolved separately through the
+/// [`LifecycleConfig`] `Config` channel.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
 /// the shape is structurally valid; the `expect` documents the
 /// invariant.
 #[must_use]
-pub fn frame_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
+pub fn frame_lifecycle_params() -> LifecycleParams {
     let graph = LifecycleGraphData::builder()
         .state::<Tick>()
         .next::<Render>()
@@ -79,7 +106,7 @@ pub fn frame_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
         .start::<Tick>()
         .build()
         .expect("frame lifecycle graph is structurally valid");
-    LifecycleConfig { graph, initial_subscribers: vec![], advance_timeout_millis }
+    LifecycleParams { graph, initial_subscribers: vec![] }
 }
 
 #[cfg(test)]
@@ -98,8 +125,8 @@ mod tests {
         // `initial_subscribers` set. Quit-edge *placement* (on `Present`,
         // not `Tick`) is verified by the `resolve_edge` tests and
         // end-to-end by the substrate-harness quit-drain scenario.
-        let cfg = frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT);
-        let graph_dbg = format!("{:?}", cfg.graph);
+        let params = frame_lifecycle_params();
+        let graph_dbg = format!("{:?}", params.graph);
         let tick = format!("{:?}", <Tick as Kind>::ID);
         let render = format!("{:?}", <Render as Kind>::ID);
         let present = format!("{:?}", <Present as Kind>::ID);
@@ -115,6 +142,6 @@ mod tests {
 
         // No initial subscribers: components subscribe the `Tick` stage
         // directly on `aether.lifecycle` (ADR-0082 §7/§11).
-        assert!(cfg.initial_subscribers.is_empty());
+        assert!(params.initial_subscribers.is_empty());
     }
 }

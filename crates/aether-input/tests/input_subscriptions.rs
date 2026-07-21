@@ -24,7 +24,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_input::{InputCapability, InputConfig, SubscribeInputResult, UnsubscribeInput};
+use aether_input::{InputCapability, SubscribeInputResult, UnsubscribeInput};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
@@ -33,11 +33,7 @@ use std::fs;
 const KEY_CODE: u32 = 65;
 
 fn boot_bench() -> SubstrateHarness {
-    SubstrateHarness::builder()
-        .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
-        .build()
-        .expect("boot")
+    SubstrateHarness::builder().with_component_host().with_actor::<InputCapability>((), ()).build().expect("boot")
 }
 
 fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {

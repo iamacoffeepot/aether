@@ -52,3 +52,5 @@ pub use kinds::*;
 #[cfg(feature = "runtime")]
 pub use player::GameGatewayConfig;
 pub use player::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+#[cfg(feature = "runtime")]
+pub use player::{GameGatewayConfigLayer, GameGatewayOverlay, GameGatewayParams};

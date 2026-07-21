@@ -8,10 +8,10 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use aether_component::{ComponentHostCapability, ComponentHostConfig};
+use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_kinds::BinaryManifest;
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
+use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
@@ -196,7 +196,7 @@ impl BloomeryChassis {
         // MCP harness / fleet load components at runtime). Built from the same
         // wasmtime engine/linker/outbound the boot set up, mirroring the headless
         // chassis.
-        let component_host = ComponentHostConfig {
+        let component_host = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
@@ -240,10 +240,10 @@ impl BloomeryChassis {
             // answer gate dials it to verify author signatures against the
             // host-local allowlist rather than the fake always-valid provider.
             .with_actor::<SigningCapability>(signing, ())
-            .with_actor::<ComponentHostCapability>(component_host, ())
+            .with_actor::<ComponentHostCapability>((), component_host)
             .with_actor::<RpcServerCapability>(
-                RpcServerConfig {
-                    bind_addr: Some(rpc_addr.to_string()),
+                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
+                RpcServerParams {
                     peer_kind: PeerKind::Substrate {
                         engine_name: "aether-bloomery".into(),
                         engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -253,7 +253,6 @@ impl BloomeryChassis {
                     // (it wires no engines cap), so it needs no route target.
                     route_target: None,
                 },
-                (),
             )
             // The REST control ingress (ADR-0149 §Packaging, #3498): the HTTP
             // server cap binds localhost, and the api cap claims the control

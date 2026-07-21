@@ -14,7 +14,9 @@ use aether_harness_substrate::{
     SubstrateHarnessChassis,
 };
 use aether_kinds::FrameCheck;
-use aether_render::{CaptureBackend, DrawTexturedQuads, RenderCapability, RenderConfig, RenderHandles};
+use aether_render::{
+    CaptureBackend, DrawTexturedQuads, RenderCapability, RenderHandles, RenderParams, RenderTuningConfig,
+};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::MailboxId;
@@ -22,10 +24,11 @@ use aether_substrate::render::VERTEX_BUFFER_BYTES;
 
 use crate::gpu::Gpu;
 
-/// [`RenderExt`] implementation: chains `RenderCapability` into the
-/// builder with its config *data* (ADR-0155 §4 keeps `RenderConfig` pure —
-/// the capture backend is no longer a config field), and installs the
-/// Start-stage capture backend after boot.
+/// [`RenderExt`] implementation: chains `RenderCapability` into the builder
+/// with its `RenderTuningConfig` knobs + `RenderParams` wiring (ADR-0155 §4 /
+/// ADR-0156 §3 keep the config pure — the observability hook and capture
+/// backend are not config fields), and installs the Start-stage capture
+/// backend after boot.
 pub struct GpuRenderExt;
 
 impl RenderExt for GpuRenderExt {
@@ -35,19 +38,15 @@ impl RenderExt for GpuRenderExt {
         builder: Builder<SubstrateHarnessChassis>,
     ) -> Builder<SubstrateHarnessChassis> {
         builder.with_actor::<RenderCapability>(
-            RenderConfig {
-                vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-                observed_kinds: wiring.observed_kinds.clone(),
-                assets_dir: wiring.assets_dir.clone(),
-            },
-            (),
+            RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES },
+            RenderParams { observed_kinds: wiring.observed_kinds.clone(), assets_dir: wiring.assets_dir.clone() },
         )
     }
 
     fn install_capture_backend(&self, wiring: &BenchWiring, passive: &PassiveChassis<SubstrateHarnessChassis>) {
         // Issue 629 / Phase A: the render cap published its handles during
         // `init`; ADR-0155 §4 makes the capture backend a Start-stage handoff
-        // installed into that shared bundle rather than a `RenderConfig`
+        // installed into that shared bundle rather than a `RenderParams`
         // field. The desktop driver does the same in its `boot`.
         let handles: RenderHandles = passive.handle::<RenderHandles>().expect(
             "RenderHandles must be published before installing the capture backend — \
