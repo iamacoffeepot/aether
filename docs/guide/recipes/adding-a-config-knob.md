@@ -104,6 +104,31 @@ The container attribute on the struct sets the prefixes both names derive from:
 )]
 ```
 
+#### Write the field's first sentence as its `--help` summary
+
+The derive lifts the first sentence of the field's rustdoc into that flag's
+`--help` description and appends the env key and resolved default. So the
+opening sentence is the copy an operator reads: a plain-language summary of
+what the knob does, with units spelled out, no internal type names, no issue
+or ADR references, and no leading `AETHER_…` env incantation. Everything a
+maintainer wants — the adapter the flag swaps, the error it returns, the
+wire-shape pins — goes below a blank doc line, where it stays in the source
+and out of `--help`.
+
+```rust
+/// Reject plaintext HTTP URLs and allow only HTTPS.
+///
+/// An `http://` URL is rejected with `HttpError::InvalidUrl`.
+#[cfg_attr(feature = "runtime", config(default = false))]
+pub require_https: bool,
+```
+
+The first sentence there is the entire flag description a `--help` reader
+gets; the detail paragraph names `HttpError::InvalidUrl` for whoever opens the
+source, and never surfaces in the dump. A summary that opens with a type name
+or an `AETHER_…` key renders that text verbatim, so the flag reads as
+maintainer prose to the operator who runs `--help`.
+
 ### 2. Keep `Default` in sync — and let the test enforce it
 
 `HttpConfig` declares `impl Default` separately from the derive's `default = ...`
