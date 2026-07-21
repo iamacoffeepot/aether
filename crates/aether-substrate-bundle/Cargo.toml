@@ -4,8 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Chassis-binary residue crate: the substrate-harness chassis entry
-# point plus the standalone bundle and perf bins. The desktop, headless,
+# Chassis-binary residue crate: the standalone bundle and perf bins. The desktop, headless,
 # and hub chassis live in their own aether-chassis-* crates; the shared
 # substrate runtime stays in `aether-substrate`.
 #
@@ -15,10 +14,6 @@ license.workspace = true
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-name = "aether-substrate-harness"
-path = "src/bin/substrate-harness.rs"
 
 # Standalone bundle builds (#1529, generalizing #1518): a chassis that
 # auto-loads the component pack embedded at build time, so the binary
@@ -79,42 +74,12 @@ aether-chassis-desktop = { path = "../aether-chassis-desktop" }
 # `aether-substrate-harness` binary composes through them, and the
 # resident scenario tests link both.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`. Every chassis installs `ComponentHostCapability` with
 # its wasmtime-typed `ComponentHostConfig` and the scenario tests build
 # trampoline addresses off `WasmTrampoline::NAMESPACE`, so the bundle takes
 # the runtime face.
 aether-component = { path = "../aether-component" }
-# iamacoffeepot/aether#3749: the lifecycle cap was extracted to
-# `aether-lifecycle`; every chassis composes `LifecycleCapability` and
-# builds its `LifecycleConfig` graph, so the bundle takes the runtime face.
-aether-lifecycle = { path = "../aether-lifecycle" }
-# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
-# every chassis composes `InputCapability` + `InputConfig`.
-aether-input = { path = "../aether-input" }
-# iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
-# the chassis bundle needs its wgpu runtime half (RenderCapability / RenderGpu /
-# RenderHandles / RenderTuningConfigLayer for the desktop + substrate-harness drivers).
-aether-render = { path = "../aether-render", features = ["runtime"] }
-# iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`; every
-# chassis composes `TcpCapability`, so the bundle takes the runtime face.
-aether-tcp = { path = "../aether-tcp" }
-# iamacoffeepot/aether#3754: the game player-gateway cap was extracted to
-# `aether-game`; every chassis registers the `GameGatewayCapability` identity
-# and boots it from `GameGatewayConfig`, so the bundle takes the runtime face.
-aether-game = { path = "../aether-game" }
-# iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`;
-# the chassis bundle wires `TextCapability`, so it needs the runtime half
-# (fontdue TTF parse / rasterize + the substrate-side runtime).
-aether-text = { path = "../aether-text", features = ["runtime"] }
-aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
-# The `aether.fs` cap (iamacoffeepot/aether#3706) — the chassis wires
-# `FsCapability` + resolves `NamespaceRoots`, so it needs the fs runtime (default).
-aether-fs = { path = "../aether-fs" }
-aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
-aether-kinds = { path = "../aether-kinds" }
 # Catch-all error type for chassis main()s + build_passive that
 # bridge BootError / wasmtime / io faults purely to bubble up.
 # Same crate as `wasmtime::Result` re-exports (issue #571).
@@ -139,7 +104,6 @@ serde = { workspace = true, features = ["derive", "std"] }
 # Trial reports + comparison output are JSON (perf tooling, #1077).
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
-wgpu = { workspace = true }
 
 # Hub chassis blocks on a SIGINT/SIGTERM signal in
 # `HubServerDriverRunning::run`. Tokio retired alongside the embedded

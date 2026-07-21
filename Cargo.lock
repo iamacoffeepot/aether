@@ -262,6 +262,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-chassis-harness"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-chassis",
+ "aether-clipboard",
+ "aether-data",
+ "aether-fs",
+ "aether-game",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-input",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-render",
+ "aether-substrate",
+ "aether-tcp",
+ "aether-text",
+ "anyhow",
+ "tracing",
+]
+
+[[package]]
 name = "aether-chassis-headless"
 version = "0.3.0-alpha"
 dependencies = [
@@ -819,25 +842,13 @@ dependencies = [
 name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-actor",
  "aether-chassis",
  "aether-chassis-desktop",
  "aether-chassis-headless",
- "aether-clipboard",
  "aether-component",
- "aether-data",
- "aether-fs",
- "aether-game",
  "aether-harness-fleet",
  "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-input",
- "aether-kinds",
- "aether-lifecycle",
- "aether-render",
  "aether-substrate",
- "aether-tcp",
- "aether-text",
  "anyhow",
  "plotters",
  "png",
@@ -845,7 +856,6 @@ dependencies = [
  "serde_json",
  "tracing",
  "wasmtime",
- "wgpu",
 ]
 
 [[package]]
