@@ -192,6 +192,9 @@ large_stack_arrays                  = "deny"
 match_wildcard_for_single_variants  = "deny"
 uninlined_format_args               = "deny"
 unreadable_literal                  = "deny"
+# Module layout: a module with child modules is `foo/mod.rs`; a plain
+# `foo.rs` file is only for a terminal (leaf) module with no children.
+self_named_module_files             = "deny"
 
 # Warn picks — cherry-picked from restriction + style (not covered by pedantic/nursery baseline).
 unwrap_used                         = "warn"
