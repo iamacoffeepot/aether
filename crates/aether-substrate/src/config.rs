@@ -966,15 +966,15 @@ impl ConfigSources {
 
     /// ADR-0156 §5 converse tripwire (issue 3872): reject any staged argv layer
     /// that no composed member consumed. The resolve path removes each layer as
-    /// its member resolves ([`take_argv`](Self::take_argv)), so a layer still
-    /// present after boot resolution was staged for a config type no composed
-    /// member resolves — a typo'd or orphaned `set_argv` (or, now, a `stage`
-    /// delegating to a field whose overlay was flattened into a root the chassis
-    /// never composes). The argv analogue of [`validate_overrides`], failing as
-    /// loudly rather than silently discarding the operator's flag (which
-    /// resolution would otherwise treat as indistinguishable from the flag never
-    /// being passed). Run once, after the Pass 0 resolve loop consumes every
-    /// composed member's layer.
+    /// its member resolves (`take_argv`), so a layer still present after boot
+    /// resolution was staged for a config type no composed member resolves — a
+    /// typo'd or orphaned `set_argv` (or, now, a `stage` delegating to a field
+    /// whose overlay was flattened into a root the chassis never composes). The
+    /// argv analogue of [`Self::validate_overrides`], failing as loudly rather
+    /// than silently discarding the operator's flag (which resolution would
+    /// otherwise treat as indistinguishable from the flag never being passed).
+    /// Run once, after the Pass 0 resolve loop consumes every composed member's
+    /// layer.
     ///
     /// # Errors
     ///
