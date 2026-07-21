@@ -1,5 +1,5 @@
 //! First-party native transforms (ADR-0048, issue 1464). A
-//! `#[transform]` here links into both `aether-substrate-bundle` (the
+//! `#[transform]` here links into both the chassis crates (the
 //! headless binary's `TransformRegistry::from_inventory`) and
 //! `aether-mcp` (`describe_transforms`), so the link-time inventory
 //! submission populates both surfaces with no extra wiring. Co-located

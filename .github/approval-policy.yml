@@ -137,7 +137,17 @@ rules:
   # are spelled out because this is where a new capability or a chassis change
   # lands, and a reader should not have to infer the tier of the busiest tree in
   # the repo.
-  - glob: "crates/aether-substrate-bundle/**"
+  - glob: "crates/aether-chassis/**"
+    tier: judge
+  - glob: "crates/aether-chassis-desktop/**"
+    tier: judge
+  - glob: "crates/aether-chassis-headless/**"
+    tier: judge
+  - glob: "crates/aether-chassis-hub/**"
+    tier: judge
+  - glob: "crates/aether-chassis-harness/**"
+    tier: judge
+  - glob: "crates/aether-chassis-bundle/**"
     tier: judge
   - glob: "crates/aether-behavior/**"
     tier: judge

@@ -49,12 +49,10 @@ anyhow = { workspace = true }
 # `--describe` prints the BinaryManifest as JSON (ADR-0115).
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
-# The winit event loop + wgpu surface stack and the capture readback
-# PNG encode.
+# The winit event loop + wgpu surface stack.
 winit = "0.30.13"
 wgpu = { workspace = true }
 pollster = "0.4.0"
-png = { workspace = true }
 
 # The desktop signal-watcher thread mirrors the headless shutdown flag:
 # signal-hook on Unix, the `ctrlc` Ctrl-C fallback on Windows.

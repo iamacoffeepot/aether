@@ -68,13 +68,13 @@ Run a chassis explicitly:
 
 ```sh
 # Desktop: window/input/GPU/audio profile
-cargo run -p aether-substrate-bundle --bin aether-substrate
+cargo run -p aether-chassis-desktop --bin aether-substrate
 
 # Headless: timer-driven engine profile
-cargo run -p aether-substrate-bundle --bin aether-substrate-headless
+cargo run -p aether-chassis-headless --bin aether-substrate-headless
 
 # Hub: fleet supervision and artifact stores
-cargo run -p aether-substrate-bundle --bin aether-substrate-hub
+cargo run -p aether-chassis-hub --bin aether-substrate-hub
 ```
 
 Use `--print-config` after the binary separator to inspect the knob registry and
@@ -83,7 +83,7 @@ dump runs before config-file and per-capability CLI overlays, so it is not the
 final effective configuration:
 
 ```sh
-cargo run -p aether-substrate-bundle --bin aether-substrate-headless -- --print-config
+cargo run -p aether-chassis-headless --bin aether-substrate-headless -- --print-config
 ```
 
 ## Drive a live engine
@@ -163,7 +163,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Guest SDKs | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-capabilities` | render, text, audio, FS, HTTP, TCP, lifecycle, fleet, providers, and other capabilities |
-| Chassis and harnesses | `aether-substrate-bundle` | desktop/headless/hub/substrate-harness, bundles, FleetHarness, performance tools |
+| Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
 | Product actors | `aether-kit`, `aether-mesh` | camera, widgets, workbench, terrain/world, simulation, geometry DSL |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |

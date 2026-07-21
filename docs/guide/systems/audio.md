@@ -188,8 +188,8 @@ only for `aether.audio.set_master_gain`; it does **not** synthesize the newer
 reply kinds. Do not await schedule, track, instrument, reverb, or sender-gain
 results there. The minimal hub and SubstrateHarness chassis do not compose the audio
 capability. These current facts are visible in
-[`headless/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/headless/chassis.rs),
-[`hub/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/hub/chassis.rs),
+[`headless/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-headless/src/chassis.rs),
+[`hub/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-hub/src/chassis.rs),
 and
 [`substrate_harness/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs).
 

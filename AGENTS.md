@@ -23,7 +23,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 - Build: `cargo build`
 - Release build: `cargo build --release`
 - Run a crate: `cargo run -p <crate>`
-- Chassis binaries: `cargo run -p aether-substrate-bundle --bin aether-substrate-hub`, `--bin aether-substrate`, or `--bin aether-substrate-headless`
+- Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-substrate-hub`, `-p aether-chassis-desktop --bin aether-substrate`, or `-p aether-chassis-headless --bin aether-substrate-headless`
 - Test: `cargo test`
 - Single test: `cargo test <name>`
 - Clippy: `cargo clippy --all-targets -- -D warnings`

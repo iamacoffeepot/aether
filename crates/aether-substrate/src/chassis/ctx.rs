@@ -572,7 +572,7 @@ impl<'a> ChassisCtx<'a> {
     /// dispatch. Phase 4 wires `Mailer::push` against this slot and
     /// removes today's hub-specific `Mailer.outbound` field, at
     /// which point `HubClientCapability` (in
-    /// `aether-substrate-bundle::hub`) claims the slot to forward
+    /// `aether-chassis-hub`) claims the slot to forward
     /// unresolved mail over TCP.
     pub fn claim_fallback_router(&mut self, handler: FallbackRouter) -> Result<(), BootError> {
         if self.fallback.is_some() {

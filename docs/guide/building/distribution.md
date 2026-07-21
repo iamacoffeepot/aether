@@ -69,7 +69,7 @@ not turn one packed component into several instances.
 The bundle flow has two formats with different jobs:
 
 1. `xtask` writes a build manifest describing chassis and ordered inputs.
-2. `aether-substrate-bundle` encodes those files into the executable's component
+2. `aether-chassis-bundle` encodes those files into the executable's component
    pack.
 3. At process start, the generic bundle binary turns the pack into autoload
    entries and loads the selected exports/configs.
@@ -133,8 +133,8 @@ Validate a bundle at the boundary it changes:
 ## Implementation routes
 
 - Discovery and commands: `xtask/src/{main,inventory}.rs`
-- Autoload: `crates/aether-substrate-bundle/src/autoload.rs`
-- Pack format: `crates/aether-substrate-bundle/src/bundle_pack.rs`
-- Generic launchers: `crates/aether-substrate-bundle/src/bin/aether-bundle-*.rs`
+- Autoload: `crates/aether-chassis/src/autoload.rs`
+- Pack format: `crates/aether-chassis/src/bundle_pack.rs`
+- Generic launchers: `crates/aether-chassis-bundle/src/bin/aether-bundle-*.rs`
 - Current hosted artifact job: `.github/workflows/release.yml`
 - Related decisions: ADR-0090, ADR-0115, ADR-0116; ADR-0092 is Proposed

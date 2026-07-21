@@ -15,7 +15,9 @@
 //! rule marks the whole workspace changed (determinator's built-in
 //! fallback). The couplings cargo's graph cannot see are injected
 //! structurally: a changed component or behavior crate pulls in
-//! [`CHASSIS_PACKAGE`], whose scenario tests execute that crate's wasm.
+//! the wasm-executing scenario suites, resolved through cargo's own
+//! dependency edges (the chassis-bundle coupling special case retired
+//! with that crate, #3816).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -28,7 +30,7 @@ use determinator::Determinator;
 use determinator::rules::DeterminatorRules;
 use guppy::graph::{DependencyDirection, PackageGraph};
 
-use crate::inventory::{CHASSIS_PACKAGE, discover_behaviors, discover_components};
+use crate::inventory::{discover_behaviors, discover_components};
 
 /// The real-process fleet harness (issue #3767): any package that
 /// dev-deps it forks the dist-resolved headless chassis binary at test
@@ -178,7 +180,7 @@ fn select(
     determinator.add_changed_paths(changed.iter().map(String::as_str));
 
     let affected = determinator.compute().affected_set;
-    let mut packages: BTreeSet<String> = affected
+    let packages: BTreeSet<String> = affected
         .packages(DependencyDirection::Forward)
         .filter(guppy::graph::PackageMetadata::in_workspace)
         .map(|package| package.name().to_string())
@@ -191,7 +193,6 @@ fn select(
         });
     }
 
-    inject_wasm_coupling(&mut packages, wasm_sources);
     let wasm_needed = derive_wasm_needed(&packages, wasm_sources, wasm_consumers);
     Ok(Selection { run_all: None, packages, wasm_needed })
 }
@@ -217,18 +218,7 @@ fn derive_wasm_needed(
     wasm_sources: &BTreeSet<String>,
     wasm_consumers: &BTreeSet<String>,
 ) -> bool {
-    packages.contains(CHASSIS_PACKAGE)
-        || packages.iter().any(|name| wasm_sources.contains(name) || wasm_consumers.contains(name))
-}
-
-/// The coupling cargo's graph cannot see: [`CHASSIS_PACKAGE`]'s scenario
-/// tests execute the wasm built from component and behavior crates, so an
-/// affected wasm-source crate pulls the chassis package into the
-/// selection.
-fn inject_wasm_coupling(packages: &mut BTreeSet<String>, wasm_sources: &BTreeSet<String>) {
-    if packages.iter().any(|name| wasm_sources.contains(name)) {
-        packages.insert(CHASSIS_PACKAGE.to_string());
-    }
+    packages.iter().any(|name| wasm_sources.contains(name) || wasm_consumers.contains(name))
 }
 
 fn report(selection: &Selection, changed_count: usize) {
@@ -314,23 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn wasm_coupling_injects_chassis_package() {
-        // A forgotten injection silently deselects the scenario tests
-        // that execute a changed component's wasm.
-        let wasm_sources = string_set(&["aether-kit"]);
-        let mut with_component = string_set(&["aether-kit"]);
-        inject_wasm_coupling(&mut with_component, &wasm_sources);
-        assert!(with_component.contains(CHASSIS_PACKAGE), "component change must pull in {CHASSIS_PACKAGE}");
-
-        let mut without_component = string_set(&["aether-bloomery-host"]);
-        inject_wasm_coupling(&mut without_component, &wasm_sources);
-        assert!(
-            !without_component.contains(CHASSIS_PACKAGE),
-            "non-component change must not pull in {CHASSIS_PACKAGE}"
-        );
-    }
-
-    #[test]
     fn wasm_needed_covers_consumers_beyond_the_chassis() {
         // The invariant from issue #3617: a crate that is neither the chassis
         // nor a wasm source, but whose tests execute a wasm source's component at
@@ -392,7 +365,6 @@ mod tests {
                 .expect("select over leaf change");
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
         assert!(leaf.packages.contains("aether-bloomery-host"), "changed crate must be selected");
-        assert!(!leaf.packages.contains(CHASSIS_PACKAGE), "unrelated chassis package must not be selected");
 
         // A path matching no package and no rule must fall back to the
         // whole workspace — silent deselection of unknown inputs is the

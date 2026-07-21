@@ -31,7 +31,7 @@
 
 use aether_actor::{ActorInitError, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;
-use aether_test_fixtures_kinds::{BootObserved, BootTornDown, SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME};
+use aether_test_fixtures_kinds::{BootObserved, BootTornDown, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME};
 
 /// The module's unconditional boot actor (ADR-0147). Not selectable — a load
 /// that names its `NAMESPACE` as the export selector is rejected by the host —
@@ -50,14 +50,14 @@ impl WasmActor for Boot {
     /// boot singleton was instantiated exactly once no matter how many selector
     /// loads of the module happened.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.send_to_named::<BootObserved>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &BootObserved { marker: 0 });
+        ctx.send_to_named::<BootObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &BootObserved { marker: 0 });
     }
 
     /// Broadcast [`BootTornDown`] once when the host tears the boot down (its
     /// refcount reached zero). `unwire` is the trampoline's pre-shutdown hook,
     /// reached via the host's self-directed `DropComponent` at last unload.
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.send_to_named::<BootTornDown>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &BootTornDown { marker: 0 });
+        ctx.send_to_named::<BootTornDown>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &BootTornDown { marker: 0 });
     }
 
     #[handler::single]

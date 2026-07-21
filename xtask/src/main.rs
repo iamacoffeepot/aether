@@ -525,7 +525,7 @@ fn classify_component(raw: &str) -> ComponentSource {
 
 /// Render the pack manifest JSON the chassis package's `build.rs`
 /// consumes (`BundleManifest` in
-/// `crates/aether-substrate-bundle/src/bundle_pack.rs` — xtask doesn't
+/// `crates/aether-chassis/src/bundle_pack.rs` — xtask doesn't
 /// depend on the chassis crate, so keep the field names in sync).
 /// Component order is plan order; config paths are canonicalized here
 /// so the manifest carries only absolute paths.

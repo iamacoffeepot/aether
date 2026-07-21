@@ -248,7 +248,7 @@ builder.with_actor::<TextCapability>(())
 Where that line goes depends on which chassis should carry the cap:
 
 - **Desktop and headless together** — add it to `with_common_caps` in
-  [`crates/aether-substrate-bundle/src/chassis_common.rs`][common], the
+  [`crates/aether-chassis/src/boot.rs`][common], the
   shared composition those two chassis call. `TextCapability` lives here — and
   a cap added to that `.with_actor::<_>()` chain must also join the
   `common_cap_namespaces()`
@@ -263,7 +263,7 @@ Where that line goes depends on which chassis should carry the cap:
   compositions for this reason.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
-  `aether-substrate-bundle`. The desktop renderer
+  the chassis crates. The desktop renderer
   (`with_actor::<RenderCapability>(render_config)`) is desktop-only this
   way; the headless companion (`HeadlessRenderCapability`) claims the same
   `aether.render` name on the headless chassis.
@@ -282,7 +282,7 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 
 [adr70]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md
 [adr71]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md
-[common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-substrate-bundle/src/chassis_common.rs
+[common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis/src/boot.rs
 [substrateharness]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs
 
 ## 5. Passive cap or driver?

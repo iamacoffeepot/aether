@@ -62,7 +62,7 @@ per-mail trace ring.
 
 ## Running the tools
 
-The binaries live in `aether-substrate-bundle`:
+The binaries live in `aether-harness-perf`:
 
 - `aether-perf-trial` runs a sweep and emits JSON;
 - `aether-perf-compare` pairs trial sets and renders a report;
@@ -120,9 +120,9 @@ or import it without explicit owner approval and local validation.
 
 ## Source routes
 
-- Harness/topologies: `crates/aether-substrate-bundle/src/perf/harness.rs`
-- Versioned reports/comparison: `crates/aether-substrate-bundle/src/perf/report.rs`
-- Binaries: `crates/aether-substrate-bundle/src/bin/perf-*.rs`
+- Harness/topologies: `crates/aether-harness-substrate/src/perf/harness.rs`
+- Versioned reports/comparison: `crates/aether-harness-substrate/src/perf/report.rs`
+- Binaries: `crates/aether-harness-perf/src/bin/perf-*.rs`
 - Automation: `scripts/perf-*.sh`, `.github/workflows/perf-compare.yml`
 - Fuzz targets: `fuzz/`
 - Decision: accepted ADR-0085

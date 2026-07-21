@@ -158,5 +158,5 @@ two capabilities share shapes but not runtime ownership.
 - Typed authoring and handles: `crates/aether-http/src/{typed,stream}.rs`
 - Runtime: `crates/aether-http/src/server/`
 - Derives: `crates/aether-http-derive/src/lib.rs`
-- Integration boundary: `crates/aether-substrate-bundle/tests/http_serving.rs`
+- Integration boundary: `crates/aether-http/tests/http_serving.rs`
 - ADR-0108, ADR-0128–ADR-0136 (all accepted; read amendments in order)

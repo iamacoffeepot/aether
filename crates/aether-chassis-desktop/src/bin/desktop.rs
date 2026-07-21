@@ -1,5 +1,5 @@
 //! Desktop substrate binary entry point. See
-//! `aether_substrate_bundle::desktop` for the chassis impl.
+//! `aether_chassis_desktop` for the chassis impl.
 //!
 //! Parses argv with [`DesktopCli`] (ADR-0090 unit d, issue 1258);
 //! each per-cap overlay shadows its `AETHER_*` env var, unset flags

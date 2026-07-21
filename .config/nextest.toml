@@ -31,7 +31,7 @@ filter = "package(=aether-kit) & binary(terrain_workbench_scenario)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The two heaviest binaries iamacoffeepot/aether#3768 rehomed from
-# `aether-substrate-bundle` (whose package cap is 180s) into aether-kit:
+# the chassis bundle's 180s-capped suite into aether-kit:
 # `widget_render_interaction`'s scenarios each cold-load the kit wasm plus a
 # font and run multi-capture verdicts, and `world_case_atlas` renders and
 # scores a whole contact sheet per test. Both were sized against the bundle's
@@ -87,18 +87,6 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # default.
 [[profile.ci.overrides]]
 filter = "package(=aether-substrate) & kind(test)"
-slow-timeout = { period = "180s", terminate-after = 1 }
-
-# The `aether-substrate-bundle` integration tests (FleetHarness + the engines /
-# routing fleet suites) fork real debug `aether-substrate` processes and wait
-# for them to bind. Run concurrently they make timely progress but stretch
-# well past the 60s steady-state cap under fork contention, so they carry a
-# generous wall-clock backstop — a deadlock guard a healthy run never reaches,
-# not a steady-state deadline (same stance as the hub proxy-connect budget,
-# iamacoffeepot/aether#2072). `kind(test)` scopes this to the integration
-# binaries; the package's unit tests keep the 60s cap.
-[[profile.ci.overrides]]
-filter = "package(=aether-substrate-bundle) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The headless chassis crate's integration tests (rehomed from the
@@ -200,7 +188,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary.
 [[profile.ci.overrides]]
-filter = "package(=aether-substrate-bundle) & binary(fleetharness_replace)"
+filter = "package(=aether-component) & binary(fleetharness_replace)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The `aether-text` text scenario binary (rehomed from the bundle's

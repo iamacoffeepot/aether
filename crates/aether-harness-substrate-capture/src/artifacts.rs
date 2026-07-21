@@ -15,7 +15,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use aether_substrate_bundle::substrate_harness::ArtifactGuard;
+//! use aether_harness_substrate_capture::ArtifactGuard;
 //!
 //! let mut guard = ArtifactGuard::arm("widget_panel_layout", png, checks, verdict.results);
 //! // ... assertions on `verdict` that may panic ...
@@ -259,7 +259,7 @@ fn absolute_rgb_difference(actual: &Image, reference: &Image) -> Vec<u8> {
 /// # Panics
 /// Panics if `CARGO_MANIFEST_DIR` does not have two ancestor
 /// directories — fail-fast per ADR-0063: this crate's own manifest dir
-/// is always `crates/aether-substrate-bundle`, two levels under the
+/// is always `crates/aether-harness-substrate-capture`, two levels under the
 /// workspace root.
 #[allow(clippy::disallowed_methods)] // test-only: CARGO_TARGET_DIR is the standard cargo
 // build-output override, not cap config — honor it the same way

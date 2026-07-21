@@ -129,7 +129,7 @@ rules:
   # the repo.
   - glob: "crates/aether-capabilities/**"
     tier: judge
-  - glob: "crates/aether-substrate-bundle/**"
+  - glob: "crates/aether-chassis-desktop/**"
     tier: judge
   - glob: "crates/aether-behavior/**"
     tier: judge

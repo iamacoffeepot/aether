@@ -35,7 +35,7 @@ rules:
     tier: auto
   - glob: "crates/aether-kit/**"
     tier: auto
-  - glob: "crates/aether-substrate-bundle/**"
+  - glob: "crates/aether-chassis-desktop/**"
     tier: judge
   - glob: "scripts/surface-match.py"
     tier: human
@@ -77,7 +77,7 @@ class MatcherTests(unittest.TestCase):
             "crates/aether-kit/src/**": "auto",
             "crates/aether-kit/**": "human",
             "docs/**": "human",
-            "crates/aether-substrate-bundle/new/**": "judge",
+            "crates/aether-chassis-desktop/new/**": "judge",
             "new-top/**": "judge",
         }
         for surface, expected in cases.items():

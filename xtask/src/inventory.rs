@@ -37,12 +37,6 @@ const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 /// [`CHASSIS_BINS`].
 pub const BUNDLE_PACKAGE: &str = "aether-chassis-bundle";
 
-/// The residue chassis-bundle crate the affected-set wasm-coupling rule
-/// still names. Retires with the crate itself (#3816) — every
-/// wasm-executing scenario suite has already rehomed, so the coupling
-/// injection is a no-op selection of a testless crate until then.
-pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
-
 /// Chassis (host-target) binaries packaged into `dist/bin/`, as
 /// `(package, bin)` pairs — the by-chassis bundle split (issues
 /// #3809-#3816) spreads them over per-chassis crates. Each bin name is

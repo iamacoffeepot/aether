@@ -86,8 +86,8 @@ echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)...
     cargo build --release \
         -p aether-mcp --bin aether-tunnel \
         -p aether-mcp --bin aether-mcp \
-        -p aether-substrate-bundle --bin aether-substrate-hub \
-        -p aether-substrate-bundle --bin aether-substrate-headless
+        -p aether-chassis-hub --bin aether-substrate-hub \
+        -p aether-chassis-headless --bin aether-substrate-headless
 ) || true
 
 # Bootstrap the hub's content-addressed binary store (ADR-0115) with the

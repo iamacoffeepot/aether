@@ -38,7 +38,7 @@ jobs:
       # registry when it exists, allowing the driver to select
       # selector=aether-substrate deterministically.
       - name: Build desktop chassis
-        run: cargo build --release -p aether-substrate-bundle --bin aether-substrate
+        run: cargo build --release -p aether-chassis-desktop --bin aether-substrate
 
       # Start the display before the tunnel so the tunnel, hub, and desktop
       # substrate inherit DISPLAY through the complete fork chain.

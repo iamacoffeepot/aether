@@ -23,7 +23,7 @@
 
 use aether_actor::{ActorInitError, Mail, MailSender, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;
-use aether_test_fixtures_kinds::{SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, TickObserved};
+use aether_test_fixtures_kinds::{SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, TickObserved};
 
 /// Entry export — the first type in the `export!` list. An unmodified
 /// host instantiates this one. Strict receiver: no `#[fallback]`.
@@ -72,7 +72,7 @@ impl WasmActor for Panel {
     /// dispatches mail.
     #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
-        ctx.send_to_named::<TickObserved>(SUBSTRATE_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved { count: 1 });
+        ctx.send_to_named::<TickObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &TickObserved { count: 1 });
     }
 
     #[fallback]
