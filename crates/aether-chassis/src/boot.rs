@@ -766,9 +766,9 @@ impl CommonEnv {
     /// place, so neither chassis's `compose` hand-copies the same six env-sourced
     /// fields. The three composer-constructed handles (`aborter`,
     /// `component_host_params`, `game_gateway_params`) are supplied by the caller;
-    /// the source stack is threaded back out for
-    /// [`Builder::with_config_sources`](aether_substrate::chassis::builder::Builder::with_config_sources).
-    /// `runtime` is dropped here — it is consumed chassis-side (`apply_filter`)
+    /// the source stack is threaded back out for the builder's
+    /// `with_config_sources`. `runtime` is dropped here — it is consumed
+    /// chassis-side (`apply_filter`)
     /// before `compose` runs and is not a `CommonBoot` field.
     #[must_use]
     pub fn into_common_boot(

@@ -117,14 +117,13 @@ impl HeadlessChassis {
 /// from env vars (per ADR-0070's "substrate-core never reads env" invariant);
 /// tests construct one directly.
 ///
-/// ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
+/// The shared config (source stack, fs roots, content-gen staging, runtime,
+/// pool / ring / scheduler / teardown knobs) lives in the embedded
+/// [`CommonEnv`]; only the headless tick cadence and the autoload list are
+/// per-chassis. ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
 /// `HttpServerConfig`, `AnthropicConfig`, `GeminiConfig`, `LifecycleConfig`) no
-/// longer ride as fields — the builder resolves each off [`Self::sources`]. A
-/// test constructs one by staging programmatic overrides into `sources`
-/// (`ConfigSources::set_override`). What remains as fields is the source stack
-/// plus the chassis-side reads of resolved members: the fs roots + content-gen
-/// (the derived staging root's inputs), the driver-only tick cadence, and the
-/// pool / ring / scheduler / teardown knobs.
+/// longer ride as fields — the builder resolves each off [`CommonEnv::sources`],
+/// and a test stages programmatic overrides into it (`ConfigSources::set_override`).
 pub struct HeadlessEnv {
     /// The config fields every full-stack chassis shares (source stack, fs roots,
     /// content-gen staging, runtime knobs, pool / ring / scheduler / teardown
