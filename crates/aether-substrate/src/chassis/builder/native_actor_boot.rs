@@ -14,7 +14,7 @@ use crate::actor::native::local;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::ctx::{ChassisCtx, MailboxSender, MailboxWakeSlot};
 use crate::chassis::error::BootError;
-use crate::config::ConfigError;
+use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
@@ -91,14 +91,14 @@ impl<A: NativeActor> NativeActorBoot<A> {
 
 impl<A: NativeActor> PassiveBoot for NativeActorBoot<A>
 where
-    A::Config: crate::config::ConfigMember,
+    A::Config: ConfigMember,
 {
-    fn resolve(&mut self, sources: &mut crate::config::ConfigSources) -> Result<(), ConfigError> {
+    fn resolve(&mut self, sources: &mut ConfigSources) -> Result<(), ConfigError> {
         // ADR-0156 §5: resolve this cap's `Config` off the builder's source
         // stack (programmatic > argv > env > file > default) ahead of Claim.
         // Section identity comes from `A::Config`'s `ConfigMember` declaration,
         // so no chassis-side section string is threaded here.
-        self.config = Some(<A::Config as crate::config::ConfigMember>::resolve(sources)?);
+        self.config = Some(<A::Config as ConfigMember>::resolve(sources)?);
         Ok(())
     }
 

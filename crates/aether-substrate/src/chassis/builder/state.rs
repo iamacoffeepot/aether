@@ -14,7 +14,8 @@ use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
 use crate::config::{
-    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigSources, FromArgvThenEnv, RingCapacities, SchedulerTuning,
+    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, FromArgvThenEnv, RingCapacities,
+    SchedulerTuning,
 };
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
@@ -436,7 +437,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// same way `config_manifest` does, so `--print-config` can report
     /// provenance without a driver value.
     #[must_use]
-    pub fn config_provenance(&self) -> Vec<(&'static str, crate::config::ConfigProvenance)> {
+    pub fn config_provenance(&self) -> Vec<(&'static str, ConfigProvenance)> {
         self.config_manifest().provenance(&self.config_sources)
     }
 }

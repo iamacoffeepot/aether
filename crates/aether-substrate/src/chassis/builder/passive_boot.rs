@@ -1,6 +1,7 @@
 use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
+use crate::config::{ConfigError, ConfigSources};
 
 pub(super) trait DynShutdown {
     fn shutdown_dyn(self: Box<Self>);
@@ -60,7 +61,7 @@ pub(super) trait PassiveBoot: Send {
     ///
     /// Returns [`ConfigError`] when a known env key, argv overlay value, or
     /// config-file section holds an unparseable value (ADR-0090 §4).
-    fn resolve(&mut self, sources: &mut crate::config::ConfigSources) -> Result<(), crate::config::ConfigError> {
+    fn resolve(&mut self, sources: &mut ConfigSources) -> Result<(), ConfigError> {
         let _ = sources;
         Ok(())
     }

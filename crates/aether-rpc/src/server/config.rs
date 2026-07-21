@@ -42,7 +42,7 @@ impl ConfigMember for RpcServerConfig {
     /// with the hand impl when the port knob migrates onto a derive-`Config`
     /// member (#3849).
     fn resolve(sources: &mut ConfigSources) -> Result<Self, ConfigError> {
-        Ok(sources.take_or(|| RpcServerConfig { bind_addr: None }))
+        Ok(sources.take_or(|| Self { bind_addr: None }))
     }
 }
 

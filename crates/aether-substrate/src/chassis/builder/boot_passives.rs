@@ -8,7 +8,7 @@ use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
-use crate::config::{RingCapacities, SchedulerTuning};
+use crate::config::{ConfigSources, RingCapacities, SchedulerTuning};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
@@ -137,7 +137,7 @@ pub(super) fn boot_passives(
     // ADR-0156 §5: the builder's config source stack (programmatic > argv >
     // env > file > default). The Pass 0 resolve loop resolves each passive's
     // cap `Config` off this ahead of Claim.
-    sources: &mut crate::config::ConfigSources,
+    sources: &mut ConfigSources,
     mut passives: Vec<Box<dyn PassiveBoot>>,
     // ADR-0155 §4: the driver type's value-free Claim hook, run in Pass 1
     // alongside the passives' claims (before any Init). `Builder::build`
