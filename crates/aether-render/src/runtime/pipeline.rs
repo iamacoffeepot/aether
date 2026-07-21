@@ -26,6 +26,7 @@ use aether_substrate::render::{
     push_textured_params, push_world_quad_vertices, record_main_pass, record_material_pass, record_quad_overlay_pass,
 };
 
+use super::capture::CaptureBackend;
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::QuadBatch;
 use super::texture::TextureRegistry;
@@ -94,6 +95,18 @@ pub struct RenderHandles {
     /// vertex buffer ([`RenderGpu::new`]) to the same value the cap's
     /// accumulator truncates at.
     pub vertex_buffer_bytes: usize,
+    /// Driver-installed capture backend (ADR-0155 §4 Start-stage handoff).
+    /// The `capture_frame` handler reads this to defer GPU readback to the
+    /// chassis main thread; empty until the driver installs it at Start via
+    /// [`Self::install_capture_backend`]. The backend lives here — off
+    /// `RenderConfig` — so env-resolved config stays pure data: `--describe`
+    /// resolves the render config on a headless host without ever
+    /// constructing the capture queue + main-loop wake the backend carries.
+    /// `RenderHandles` is the exported-handle precedent that makes this
+    /// work: the cap publishes the bundle at init, and the driver fetches
+    /// it via `DriverCtx::handle::<RenderHandles>()` and installs the
+    /// backend into this shared slot at Start.
+    pub capture_backend: Arc<OnceLock<CaptureBackend>>,
 }
 
 /// Commit a frame's live accumulator into its cache, the shared
@@ -174,6 +187,29 @@ impl RenderHandles {
     /// indicates a chassis-wiring bug.
     pub fn install_gpu(&self, gpu: RenderGpu) {
         self.gpu.set(gpu).ok().expect("RenderHandles::install_gpu called twice");
+    }
+
+    /// Install the driver-side capture backend (ADR-0155 §4). The desktop
+    /// driver and the substrate-harness build the [`CaptureBackend`] —
+    /// capture queue + main-loop wake + reply egress — at Start and install
+    /// it here, into the same shared slot the cap's `capture_frame` handler
+    /// reads. Before this runs `capture_frame` replies `Err` (no backend),
+    /// exactly as an unconfigured chassis did when the backend rode
+    /// `RenderConfig`.
+    ///
+    /// # Panics
+    /// Panics if called more than once — fail-fast per ADR-0063: like
+    /// [`Self::install_gpu`], a second install signals a chassis-wiring bug.
+    pub fn install_capture_backend(&self, backend: CaptureBackend) {
+        self.capture_backend.set(backend).ok().expect("RenderHandles::install_capture_backend called twice");
+    }
+
+    /// The installed capture backend, or `None` before the driver installs
+    /// it. The `capture_frame` handler reads this to decide whether capture
+    /// is available on this chassis.
+    #[must_use]
+    pub fn capture_backend(&self) -> Option<&CaptureBackend> {
+        self.capture_backend.get()
     }
 
     /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
@@ -759,6 +795,7 @@ mod tests {
             textures: Arc::new(Mutex::new(TextureRegistry::new())),
             gpu: Arc::new(OnceLock::new()),
             vertex_buffer_bytes: 0,
+            capture_backend: Arc::new(OnceLock::new()),
         }
     }
 

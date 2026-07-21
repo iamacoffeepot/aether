@@ -16,15 +16,16 @@ use aether_harness_substrate::{
 use aether_kinds::FrameCheck;
 use aether_render::{CaptureBackend, DrawTexturedQuads, RenderCapability, RenderConfig, RenderHandles};
 use aether_substrate::capture::ReferenceCapture;
-use aether_substrate::chassis::builder::Builder;
+use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::MailboxId;
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
 
 use crate::gpu::Gpu;
 
-/// [`RenderExt`] implementation: builds the render cap's config from
-/// the boot wiring — the same shape the chassis assembled before the
-/// split — and chains `RenderCapability` into the builder.
+/// [`RenderExt`] implementation: chains `RenderCapability` into the
+/// builder with its config *data* (ADR-0155 §4 keeps `RenderConfig` pure —
+/// the capture backend is no longer a config field), and installs the
+/// Start-stage capture backend after boot.
 pub struct GpuRenderExt;
 
 impl RenderExt for GpuRenderExt {
@@ -37,12 +38,23 @@ impl RenderExt for GpuRenderExt {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds: wiring.observed_kinds.clone(),
             assets_dir: wiring.assets_dir.clone(),
-            capture_backend: Some(CaptureBackend {
-                queue: wiring.capture_queue.clone(),
-                wake: Arc::clone(&wiring.capture_wake),
-                outbound: Arc::clone(&wiring.outbound),
-            }),
         })
+    }
+
+    fn install_capture_backend(&self, wiring: &BenchWiring, passive: &PassiveChassis<SubstrateHarnessChassis>) {
+        // Issue 629 / Phase A: the render cap published its handles during
+        // `init`; ADR-0155 §4 makes the capture backend a Start-stage handoff
+        // installed into that shared bundle rather than a `RenderConfig`
+        // field. The desktop driver does the same in its `boot`.
+        let handles: RenderHandles = passive.handle::<RenderHandles>().expect(
+            "RenderHandles must be published before installing the capture backend — \
+             RenderCapability boots via GpuRenderExt::compose",
+        );
+        handles.install_capture_backend(CaptureBackend {
+            queue: wiring.capture_queue.clone(),
+            wake: Arc::clone(&wiring.capture_wake),
+            outbound: Arc::clone(&wiring.outbound),
+        });
     }
 }
 

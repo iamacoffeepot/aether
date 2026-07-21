@@ -60,11 +60,14 @@ pub trait DriverCapability: 'static {
     ///
     /// Default: claims nothing. Headless, hub, and the passive
     /// [`NeverDriver`] own no driver-as-actor mailbox; only the desktop
-    /// driver (which serves `aether.window`) overrides this. Moving
-    /// desktop's claim onto this hook is gated on splitting the claim's
-    /// registry reservation from the Start-stage inbox / `EventLoop`-proxy
-    /// wiring it currently fuses (the desktop Env split, ADR-0155 §4 /
-    /// issue #3834) and lands with that work.
+    /// driver (which serves `aether.window`) overrides this. It reserves the
+    /// inbox here with [`ChassisCtx::claim_driver_mailbox`], splitting the
+    /// registry reservation (Claim) from the Start-stage consumption of the
+    /// inbox / actor slots / `EventLoop`-proxy wake — which [`Self::boot`]
+    /// recovers via [`DriverCtx::take_claimed_mailbox`] (ADR-0155 §4 / issue
+    /// #3834). Both the fused build path and the value-free `--describe`
+    /// path run this hook, so `aether.window` appears in the claim-derived
+    /// roster while the driver value is never constructed.
     fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
         let _ = ctx;
         Ok(())
@@ -139,6 +142,18 @@ impl<'a> DriverCtx<'a> {
     /// by explicit name.
     pub fn claim_mailbox(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
         self.inner.claim_mailbox_with_override(name)
+    }
+
+    /// ADR-0155 §4: recover a driver-as-actor [`MailboxClaim`] the driver's
+    /// [`DriverCapability::claim`] hook reserved at the Claim stage under
+    /// `name`. Returns the live claim — inbox, actor slots, wake slot, id —
+    /// so the Start-stage [`DriverCapability::boot`] can take ownership of
+    /// the inbox and install its runtime wiring (e.g. the desktop driver's
+    /// `EventLoopProxy` wake on `aether.window`), rather than re-claiming
+    /// the mailbox (which would collide with the Claim-stage reservation).
+    /// `None` when the driver's claim hook reserved no mailbox under `name`.
+    pub fn take_claimed_mailbox(&mut self, name: &str) -> Option<MailboxClaim> {
+        self.inner.take_claimed_mailbox(name)
     }
 
     #[must_use]

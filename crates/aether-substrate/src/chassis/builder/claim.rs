@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::passive_boot::PassiveBoot;
-use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
+use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::config::RingCapacities;
 use crate::mail::MailboxId;
@@ -60,13 +60,36 @@ pub(super) fn claim_only(
 
     let mut fallback: Option<FallbackRouter> = None;
     let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+    // ADR-0155 §4: the driver's Claim hook reserves its inbox here (via
+    // `claim_driver_mailbox`), stashing the live `MailboxClaim`. Describe
+    // wants only the claimed *namespaces* off the registry, so this stash is
+    // read for nothing and drops when `claim_only` returns — the inbox
+    // receiver, actor slots, and wake slot the reservation produced never
+    // reach a Start stage on this path.
+    let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
 
     for boot in &mut passives {
-        let mut ctx = ChassisCtx::new(registry, mailer, &mut fallback, aborter, &mut claimed_actor_mailboxes, &spawner);
+        let mut ctx = ChassisCtx::new(
+            registry,
+            mailer,
+            &mut fallback,
+            aborter,
+            &mut claimed_actor_mailboxes,
+            &spawner,
+            &mut reserved_driver_mailboxes,
+        );
         boot.claim(&mut ctx)?;
     }
 
-    let mut ctx = ChassisCtx::new(registry, mailer, &mut fallback, aborter, &mut claimed_actor_mailboxes, &spawner);
+    let mut ctx = ChassisCtx::new(
+        registry,
+        mailer,
+        &mut fallback,
+        aborter,
+        &mut claimed_actor_mailboxes,
+        &spawner,
+        &mut reserved_driver_mailboxes,
+    );
     driver_claim(&mut ctx)?;
 
     Ok(claimed_namespaces(registry))

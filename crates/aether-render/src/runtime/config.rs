@@ -3,8 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
 
-use super::capture::CaptureBackend;
-
 /// Boot knobs for `RenderCapability` (ADR-0090). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `RenderTuningConfigLayer`, the clap-shaped `RenderTuningOverlay`,
@@ -46,14 +44,6 @@ pub struct RenderTuningConfig {
 pub struct RenderConfig {
     pub vertex_buffer_bytes: usize,
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
-    /// Driver-side capture backend. Desktop and substrate-harness populate
-    /// it with their `CaptureQueue` + chassis-loop wake hook;
-    /// chassis without a render thread (the in-crate tests below)
-    /// leave it `None` and `aether.render.capture_frame` mail
-    /// replies `Err`. Headless declines capture by composing a
-    /// distinct `HeadlessRenderCapability` instead, so this `None`
-    /// branch is exercised only in the test fixtures here.
-    pub capture_backend: Option<CaptureBackend>,
     /// Resolved path for the `"assets"` namespace, used by the
     /// `capture_frame` handler to read reference images for
     /// similarity checks (iamacoffeepot/aether#1780). The handler
@@ -66,6 +56,6 @@ pub struct RenderConfig {
 
 impl Default for RenderConfig {
     fn default() -> Self {
-        Self { vertex_buffer_bytes: VERTEX_BUFFER_BYTES, observed_kinds: None, capture_backend: None, assets_dir: None }
+        Self { vertex_buffer_bytes: VERTEX_BUFFER_BYTES, observed_kinds: None, assets_dir: None }
     }
 }
