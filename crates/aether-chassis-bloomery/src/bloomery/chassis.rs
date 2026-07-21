@@ -14,6 +14,7 @@ use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::{BootableChassis, describe_caps};
 use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
@@ -149,24 +150,24 @@ impl Chassis for BloomeryChassis {
 impl BloomeryChassis {
     /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the chassis
     /// profile, the mailbox namespaces this binary claims, and the `build.rs`
-    /// provenance. Resolves the bloomery config the same argv/env way a real
-    /// boot does, composes the exact capability chain `build_inner`
-    /// runs (via `compose`), then runs the ADR-0155 claim-only
-    /// terminal and reads the claimed namespaces off the registry — so the
-    /// roster can never drift from what boots. Bloomery keeps its own manifest
-    /// assembly (it deliberately does not depend on the `aether-chassis`
-    /// aggregate). `--describe` stops before Init, so it opens no `SQLite`
-    /// store / artifacts dir and binds no socket. The hub's binary store forks
-    /// `<binary> --describe` once at upload time to capture this.
+    /// provenance. Runs the shared ADR-0155 claim ceremony
+    /// ([`aether_substrate::chassis::describe_caps`]) — resolve the bloomery
+    /// config the same argv/env way a real boot does, compose the exact chain
+    /// `build_inner` runs, claim, read the roster — so it can never drift from
+    /// what boots. Bloomery keeps its own manifest assembly here rather than
+    /// routing through `aether_chassis::describe_manifest`: it deliberately does
+    /// not depend on the `aether-chassis` aggregate, and the `build.rs`
+    /// provenance `env!`s must resolve in *this* crate, where its own
+    /// `build.rs` set them. `--describe` stops before Init, so it opens no
+    /// `SQLite` store / artifacts dir and binds no socket. The hub's binary
+    /// store forks `<binary> --describe` once at upload time to capture this.
     ///
     /// # Errors
     ///
     /// Returns [`BootError`] when config resolution ([`BloomeryEnv::from_env`]),
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
-        let env = BloomeryEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        let caps = Self::compose(&boot, env).claim_namespaces()?;
+        let caps = describe_caps::<Self>()?;
         Ok(BinaryManifest {
             chassis: Self::PROFILE.to_owned(),
             caps: caps.into_iter().collect(),
@@ -175,13 +176,19 @@ impl BloomeryChassis {
             target: env!("AETHER_TARGET_TRIPLE").to_owned(),
         })
     }
+}
+
+impl BootableChassis for BloomeryChassis {
+    fn resolve_env() -> Result<Self::Env, ConfigError> {
+        BloomeryEnv::from_env()
+    }
 
     /// Compose the bloomery capability chain — the single claim/build path
-    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
-    /// run, so the manifest roster can never drift from what boots. Returns
-    /// the composed builder before the driver is installed: `build_inner` adds
-    /// the signal-blocking driver and starts, while `describe_manifest` calls
-    /// `claim_namespaces` on it. Takes the boot handle by reference so
+    /// (ADR-0155) both [`Chassis::build`] and [`Self::describe_manifest`] run,
+    /// so the manifest roster can never drift from what boots. Returns the
+    /// composed builder before the driver is installed: `build_inner` adds the
+    /// signal-blocking driver and starts, while `describe_manifest` reads the
+    /// claim terminal off it. Takes the boot handle by reference so
     /// `build_inner` can move the same `boot` into the driver afterward.
     fn compose(boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
@@ -262,7 +269,9 @@ impl BloomeryChassis {
             )
             .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file })
     }
+}
 
+impl BloomeryChassis {
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::build()?;
         let builder = Self::compose(&boot, env);

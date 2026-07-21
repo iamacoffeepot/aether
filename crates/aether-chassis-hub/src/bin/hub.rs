@@ -20,14 +20,14 @@ fn main() -> anyhow::Result<()> {
         // ADR-0156 §4: the dump is the hub's composition-derived aggregate
         // (including the declared fleet pass-through) plus the hub residual
         // hand records, so it resolves the hub config the same way a boot does.
-        print!("{}", HubChassis::config_dump()?);
+        print!("{}", aether_chassis::config_dump::<HubChassis>()?);
         return Ok(());
     }
     // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
     // chassis kind, linked caps, build provenance — as JSON, then exit
     // before boot.
     if cli.describe {
-        println!("{}", serde_json::to_string(&HubChassis::describe_manifest()?)?);
+        println!("{}", serde_json::to_string(&aether_chassis::describe_manifest::<HubChassis>()?)?);
         return Ok(());
     }
     let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli)?)?;

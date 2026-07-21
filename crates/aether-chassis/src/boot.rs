@@ -35,8 +35,9 @@ use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
 use aether_render::RenderTuningConfig;
 use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerParams};
-use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
+use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::{BootableChassis, Chassis, config_manifest, describe_caps};
 use aether_substrate::config::{ConfigError, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 
@@ -900,6 +901,33 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
         profile: env!("AETHER_BUILD_PROFILE").to_owned(),
         target: env!("AETHER_TARGET_TRIPLE").to_owned(),
     }
+}
+
+/// The `--describe` entry point for a chassis whose build provenance lives in
+/// this crate (desktop / headless / hub): run the ADR-0155 claim ceremony via
+/// [`describe_caps`] and wrap the roster in a [`binary_manifest`] carrying
+/// `aether-chassis`'s `build.rs` provenance. The bloomery chassis wraps
+/// [`describe_caps`] with its own crate's provenance instead — it does not
+/// depend on this crate — so it does not route through here.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when env resolution, substrate boot, or the claim pass
+/// fails.
+pub fn describe_manifest<C: BootableChassis>() -> Result<BinaryManifest, BootError> {
+    Ok(binary_manifest(C::PROFILE, describe_caps::<C>()?))
+}
+
+/// The `--print-config` discovery dump for a chassis: render the
+/// composition-derived config aggregate ([`config_manifest`]) plus the chassis's
+/// [`residual knobs`](BootableChassis::residual_knobs). The bin prints this and
+/// exits before boot.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when env resolution or substrate boot fails.
+pub fn config_dump<C: BootableChassis>() -> Result<String, BootError> {
+    Ok(config_manifest::<C>()?.dump(&C::residual_knobs()))
 }
 
 /// ADR-0155 §3: always compose the RPC server on the substrate chassis; its

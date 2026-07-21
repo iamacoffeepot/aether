@@ -35,8 +35,8 @@ mod tick;
 mod window;
 
 pub use boot::{
-    RenderSizeConfig, binary_manifest, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget,
-    with_hub_fleet_passthrough,
+    RenderSizeConfig, binary_manifest, chassis_residual_knobs, config_dump, describe_manifest, hub_residual_knobs,
+    resolve_teardown_budget, with_hub_fleet_passthrough,
 };
 pub use tick::{DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, TickOverlay};
 pub use window::{WindowConfig, WindowConfigLayer, WindowOverlay, WindowSettings, parse_window_mode_env};

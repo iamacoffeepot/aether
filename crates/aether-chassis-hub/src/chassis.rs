@@ -15,12 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_engine::EngineServer;
-use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{
-    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, StageArgv, validate_env,
+    ConfigError, ConfigSources, KnobRecord, RingCapacities, SchedulerTuning, StageArgv, validate_env,
 };
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
@@ -49,53 +49,57 @@ impl Chassis for HubChassis {
     }
 }
 
-impl HubChassis {
-    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the
-    /// chassis profile, the mailbox namespaces this binary claims, and the
-    /// `build.rs` provenance. Resolves the hub config the same argv/env/file
-    /// way a real boot does, composes the exact capability chain
-    /// `build_inner` runs (via `compose` — the trace dispatcher, the engines
-    /// cap, and the RPC server), then runs the
-    /// ADR-0155 claim-only terminal and reads the claimed namespaces off the
-    /// registry. `--describe` stops before Init, so it starts no engine
-    /// supervision and binds no socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution ([`HubEnv::from_env`]),
-    /// substrate boot, or the claim pass fails.
-    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
-        let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        let caps = Self::compose(&boot, env).claim_namespaces()?;
-        Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
+impl BootableChassis for HubChassis {
+    fn resolve_env() -> Result<Self::Env, ConfigError> {
+        HubEnv::from_env()
     }
 
-    /// The ADR-0156 §4 composition-derived config aggregate: resolve the hub
-    /// config, compose the exact capability chain `build_inner` runs (via
-    /// `compose` — including the declared fleet pass-through), then read
-    /// [`Builder::config_manifest`]. The hub's manifest is a deliberate
-    /// superset of what it wires itself — spawned substrates inherit its env,
-    /// so it declares the full fleet knob set as its one over-approximation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution or substrate boot fails.
-    pub fn config_manifest() -> Result<ConfigManifest, BootError> {
-        let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::build()?;
-        Ok(Self::compose(&boot, env).config_manifest())
+    fn residual_knobs() -> Vec<KnobRecord> {
+        hub_residual_knobs()
     }
 
-    /// Render the `--print-config` discovery dump from the hub's
-    /// composition-derived manifest plus the hub residual hand-registered
-    /// knobs (the engines-cap store-root override).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution or substrate boot fails.
-    pub fn config_dump() -> Result<String, BootError> {
-        Ok(Self::config_manifest()?.dump(&hub_residual_knobs()))
+    /// Compose the hub capability chain — the single claim/build path
+    /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
+    /// so the manifest roster can never drift from what boots: the trace
+    /// dispatcher, the engines cap, and the RPC server. Returns the composed
+    /// builder before the driver is installed — `build_inner` adds the
+    /// signal-blocking driver and starts, while the describe / config helpers
+    /// read the claim / config terminals off it. Takes the boot handle by
+    /// reference so `build_inner` can move the same `boot` into the driver
+    /// afterward.
+    fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
+        let HubEnv { sources, rpc_port, runtime: _, ring_capacities, scheduler_tuning, teardown_budget } = env;
+        let registry = Arc::clone(&boot.registry);
+        let mailer = Arc::clone(&boot.queue);
+
+        // ADR-0156 §4: declare the hub's fleet pass-through set — the full
+        // fleet knobs a hub-spawned substrate inherits from the hub's env, the
+        // one documented over-approximation in the aggregate. The engines cap
+        // (`EngineConfig`) declares its own member via `with_actor` below.
+        //
+        // ADR-0156 §5: hand the builder the source stack so it resolves the
+        // composed `EngineServer`'s `EngineConfig` (the liveness-heartbeat
+        // tuning, issue 1339) off it. #3849: the RPC server's `Config` is now a
+        // derive member resolved off the stack; the hub always binds, so it
+        // composes the resolved-with-default port as an explicit override.
+        with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
+            .with_ring_capacities(ring_capacities)
+            .with_scheduler_tuning(scheduler_tuning)
+            .with_teardown_budget(teardown_budget)
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<EngineServer>(())
+            .with_actor_configured::<RpcServerCapability>(
+                RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: aether_substrate::engine_name::<Self>(),
+                    engine_version: env!("CARGO_PKG_VERSION").into(),
+                    kinds: vec![],
+                },
+                #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
+                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
+            },
+                RpcServerConfig { port: Some(rpc_port) },
+            )
     }
 }
 
@@ -193,49 +197,6 @@ impl HubEnv {
 }
 
 impl HubChassis {
-    /// Compose the hub capability chain — the single claim/build path
-    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
-    /// run, so the manifest roster can never drift from what boots: the trace
-    /// dispatcher, the engines cap, and the RPC server. Returns the composed
-    /// builder before the driver is installed — `build_inner` adds the
-    /// signal-blocking driver and starts, while `describe_manifest` calls
-    /// `claim_namespaces` on it. Takes the boot handle by reference so
-    /// `build_inner` can move the same `boot` into the driver afterward.
-    fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
-        let HubEnv { sources, rpc_port, runtime: _, ring_capacities, scheduler_tuning, teardown_budget } = env;
-        let registry = Arc::clone(&boot.registry);
-        let mailer = Arc::clone(&boot.queue);
-
-        // ADR-0156 §4: declare the hub's fleet pass-through set — the full
-        // fleet knobs a hub-spawned substrate inherits from the hub's env, the
-        // one documented over-approximation in the aggregate. The engines cap
-        // (`EngineConfig`) declares its own member via `with_actor` below.
-        //
-        // ADR-0156 §5: hand the builder the source stack so it resolves the
-        // composed `EngineServer`'s `EngineConfig` (the liveness-heartbeat
-        // tuning, issue 1339) off it. #3849: the RPC server's `Config` is now a
-        // derive member resolved off the stack; the hub always binds, so it
-        // composes the resolved-with-default port as an explicit override.
-        with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
-            .with_ring_capacities(ring_capacities)
-            .with_scheduler_tuning(scheduler_tuning)
-            .with_teardown_budget(teardown_budget)
-            .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<EngineServer>(())
-            .with_actor_configured::<RpcServerCapability>(
-                RpcServerParams {
-                peer_kind: PeerKind::Substrate {
-                    engine_name: aether_substrate::engine_name::<Self>(),
-                    engine_version: env!("CARGO_PKG_VERSION").into(),
-                    kinds: vec![],
-                },
-                #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
-                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
-            },
-                RpcServerConfig { port: Some(rpc_port) },
-            )
-    }
-
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::build()?;
         // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
@@ -245,7 +206,7 @@ impl HubChassis {
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set (the
         // declared fleet pass-through) plus the hub residual hand records.
-        validate_env(&builder.config_manifest().known_keys(&hub_residual_knobs()))?;
+        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
         let driver = HubServerDriverCapability { boot };
         builder.driver(driver).build()
     }
@@ -344,6 +305,7 @@ fn shutdown_signal() -> &'static str {
 mod config_manifest_tests {
     use super::HubChassis;
     use aether_chassis::boot::hub_residual_knobs;
+    use aether_substrate::chassis::config_manifest;
 
     #[test]
     fn hub_known_keys_carry_fleet_passthrough_engine_and_store_root() {
@@ -352,7 +314,7 @@ mod config_manifest_tests {
         // full fleet knob set as its one documented over-approximation. Its own
         // engines-cap knob rides `with_actor`; the store-root override folds in
         // as a residual hand record.
-        let manifest = HubChassis::config_manifest().expect("hub config manifest");
+        let manifest = config_manifest::<HubChassis>().expect("hub config manifest");
         let known = manifest.known_keys(&hub_residual_knobs());
         assert!(known.contains("AETHER_AUDIO_DISABLE"), "hub declares the fleet audio knob as pass-through");
         assert!(known.contains("AETHER_WINDOW_MODE"), "hub declares the fleet window knob as pass-through");
