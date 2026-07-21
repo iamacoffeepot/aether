@@ -29,8 +29,8 @@ use aether_trace::TraceDispatchCapability;
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::rpc_port_from_env;
 use aether_chassis::boot::{
-    ActorRingConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, load_chassis_config,
-    with_hub_fleet_passthrough,
+    ActorRingConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, install_frame_size,
+    load_chassis_config, with_hub_fleet_passthrough,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -163,6 +163,10 @@ impl HubEnv {
         let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
+        // ADR-0156 §6: push the resolved wire-frame cap into the codec here,
+        // before the RPC server binds and any framing runs — the codec cannot
+        // pull the knob itself.
+        install_frame_size(&mut sources)?;
         let rpc_port = cli.rpc_port.or_else(rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
         Ok(Self {
             sources,

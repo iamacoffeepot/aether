@@ -23,6 +23,7 @@ use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_anthropic::{AnthropicCapability, AnthropicConfig};
 use aether_audio::AudioConfig;
+use aether_codec::frame::install_max_frame_size;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_contentgen::ContentGenConfig;
 use aether_fs::{FsCapability, NamespaceRoots};
@@ -34,10 +35,10 @@ use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
 use aether_render::RenderTuningConfig;
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
-use aether_substrate::config::{ConfigError, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_tcp::TcpCapability;
@@ -52,18 +53,17 @@ use crate::window::WindowConfig;
 /// layer's lower precedence relative to ordinary `AETHER_*` env knobs.
 pub const CONFIG_FILE_ENV: &str = "AETHER_CONFIG_FILE";
 
-/// Chassis-direct env knobs that aren't `#[derive(Config)]` fields —
-/// the hand-registered knobs the chassis bins read inline
-/// (`AETHER_RPC_PORT`) plus the one orphaned codec knob that can't
-/// live substrate-side (`AETHER_MAX_FRAME_SIZE` — `aether-codec`
-/// cannot depend on `aether-substrate`, where `KnobRecord`/`KnobKind`
-/// live). Registered as [`KnobRecord`]s so e1's unknown-`AETHER_*`
-/// sweep doesn't flag them and e2's `--print-config` dump lists them.
-/// ADR-0090 §1/§4. The runtime (log / panic-hook) knobs are registered
-/// by `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler
-/// hot-path, chassis boot, window, and tick knobs are covered by the
+/// Chassis-direct env knobs that aren't `#[derive(Config)]` fields — the
+/// hand-registered knobs the chassis bins read inline (`AETHER_RPC_PORT`).
+/// Registered as [`KnobRecord`]s so e1's unknown-`AETHER_*` sweep doesn't flag
+/// them and e2's `--print-config` dump lists them. ADR-0090 §1/§4. The runtime
+/// (log / panic-hook) knobs are registered by
+/// `aether_substrate::runtime::RUNTIME_KNOBS`; the scheduler hot-path, chassis
+/// boot, window, tick, and wire-frame-size knobs are covered by the
 /// derive-emitted `*Layer::META`s the composition-derived
-/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) walks.
+/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) walks — the
+/// frame-size knob is now the [`FrameSizeConfig`] member (ADR-0156 §6), pushed
+/// into the codec by [`install_frame_size`].
 pub const CHASSIS_KNOBS: &[KnobRecord] = &[
     KnobRecord {
         env_key: CONFIG_FILE_ENV,
@@ -76,14 +76,6 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
         doc: "aether.rpc.server bind port; desktop/headless skip the server when unset, hub always \
               binds (default 8901).",
         default: None,
-        kind: KnobKind::HandRegistered,
-    },
-    KnobRecord {
-        env_key: "AETHER_MAX_FRAME_SIZE",
-        doc: "Maximum accepted wire-frame body size in bytes (see \
-              aether_codec::frame::max_frame_size); default mirrors \
-              aether_codec::frame::MAX_FRAME_SIZE (64 MiB) — keep the two in sync.",
-        default: Some("67108864"),
         kind: KnobKind::HandRegistered,
     },
 ];
@@ -412,11 +404,27 @@ impl ChassisBootConfig {
     }
 }
 
+/// Resolve the [`FrameSizeConfig`] member off the assembled source stack and
+/// push it set-once into `aether-codec` (ADR-0156 §6). Each chassis calls this
+/// once during config resolution — before the RPC server binds or dials, so it
+/// runs before any framing. `aether-codec` sits below the config system and
+/// cannot pull the knob itself; this is the push half of the inversion, the
+/// codec's [`install_max_frame_size`] the receiving half.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the `AETHER_MAX_FRAME_SIZE` member fails to
+/// resolve (a garbage value hard-errors at boot, ADR-0090 §4).
+pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError> {
+    install_max_frame_size(sources.resolve::<FrameSizeConfig>()?.to_max_frame_size());
+    Ok(())
+}
+
 /// The residual hand-registered knobs the composition-derived
 /// [`ConfigManifest`](aether_substrate::config::ConfigManifest) doesn't yet
 /// own (ADR-0156 §6 folds these in on later slices): the chassis-direct
-/// records ([`CHASSIS_KNOBS`] — the config-file path, RPC port, orphaned
-/// frame-size knob) plus the runtime log-filter / panic-hook knobs
+/// records ([`CHASSIS_KNOBS`] — the config-file path and RPC port) plus the
+/// runtime log-filter / panic-hook knobs
 /// (`aether_substrate::runtime::RUNTIME_KNOBS`). Folded in beside the
 /// manifest metas by every chassis's known-keys sweep and `--print-config`
 /// dump ([`ConfigManifest::known_keys`](aether_substrate::config::ConfigManifest::known_keys)
@@ -476,6 +484,7 @@ pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C>
         .with_config_member::<ActorRingConfig>()
         .with_config_member::<SchedulerTuningConfig>()
         .with_config_member::<SettlementConfig>()
+        .with_config_member::<FrameSizeConfig>()
 }
 
 /// Build the single-stage lifecycle params the headless chassis runs
@@ -596,6 +605,11 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_config_member::<SchedulerTuningConfig>()
         .with_config_member::<SettlementConfig>()
         .with_config_member::<ContentGenConfig>()
+        // ADR-0156 §6: the wire-frame-size knob. It configures the shared codec
+        // rather than any single cap and is pushed into the codec by
+        // `install_frame_size`, so it declares its aggregate membership here
+        // (the retired `AETHER_MAX_FRAME_SIZE` `KnobRecord`'s replacement).
+        .with_config_member::<FrameSizeConfig>()
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<InputCapability>(())
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
@@ -825,17 +839,18 @@ mod tests {
     #[test]
     fn residual_knobs_carry_the_infra_records() {
         // Tripwire: the composition-derived aggregate doesn't yet own the
-        // chassis-direct records (config-file path, RPC port, frame size) or
-        // the runtime log/panic knobs — they ride `chassis_residual_knobs`,
-        // folded into every chassis's known-keys sweep beside the manifest
-        // metas (ADR-0156 §6 relocates them onto members on later slices).
-        // Catches a refactor that drops the `RUNTIME_KNOBS` extend or a
-        // `CHASSIS_KNOBS` record, re-introducing a false unknown-key warning.
+        // chassis-direct records (config-file path, RPC port) or the runtime
+        // log/panic knobs — they ride `chassis_residual_knobs`, folded into
+        // every chassis's known-keys sweep beside the manifest metas (ADR-0156
+        // §6 relocates them onto members on later slices). Catches a refactor
+        // that drops the `RUNTIME_KNOBS` extend or a `CHASSIS_KNOBS` record,
+        // re-introducing a false unknown-key warning. The frame-size knob left
+        // this set for the `FrameSizeConfig` member (ADR-0156 §6), so it is
+        // covered by the manifest walk, not a residual record.
         let keys: Vec<&str> = chassis_residual_knobs().iter().map(|record| record.env_key).collect();
         for key in [
             "AETHER_CONFIG_FILE",
             "AETHER_RPC_PORT",
-            "AETHER_MAX_FRAME_SIZE",
             "AETHER_LOG_FILTER",
             "AETHER_BACKTRACE",
             "AETHER_CRASH_LOG_DISABLE",
@@ -843,6 +858,10 @@ mod tests {
         ] {
             assert!(keys.contains(&key), "chassis_residual_knobs missing {key}");
         }
+        assert!(
+            !keys.contains(&"AETHER_MAX_FRAME_SIZE"),
+            "the frame-size knob moved onto the FrameSizeConfig member; it must not ride a residual record",
+        );
     }
 
     #[test]

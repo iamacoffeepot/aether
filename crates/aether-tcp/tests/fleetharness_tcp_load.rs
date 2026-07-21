@@ -75,7 +75,7 @@ mod tests {
             };
             assert!(
                 profile.frame_bytes < max_frame_size(),
-                "AETHER_TCP_LOAD_FRAME_BYTES={} must remain below the active AETHER_MAX_FRAME_SIZE={} cap",
+                "AETHER_TCP_LOAD_FRAME_BYTES={} must remain below the active max frame size={} cap",
                 profile.frame_bytes,
                 max_frame_size(),
             );
