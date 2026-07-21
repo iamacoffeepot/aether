@@ -905,11 +905,10 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
 
 /// The `--describe` entry point for a chassis whose build provenance lives in
 /// this crate (desktop / headless / hub): run the ADR-0155 claim ceremony via
-/// [`aether_substrate::chassis::describe_caps`] and wrap the roster in a
-/// [`binary_manifest`] carrying `aether-chassis`'s `build.rs` provenance. The
-/// bloomery chassis wraps [`describe_caps`](aether_substrate::chassis::describe_caps)
-/// with its own crate's provenance instead — it does not depend on this crate —
-/// so it does not route through here.
+/// [`describe_caps`] and wrap the roster in a [`binary_manifest`] carrying
+/// `aether-chassis`'s `build.rs` provenance. The bloomery chassis wraps
+/// [`describe_caps`] with its own crate's provenance instead — it does not
+/// depend on this crate — so it does not route through here.
 ///
 /// # Errors
 ///
@@ -920,10 +919,9 @@ pub fn describe_manifest<C: BootableChassis>() -> Result<BinaryManifest, BootErr
 }
 
 /// The `--print-config` discovery dump for a chassis: render the
-/// composition-derived config aggregate
-/// ([`config_manifest`](aether_substrate::chassis::config_manifest)) plus the
-/// chassis's [`residual knobs`](BootableChassis::residual_knobs). The bin prints
-/// this and exits before boot.
+/// composition-derived config aggregate ([`config_manifest`]) plus the chassis's
+/// [`residual knobs`](BootableChassis::residual_knobs). The bin prints this and
+/// exits before boot.
 ///
 /// # Errors
 ///
