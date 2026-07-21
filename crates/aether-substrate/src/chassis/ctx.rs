@@ -285,16 +285,18 @@ impl MailboxSender {
     }
 }
 
-/// Generic fallback-router handler: invoked by substrate dispatch when a
-/// local mailbox lookup misses. Phase 1 stores the handler but does
-/// not call it; Phase 4 wires `Mailer::push` to consult the slot in
-/// place of today's hub-specific bubble-up.
+/// Generic fallback-router handler: a substrate-dispatch hook for a
+/// local mailbox-lookup miss. The slot is stored at boot but not yet
+/// consulted on the dispatch path, so a locally-unknown mailbox still
+/// warn-drops.
 ///
 /// Returning `true` means "I handled this mail" (substrate does nothing
 /// further); `false` means "not mine" (substrate falls through to its
-/// warn-drop path). Today only `HubClientCapability` will claim the
-/// slot; other implementations are possible (test routers, multi-hub
-/// fan-out).
+/// warn-drop path). The slot is generic and the substrate carries no
+/// hub knowledge: a hub reaches an engine by dialing the substrate's
+/// `aether_rpc::RpcServerCapability`, and the substrate never dials out,
+/// so no hub client claims this slot. Any single capability may (a test
+/// router, an alternate fan-out).
 pub type FallbackRouter = Arc<dyn Fn(&Envelope) -> bool + Send + Sync + 'static>;
 
 /// Kernel-side handle bundle exposed to a capability during its
@@ -616,12 +618,11 @@ impl<'a> ChassisCtx<'a> {
     /// may claim the slot; a second call returns
     /// [`BootError::FallbackRouterAlreadyClaimed`].
     ///
-    /// Phase 1 stores the handler but does not consult it from substrate
-    /// dispatch. Phase 4 wires `Mailer::push` against this slot and
-    /// removes today's hub-specific `Mailer.outbound` field, at
-    /// which point `HubClientCapability` (in
-    /// `aether-chassis-hub`) claims the slot to forward
-    /// unresolved mail over TCP.
+    /// The handler is stored but not yet consulted from substrate
+    /// dispatch, so a locally-unknown mailbox still warn-drops. No hub
+    /// client claims this slot: a hub reaches an engine by dialing the
+    /// substrate's `aether_rpc::RpcServerCapability`, and the substrate
+    /// never dials out.
     pub fn claim_fallback_router(&mut self, handler: FallbackRouter) -> Result<(), BootError> {
         if self.fallback.is_some() {
             return Err(BootError::FallbackRouterAlreadyClaimed);

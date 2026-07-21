@@ -1,9 +1,9 @@
 //! aether-substrate: runtime that every substrate chassis shares.
 //!
-//! Hosts the wasmtime engine, the mail router, the kind manifest, the
-//! reply-handle table, and the hub-socket client. Chassis-specific
-//! peripherals (window, GPU, TCP listener, event loop) live in the
-//! chassis crate that binds this as a dependency. See ADR-0035.
+//! Hosts the wasmtime engine, the mail router, the kind manifest, and
+//! the reply-handle table. Chassis-specific peripherals (window, GPU,
+//! TCP listener, event loop) live in the chassis crate that binds this
+//! as a dependency. See ADR-0035.
 //!
 //! Each loaded wasm component runs as an `aether_component::trampoline::WasmTrampoline`
 //! — a `NativeActor` instanced under `aether.embedded:NAME`
@@ -84,7 +84,6 @@ pub use aether_actor::{Emit, Manual, Multi, ReplyMode, Single};
 pub use aether_derive::Config;
 #[cfg(feature = "wasm")]
 pub use boot::SubstrateBoot;
-pub use chassis::Chassis;
 pub use chassis::builder::{
     Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver, NeverDriver,
     NeverDriverRunning, NoDriver, PassiveChassis, RunError,
@@ -94,6 +93,7 @@ pub use chassis::ctx::{
 };
 pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};
+pub use chassis::{Chassis, engine_name};
 pub use config::{
     ConfigError, ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, FromArgvThenEnv,
     KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config, file_section, known_keys,

@@ -243,7 +243,7 @@ impl BloomeryChassis {
             .with_actor_configured::<RpcServerCapability>(
                 RpcServerParams {
                     peer_kind: PeerKind::Substrate {
-                        engine_name: "aether-bloomery".into(),
+                        engine_name: aether_substrate::engine_name::<Self>(),
                         engine_version: env!("CARGO_PKG_VERSION").into(),
                         kinds: vec![],
                     },

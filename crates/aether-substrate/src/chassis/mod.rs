@@ -85,3 +85,15 @@ pub trait Chassis: Sized + 'static {
     /// shape exists for trait uniformity, not for invocation.
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError>;
 }
+
+/// Derive a chassis's wire-visible RPC engine name from its
+/// [`Chassis::PROFILE`]. The rule is uniform across every chassis —
+/// `"aether-" + PROFILE` (`desktop` → `aether-desktop`, `headless` →
+/// `aether-headless`, `hub` → `aether-hub`, `bloomery` →
+/// `aether-bloomery`) — so this is the single source of truth every
+/// `PeerKind::Substrate { engine_name, .. }` a chassis builds reads, and
+/// the name is never stated as a second literal beside the profile.
+#[must_use]
+pub fn engine_name<C: Chassis>() -> String {
+    format!("aether-{}", C::PROFILE)
+}
