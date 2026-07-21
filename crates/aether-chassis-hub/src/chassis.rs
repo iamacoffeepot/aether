@@ -15,7 +15,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::Addressable;
 use aether_engine::{EngineConfig, EngineServer};
 use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
@@ -50,21 +49,25 @@ impl Chassis for HubChassis {
 }
 
 impl HubChassis {
-    /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
-    /// profile, the mailbox namespaces this binary links, and the
-    /// `build.rs` provenance. The hub is the minimal coordinator chassis —
-    /// it links the trace dispatcher, the engines cap, and the RPC server,
-    /// not the full-stack cap set — so it lists those three directly
-    /// rather than through the full-stack
-    /// [`common_cap_namespaces`](aether_chassis::common_cap_namespaces) base.
-    #[must_use]
-    pub fn describe_manifest() -> BinaryManifest {
-        let caps = vec![
-            <TraceDispatchCapability as Addressable>::NAMESPACE,
-            <EngineServer as Addressable>::NAMESPACE,
-            <RpcServerCapability as Addressable>::NAMESPACE,
-        ];
-        aether_chassis::binary_manifest(Self::PROFILE, caps)
+    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the
+    /// chassis profile, the mailbox namespaces this binary claims, and the
+    /// `build.rs` provenance. Resolves the hub config the same argv/env/file
+    /// way a real boot does, composes the exact capability chain
+    /// `build_inner` runs (via `compose` — the trace dispatcher, the engines
+    /// cap, and the RPC server), then runs the
+    /// ADR-0155 claim-only terminal and reads the claimed namespaces off the
+    /// registry. `--describe` stops before Init, so it starts no engine
+    /// supervision and binds no socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution ([`HubEnv::from_env`]),
+    /// substrate boot, or the claim pass fails.
+    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
+        let env = HubEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        let caps = Self::compose(&boot, env).claim_namespaces()?;
+        Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
 }
 
@@ -131,13 +134,18 @@ impl HubEnv {
 }
 
 impl HubChassis {
-    fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
+    /// Compose the hub capability chain — the single claim/build path
+    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
+    /// run, so the manifest roster can never drift from what boots: the trace
+    /// dispatcher, the engines cap, and the RPC server. Returns the composed
+    /// builder before the driver is installed — `build_inner` adds the
+    /// signal-blocking driver and starts, while `describe_manifest` calls
+    /// `claim_namespaces` on it. Takes the boot handle by reference so
+    /// `build_inner` can move the same `boot` into the driver afterward.
+    fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
         let HubEnv { rpc_addr, engine, ring_caps, scheduler_tuning, teardown_cap } = env;
-        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
-
-        let driver = HubServerDriverCapability { boot };
 
         Builder::<Self>::new(registry, mailer)
             .with_ring_caps(ring_caps)
@@ -157,8 +165,13 @@ impl HubChassis {
                 #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
                 route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
             })
-            .driver(driver)
-            .build()
+    }
+
+    fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
+        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        let builder = Self::compose(&boot, env);
+        let driver = HubServerDriverCapability { boot };
+        builder.driver(driver).build()
     }
 }
 

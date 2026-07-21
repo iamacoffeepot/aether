@@ -24,11 +24,23 @@ fn headless_describe_emits_manifest() {
         serde_json::from_slice(&output.stdout).expect("test setup: --describe stdout is a BinaryManifest JSON");
     assert_eq!(manifest.chassis, "headless", "reports the headless profile");
     assert!(!manifest.caps.is_empty(), "the headless chassis links a non-empty cap set");
-    assert!(
-        manifest.caps.iter().any(|c| c == "aether.fs"),
-        "the headless chassis links the fs cap, got {:?}",
-        manifest.caps,
-    );
+    // ADR-0155: the roster is claim-derived, so these assert the real claim
+    // path — not a hand list. `aether.fs` is a `with_common_caps` cap;
+    // `aether.game.gateway` pins that `with_common_caps` still composes the
+    // (inert-by-default) game gateway, which the claim reserves even though no
+    // player listener opens — catches someone dropping it from the common
+    // chain. `aether.audio` is the headless inline fail-fast sink, and
+    // `aether.rpc.server` / `aether.http.server` are the always-claim servers
+    // (ADR-0155 §3) the old hand list silently omitted.
+    for expected in ["aether.fs", "aether.game.gateway", "aether.audio", "aether.rpc.server", "aether.http.server"] {
+        assert!(
+            manifest.caps.iter().any(|c| c == expected),
+            "claim-derived roster must include {expected}, got {:?}",
+            manifest.caps
+        );
+    }
+    // BTreeSet order: the manifest caps are sorted (ADR-0155).
+    assert!(manifest.caps.windows(2).all(|w| w[0] <= w[1]), "claim-derived caps are sorted, got {:?}", manifest.caps);
     // Build provenance is always baked (`unknown` fallbacks outside a git
     // checkout), so the fields are never empty.
     assert!(!manifest.git_sha.is_empty(), "git_sha is baked");

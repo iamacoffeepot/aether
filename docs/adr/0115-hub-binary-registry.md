@@ -1,6 +1,7 @@
 # ADR-0115: Hub Binary Registry
 
 - **Status:** Accepted
+- **Amended by:** ADR-0155 (the manifest's caps are claim-derived, not declared)
 - **Date:** 2026-06-15
 
 ## Context

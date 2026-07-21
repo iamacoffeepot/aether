@@ -13,11 +13,11 @@
 //! deleted as a kind in Phase 4 — no replacement, no MCP path until
 //! issue 603 §F2 revives the per-domain shape.
 
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_clipboard::HeadlessClipboardCapability;
@@ -33,7 +33,6 @@ use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
-use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
@@ -72,25 +71,25 @@ impl Chassis for HeadlessChassis {
 }
 
 impl HeadlessChassis {
-    /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
-    /// profile, the mailbox namespaces this binary links, and the
-    /// `build.rs` provenance. The headless chassis layers the renderer /
-    /// window / substrate-harness / lifecycle caps plus the RPC server onto the
-    /// shared [`common_cap_namespaces`](aether_chassis::common_cap_namespaces)
-    /// base — a hub-forked fleet engine always boots its RPC server, so it
-    /// is part of the headless capability surface.
-    #[must_use]
-    pub fn describe_manifest() -> BinaryManifest {
-        let mut caps = aether_chassis::common_cap_namespaces();
-        caps.extend([
-            <HeadlessRenderCapability as Addressable>::NAMESPACE,
-            <HeadlessClipboardCapability as Addressable>::NAMESPACE,
-            <HeadlessWindowCapability as Addressable>::NAMESPACE,
-            <UnsupportedSubstrateHarnessCapability as Addressable>::NAMESPACE,
-            <LifecycleCapability as Addressable>::NAMESPACE,
-            <RpcServerCapability as Addressable>::NAMESPACE,
-        ]);
-        aether_chassis::binary_manifest(Self::PROFILE, caps)
+    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the
+    /// chassis profile, the mailbox namespaces this binary claims, and the
+    /// `build.rs` provenance. Resolves the chassis config the same
+    /// argv/env/file way a real boot does, composes the exact capability
+    /// chain `build_inner` runs (via `compose` — including the
+    /// `aether.audio` fail-fast inline sink), then runs the ADR-0155
+    /// claim-only terminal and reads the claimed namespaces straight off
+    /// the registry. `--describe` stops before Init, so it opens no audio
+    /// device / filesystem roots and binds no socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution ([`HeadlessEnv::from_env`]),
+    /// substrate boot, or the claim pass fails.
+    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
+        let env = HeadlessEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
+        let caps = Self::compose(&boot, env).claim_namespaces()?;
+        Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
 }
 
@@ -265,14 +264,21 @@ impl HeadlessEnv {
 }
 
 impl HeadlessChassis {
-    /// Build the headless chassis: stand up substrate-core internals,
-    /// register the audio fail-fast sink, connect the hub, compose
-    /// the native passives (broadcast/handle/log/control/io/http plus
-    /// the headless render / window / substrate-harness fail-fast caps)
-    /// through the `chassis_builder` `.with()` chain, then wrap the
-    /// timer in a [`HeadlessTimerDriverCapability`] and hand it to the
-    /// builder.
-    fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<Self>, BootError> {
+    /// Compose the headless capability chain — the single claim/build path
+    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
+    /// run, so the manifest roster can never drift from what boots. Registers
+    /// the `aether.audio` fail-fast inline sink on the shared registry, then
+    /// composes the common caps plus the headless render / clipboard / window
+    /// / substrate-harness / lifecycle caps and the always-claim RPC + HTTP
+    /// servers (ADR-0155 §3). Returns the composed builder before the driver
+    /// is installed: `build_inner` adds the timer driver and starts, while
+    /// `describe_manifest` calls `claim_namespaces` on it.
+    ///
+    /// Takes the boot handle by reference — `build_inner` moves the same
+    /// `boot` into the timer driver afterward. The `tick_period` (driver-only)
+    /// and `autoload` (drained post-build) fields ride [`HeadlessEnv`] but
+    /// take no part in the claim chain, so they are ignored here.
+    fn compose(boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
         let HeadlessEnv {
             namespace_roots,
             http,
@@ -280,25 +286,22 @@ impl HeadlessChassis {
             anthropic,
             gemini,
             contentgen,
-            tick_period,
             rpc_addr,
             workers,
             ring_caps,
             scheduler_tuning,
             teardown_cap,
             lifecycle_advance_timeout_millis,
-            autoload,
+            tick_period: _,
+            autoload: _,
         } = env;
 
-        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
         let input_config = InputConfig::default();
-
-        let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
 
         // Audio nop sink — NoteOn/NoteOff fall through silently;
         // SetMasterGain replies Err so agents fail fast rather than
@@ -312,6 +315,10 @@ impl HeadlessChassis {
         // any chain that mails `aether.audio` from the headless
         // chassis leaks `in_flight` and never settles. Same shape
         // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_inline`.
+        //
+        // ADR-0155: registering the sink here (Compose) is what puts
+        // `aether.audio` in the claim-derived `--describe` roster — an
+        // inline sink is a claim like any other.
         let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_inline(
@@ -328,28 +335,12 @@ impl HeadlessChassis {
             }),
         );
 
-        // Tick rates are bounded well below `u32::MAX` Hz (typically
-        // 60-240 Hz); the `u128 → u32` narrowing is safe in practice.
-        #[allow(clippy::cast_possible_truncation)]
-        let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
-        tracing::info!(
-            target: "aether_substrate::boot",
-            workers_override = ?workers,
-            tick_hz = tick_hz,
-            log_ring_capacity = ring_caps.log,
-            trace_ring_capacity = ring_caps.trace,
-            trace_ring_max_capacity = ring_caps.trace_max,
-            "componentless boot — load a component via aether.component.load",
-        );
-
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         // ADR-0063: production chassis configures the fatal-abort
         // aborter so a wasm guest trap exits the substrate via
         // `lifecycle::fatal_abort` instead of unwinding.
         let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
-
-        let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
 
         // ADR-0071 phase B: io / http / log compose through the
         // chassis_builder `.with()` chain. Boot order is declaration
@@ -377,14 +368,48 @@ impl HeadlessChassis {
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the driver broadcasts
         // Tick to `aether.input` via the relay subscriber.
-        let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
+        let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessClipboardCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis));
-        let builder =
-            with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(http_server);
+        with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(http_server)
+    }
+
+    /// Build the headless chassis: stand up substrate-core internals,
+    /// compose the capability chain via [`Self::compose`], then wrap the
+    /// timer in a [`HeadlessTimerDriverCapability`] and hand it to the
+    /// builder.
+    fn build_inner(mut env: HeadlessEnv) -> Result<BuiltChassis<Self>, BootError> {
+        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
+        let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
+        let mailer = Arc::clone(&boot.queue);
+
+        // Driver-only / post-build fields, read out before `compose` consumes
+        // `env`: the tick cadence rides the timer driver, the autoload list is
+        // drained after build. The `Copy` knobs also feed the boot log line.
+        let tick_period = env.tick_period;
+        let workers = env.workers;
+        let ring_caps = env.ring_caps;
+        let autoload = mem::take(&mut env.autoload);
+
+        // Tick rates are bounded well below `u32::MAX` Hz (typically
+        // 60-240 Hz); the `u128 → u32` narrowing is safe in practice.
+        #[allow(clippy::cast_possible_truncation)]
+        let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
+        tracing::info!(
+            target: "aether_substrate::boot",
+            workers_override = ?workers,
+            tick_hz = tick_hz,
+            log_ring_capacity = ring_caps.log,
+            trace_ring_capacity = ring_caps.trace,
+            trace_ring_max_capacity = ring_caps.trace_max,
+            "componentless boot — load a component via aether.component.load",
+        );
+
+        let builder = Self::compose(&boot, env);
+        let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load

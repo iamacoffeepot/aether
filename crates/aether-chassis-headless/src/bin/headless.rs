@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     // before boot. The hub's binary store forks `<binary> --describe`
     // once at upload time to capture exactly this.
     if cli.describe {
-        println!("{}", serde_json::to_string(&HeadlessChassis::describe_manifest())?);
+        println!("{}", serde_json::to_string(&HeadlessChassis::describe_manifest()?)?);
         return Ok(());
     }
     let env = HeadlessEnv::from_env_with_argv(cli)?;

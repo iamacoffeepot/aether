@@ -8,7 +8,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use aether_actor::Addressable;
 use aether_component::{ComponentHostCapability, ComponentHostConfig};
 use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_kinds::BinaryManifest;
@@ -148,47 +147,47 @@ impl Chassis for BloomeryChassis {
 }
 
 impl BloomeryChassis {
-    /// The `--describe` manifest (ADR-0115): the chassis profile, the mailbox
-    /// namespaces this binary links, and the `build.rs` provenance. Bloomery is
-    /// a minimal coordinator chassis — it links the trace dispatcher, the store,
-    /// the artifacts record, the RPC server, and the HTTP ingress + REST control
-    /// api (#3498) — so it lists those directly.
-    /// The hub's binary store forks `<binary> --describe` once at upload time to
-    /// capture this.
-    #[must_use]
-    pub fn describe_manifest() -> BinaryManifest {
-        let caps = vec![
-            <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
-            <StoreCapability as Addressable>::NAMESPACE.to_owned(),
-            <ControlCore as Addressable>::NAMESPACE.to_owned(),
-            <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
-            <MirrorReactorCapability as Addressable>::NAMESPACE.to_owned(),
-            <ExecutorReactorCapability as Addressable>::NAMESPACE.to_owned(),
-            <LandReactorCapability as Addressable>::NAMESPACE.to_owned(),
-            <IntegrateReactorCapability as Addressable>::NAMESPACE.to_owned(),
-            <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
-            <SourceCapability as Addressable>::NAMESPACE.to_owned(),
-            <SigningCapability as Addressable>::NAMESPACE.to_owned(),
-            <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
-            <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
-            <HttpServerCapability as Addressable>::NAMESPACE.to_owned(),
-            <BloomeryApiCapability as Addressable>::NAMESPACE.to_owned(),
-        ];
-        BinaryManifest {
+    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the chassis
+    /// profile, the mailbox namespaces this binary claims, and the `build.rs`
+    /// provenance. Resolves the bloomery config the same argv/env way a real
+    /// boot does, composes the exact capability chain `build_inner`
+    /// runs (via `compose`), then runs the ADR-0155 claim-only
+    /// terminal and reads the claimed namespaces off the registry — so the
+    /// roster can never drift from what boots. Bloomery keeps its own manifest
+    /// assembly (it deliberately does not depend on the `aether-chassis`
+    /// aggregate). `--describe` stops before Init, so it opens no `SQLite`
+    /// store / artifacts dir and binds no socket. The hub's binary store forks
+    /// `<binary> --describe` once at upload time to capture this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution ([`BloomeryEnv::from_env`]),
+    /// substrate boot, or the claim pass fails.
+    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
+        let env = BloomeryEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
+        let caps = Self::compose(&boot, env).claim_namespaces()?;
+        Ok(BinaryManifest {
             chassis: Self::PROFILE.to_owned(),
-            caps,
+            caps: caps.into_iter().collect(),
             git_sha: env!("AETHER_GIT_SHA").to_owned(),
             profile: env!("AETHER_BUILD_PROFILE").to_owned(),
             target: env!("AETHER_TARGET_TRIPLE").to_owned(),
-        }
+        })
     }
 
-    fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
+    /// Compose the bloomery capability chain — the single claim/build path
+    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
+    /// run, so the manifest roster can never drift from what boots. Returns
+    /// the composed builder before the driver is installed: `build_inner` adds
+    /// the signal-blocking driver and starts, while `describe_manifest` calls
+    /// `claim_namespaces` on it. Takes the boot handle by reference so
+    /// `build_inner` can move the same `boot` into the driver afterward.
+    fn compose(boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = github.approval_policy_file.clone();
-        let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         let rpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port);
@@ -203,10 +202,7 @@ impl BloomeryChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
 
-        // The driver owns the boot and drops it on the shutdown signal.
-        let driver = BloomeryDriverCapability { boot };
-
-        let built = Builder::<Self>::new(registry, mailer)
+        Builder::<Self>::new(registry, mailer)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
             // The single-writer control core (ADR-0149 §The control core): owns the
@@ -265,10 +261,15 @@ impl BloomeryChassis {
                 ..HttpServerConfig::default()
             })
             .with_actor::<BloomeryApiCapability>(ApiConfig { approval_policy_file })
-            .driver(driver)
-            .build()?;
+    }
 
-        Ok(built)
+    fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
+        let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
+        let builder = Self::compose(&boot, env);
+        // The driver owns the boot and drops it on the shutdown signal — it
+        // moves in here, after `compose` finished borrowing it.
+        let driver = BloomeryDriverCapability { boot };
+        builder.driver(driver).build()
     }
 }
 

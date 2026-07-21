@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     // chassis kind, linked caps, build provenance — as JSON, then exit
     // before boot (no winit event loop opened).
     if cli.describe {
-        println!("{}", serde_json::to_string(&DesktopChassis::describe_manifest())?);
+        println!("{}", serde_json::to_string(&DesktopChassis::describe_manifest()?)?);
         return Ok(());
     }
     let env = DesktopEnv::from_env_with_argv(cli)?;

@@ -11,6 +11,7 @@
 //! minimal RPC-only chassis, substrate-harness drives a loopback), so the
 //! helper module stays scoped to the two full-stack chassis.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io;
@@ -19,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::Addressable;
 use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLayer};
@@ -707,45 +707,25 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root })
 }
 
-/// The mailbox namespaces `with_common_caps` registers — the linked
-/// capabilities every full-stack chassis carries, for the `--describe`
-/// manifest (ADR-0115, issue 1953). Read straight off each cap type's
-/// `Addressable::NAMESPACE` const, so the values can't drift from what
-/// `with_common_caps` actually claims; the *membership* of this list must
-/// be kept in lockstep with the `.with_actor::<_>()` chain above (a cap
-/// added there must be added here). The renderer / window / lifecycle
-/// extras each chassis layers on top are appended by its own
-/// `cap_namespaces` helper.
-#[must_use]
-pub fn common_cap_namespaces() -> Vec<&'static str> {
-    vec![
-        <TraceDispatchCapability as Addressable>::NAMESPACE,
-        <InputCapability as Addressable>::NAMESPACE,
-        <ComponentHostCapability as Addressable>::NAMESPACE,
-        <FsCapability as Addressable>::NAMESPACE,
-        <TextCapability as Addressable>::NAMESPACE,
-        <InventoryCapability as Addressable>::NAMESPACE,
-        <HttpCapability as Addressable>::NAMESPACE,
-        <TcpCapability as Addressable>::NAMESPACE,
-        <GameGatewayCapability as Addressable>::NAMESPACE,
-        <AnthropicCapability as Addressable>::NAMESPACE,
-        <GeminiCapability as Addressable>::NAMESPACE,
-    ]
-}
-
 /// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,
-/// issue 1953): the chassis profile, the mailbox namespaces it links, and
-/// the build provenance `build.rs` baked into the bundle crate
+/// amended by ADR-0155): the chassis profile, the mailbox namespaces it
+/// claims, and the build provenance `build.rs` baked into this crate
 /// (`AETHER_GIT_SHA` / `AETHER_BUILD_PROFILE` / `AETHER_TARGET_TRIPLE`).
-/// The `env!`s resolve in this crate, where `build.rs` set them. Each
-/// chassis bin calls this on `--describe`, prints the JSON, and exits
-/// before boot — the hub's binary store forks `<binary> --describe` once
-/// at upload time to capture exactly this.
+/// The `env!`s resolve in this crate, where `build.rs` set them.
+///
+/// `caps` is the claim-derived namespace set the describe path reads off
+/// `Builder::claim_namespaces` — the same claim code a real boot runs over
+/// the composed `with_actor` chain, driver claims, and inline sinks — so
+/// there is no hand-maintained list to drift. The [`BTreeSet`] arrives
+/// sorted; the manifest's `caps` field preserves that order. Each chassis
+/// bin calls this on `--describe`, prints the JSON, and exits before boot
+/// — the hub's binary store forks `<binary> --describe` once at upload time
+/// to capture exactly this.
 #[must_use]
-pub fn binary_manifest(chassis: &str, caps: Vec<&'static str>) -> BinaryManifest {
+pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest {
     BinaryManifest {
         chassis: chassis.to_owned(),
-        caps: caps.into_iter().map(str::to_owned).collect(),
+        caps: caps.into_iter().collect(),
         git_sha: env!("AETHER_GIT_SHA").to_owned(),
         profile: env!("AETHER_BUILD_PROFILE").to_owned(),
         target: env!("AETHER_TARGET_TRIPLE").to_owned(),
@@ -1008,17 +988,6 @@ mod tests {
         {
             assert!(known.contains(key), "chassis_known_keys missing {key}");
         }
-    }
-
-    #[test]
-    fn common_manifest_includes_the_inert_game_gateway() {
-        use aether_actor::Addressable;
-        use aether_game::GameGatewayCapability;
-
-        assert!(
-            super::common_cap_namespaces().contains(&GameGatewayCapability::NAMESPACE),
-            "every common chassis must register and advertise the game gateway identity",
-        );
     }
 
     #[test]

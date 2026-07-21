@@ -1,6 +1,6 @@
 # ADR-0155: Staged Chassis Boot and Claim-Derived Describe
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-20
 
 ## Context
