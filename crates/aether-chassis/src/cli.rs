@@ -260,22 +260,26 @@ mod checkability_tests {
     #[test]
     fn derived_flag_help_carries_doc_env_and_default() {
         // Tripwire: the `#[derive(Config)]` overlay must forward the domain
-        // field's rustdoc summary and append the confique-resolved env key
-        // plus the declared default onto each flag's clap help (issue 3862).
-        // clap sees neither the env key (confique resolves it) nor the
-        // default (it lives on the Layer), so both ride the help text — a
-        // regression that dropped forwarding would leave a bare `--flag
-        // <FLAG>`. Walked through the same clap introspection a `--help`
-        // render uses, on the ms_duration flag that carries all three parts.
-        let help = HttpOverlay::augment_args(clap::Command::new("probe"))
+        // field's first rustdoc line and append the confique-resolved env
+        // key plus the declared default onto each flag's clap help, and
+        // stamp the ms_duration hint's typed value name (issue 3862). clap
+        // sees none of these on its own — env resolution is confique-side,
+        // the default lives on the Layer, and the value name would default
+        // to the id — so a regression that dropped the forwarding leaves a
+        // bare `--http-timeout-ms <http_timeout_ms>`. Walked through the
+        // same clap introspection a `--help` render uses.
+        let command = HttpOverlay::augment_args(clap::Command::new("probe"));
+        let arg = command
             .get_arguments()
             .find(|arg| arg.get_long() == Some("http-timeout-ms"))
-            .and_then(clap::Arg::get_help)
-            .map(ToString::to_string)
-            .expect("--http-timeout-ms is present and carries help");
+            .expect("--http-timeout-ms is present");
+        let help = arg.get_help().map(ToString::to_string).expect("flag carries help");
         assert!(help.contains("per-request timeout"), "domain rustdoc forwarded: {help}");
         assert!(help.contains("[env: AETHER_HTTP_TIMEOUT_MS]"), "resolved env key annotated: {help}");
-        assert!(help.contains("[default: 30_000]"), "declared default annotated: {help}");
+        assert!(help.contains("[default: 30000]"), "declared default annotated (separators stripped): {help}");
+        let value_names: Vec<String> =
+            arg.get_value_names().unwrap_or_default().iter().map(ToString::to_string).collect();
+        assert_eq!(value_names, ["MILLIS"], "ms_duration hint stamps the typed value name");
     }
 
     #[test]

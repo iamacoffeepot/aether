@@ -350,12 +350,25 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
 
     let resolved_parse = resolve_parse_env(&attr);
     let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), resolved_parse.as_ref());
-    // Per-flag `--help` text (issue 3862): the domain field's rustdoc
-    // summary followed by the confique-resolved env key and declared
-    // default. clap can't see either — env resolution is confique-side
-    // and the default lives on the Layer — so both are stated in the text.
+    // Per-flag `--help` text (issue 3862): the domain field's first
+    // rustdoc line — the consumer-grade summary under the first-line
+    // convention — followed by the confique-resolved env key and declared
+    // default. clap can't see either — env resolution is confique-side and
+    // the default lives on the Layer — so both are stated in the text.
     let overlay_help = build_overlay_help(&field.attrs, &env_key, attr.default.as_ref());
-    let overlay_attrs = build_overlay_attrs(&cli_id, &cli_long, is_bool, &overlay_help);
+    // Typed value placeholder from the hints the derive already resolved,
+    // so a flag reads `<MILLIS>` / `[<BOOL>]` / `<ITEMS>` instead of clap's
+    // id-derived `<http_timeout_ms>`. Unhinted fields keep clap's default.
+    let value_name = if attr.ms_duration {
+        Some("MILLIS")
+    } else if is_bool {
+        Some("BOOL")
+    } else if attr.csv_set {
+        Some("ITEMS")
+    } else {
+        None
+    };
+    let overlay_attrs = build_overlay_attrs(&cli_id, &cli_long, is_bool, value_name, &overlay_help);
 
     // Resolve the `from_layer` body shape (priority-ordered): the typed
     // shapes first, then the hint-driven coercions, then a plain move.
@@ -410,50 +423,58 @@ fn build_layer_attrs(env_key: &str, default: Option<&Expr>, parse: Option<&Path>
     quote! { #[config(#inner)] }
 }
 
-fn build_overlay_attrs(cli_id: &str, cli_long: &str, is_bool: bool, help: &str) -> TokenStream2 {
+fn build_overlay_attrs(
+    cli_id: &str,
+    cli_long: &str,
+    is_bool: bool,
+    value_name: Option<&str>,
+    help: &str,
+) -> TokenStream2 {
+    let value_name_attr = value_name.map(|name| quote! { , value_name = #name });
     if is_bool {
         quote! {
             #[arg(
                 id = #cli_id,
                 long = #cli_long,
-                help = #help,
+                help = #help
+                #value_name_attr,
                 num_args = 0..=1,
                 default_missing_value = "true"
             )]
         }
     } else {
         quote! {
-            #[arg(id = #cli_id, long = #cli_long, help = #help)]
+            #[arg(id = #cli_id, long = #cli_long, help = #help #value_name_attr)]
         }
     }
 }
 
 /// Assemble the overlay field's clap `help` string: the domain field's
-/// rustdoc summary (its first paragraph, newlines collapsed) followed by
-/// the confique-resolved env key and, where declared, the default. Both
-/// annotations are invisible to clap on their own — env resolution is
-/// confique-side and the default lives on the Layer field — so they ride
-/// the help text (issue 3862). Help/metadata only: resolution order and
-/// resolved values are untouched.
+/// first rustdoc line (the consumer-grade summary under the first-line
+/// convention) followed by the confique-resolved env key and, where
+/// declared, the default. Both annotations are invisible to clap on their
+/// own — env resolution is confique-side and the default lives on the
+/// Layer field — so they ride the help text (issue 3862). Help/metadata
+/// only: resolution order and resolved values are untouched.
 fn build_overlay_help(field_attrs: &[Attribute], env_key: &str, default: Option<&Expr>) -> String {
-    let mut help = doc_summary(field_attrs).unwrap_or_default();
+    use std::fmt::Write as _;
+
+    let mut help = first_doc_line(field_attrs).unwrap_or_default();
     if !help.is_empty() {
         help.push(' ');
     }
-    help.push_str(&format!("[env: {env_key}]"));
+    let _ = write!(help, "[env: {env_key}]");
     if let Some(default) = default {
-        help.push_str(&format!(" [default: {}]", quote!(#default)));
+        let _ = write!(help, " [default: {}]", render_default(default));
     }
     help
 }
 
-/// The first rustdoc paragraph of a field, trimmed per line and joined
-/// with single spaces — the same summary clap would derive from a doc
-/// comment it owned. Stops at the first blank doc line so only the lead
-/// sentence(s) become the flag description. `None` for an undocumented
-/// field.
-fn doc_summary(attrs: &[Attribute]) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
+/// The first non-empty rustdoc line of a field, trimmed. Under the
+/// first-line convention that lead line is the consumer-grade summary;
+/// the maintainer detail lives in the following paragraphs and stays out
+/// of `--help`. `None` for an undocumented field.
+fn first_doc_line(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
         if !attr.path().is_ident("doc") {
             continue;
@@ -466,15 +487,29 @@ fn doc_summary(attrs: &[Attribute]) -> Option<String> {
         };
         let line = s.value();
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if lines.is_empty() {
-                continue;
-            }
-            break;
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
-        lines.push(trimmed.to_string());
     }
-    (!lines.is_empty()).then(|| lines.join(" "))
+    None
+}
+
+/// Render a declared default for the `[default: …]` help annotation.
+/// Numeric literals drop their digit separators (`30_000` → `30000`) so
+/// the shown value matches what a user would type; strings keep their
+/// quotes (an empty-string default reads as `""`, not a blank); anything
+/// else falls back to its token text.
+fn render_default(default: &Expr) -> String {
+    if let Expr::Lit(syn::ExprLit { lit, .. }) = default {
+        match lit {
+            syn::Lit::Int(i) => return i.base10_digits().to_string(),
+            syn::Lit::Float(f) => return f.base10_digits().to_string(),
+            syn::Lit::Str(s) => return format!("\"{}\"", s.value()),
+            syn::Lit::Bool(b) => return b.value.to_string(),
+            _ => {}
+        }
+    }
+    quote!(#default).to_string()
 }
 
 /// Which `from_layer` body a field gets — resolved from its type +
