@@ -39,7 +39,7 @@ pub use boot::{
     with_hub_fleet_passthrough,
 };
 pub use tick::{DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, TickOverlay};
-pub use window::{WindowBoot, WindowConfig, WindowConfigLayer, WindowOverlay, parse_window_mode_env};
+pub use window::{WindowConfig, WindowConfigLayer, WindowOverlay, WindowSettings, parse_window_mode_env};
 
 /// Atomically advance `counter` and return the next non-zero id for
 /// synthetic chassis-root mail (ADR-0080 §6). Both the headless driver

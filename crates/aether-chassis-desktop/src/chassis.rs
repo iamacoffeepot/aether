@@ -36,7 +36,7 @@ use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::event_loop::EventLoop;
 
-use aether_chassis::{WindowBoot, WindowConfig};
+use aether_chassis::{WindowConfig, WindowSettings};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
@@ -174,7 +174,7 @@ pub struct DesktopEnv {
     /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
     /// `wireframe` reaches `Gpu::new` via `WireframeMode::from_config_value`,
     /// which owns the tri-state parse.
-    pub window: WindowBoot,
+    pub window: WindowSettings,
     /// The substrate runtime knobs (#3849), resolved off the source stack. Only
     /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
     /// the subscriber installs, in `DesktopChassis::build_inner`). The
@@ -315,9 +315,10 @@ impl DesktopEnv {
 
         // Window boot knobs: resolved through `WindowConfig` (argv > env >
         // default) and lowered as a unit. `lower` delegates the mode to
-        // `parse_window_mode_env` (soft-falling back to `Windowed` on a bad
-        // value) and maps `None` / empty title to `"aether"`.
-        let window = window_config.lower();
+        // `parse_window_mode_env` — a present-but-bad `AETHER_WINDOW_MODE`
+        // aborts boot via `ConfigError` (ADR-0090 §4), an absent value
+        // resolves to `Windowed` — and maps `None` / empty title to `"aether"`.
+        let window = window_config.lower()?;
 
         let workers = chassis_boot.to_workers();
 
@@ -465,7 +466,7 @@ impl DesktopChassis {
 
         // Driver-only / post-build fields, read out before `compose` consumes
         // `env`: the window boot knobs ride the desktop driver, the autoload
-        // list is drained after build. `WindowBoot` is `Clone` (not `Copy`);
+        // list is drained after build. `WindowSettings` is `Clone` (not `Copy`);
         // it is tiny, so the clone is free.
         let workers = env.workers;
         let window = env.window.clone();
