@@ -44,6 +44,32 @@ impl StdError for RunError {
 /// neither needs to cross threads.
 pub trait DriverCapability: 'static {
     type Running: DriverRunning;
+
+    /// ADR-0155 Claim-stage hook: reserve every mailbox/namespace this
+    /// driver owns as a driver-as-actor (ADR-0071 phase 3), using only
+    /// the driver *type* — no driver value, no runtime handles. This is
+    /// an associated function rather than a method precisely because the
+    /// desktop driver's winit `EventLoop` does not (and cannot) exist at
+    /// claim time: `--describe` captures the capability roster on a
+    /// headless host, so the hook must run without constructing the
+    /// driver. Claims land on the passed [`ChassisCtx`] the same way a
+    /// passive cap's claim does, so the driver's namespaces appear in the
+    /// claim-derived roster alongside the `with_actor` chain and inline
+    /// sinks. Called by
+    /// [`Builder::claim_namespaces`](crate::chassis::builder::Builder::claim_namespaces).
+    ///
+    /// Default: claims nothing. Headless, hub, and the passive
+    /// [`NeverDriver`] own no driver-as-actor mailbox; only the desktop
+    /// driver (which serves `aether.window`) overrides this. Moving
+    /// desktop's claim onto this hook is gated on splitting the claim's
+    /// registry reservation from the Start-stage inbox / `EventLoop`-proxy
+    /// wiring it currently fuses (the desktop Env split, ADR-0155 §4 /
+    /// issue #3834) and lands with that work.
+    fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        let _ = ctx;
+        Ok(())
+    }
+
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError>;
 }
 

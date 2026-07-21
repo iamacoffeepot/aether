@@ -2,6 +2,7 @@ use super::*;
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
+use crate::chassis::ctx::ChassisCtx;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry;
@@ -286,6 +287,112 @@ fn driver_build_runs_driver_and_tears_down_passives() {
 
     chassis.run().expect("driver run succeeds");
     assert!(ran.load(Ordering::SeqCst));
+}
+
+/// Test driver whose value-free ADR-0155 claim hook reserves a
+/// driver-as-actor mailbox (the shape the desktop driver's
+/// `aether.window` claim will take once the Env split lands). `boot` is
+/// never reached by the claim-only terminal — the driver value is never
+/// constructed.
+struct ClaimingDriver;
+struct ClaimingDriverRunning;
+
+impl DriverCapability for ClaimingDriver {
+    type Running = ClaimingDriverRunning;
+
+    fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        ctx.claim_mailbox_with_override("test.claim_only.window")?;
+        Ok(())
+    }
+
+    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        Ok(ClaimingDriverRunning)
+    }
+}
+
+impl DriverRunning for ClaimingDriverRunning {
+    fn run(self: Box<Self>) -> Result<(), RunError> {
+        Ok(())
+    }
+}
+
+/// ADR-0155 claim-only terminal: `claim_namespaces` reports exactly the
+/// namespaces the three registration contributors reserve — the
+/// `with_actor` chain, an inline sink registered directly on the shared
+/// registry, and the driver type's value-free claim hook — and runs ONLY
+/// the Claim stage, never advancing to Init (a cap's `init` side effect
+/// stays unfired). The un-fired `init` is the load-bearing proof that no
+/// OS resource is touched and no worker pool starts: Init is the first
+/// stage that touches OS resources (ADR-0155), and Start (dispatcher
+/// threads, the pool) is strictly after it in the fused boot path, so a
+/// terminal that stops before Init spawns no thread by construction.
+#[test]
+fn claim_namespaces_reports_all_contributors_and_skips_init() {
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    // A cap whose `init` increments a counter — the tripwire for "Claim
+    // ran, Init did not".
+    struct InitTripwireCap {
+        _init_count: Arc<AtomicU32>,
+    }
+    impl Addressable for InitTripwireCap {
+        const NAMESPACE: &'static str = "test.claim_only.init_tripwire";
+        type Resolver = aether_actor::One;
+    }
+    impl aether_actor::Lifecycle<Self> for InitTripwireCap {
+        type Config = Arc<AtomicU32>;
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+        fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            config.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Self { _init_count: config })
+        }
+    }
+    impl NativeActor for InitTripwireCap {
+        type State = Self;
+    }
+    impl Dispatch<Self> for InitTripwireCap {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let init_count = Arc::new(AtomicU32::new(0));
+
+    // Inline sink registered directly on the shared registry — the
+    // headless chassis's `aether.audio` fail-fast sink takes this path,
+    // outside the `with_actor` chain.
+    registry.register_inline("test.claim_only.inline_sink", Arc::new(|_dispatch: registry::MailDispatch<'_>| {}));
+
+    let claimed = Builder::<DrivenTestChassis<ClaimingDriver>>::new(registry, Arc::clone(&mailer))
+        .with_actor::<StubLog>(())
+        .with_actor::<InitTripwireCap>(Arc::clone(&init_count))
+        .claim_namespaces()
+        .expect("claim-only succeeds");
+
+    let expected: std::collections::BTreeSet<String> = [
+        "test.chassis_builder.stub_log",
+        "test.claim_only.init_tripwire",
+        "test.claim_only.inline_sink",
+        "test.claim_only.window",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(claimed, expected, "claim-only reports every claimed namespace and nothing else");
+
+    assert_eq!(
+        init_count.load(AtomicOrdering::SeqCst),
+        0,
+        "claim-only stops at Claim — no cap's init runs, so no OS resource is touched and no pool starts",
+    );
 }
 
 /// Boot-time mailbox-claim collision aborts the build (and runs

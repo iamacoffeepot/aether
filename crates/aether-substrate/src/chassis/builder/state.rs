@@ -1,9 +1,11 @@
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::boot_passives::boot_passives;
 use super::built::{BuiltChassis, PassiveChassis};
+use super::claim::claim_only;
 use super::driver::{DriverCapability, DriverCtx, DriverRunning};
 use super::native_actor_boot::NativeActorBoot;
 use super::passive_boot::{FallbackRouterBoot, PassiveBoot};
@@ -280,6 +282,33 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     pub fn with_teardown_cap(mut self, teardown_cap: Duration) -> Self {
         self.teardown_cap = teardown_cap;
         self
+    }
+
+    /// ADR-0155 claim-only terminal: run ONLY the Claim stage over every
+    /// composed passive plus the driver type's value-free claim hook, and
+    /// return the set of namespaces claimed on the registry — the
+    /// `with_actor` chain, the driver-as-actor claims
+    /// ([`DriverCapability::claim`]), and any inline sinks a chassis
+    /// registered directly on the shared registry.
+    ///
+    /// Nothing past Claim runs: no `init` (where a cap first touches OS
+    /// resources — filesystem roots, the audio device), no `wire`, no
+    /// dispatcher `spawn`, and no worker pool. Teardown is the plain drop
+    /// of the composed passives — no `cleanup_after_failure` walk, because
+    /// a claim-only application never acquires a runtime resource to
+    /// release. The driver type `C::Driver` is known from the chassis, so
+    /// this terminal needs no `driver(_)` value — describe composes the
+    /// `with_actor` chain and calls it in [`NoDriver`] state, never
+    /// constructing the driver.
+    ///
+    /// This is the seam ADR-0155's `--describe` capture reads: the roster
+    /// is derived from the same claim code a real boot runs, so no
+    /// hand-maintained capability list can drift from it. The describe
+    /// rewire that consumes this lands in a later slice.
+    pub fn claim_namespaces(self) -> Result<BTreeSet<String>, BootError> {
+        claim_only(&self.registry, &self.mailer, &self.aborter, self.ring_caps, self.passives, |ctx| {
+            <C::Driver as DriverCapability>::claim(ctx)
+        })
     }
 }
 

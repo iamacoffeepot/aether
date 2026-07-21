@@ -23,6 +23,7 @@
 
 mod boot_passives;
 mod built;
+mod claim;
 mod driver;
 mod native_actor_boot;
 mod passive_boot;
