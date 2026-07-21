@@ -68,9 +68,9 @@ pub(super) struct BootedPassives {
     settlement_registry: Arc<SettlementRegistry>,
     /// Issue #2509: cumulative patience the instanced-actor teardown
     /// close-done gate waits before declaring a slot wedged. Threaded from
-    /// [`Builder::with_teardown_cap`] and handed to
+    /// [`Builder::with_teardown_budget`] and handed to
     /// `Spawner::shutdown_instanced` in `Self::shutdown_in_place`.
-    teardown_cap: Duration,
+    teardown_budget: Duration,
 }
 
 impl BootedPassives {
@@ -97,13 +97,13 @@ impl BootedPassives {
         // cycle resolves well before it; a genuine wedge exhausts it
         // and aborts/panics).
         // Issue #2509: the cumulative cap is now the configured
-        // `teardown_cap` (default 300s, retunable via the shared
+        // `teardown_budget` (default 300s, retunable via the shared
         // `AETHER_SETTLEMENT_CAP_SECS` knob) rather than a hardcoded
         // 30s, so a healthy-but-slow close cycle on a saturated box is
         // never false-fired — the same starvation-vs-wedge fix #2062
         // gave the settlement gates, on the gate it scoped out. The 2s
         // round budget (the warn cadence) is unchanged.
-        self.spawner.shutdown_instanced(Duration::from_secs(2), self.teardown_cap);
+        self.spawner.shutdown_instanced(Duration::from_secs(2), self.teardown_budget);
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
@@ -122,7 +122,7 @@ impl Drop for BootedPassives {
 // boot ordering — leaving it as one function keeps the chassis boot
 // sequence readable in one place.
 #[allow(clippy::too_many_lines)]
-// Issue #2509 added the teardown-cap arg; boot_passives already carries
+// Issue #2509 added the teardown-budget arg; boot_passives already carries
 // the resolved chassis config values in argument position (mirroring the
 // `Builder` fields), so an extra `Duration` is the same shape.
 #[allow(clippy::too_many_arguments)]
@@ -131,9 +131,9 @@ pub(super) fn boot_passives(
     mailer: &Arc<Mailer>,
     aborter: &Arc<dyn FatalAborter>,
     workers: Option<usize>,
-    ring_caps: RingCapacities,
+    ring_capacities: RingCapacities,
     scheduler_tuning: SchedulerTuning,
-    teardown_cap: Duration,
+    teardown_budget: Duration,
     // ADR-0156 §5: the builder's config source stack (programmatic > argv >
     // env > file > default). The Pass 0 resolve loop resolves each passive's
     // cap `Config` off this ahead of Claim.
@@ -228,14 +228,14 @@ pub(super) fn boot_passives(
     // floor + growth ceiling explicitly to the same configured trace caps
     // the per-actor rings get. The ring is empty at boot, so resizing it
     // now is safe.
-    mailer.trace_handle().set_chassis_host_ring_capacity(ring_caps.trace, ring_caps.trace_max);
+    mailer.trace_handle().set_chassis_host_ring_capacity(ring_capacities.trace, ring_capacities.trace_max);
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
         Arc::clone(mailer),
         Arc::clone(aborter),
         pool.wake_sink(),
-        ring_caps,
+        ring_capacities,
     ));
     // Issue 697: multi-pass boot — claim → init → wire → spawn,
     // synchronized across all passives. Each pass below walks every
@@ -428,6 +428,6 @@ pub(super) fn boot_passives(
         spawner,
         _pool: pool,
         settlement_registry,
-        teardown_cap,
+        teardown_budget,
     })
 }

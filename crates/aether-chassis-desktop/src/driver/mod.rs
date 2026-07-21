@@ -151,26 +151,19 @@ pub struct App {
     pub(crate) started: Option<Instant>,
     pub(crate) frame: u64,
     occluded: bool,
-    /// Initial window mode, parsed from `AETHER_WINDOW_MODE` at boot
-    /// and applied when `resumed` creates the window. Kept so the
-    /// window attributes can reference it even when `resumed` fires
-    /// lazily (and for logging).
-    boot_mode: WindowMode,
-    /// Optional initial windowed size from `AETHER_WINDOW_MODE`.
-    /// Only consulted when `boot_mode == Windowed`.
-    boot_size: Option<(u32, u32)>,
-    /// Initial window title, parsed from `AETHER_WINDOW_TITLE` at
-    /// boot and applied when `resumed` creates the window. Runtime
-    /// `set_window_title` mail overrides this but doesn't update the
-    /// field — the current title lives on the `Window` itself.
-    boot_title: String,
-    /// Resolved `AETHER_WIREFRAME` config value, threaded to `Gpu::new`
-    /// when `resumed` creates the window. `WireframeMode::from_config_value`
-    /// owns the tri-state parse.
-    boot_wireframe: Option<String>,
+    /// Lowered window boot knobs (mode / size / title / wireframe), parsed
+    /// from `AETHER_WINDOW_MODE` / `AETHER_WINDOW_TITLE` / `AETHER_WIREFRAME`
+    /// at boot and applied when `resumed` creates the window. Kept so the
+    /// window attributes can reference the mode even when `resumed` fires
+    /// lazily (and for logging); the size is consulted only when the mode is
+    /// `Windowed`. Runtime `set_window_title` mail overrides the title but
+    /// doesn't update this field — the current title lives on the `Window`
+    /// itself. The wireframe value threads to `Gpu::new`, whose
+    /// `WireframeMode::from_config_value` owns the tri-state parse.
+    window_boot: aether_chassis::WindowBoot,
     /// Currently-applied window mode. Updated by `set_window_mode`
     /// and read by `platform_info`'s window-state field. Starts as
-    /// `boot_mode`.
+    /// `window_boot.mode`.
     current_mode: WindowMode,
     /// `aether.window` inbox claimed via `DriverCtx::claim_mailbox`
     /// at boot (issue 603 Phase 3). The driver is the cap — drained
@@ -556,11 +549,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let mut attrs = Window::default_attributes().with_title(&self.boot_title);
-        if let Some((w, h)) = self.boot_size {
+        let mut attrs = Window::default_attributes().with_title(&self.window_boot.title);
+        if let Some((w, h)) = self.window_boot.size {
             attrs = attrs.with_inner_size(PhysicalSize::new(w, h));
         }
-        match resolve_fullscreen(&self.boot_mode, event_loop.primary_monitor().as_ref()) {
+        match resolve_fullscreen(&self.window_boot.mode, event_loop.primary_monitor().as_ref()) {
             Ok(fs) => attrs = attrs.with_fullscreen(fs),
             Err(e) => {
                 tracing::warn!(
@@ -568,7 +561,7 @@ impl ApplicationHandler<UserEvent> for App {
                     error = %e,
                     "AETHER_WINDOW_MODE boot request rejected — falling back to Windowed",
                 );
-                self.boot_mode = WindowMode::Windowed;
+                self.window_boot.mode = WindowMode::Windowed;
                 self.current_mode = WindowMode::Windowed;
             }
         }
@@ -579,7 +572,8 @@ impl ApplicationHandler<UserEvent> for App {
         // placement (`set_ime_cursor_area`) is deferred — its absence only
         // floats the IME popup at a default position.
         window.set_ime_allowed(true);
-        self.gpu = Some(Gpu::new(Arc::clone(&window), self.render_handles.clone(), self.boot_wireframe.as_deref()));
+        self.gpu =
+            Some(Gpu::new(Arc::clone(&window), self.render_handles.clone(), self.window_boot.wireframe.as_deref()));
         window.request_redraw();
         let initial_size = window.inner_size();
         self.window = Some(window);
@@ -962,10 +956,10 @@ pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
     pub capture_queue: CaptureQueue,
-    pub boot_mode: WindowMode,
-    pub boot_size: Option<(u32, u32)>,
-    pub boot_title: String,
-    pub boot_wireframe: Option<String>,
+    /// Lowered window boot knobs (mode / size / title / wireframe), threaded
+    /// from `DesktopEnv` as a unit and applied when `resumed` creates the
+    /// window.
+    pub window: aether_chassis::WindowBoot,
 }
 
 pub struct DesktopDriverRunning {
@@ -1008,7 +1002,7 @@ impl DriverCapability for DesktopDriverCapability {
     // splitting would just pass the same dozen fields through a helper.
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { event_loop, boot, capture_queue, boot_mode, boot_size, boot_title, boot_wireframe } = self;
+        let Self { event_loop, boot, capture_queue, window } = self;
 
         // Issue 629 / Phase A: render publishes its `RenderHandles`
         // bundle on the chassis's `ExportedHandles` map during `init`.
@@ -1141,11 +1135,8 @@ impl DriverCapability for DesktopDriverCapability {
             started: None,
             frame: 0,
             occluded: false,
-            boot_mode: boot_mode.clone(),
-            boot_size,
-            boot_title,
-            boot_wireframe,
-            current_mode: boot_mode,
+            current_mode: window.mode.clone(),
+            window_boot: window,
             window_inbox: window_claim.inbox,
             actor_slots: window_claim.actor_slots,
             window_mailbox: window_claim.id,

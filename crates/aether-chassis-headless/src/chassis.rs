@@ -26,7 +26,7 @@ use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
-use aether_http::{HttpConfig as HttpConf, HttpServerCapability, HttpServerConfig};
+use aether_http::{HttpConfig, HttpServerCapability, HttpServerConfig};
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
 use aether_lifecycle::{LifecycleCapability, LifecycleConfig};
@@ -88,7 +88,7 @@ impl HeadlessChassis {
     /// substrate boot, or the claim pass fails.
     pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
         let env = HeadlessEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         let caps = Self::compose(&boot, env).claim_namespaces()?;
         Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
@@ -105,7 +105,7 @@ impl HeadlessChassis {
     /// Returns [`BootError`] when config resolution or substrate boot fails.
     pub fn config_manifest() -> Result<ConfigManifest, BootError> {
         let env = HeadlessEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         Ok(Self::compose(&boot, env).config_manifest())
     }
 
@@ -147,7 +147,7 @@ pub struct HeadlessEnv {
     /// the subscriber installs, in `HeadlessChassis::build_inner`); the field
     /// carries the whole resolved member so its `[runtime]` file / env values
     /// are resolved once. `aether.rpc.server`'s bind port rides the source stack
-    /// too now (`RpcServerConfig`), so there is no separate `rpc_addr` field —
+    /// too now (`RpcServerConfig`), so there is no separate `rpc_address` field —
     /// the builder resolves it (unset → claimed but unbound, ADR-0155 §3).
     pub runtime: RuntimeConfig,
     /// Issue 745: optional worker-pool size override. Populated from
@@ -158,7 +158,7 @@ pub struct HeadlessEnv {
     /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
     /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
     /// [`RingCapacities::default`] (the `aether-actor` const caps).
-    pub ring_caps: RingCapacities,
+    pub ring_capacities: RingCapacities,
     /// Issue 2485: scheduler hot-path tuning resolved from the
     /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
     /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
@@ -167,7 +167,7 @@ pub struct HeadlessEnv {
     /// Issue #2509: cumulative patience for the instanced-actor teardown
     /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
     /// `[settlement]`.
-    pub teardown_cap: Duration,
+    pub teardown_budget: Duration,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the components come up with no hub; the normal
     /// headless bin leaves it empty and loads components over the hub instead.
@@ -233,7 +233,7 @@ impl HeadlessEnv {
         // identity comes from each member's `ConfigMember` declaration, so no
         // chassis-side section string survives.
         let mut sources = ConfigSources::new(config_file);
-        sources.set_argv::<HttpConf>(http.into_layer());
+        sources.set_argv::<HttpConfig>(http.into_layer());
         sources.set_argv::<HttpServerConfig>(http_server_overlay.into_layer());
         sources.set_argv::<NamespaceRoots>(fs.into_layer());
         sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
@@ -257,9 +257,9 @@ impl HeadlessEnv {
         // Tick cadence: resolved through `TickConfig` (argv > env > default).
         // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
         let tick_period = sources.resolve::<TickConfig>()?.to_tick_period();
-        let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
+        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
-        let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
+        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
         // #3849: resolve the substrate runtime knobs (log filter + panic-hook
         // knobs) off the same stack. `build_inner` re-applies `log_filter` once
         // the subscriber is installed; the panic-hook knobs are declared members
@@ -287,9 +287,9 @@ impl HeadlessEnv {
             tick_period,
             runtime,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
-            teardown_cap,
+            teardown_budget,
             autoload,
         })
     }
@@ -316,9 +316,9 @@ impl HeadlessChassis {
             namespace_roots,
             contentgen,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
-            teardown_cap,
+            teardown_budget,
             tick_period: _,
             runtime: _,
             autoload: _,
@@ -376,12 +376,12 @@ impl HeadlessChassis {
         let common = CommonBoot {
             aborter,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
             // Issue #2509: the instanced-actor teardown gate honors the
             // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
             // `0 → wait forever` sentinel) as the settlement gates.
-            teardown_cap,
+            teardown_budget,
             component_host_params,
             namespace_roots,
             contentgen,
@@ -409,7 +409,7 @@ impl HeadlessChassis {
     /// timer in a [`HeadlessTimerDriverCapability`] and hand it to the
     /// builder.
     fn build_inner(mut env: HeadlessEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::builder().build()?;
+        let boot = SubstrateBoot::build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
@@ -423,7 +423,7 @@ impl HeadlessChassis {
         // drained after build. The `Copy` knobs also feed the boot log line.
         let tick_period = env.tick_period;
         let workers = env.workers;
-        let ring_caps = env.ring_caps;
+        let ring_capacities = env.ring_capacities;
         let autoload = mem::take(&mut env.autoload);
 
         // Tick rates are bounded well below `u32::MAX` Hz (typically
@@ -434,9 +434,9 @@ impl HeadlessChassis {
             target: "aether_substrate::boot",
             workers_override = ?workers,
             tick_hz = tick_hz,
-            log_ring_capacity = ring_caps.log,
-            trace_ring_capacity = ring_caps.trace,
-            trace_ring_max_capacity = ring_caps.trace_max,
+            log_ring_capacity = ring_capacities.log,
+            trace_ring_capacity = ring_capacities.trace,
+            trace_ring_max_capacity = ring_capacities.trace_max,
             "componentless boot — load a component via aether.component.load",
         );
 

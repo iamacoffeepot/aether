@@ -338,15 +338,15 @@ impl RenderSizeConfig {
 }
 
 /// Issue #2509: resolve the instanced-actor teardown close-done gate's
-/// cumulative-patience cap from the shared `AETHER_SETTLEMENT_CAP_SECS`
+/// cumulative-patience budget from the shared `AETHER_SETTLEMENT_CAP_SECS`
 /// knob (`SettlementConfig::to_cap`, including its `0 → Duration::MAX`
 /// "wait forever" sentinel). Each chassis threads the result into the
-/// substrate `Builder` via `with_teardown_cap`, so one knob covers both
+/// substrate `Builder` via `with_teardown_budget`, so one knob covers both
 /// the settlement gates and the teardown gate. A crate-root re-export
 /// keeps it reachable from the chassis bins (which cannot see the private
 /// `SettlementConfig`).
 #[must_use]
-pub fn resolve_teardown_cap() -> Duration {
+pub fn resolve_teardown_budget() -> Duration {
     SettlementConfig::from_env().to_cap()
 }
 
@@ -581,7 +581,7 @@ pub struct CommonBoot {
     pub workers: Option<usize>,
     /// Issue 1990: per-actor ring capacities, resolved from the
     /// `ActorRingConfig` derive-`Config` knob in the chassis main.
-    pub ring_caps: RingCapacities,
+    pub ring_capacities: RingCapacities,
     /// Issue 2485: scheduler hot-path tuning, resolved from the
     /// `SchedulerTuningConfig` derive-`Config` knob in the chassis main.
     pub scheduler_tuning: SchedulerTuning,
@@ -589,8 +589,8 @@ pub struct CommonBoot {
     /// close-done gate, resolved from the same `SettlementConfig`
     /// (`AETHER_SETTLEMENT_CAP_SECS`) knob the settlement gates read (via
     /// [`SettlementConfig::to_cap`]), so one knob covers both. Threaded
-    /// into the `Builder` via `with_teardown_cap`.
-    pub teardown_cap: Duration,
+    /// into the `Builder` via `with_teardown_budget`.
+    pub teardown_budget: Duration,
     /// Composer-supplied wasmtime / egress handles for the component host
     /// cap (ADR-0156 §3 `Params`); the cap's `Config` is `()`.
     pub component_host_params: ComponentHostParams,
@@ -637,13 +637,13 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
-        .with_ring_caps(boot.ring_caps)
+        .with_ring_capacities(boot.ring_capacities)
         .with_scheduler_tuning(boot.scheduler_tuning)
-        .with_teardown_cap(boot.teardown_cap)
+        .with_teardown_budget(boot.teardown_budget)
         // ADR-0156 §4: the chassis-declared non-cap members — knobs that
         // configure the shared base rather than any single cap, so they ride
-        // the dedicated builder seams above (`with_workers` / `with_ring_caps`
-        // / `with_scheduler_tuning` / `with_teardown_cap`) instead of a
+        // the dedicated builder seams above (`with_workers` / `with_ring_capacities`
+        // / `with_scheduler_tuning` / `with_teardown_budget`) instead of a
         // `with_actor` entry, and declare their aggregate membership here.
         // `ContentGenConfig` joins them: its `AETHER_GEN_DIR` staging knob is
         // folded into `GeminiParams::gen_root` below rather than composed as a

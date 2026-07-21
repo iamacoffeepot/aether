@@ -161,9 +161,9 @@ where
         // configured capacities, read off the shared `Spawner` (the
         // single source). Mirrors the instanced spawn funnel in
         // `Spawner::spawn_actor`.
-        let ring_caps = ctx.spawner_arc().ring_caps();
-        slots.seed(ActorLogRing::with_capacity(ring_caps.log));
-        slots.seed(ActorTraceRing::with_growth(ring_caps.trace, ring_caps.trace_max));
+        let ring_capacities = ctx.spawner_arc().ring_capacities();
+        slots.seed(ActorLogRing::with_capacity(ring_capacities.log));
+        slots.seed(ActorTraceRing::with_growth(ring_capacities.trace, ring_capacities.trace_max));
 
         self.state = BootState::Claimed {
             resources: ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots },

@@ -22,12 +22,12 @@ use aether_kinds::WindowMode;
 pub struct WindowConfig {
     /// `AETHER_WINDOW_MODE=<value>` desktop window mode at boot:
     /// `windowed[:WxH]` / `fullscreen-borderless` / `exclusive:WxH@HZ`.
-    /// Lowered via [`Self::to_boot_mode`] which delegates to
+    /// Lowered via [`Self::lower`] which delegates to
     /// [`parse_window_mode_env`] and soft-falls back to `Windowed` on
     /// a bad value (keeping the pre-migration behaviour).
     pub mode: Option<String>,
     /// `AETHER_WINDOW_TITLE=<text>` desktop window title at boot.
-    /// Lowered via [`Self::to_boot_title`]; empty / unset → `"aether"`.
+    /// Lowered via [`Self::lower`]; empty / unset → `"aether"`.
     pub title: Option<String>,
     /// `AETHER_WIREFRAME=<value>` desktop GPU wireframe mode at boot:
     /// `off` (default) / `line` / `overlay`. The env key is pinned back
@@ -40,34 +40,51 @@ pub struct WindowConfig {
     pub wireframe: Option<String>,
 }
 
-impl WindowConfig {
-    /// Lower `mode` to the `(WindowMode, Option<(u32, u32)>)` pair the
-    /// chassis threads into `DesktopEnv`. Delegates to
-    /// [`parse_window_mode_env`]; a bad value warn-logs and falls back
-    /// to `Windowed`, preserving the pre-migration soft-fallback
-    /// behaviour for `AETHER_WINDOW_MODE`.
-    #[must_use]
-    pub fn to_boot_mode(&self) -> (WindowMode, Option<(u32, u32)>) {
-        self.mode.as_ref().map_or((WindowMode::Windowed, None), |s| match parse_window_mode_env(s) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::boot",
-                    value = %s,
-                    error = %e,
-                    "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
-                );
-                (WindowMode::Windowed, None)
-            }
-        })
-    }
+/// Lowered desktop window boot knobs — the unit `DesktopEnv.window` carries
+/// and the chassis threads to the desktop driver and the bundle bins.
+/// Mirrors the other embedded knob groups (`RingCapacities`,
+/// `SchedulerTuning`, `RenderTuningConfig`) rather than riding as loose
+/// fields. Produced by [`WindowConfig::lower`].
+#[derive(Clone, Debug)]
+pub struct WindowBoot {
+    /// Desktop window mode at boot, lowered from `WindowConfig::mode`.
+    pub mode: WindowMode,
+    /// Initial windowed size (`Some` only for a `windowed:WxH` mode).
+    pub size: Option<(u32, u32)>,
+    /// Window title at boot; `"aether"` when unset or empty.
+    pub title: String,
+    /// Resolved `AETHER_WIREFRAME` config value, threaded verbatim to the
+    /// desktop render driver's `WireframeMode::from_config_value`.
+    pub wireframe: Option<String>,
+}
 
-    /// Lower `title` to the boot title string. `None` (unset or empty —
-    /// the derive's `Option<String>` filters empty → `None`) maps to
-    /// `"aether"`; a provided value passes through verbatim.
+impl WindowConfig {
+    /// Lower the resolved window knobs into the [`WindowBoot`] unit the
+    /// chassis threads into `DesktopEnv`. Subsumes the mode + title lowering:
+    /// `mode` delegates to [`parse_window_mode_env`], warn-logging and
+    /// falling back to `Windowed` on a bad value (preserving the
+    /// pre-migration soft-fallback for `AETHER_WINDOW_MODE`); `title`
+    /// maps `None` (unset or empty — the derive filters empty → `None`) to
+    /// `"aether"` and passes a provided value through verbatim; `wireframe`
+    /// rides through unchanged.
     #[must_use]
-    pub fn to_boot_title(&self) -> String {
-        self.title.clone().unwrap_or_else(|| "aether".to_owned())
+    pub fn lower(self) -> WindowBoot {
+        let (mode, size) =
+            self.mode.as_ref().map_or((WindowMode::Windowed, None), |s| match parse_window_mode_env(s) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::boot",
+                        value = %s,
+                        error = %e,
+                        "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
+                    );
+                    (WindowMode::Windowed, None)
+                }
+            });
+        let title = self.title.unwrap_or_else(|| "aether".to_owned());
+
+        WindowBoot { mode, size, title, wireframe: self.wireframe }
     }
 }
 
@@ -112,16 +129,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn to_boot_title_none_returns_default() {
+    fn lower_title_none_returns_default() {
         // Unset title → "aether" default.
-        assert_eq!(WindowConfig::default().to_boot_title(), "aether");
+        assert_eq!(WindowConfig::default().lower().title, "aether");
     }
 
     #[test]
-    fn to_boot_title_some_returns_value() {
+    fn lower_title_some_returns_value() {
         // Provided title passes through verbatim.
         let cfg = WindowConfig { mode: None, title: Some("my game".to_owned()), wireframe: None };
-        assert_eq!(cfg.to_boot_title(), "my game");
+        assert_eq!(cfg.lower().title, "my game");
     }
 
     #[test]

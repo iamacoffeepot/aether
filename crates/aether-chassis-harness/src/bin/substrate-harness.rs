@@ -33,7 +33,7 @@ use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail
 /// before this cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 use aether_chassis::next_chassis_correlation;
-use aether_chassis::{RenderSizeConfig, resolve_teardown_cap};
+use aether_chassis::{RenderSizeConfig, resolve_teardown_budget};
 use aether_harness_substrate::{
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
     events::{self, ChassisEvent},
@@ -52,9 +52,9 @@ fn main() -> anyhow::Result<()> {
         workers: WORKERS,
         pool_workers: None,
         // Issue 1990: the standalone substrate-harness binary keeps the default
-        // ring caps; the in-process `SubstrateHarness` builder is the surface
+        // ring capacities; the in-process `SubstrateHarness` builder is the surface
         // for tuning them (per-harness, no process env).
-        ring_caps: aether_substrate::RingCapacities::default(),
+        ring_capacities: aether_substrate::RingCapacities::default(),
         // Issue 2485: the standalone binary keeps the built-in scheduler
         // tuning (per-harness, no process env).
         scheduler_tuning: aether_substrate::SchedulerTuning::default(),
@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
         // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including
         // the `0 → wait forever` sentinel) — the same knob the settlement
         // gates read.
-        teardown_cap: resolve_teardown_cap(),
+        teardown_budget: resolve_teardown_budget(),
     };
 
     let SubstrateHarnessBuild { passive, boot, kind_tick } = SubstrateHarnessChassis::build_passive(env)?;

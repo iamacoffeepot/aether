@@ -624,7 +624,7 @@ impl ConfigMember for () {
 /// The composition-derived chassis config aggregate (ADR-0156 §4): the
 /// union of every composed cap's [`ConfigMember`] declaration, the driver's,
 /// and the chassis-declared non-cap members (workers / ring capacities /
-/// scheduler tuning / teardown cap), assembled by
+/// scheduler tuning / teardown budget), assembled by
 /// [`Builder::config_manifest`](crate::chassis::builder::Builder::config_manifest).
 /// The known-keys sweep and `--print-config` dump read this walk instead of a
 /// hand-maintained registry, so a chassis knows exactly the knobs it composes
@@ -846,7 +846,7 @@ impl ConfigSources {
     /// Resolve member `C` off the stack. Sugar for
     /// [`ConfigMember::resolve`] so a chassis can read a driver-only or
     /// chassis-declared member's resolved value (tick period, window mode,
-    /// workers, ring caps) from the same stack the builder resolves cap
+    /// workers, ring capacities) from the same stack the builder resolves cap
     /// configs against — one resolution path, no chassis-side sections.
     ///
     /// # Errors

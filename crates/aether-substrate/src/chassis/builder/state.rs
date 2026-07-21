@@ -64,14 +64,14 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
 const PASSIVE_DEFAULT_WORKERS: usize = 2;
 
 /// Default cumulative patience for the instanced-actor teardown
-/// close-done gate ([`Builder::with_teardown_cap`]) when no override is
+/// close-done gate ([`Builder::with_teardown_budget`]) when no override is
 /// set. Five minutes — matches the settlement gates'
 /// `DEFAULT_SETTLEMENT_CAP_SECS` (300s): the generous backstop #2062
 /// introduced so a healthy-but-slow close cycle on a saturated box is
 /// never declared wedged (issue #2509). The constant survives only as
 /// the default; the durable retune is the `AETHER_SETTLEMENT_CAP_SECS`
 /// knob the production chassis thread in.
-const DEFAULT_TEARDOWN_CAP: Duration = Duration::from_mins(5);
+const DEFAULT_TEARDOWN_BUDGET: Duration = Duration::from_mins(5);
 
 /// Declarative chassis builder, parametric over the chassis kind `C`
 /// and a type-state `S` tracking whether a driver has been supplied.
@@ -98,7 +98,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// tests / `SubstrateHarness` leave it [`RingCapacities::default`]. Threaded
     /// into the `Spawner` (instanced spawns) + the cap-claim slot path
     /// (singleton caps) + the chassis-host trace ring at boot.
-    ring_caps: RingCapacities,
+    ring_capacities: RingCapacities,
     /// Scheduler hot-path tuning installed into the scheduler's
     /// process-global immediately before `Pool::start` in `boot_passives`.
     /// Production chassis mains populate this from the bundle-side
@@ -108,18 +108,18 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// Issue #2509: cumulative patience the instanced-actor teardown
     /// close-done gate (`Spawner::shutdown_instanced`) waits before
     /// declaring a slot wedged. Defaults to the generous 300s backstop
-    /// (`DEFAULT_TEARDOWN_CAP`) — the settlement-cap analogue #2062
+    /// (`DEFAULT_TEARDOWN_BUDGET`) — the settlement-cap analogue #2062
     /// scoped out — so a healthy-but-slow close cycle on a saturated box
     /// is never false-fired. Production chassis mains populate this from
     /// the same `AETHER_SETTLEMENT_CAP_SECS` knob the settlement gates
     /// read (via `SettlementConfig::to_cap`, including its `0 → MAX`
     /// sentinel); tests / `SubstrateHarness` inherit the default.
-    teardown_cap: Duration,
+    teardown_budget: Duration,
     /// ADR-0156 §4: the composition-derived config aggregate accumulator.
     /// [`Self::with_actor`] pushes each composed cap's [`ConfigMember`]
     /// declaration (type-level — the config *value* is never read here) and
     /// [`Self::with_config_member`] pushes the chassis-declared non-cap
-    /// members (workers / ring capacities / scheduler tuning / teardown cap);
+    /// members (workers / ring capacities / scheduler tuning / teardown budget);
     /// [`Self::config_manifest`] reads it plus the driver's members.
     config_members: Vec<ConfigMemberRecord>,
     /// ADR-0156 §5: the builder's config source stack (programmatic > argv >
@@ -154,9 +154,9 @@ impl<C: Chassis> Builder<C, NoDriver> {
             driver: None,
             aborter: Arc::new(PanicAborter),
             workers: None,
-            ring_caps: RingCapacities::default(),
+            ring_capacities: RingCapacities::default(),
             scheduler_tuning: SchedulerTuning::default(),
-            teardown_cap: DEFAULT_TEARDOWN_CAP,
+            teardown_budget: DEFAULT_TEARDOWN_BUDGET,
             config_members: Vec::new(),
             config_sources: ConfigSources::default(),
             composed_config_types: HashSet::new(),
@@ -190,9 +190,9 @@ impl<C: Chassis> Builder<C, NoDriver> {
             driver: self.driver,
             aborter: self.aborter,
             workers: self.workers,
-            ring_caps: self.ring_caps,
+            ring_capacities: self.ring_capacities,
             scheduler_tuning: self.scheduler_tuning,
-            teardown_cap: self.teardown_cap,
+            teardown_budget: self.teardown_budget,
             config_members: self.config_members,
             config_sources: self.config_sources,
             composed_config_types: self.composed_config_types,
@@ -230,9 +230,9 @@ impl<C: Chassis> Builder<C, NoDriver> {
             &self.mailer,
             &self.aborter,
             workers,
-            self.ring_caps,
+            self.ring_capacities,
             self.scheduler_tuning,
-            self.teardown_cap,
+            self.teardown_budget,
             &mut config_sources,
             self.passives,
             <C::Driver as DriverCapability>::claim,
@@ -328,9 +328,9 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// Declare a non-cap config member on the aggregate (ADR-0156 §4): the
     /// chassis-wide knobs resolved outside the `with_actor` chain and threaded
     /// through the dedicated builder seams — workers / boot manifest
-    /// (`ChassisBootConfig`), ring capacities ([`Self::with_ring_caps`]),
-    /// scheduler tuning ([`Self::with_scheduler_tuning`]), teardown cap
-    /// ([`Self::with_teardown_cap`]) — plus the hub's declared fleet
+    /// (`ChassisBootConfig`), ring capacities ([`Self::with_ring_capacities`]),
+    /// scheduler tuning ([`Self::with_scheduler_tuning`]), teardown budget
+    /// ([`Self::with_teardown_budget`]) — plus the hub's declared fleet
     /// pass-through set. These configure the shared base rather than any
     /// single cap, so they have no `with_actor` entry to ride; this is the
     /// smallest seam that folds their section + `META` into the same walk.
@@ -384,8 +384,8 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// `RingCapacities` here; the caps thread into every spawned actor's
     /// rings and the chassis-host trace ring at boot.
     #[must_use]
-    pub fn with_ring_caps(mut self, ring_caps: RingCapacities) -> Self {
-        self.ring_caps = ring_caps;
+    pub fn with_ring_capacities(mut self, ring_capacities: RingCapacities) -> Self {
+        self.ring_capacities = ring_capacities;
         self
     }
 
@@ -402,7 +402,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     }
 
     /// Issue #2509: override the instanced-actor teardown close-done
-    /// gate's cumulative patience cap. Default is `DEFAULT_TEARDOWN_CAP`
+    /// gate's cumulative patience cap. Default is `DEFAULT_TEARDOWN_BUDGET`
     /// (the 300s backstop). Production chassis mains resolve the shared
     /// `AETHER_SETTLEMENT_CAP_SECS` knob (`SettlementConfig::to_cap`,
     /// including its `0 → Duration::MAX` "wait forever" sentinel) and pass
@@ -411,8 +411,8 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// `BootedPassives`, whose `shutdown_in_place` hands it to
     /// `Spawner::shutdown_instanced`.
     #[must_use]
-    pub fn with_teardown_cap(mut self, teardown_cap: Duration) -> Self {
-        self.teardown_cap = teardown_cap;
+    pub fn with_teardown_budget(mut self, teardown_budget: Duration) -> Self {
+        self.teardown_budget = teardown_budget;
         self
     }
 
@@ -441,7 +441,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         // ADR-0156 §5: the same override coherence check the build path runs —
         // a staged-but-never-composed override is a fault at claim time too.
         self.validate_config_overrides()?;
-        claim_only(&self.registry, &self.mailer, &self.aborter, self.ring_caps, self.passives, |ctx| {
+        claim_only(&self.registry, &self.mailer, &self.aborter, self.ring_capacities, self.passives, |ctx| {
             <C::Driver as DriverCapability>::claim(ctx)
         })
     }
@@ -502,9 +502,9 @@ impl<C: Chassis> Builder<C, HasDriver> {
             driver,
             aborter,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
-            teardown_cap,
+            teardown_budget,
             config_sources: mut sources,
             ..
         } = self;
@@ -519,9 +519,9 @@ impl<C: Chassis> Builder<C, HasDriver> {
             &mailer,
             &aborter,
             workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning,
-            teardown_cap,
+            teardown_budget,
             &mut sources,
             passives,
             <C::Driver as DriverCapability>::claim,

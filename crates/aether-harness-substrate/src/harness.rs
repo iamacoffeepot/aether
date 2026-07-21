@@ -284,8 +284,8 @@ impl SubstrateHarnessBuilder {
         self
     }
 
-    /// Override the ADR-0041 namespace roots. Forwarded to
-    /// `SubstrateBootBuilder::namespace_roots` at boot, so the
+    /// Override the ADR-0041 namespace roots. Forwarded to the harness
+    /// chassis's `aether.fs` roots at boot, so the
     /// `aether.fs` adapter wired by the harness resolves
     /// `save://` / `assets://` / `config://` against these paths
     /// instead of [`NamespaceRoots::from_env`].
@@ -414,7 +414,7 @@ impl SubstrateHarnessBuilder {
     }
 
     /// Boot the harness. Overrides applied via the builder methods flow
-    /// through to `SubstrateBoot::builder` and the chassis-side sink
+    /// through to `SubstrateBoot::build` and the chassis-side sink
     /// wiring; the composed cap set is exactly the basics plus what the
     /// builder chain added.
     pub fn build(self) -> Result<SubstrateHarness, SubstrateHarnessError> {
@@ -474,7 +474,7 @@ impl SubstrateHarness {
         // `ActorRingConfig`.)
         let default = RingCapacities::default();
         let trace = trace_ring_capacity.unwrap_or(default.trace);
-        let ring_caps = RingCapacities {
+        let ring_capacities = RingCapacities {
             log: log_ring_capacity.unwrap_or(default.log),
             trace,
             trace_max: trace_ring_max_capacity.unwrap_or(trace),
@@ -495,7 +495,7 @@ impl SubstrateHarness {
         let env = SubstrateHarnessEnv {
             workers: WORKERS,
             pool_workers,
-            ring_caps,
+            ring_capacities,
             scheduler_tuning: SchedulerTuning::default(),
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
@@ -507,7 +507,7 @@ impl SubstrateHarness {
             // Issue #2509: the teardown gate honors the same resolved cap
             // (env knob or programmatic override) as the settlement-await
             // loops the harness stores this value for.
-            teardown_cap: settlement_cap,
+            teardown_budget: settlement_cap,
         };
         let SubstrateHarnessBuild { passive, boot, kind_tick } =
             SubstrateHarnessChassis::build_passive(env).map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;

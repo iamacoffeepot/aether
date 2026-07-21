@@ -28,13 +28,13 @@ fn main() -> anyhow::Result<()> {
     // embedded components.
     let mut env = DesktopEnv::from_env()?;
     if let Some(title) = pack.chassis.title {
-        env.boot_title = title;
+        env.window.title = title;
     }
     if let Some(spec) = pack.chassis.window_mode {
         let (mode, size) = parse_window_mode_env(&spec)
             .map_err(|e| anyhow::anyhow!("bundle pack window_mode {spec:?} unparseable: {e}"))?;
-        env.boot_mode = mode;
-        env.boot_size = size;
+        env.window.mode = mode;
+        env.window.size = size;
     }
     if pack.chassis.tick_hz.is_some() {
         tracing::warn!(

@@ -39,12 +39,12 @@ pub(super) fn claim_only(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
     aborter: &Arc<dyn FatalAborter>,
-    ring_caps: RingCapacities,
+    ring_capacities: RingCapacities,
     mut passives: Vec<Box<dyn PassiveBoot>>,
     driver_claim: impl FnOnce(&mut ChassisCtx<'_>) -> Result<(), BootError>,
 ) -> Result<BTreeSet<String>, BootError> {
     // The claim path reaches the `Spawner` through `ChassisCtx::spawner_arc`
-    // (namespace ownership claim + per-actor ring caps + per-cap transport
+    // (namespace ownership claim + per-actor ring capacities + per-cap transport
     // construction). A detached wake sink lets us build that `Spawner`
     // without `Pool::start` spawning any worker thread — the Claim stage
     // never schedules a dispatcher slot, so the sink is never drained.
@@ -55,7 +55,7 @@ pub(super) fn claim_only(
         Arc::clone(mailer),
         Arc::clone(aborter),
         WakeSink::detached(),
-        ring_caps,
+        ring_capacities,
     ));
 
     let mut fallback: Option<FallbackRouter> = None;
