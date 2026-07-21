@@ -42,7 +42,7 @@ pub use wire::*;
 
 pub use server::RpcServerCapability;
 #[cfg(not(target_family = "wasm"))]
-pub use server::{RpcServerConfig, RpcServerParams};
+pub use server::{RpcServerConfig, RpcServerConfigLayer, RpcServerOverlay, RpcServerParams};
 // `RpcServerHandle` is a live-server boot artifact (published only inside
 // runtime `init`); chassis and test builds read the bound port off it.
 pub use server::RpcServerHandle;

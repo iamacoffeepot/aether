@@ -14,7 +14,6 @@
 //! issue 603 §F2 revives the per-domain shape.
 
 use std::mem;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,9 +41,9 @@ use aether_chassis::TickConfig;
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, SettlementConfig, chassis_residual_knobs,
-    install_frame_size, load_chassis_config, rpc_port_from_env, tick_only_lifecycle_params, with_common_caps,
-    with_rpc_server,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    chassis_residual_knobs, install_frame_size, load_chassis_config, stage_rpc_argv, tick_only_lifecycle_params,
+    with_common_caps, with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, HeadlessCli};
 use aether_substrate::config::{
@@ -53,6 +52,7 @@ use aether_substrate::config::{
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
+use aether_substrate::runtime::log_install::apply_filter;
 use std::path::Path;
 
 /// Marker type for the headless chassis. Carries no fields — the
@@ -142,11 +142,14 @@ pub struct HeadlessEnv {
     /// into the staging root in `with_common_caps`.
     pub contentgen: ContentGenConfig,
     pub tick_period: Duration,
-    /// The resolved `aether.rpc.server` bind address (ADR-0155 §3). The cap
-    /// is always composed and always claims `aether.rpc.server`; the
-    /// address (from `AETHER_RPC_PORT`) gates only whether Start binds the
-    /// socket — `None` (default) leaves the mailbox claimed but unbound.
-    pub rpc_addr: Option<SocketAddr>,
+    /// The substrate runtime knobs (#3849), resolved off the source stack. Only
+    /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
+    /// the subscriber installs, in `HeadlessChassis::build_inner`); the field
+    /// carries the whole resolved member so its `[runtime]` file / env values
+    /// are resolved once. `aether.rpc.server`'s bind port rides the source stack
+    /// too now (`RpcServerConfig`), so there is no separate `rpc_addr` field —
+    /// the builder resolves it (unset → claimed but unbound, ADR-0155 §3).
+    pub runtime: RuntimeConfig,
     /// Issue 745: optional worker-pool size override. Populated from
     /// `AETHER_WORKERS`; `None` keeps `PoolConfig::default()` behavior
     /// (`available_parallelism() - 1`, min 1).
@@ -197,7 +200,6 @@ impl HeadlessEnv {
     /// Returns [`ConfigError`] when a known `AETHER_*` env var (or an
     /// argv overlay value) holds an unparseable value (ADR-0090 §4).
     pub fn from_env_with_argv(cli: HeadlessCli) -> Result<Self, ConfigError> {
-        use std::net::{IpAddr, Ipv4Addr};
         // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
         // where the composed builder's `config_manifest` supplies the
         // per-chassis known-key set (headless no longer "knows" the window /
@@ -221,7 +223,7 @@ impl HeadlessEnv {
             contentgen,
             chassis_boot: chassis_boot_overlay,
             lifecycle: lifecycle_overlay,
-            rpc_port: cli_rpc_port,
+            rpc: rpc_overlay,
         } = common;
 
         // ADR-0156 §5: assemble the source stack — the loaded config file plus
@@ -240,6 +242,10 @@ impl HeadlessEnv {
         sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
         sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
         sources.set_argv::<TickConfig>(tick_overlay.into_layer());
+        // #3849: `aether.rpc.server`'s bind port resolves through the source
+        // stack like any member — stage the `--rpc-port` overlay so the builder
+        // resolves it (argv > `AETHER_RPC_PORT` > `[rpc]` file > unset/unbound).
+        stage_rpc_argv(&mut sources, rpc_overlay);
 
         // Chassis-side reads of resolved members (ADR-0156 §5) — resolved off
         // the same stack via each member's `ConfigMember` section: the derived
@@ -254,9 +260,14 @@ impl HeadlessEnv {
         let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
-        // ADR-0156 §6: push the resolved wire-frame cap into the codec here,
-        // before the RPC server binds and any framing runs — the codec cannot
-        // pull the knob itself.
+        // #3849: resolve the substrate runtime knobs (log filter + panic-hook
+        // knobs) off the same stack. `build_inner` re-applies `log_filter` once
+        // the subscriber is installed; the panic-hook knobs are declared members
+        // consumed by the panic hook's own env reads.
+        let runtime = sources.resolve::<RuntimeConfig>()?;
+        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
+        // here, before the RPC server binds and any framing runs — the codec
+        // cannot pull the knob itself.
         install_frame_size(&mut sources)?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
@@ -268,15 +279,13 @@ impl HeadlessEnv {
             Some(path) => boot_manifest_autoload(Path::new(&path))?,
             None => Vec::new(),
         };
-        let rpc_addr =
-            cli_rpc_port.or_else(rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = chassis_boot.to_workers();
         Ok(Self {
             sources,
             namespace_roots,
             contentgen,
             tick_period,
-            rpc_addr,
+            runtime,
             workers,
             ring_caps,
             scheduler_tuning,
@@ -306,12 +315,12 @@ impl HeadlessChassis {
             sources,
             namespace_roots,
             contentgen,
-            rpc_addr,
             workers,
             ring_caps,
             scheduler_tuning,
             teardown_cap,
             tick_period: _,
+            runtime: _,
             autoload: _,
         } = env;
 
@@ -392,7 +401,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
-        with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(())
+        with_rpc_server(builder, "aether-headless").with_actor::<HttpServerCapability>(())
     }
 
     /// Build the headless chassis: stand up substrate-core internals,
@@ -401,6 +410,11 @@ impl HeadlessChassis {
     /// builder.
     fn build_inner(mut env: HeadlessEnv) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
+        // #3849: `SubstrateBoot::build` installed the subscriber with an
+        // env-or-`info` filter (before the config file loaded); re-apply the
+        // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
+        // `info`) now so a filter set only in the config file takes effect.
+        apply_filter(&env.runtime.log_filter);
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let mailer = Arc::clone(&boot.queue);
 
@@ -468,9 +482,19 @@ mod config_manifest_tests {
         );
         assert!(known.contains("AETHER_TICK_HZ"), "headless must claim its own timer-driver tick knob");
         assert!(known.contains("AETHER_HTTP_DISABLE"), "headless must claim a composed common-cap knob");
+        // #3849 + #3850: the RPC port, the runtime knobs, and the frame-size knob
+        // migrated off the residual hand records onto derive-`Config` members
+        // (`RpcServerConfig` composed via `with_rpc_server`, `RuntimeConfig` +
+        // `FrameSizeConfig` declared in `with_common_caps`), so the composition
+        // walk — not `chassis_residual_knobs` — is what now claims them. Catches a
+        // dropped `with_config_member` or a de-composed RPC server reintroducing a
+        // false unknown-key warning.
         assert!(
             known.contains("AETHER_MAX_FRAME_SIZE"),
-            "headless must claim the wire-frame-size knob it composes via the FrameSizeConfig member",
+            "headless must claim the frame-size knob via the composed FrameSizeConfig member"
         );
+        assert!(known.contains("AETHER_RPC_PORT"), "headless must claim the RPC port via the composed RpcServerConfig");
+        assert!(known.contains("AETHER_LOG_FILTER"), "headless must claim the log filter via the RuntimeConfig member");
+        assert!(known.contains("AETHER_CRASH_LOG_DIR"), "headless must claim the panic-hook knobs via RuntimeConfig");
     }
 }

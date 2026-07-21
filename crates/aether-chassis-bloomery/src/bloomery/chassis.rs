@@ -190,7 +190,6 @@ impl BloomeryChassis {
         let approval_policy_file = github.approval_policy_file.clone();
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
-        let rpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port);
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -252,7 +251,7 @@ impl BloomeryChassis {
                     // (it wires no engines cap), so it needs no route target.
                     route_target: None,
                 },
-                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
+                RpcServerConfig { port: Some(rpc_port) },
             )
             // The REST control ingress (ADR-0149 §Packaging, #3498): the HTTP
             // server cap binds localhost, and the api cap claims the control

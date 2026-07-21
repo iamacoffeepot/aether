@@ -11,7 +11,6 @@
 //! `signal-hook`'s iterator API blocks the driver thread until SIGINT
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,14 +22,14 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{
     ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, validate_env,
 };
+use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
 use crate::DEFAULT_RPC_PORT;
-use aether_chassis::boot::rpc_port_from_env;
 use aether_chassis::boot::{
-    ActorRingConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, install_frame_size,
-    load_chassis_config, with_hub_fleet_passthrough,
+    ActorRingConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, install_frame_size,
+    load_chassis_config, stage_rpc_argv, with_hub_fleet_passthrough,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -100,19 +99,29 @@ impl HubChassis {
     }
 }
 
-/// Build-time inputs the hub chassis takes. `rpc_addr` is the
-/// `aether.rpc.server` bind — the target the out-of-process `aether-mcp`
-/// coordinator dials. `AETHER_RPC_PORT` overrides the port.
+/// Build-time inputs the hub chassis takes. `rpc_port` is the
+/// `aether.rpc.server` bind port — the target the out-of-process `aether-mcp`
+/// coordinator dials — resolved off the source stack (`--rpc-port` >
+/// `AETHER_RPC_PORT` > `[rpc]` file) with the [`DEFAULT_RPC_PORT`] fallback.
 ///
 /// ADR-0156 §5: the engines-cap `Config` (`EngineConfig`, the liveness
 /// heartbeat tuning) no longer rides as a field — the builder resolves it off
 /// [`Self::sources`]. What remains is the source stack plus the chassis-side
-/// reads of the non-cap pool / ring / scheduler / teardown knobs.
+/// reads of the non-cap pool / ring / scheduler / teardown / runtime knobs and
+/// the RPC port.
 pub struct HubEnv {
     /// The config source stack (file + the engines-cap argv overlay) the
     /// builder resolves the composed `EngineServer`'s `Config` off (ADR-0156 §5).
     pub sources: ConfigSources,
-    pub rpc_addr: SocketAddr,
+    /// The resolved `aether.rpc.server` bind port. The hub always binds (unlike
+    /// desktop / headless): `RpcServerConfig` is resolved off the source stack
+    /// (argv `--rpc-port` > `AETHER_RPC_PORT` > `[rpc]` file) with the hub's
+    /// [`DEFAULT_RPC_PORT`] fallback when unset (#3849), then composed as an
+    /// explicit `with_actor_configured` override.
+    pub rpc_port: u16,
+    /// The substrate runtime knobs (#3849); `build_inner` re-applies
+    /// [`RuntimeConfig::log_filter`] after the subscriber installs.
+    pub runtime: RuntimeConfig,
     pub ring_caps: RingCapacities,
     pub scheduler_tuning: SchedulerTuning,
     pub teardown_cap: Duration,
@@ -132,7 +141,8 @@ impl HubEnv {
     }
 
     /// ADR-0090 unit d (issue 1258): resolve from argv-then-env.
-    /// `cli.rpc_port` shadows `AETHER_RPC_PORT`; falling through still
+    /// `--rpc-port` (the flattened `RpcServerOverlay`, #3849) shadows
+    /// `AETHER_RPC_PORT` through the source stack; falling through still
     /// lands on [`DEFAULT_RPC_PORT`] (the hub always binds an RPC
     /// server, unlike desktop / headless). The engines overlay
     /// (`--hub-heartbeat-*`, issue 1339) resolves through the
@@ -148,33 +158,34 @@ impl HubEnv {
     /// `Result` keeps the hard-error half free to join without a
     /// call-site change, matching desktop / headless.
     pub fn from_env_with_argv(cli: &HubCli) -> Result<Self, ConfigError> {
-        use std::net::{IpAddr, Ipv4Addr};
         // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
         // where the composed builder's `config_manifest` (including the
         // declared fleet pass-through) supplies the hub's known-key set.
         let config_file = load_chassis_config(cli.config.clone())?;
         // ADR-0156 §5: assemble the source stack — the loaded config file plus
-        // the engines-cap argv overlay. The builder resolves the composed
-        // `EngineServer`'s `EngineConfig` off this; the chassis resolves the
-        // non-cap ring / scheduler / teardown knobs below off the same stack via
-        // their `ConfigMember` sections.
+        // the engines-cap and RPC-server argv overlays. The builder resolves the
+        // composed `EngineServer`'s `EngineConfig` off this; the chassis resolves
+        // the non-cap ring / scheduler / teardown / runtime knobs and the
+        // RPC-server port below off the same stack via their `ConfigMember`
+        // sections.
         let mut sources = ConfigSources::new(config_file);
         sources.set_argv::<EngineConfig>(cli.engine.clone().into_layer());
+        stage_rpc_argv(&mut sources, cli.rpc.clone());
         let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
-        // ADR-0156 §6: push the resolved wire-frame cap into the codec here,
-        // before the RPC server binds and any framing runs — the codec cannot
-        // pull the knob itself.
+        let runtime = sources.resolve::<RuntimeConfig>()?;
+        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
+        // here, before the RPC server binds and any framing runs — the codec
+        // cannot pull the knob itself.
         install_frame_size(&mut sources)?;
-        let rpc_port = cli.rpc_port.or_else(rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
-        Ok(Self {
-            sources,
-            rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
-            ring_caps,
-            scheduler_tuning,
-            teardown_cap,
-        })
+        // #3849: the hub always binds (unlike desktop / headless) — resolve the
+        // RPC port through the source stack and fall back to `DEFAULT_RPC_PORT`
+        // when unset. Resolving it here consumes the staged `--rpc-port` overlay;
+        // `compose` re-stages the resolved value as an explicit
+        // `with_actor_configured` override so the builder binds it.
+        let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
+        Ok(Self { sources, rpc_port, runtime, ring_caps, scheduler_tuning, teardown_cap })
     }
 }
 
@@ -188,7 +199,7 @@ impl HubChassis {
     /// `claim_namespaces` on it. Takes the boot handle by reference so
     /// `build_inner` can move the same `boot` into the driver afterward.
     fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
-        let HubEnv { sources, rpc_addr, ring_caps, scheduler_tuning, teardown_cap } = env;
+        let HubEnv { sources, rpc_port, runtime: _, ring_caps, scheduler_tuning, teardown_cap } = env;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
@@ -199,8 +210,9 @@ impl HubChassis {
         //
         // ADR-0156 §5: hand the builder the source stack so it resolves the
         // composed `EngineServer`'s `EngineConfig` (the liveness-heartbeat
-        // tuning, issue 1339) off it; the RPC server's `Config` stays the
-        // programmatic bridge (`with_config`).
+        // tuning, issue 1339) off it. #3849: the RPC server's `Config` is now a
+        // derive member resolved off the stack; the hub always binds, so it
+        // composes the resolved-with-default port as an explicit override.
         with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
@@ -217,12 +229,15 @@ impl HubChassis {
                 #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
                 route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
             },
-                RpcServerConfig { bind_addr: Some(rpc_addr.to_string()) },
+                RpcServerConfig { port: Some(rpc_port) },
             )
     }
 
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
+        // the subscriber is installed (env > `[runtime]` file > `info`).
+        apply_filter(&env.runtime.log_filter);
         let builder = Self::compose(&boot, env);
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set (the

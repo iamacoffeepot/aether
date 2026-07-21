@@ -15,7 +15,6 @@
 
 use std::io;
 use std::mem;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +33,7 @@ use aether_lifecycle::{LifecycleCapability, LifecycleConfig, frame_lifecycle_par
 use aether_render::{RenderCapability, RenderParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::event_loop::EventLoop;
 
@@ -42,8 +42,8 @@ use aether_chassis::WindowConfig;
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, SettlementConfig, chassis_residual_knobs,
-    install_frame_size, load_chassis_config, rpc_port_from_env, with_common_caps, with_rpc_server,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    chassis_residual_knobs, install_frame_size, load_chassis_config, stage_rpc_argv, with_common_caps, with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, DesktopCli};
 use aether_substrate::config::{
@@ -177,11 +177,13 @@ pub struct DesktopEnv {
     /// argv > env > default), threaded to `Gpu::new` at window creation.
     /// `WireframeMode::from_config_value` owns the tri-state parse.
     pub boot_wireframe: Option<String>,
-    /// The resolved `aether.rpc.server` bind address (ADR-0155 §3). The cap
-    /// is always composed and always claims `aether.rpc.server`; the
-    /// address (from `AETHER_RPC_PORT`) gates only whether Start binds the
-    /// socket — `None` (default) leaves the mailbox claimed but unbound.
-    pub rpc_addr: Option<SocketAddr>,
+    /// The substrate runtime knobs (#3849), resolved off the source stack. Only
+    /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
+    /// the subscriber installs, in `DesktopChassis::build_inner`). The
+    /// `aether.rpc.server` bind port rides the source stack too now
+    /// (`RpcServerConfig`) — the builder resolves it (unset → claimed but
+    /// unbound, ADR-0155 §3), so there is no separate `rpc_addr` field.
+    pub runtime: RuntimeConfig,
     /// Issue 745: optional worker-pool size override. Populated from
     /// `AETHER_WORKERS` / `--workers`; `None` keeps `PoolConfig::default()`
     /// behavior (`available_parallelism() - 1`, min 1).
@@ -260,7 +262,7 @@ impl DesktopEnv {
             contentgen,
             chassis_boot: chassis_boot_overlay,
             lifecycle: lifecycle_overlay,
-            rpc_port: cli_rpc_port,
+            rpc: rpc_overlay,
         } = common;
 
         // ADR-0156 §5: assemble the source stack — the loaded config file plus
@@ -279,6 +281,10 @@ impl DesktopEnv {
         sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
         sources.set_argv::<AudioConf>(audio_overlay.into_layer());
         sources.set_argv::<WindowConfig>(window_overlay.into_layer());
+        // #3849: `aether.rpc.server`'s bind port resolves through the source
+        // stack like any member — stage the `--rpc-port` overlay so the builder
+        // resolves it (argv > `AETHER_RPC_PORT` > `[rpc]` file > unset/unbound).
+        stage_rpc_argv(&mut sources, rpc_overlay);
 
         // Chassis-side reads of resolved members (ADR-0156 §5): the derived
         // staging inputs (fs roots + content-gen), the driver-only window boot
@@ -291,9 +297,12 @@ impl DesktopEnv {
         let ring_caps = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_cap = sources.resolve::<SettlementConfig>()?.to_cap();
-        // ADR-0156 §6: push the resolved wire-frame cap into the codec here,
-        // before the RPC server binds and any framing runs — the codec cannot
-        // pull the knob itself.
+        // #3849: resolve the substrate runtime knobs (log filter + panic-hook
+        // knobs) off the same stack; `build_inner` re-applies `log_filter`.
+        let runtime = sources.resolve::<RuntimeConfig>()?;
+        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
+        // here, before the RPC server binds and any framing runs — the codec
+        // cannot pull the knob itself.
         install_frame_size(&mut sources)?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
@@ -314,11 +323,6 @@ impl DesktopEnv {
         let boot_title = window_config.to_boot_title();
         let boot_wireframe = window_config.wireframe;
 
-        let rpc_addr = {
-            use std::net::{IpAddr, Ipv4Addr};
-            cli_rpc_port.or_else(rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
-        };
-
         let workers = chassis_boot.to_workers();
 
         Ok(Self {
@@ -329,7 +333,7 @@ impl DesktopEnv {
             boot_size,
             boot_title,
             boot_wireframe,
-            rpc_addr,
+            runtime,
             workers,
             ring_caps,
             scheduler_tuning,
@@ -359,7 +363,6 @@ impl DesktopChassis {
             sources,
             namespace_roots,
             contentgen,
-            rpc_addr,
             workers,
             ring_caps,
             scheduler_tuning,
@@ -368,6 +371,7 @@ impl DesktopChassis {
             boot_size: _,
             boot_title: _,
             boot_wireframe: _,
+            runtime: _,
             autoload: _,
         } = env;
 
@@ -435,7 +439,7 @@ impl DesktopChassis {
             .with_actor::<RenderCapability>(render_params)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
-        with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(())
+        with_rpc_server(builder, "aether-desktop").with_actor::<HttpServerCapability>(())
     }
 
     /// Build the desktop chassis: construct the Start-stage runtime handles
@@ -462,6 +466,11 @@ impl DesktopChassis {
         let capture_queue = CaptureQueue::new();
 
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        // #3849: `SubstrateBoot::build` installed the subscriber with an
+        // env-or-`info` filter (before the config file loaded); re-apply the
+        // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
+        // `info`) now so a filter set only in the config file takes effect.
+        apply_filter(&env.runtime.log_filter);
         let mailer = Arc::clone(&boot.queue);
 
         // Driver-only / post-build fields, read out before `compose` consumes

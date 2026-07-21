@@ -571,12 +571,13 @@ pub struct ConfigMemberRecord {
 /// for T {}` one-liner would satisfy it, re-opening the exact wiring-in-`Config`
 /// escape hatch the bound exists to close). Rust cannot seal a trait a derive
 /// must implement downstream, so the required-method shape is the enforcement:
-/// the only hand-written impls in the workspace are the two sanctioned ones
-/// below (`()` and `RpcServerConfig`), everything else is derive-emitted or
-/// moved its wiring to `Params` (`Config = ()`).
+/// after #3849 the only hand-written impl in the workspace is `()` below
+/// (`RpcServerConfig`'s pre-#3849 programmatic bridge retired — its port now
+/// resolves through the source stack via the derive), everything else is
+/// derive-emitted or moved its wiring to `Params` (`Config = ()`).
 pub trait ConfigMember {
     /// The member records this config declares. A derive-`Config` type returns
-    /// its one section + `META` record; the two sanctioned hand impls return
+    /// its one section + `META` record; the sanctioned `()` hand impl returns
     /// empty.
     #[must_use]
     fn members() -> Vec<ConfigMemberRecord>;
@@ -588,9 +589,8 @@ pub trait ConfigMember {
     /// the derive declaration (never a chassis-side string), and the layer
     /// precedence is byte-identical to the pre-inversion per-cap
     /// `resolve_with_file` path. A derive-`Config` type delegates to
-    /// [`ConfigSources::resolve_layered`] with its own section; the two
-    /// sanctioned hand impls resolve `()` (trivially) and `RpcServerConfig`
-    /// (programmatic-only, the pre-#3849 bridge).
+    /// [`ConfigSources::resolve_layered`] with its own section; the sanctioned
+    /// `()` hand impl resolves trivially.
     ///
     /// A **required method with no default** for the same reason as
     /// [`members`](Self::members): a blanket default would re-open the
@@ -607,9 +607,10 @@ pub trait ConfigMember {
 }
 
 /// The configless-cap case: a cap whose `Config = ()` declares no aggregate
-/// member. The one sanctioned empty hand impl (beside `RpcServerConfig`'s
-/// pre-#3849 bridge); every other non-derive `Config` moved its wiring onto
-/// the `Params` channel rather than stamp an empty member impl here.
+/// member. The one sanctioned hand impl (after #3849 retired the
+/// `RpcServerConfig` bridge, it is the only one); every other non-derive
+/// `Config` moved its wiring onto the `Params` channel rather than stamp an
+/// empty member impl here.
 impl ConfigMember for () {
     fn members() -> Vec<ConfigMemberRecord> {
         Vec::new()
@@ -910,14 +911,6 @@ impl ConfigSources {
             }
         }
         Ok(())
-    }
-
-    /// Take a programmatic override for member `C`, or the supplied fallback.
-    /// The `RpcServerConfig` pre-#3849 bridge resolves this way: `bind_addr`
-    /// is resolved from `AETHER_RPC_PORT` outside the derive path and staged
-    /// programmatically, so the member has no argv/env/file layer of its own.
-    pub fn take_or<C: 'static>(&mut self, fallback: impl FnOnce() -> C) -> C {
-        self.take_override::<C>().unwrap_or_else(fallback)
     }
 
     /// Whether a programmatic override is staged for member `C`.

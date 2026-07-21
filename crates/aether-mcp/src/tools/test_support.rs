@@ -229,7 +229,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerConfig { port: Some(0) },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -293,7 +293,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerConfig { port: Some(0) },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -334,7 +334,7 @@ pub(super) fn boot_hub_with_route_loopback(
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerConfig { port: Some(0) },
         )
         .build_passive()
         .expect("hub caps boot");
@@ -368,7 +368,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
             route_target: Some(mailbox_id_from_name("aether.engine")),
         },
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerConfig { port: Some(0) },
         )
         .build_passive()?;
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;

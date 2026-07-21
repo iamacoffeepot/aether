@@ -66,7 +66,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
                 },
                 route_target: Some(mailbox_id_from_name("aether.engine")),
             },
-            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerConfig { port: Some(0) },
         )
         .build_passive()
         .expect("hub caps boot");

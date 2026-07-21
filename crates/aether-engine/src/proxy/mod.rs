@@ -164,7 +164,7 @@ mod tests {
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
             .with_actor_configured::<RpcServerCapability>(
                 RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None },
-                RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+                RpcServerConfig { port: Some(0) },
             )
             .build_passive()
             .expect("caps boot");

@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::boot_manifest_autoload;
+use aether_chassis::boot::RuntimeConfig;
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
 use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
@@ -94,7 +95,7 @@ mod tests {
             sources: default_sources(),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
@@ -161,7 +162,7 @@ mod tests {
             sources: default_sources(),
             contentgen: ContentGenConfig::default(),
             tick_period: Duration::from_millis(16),
-            rpc_addr: None,
+            runtime: RuntimeConfig::default(),
             workers: None,
             ring_caps: aether_substrate::RingCapacities::default(),
             scheduler_tuning: aether_substrate::SchedulerTuning::default(),
