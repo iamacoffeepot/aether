@@ -191,9 +191,8 @@ pub struct DesktopEnv {
     /// Force-complete deadline (ms) for a pending lifecycle advance's
     /// `Settled` (issue 1048). ADR-0156 §3: resolved from
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via the lifecycle cap's own
-    /// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) (relocated off
-    /// `ChassisBootConfig`); default
-    /// [`ADVANCE_TIMEOUT_MS_DEFAULT`](aether_lifecycle::LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT).
+    /// [`LifecycleConfig`] (relocated off `ChassisBootConfig`); default
+    /// [`LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`].
     pub lifecycle: LifecycleConfig,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin

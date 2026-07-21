@@ -442,7 +442,7 @@ pub fn resolve_teardown_cap_with_file(file: Option<&toml::Table>) -> Result<Dura
 /// `env_prefix = "AETHER"` joins the field env keys; explicit
 /// `cli_long` overrides pin the historical flag names so existing
 /// scripts and operators are unaffected.
-#[derive(Clone, Debug, aether_substrate::Config)]
+#[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "chassis")]
 pub struct ChassisBootConfig {
     /// `AETHER_WORKERS=<n>` worker-pool size override (unset →
@@ -458,12 +458,6 @@ pub struct ChassisBootConfig {
     /// filters empty → `None`, exactly matching `boot_manifest_from_env`.
     #[config(cli_long = "boot-manifest")]
     pub boot_manifest: Option<String>,
-}
-
-impl Default for ChassisBootConfig {
-    fn default() -> Self {
-        Self { workers: None, boot_manifest: None }
-    }
 }
 
 impl ChassisBootConfig {
@@ -602,7 +596,7 @@ pub fn hub_config_dump() -> String {
 /// instead.
 ///
 /// The advance timeout is resolved separately through the
-/// [`LifecycleConfig`] `Config` channel.
+/// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) `Config` channel.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,

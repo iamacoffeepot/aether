@@ -148,6 +148,7 @@ mod tests {
     use aether_substrate::mail::registry::OwnedDispatch;
     use aether_substrate::mail::registry::{MailboxEntry, Registry};
     use aether_substrate::mail::{KindId, Source};
+    use aether_substrate::render::VERTEX_BUFFER_BYTES;
     use aether_substrate::testing::TestChassis;
     use std::thread;
 
@@ -181,10 +182,7 @@ mod tests {
     fn boot_render(params: RenderParams) -> (Arc<Registry>, PassiveChassis<TestChassis>) {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(
-                RenderTuningConfig { vertex_buffer_bytes: aether_substrate::render::VERTEX_BUFFER_BYTES },
-                params,
-            )
+            .with_actor::<RenderCapability>(RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES }, params)
             .build_passive()
             .expect("build succeeds");
         (registry, chassis)
