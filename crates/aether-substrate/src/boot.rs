@@ -95,7 +95,7 @@ impl SubstrateBoot {
     /// locks are poisoned during the boot sequence — fail-fast per
     /// ADR-0063: both conditions indicate a substrate-level invariant
     /// violation discovered before any user code runs.
-    pub fn build() -> wasmtime::Result<SubstrateBoot> {
+    pub fn build() -> wasmtime::Result<Self> {
         // Issue #321: route panics through tracing so dispatcher-thread
         // crashes surface in `engine_logs` instead of vanishing to
         // stderr. Idempotent — chassis re-entries / repeated builds in
@@ -163,7 +163,7 @@ impl SubstrateBoot {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        Ok(SubstrateBoot { engine, registry, linker, queue, outbound, boot_descriptors })
+        Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors })
     }
 }
 
