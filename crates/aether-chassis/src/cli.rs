@@ -275,11 +275,11 @@ mod checkability_tests {
             .find(|arg| arg.get_long() == Some("http-timeout-ms"))
             .expect("--http-timeout-ms is present");
         let help = arg.get_help().map(ToString::to_string).expect("flag carries help");
-        // The summary sentence spans a source line wrap ("`Fetch.timeout_ms` is"
-        // / "`None`.") — the full sentence must survive the join, not truncate.
+        // The consumer-grade first sentence is forwarded verbatim as the flag's
+        // help lead, ahead of the appended env key and default.
         assert!(
-            help.contains("Default per-request timeout when `Fetch.timeout_ms` is `None`."),
-            "first sentence joined across the source wrap: {help}"
+            help.contains("Default per-request timeout in milliseconds."),
+            "first rustdoc sentence forwarded as help lead: {help}"
         );
         assert!(help.contains("[env: AETHER_HTTP_TIMEOUT_MS]"), "resolved env key annotated: {help}");
         assert!(help.contains("[default: 30000]"), "declared default annotated (separators stripped): {help}");

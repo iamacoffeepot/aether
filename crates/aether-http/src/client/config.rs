@@ -24,33 +24,41 @@ use super::{DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT_MILLIS};
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 #[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_HTTP", cli_prefix = "http"))]
 pub struct HttpConfig {
-    /// `AETHER_HTTP_DISABLE=1` swaps the `UreqHttpAdapter` for a
-    /// `DisabledHttpAdapter` that replies `HttpError::Disabled` to
-    /// every fetch. `env` + `cli_long` overrides pin the wire shape
-    /// (`AETHER_HTTP_DISABLE`, `--http-disable`) to the pre-derive
-    /// names while the domain field stays `disabled` for read-site
-    /// clarity.
+    /// Disable HTTP egress; every fetch replies with an error.
+    ///
+    /// Swaps the `UreqHttpAdapter` for a `DisabledHttpAdapter` that
+    /// replies `HttpError::Disabled` to every fetch. `env` + `cli_long`
+    /// overrides pin the wire shape (`AETHER_HTTP_DISABLE`,
+    /// `--http-disable`) to the pre-derive names while the domain field
+    /// stays `disabled` for read-site clarity.
     #[cfg_attr(feature = "runtime", config(env = "AETHER_HTTP_DISABLE", cli_long = "http-disable", default = false))]
     pub disabled: bool,
-    /// Hostnames accepted for a request, re-checked on every redirect hop
-    /// within a bounded budget (issue #3463), not just the initial URL.
-    /// Empty rejects every request (deny-by-default per ADR-0043). The
+    /// Hostnames allowed for outbound requests; empty denies all.
+    ///
+    /// Each hostname is re-checked on every redirect hop within a bounded
+    /// budget (issue #3463), not just on the initial URL. An empty set
+    /// rejects every request (deny-by-default per ADR-0043). The
     /// `csv_set` hint auto-wires the shared comma-split parser on the env
     /// side.
     #[cfg_attr(feature = "runtime", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
-    /// `AETHER_HTTP_REQUIRE_HTTPS=1` rejects `http://` URLs with
-    /// `HttpError::InvalidUrl`.
+    /// Reject plain-text http:// URLs and allow only https.
+    ///
+    /// An `http://` URL is rejected with `HttpError::InvalidUrl`.
     #[cfg_attr(feature = "runtime", config(default = false))]
     pub require_https: bool,
-    /// Cap on inbound and outbound body bytes. Defaults to
+    /// Maximum request and response body size in bytes.
+    ///
+    /// Caps both inbound and outbound body bytes. Defaults to
     /// [`DEFAULT_MAX_BODY_BYTES`] (16 MB).
     #[cfg_attr(feature = "runtime", config(default = 16_777_216))]
     pub max_body_bytes: usize,
-    /// Default per-request timeout when `Fetch.timeout_ms` is
-    /// `None`. Defaults to [`DEFAULT_TIMEOUT_MILLIS`] (30 s). The derive's
-    /// `ms_duration` hint stores the Layer field as `u32`-ms and
-    /// bridges via `Duration::from_millis(u64::from(...))`;
+    /// Default per-request timeout in milliseconds.
+    ///
+    /// Applied when a fetch request carries no explicit timeout. Defaults
+    /// to [`DEFAULT_TIMEOUT_MILLIS`] (30 s). The derive's `ms_duration`
+    /// hint stores the Layer field as `u32`-ms and bridges via
+    /// `Duration::from_millis(u64::from(...))`;
     /// `layer_field = "timeout_ms"` pins the Layer / env / CLI shape to
     /// the pre-derive name (`AETHER_HTTP_TIMEOUT_MS`,
     /// `--http-timeout-ms`).

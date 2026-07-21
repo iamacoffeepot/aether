@@ -19,16 +19,18 @@
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_AUDIO", cli_prefix = "audio")]
 pub struct AudioConfig {
-    /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The cap
-    /// still claims its mailbox and replies `Err` to `SetMasterGain`
-    /// so agents fail fast instead of hanging. `env` + `cli_long`
-    /// overrides pin the historical wire shape (no `D` suffix on
-    /// `DISABLE`; `--audio-disable` not `--audio-disabled`).
+    /// Disable audio output entirely.
+    ///
+    /// Skips cpal init. The cap still claims its mailbox and replies `Err`
+    /// to `SetMasterGain` so agents fail fast instead of hanging. `env` +
+    /// `cli_long` overrides pin the historical wire shape (no `D` suffix
+    /// on `DISABLE`; `--audio-disable` not `--audio-disabled`).
     #[config(env = "AETHER_AUDIO_DISABLE", cli_long = "audio-disable", default = false)]
     pub disabled: bool,
-    /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If
-    /// the device doesn't support it, boot falls back to nop
-    /// (ADR-0039 — non-fatal). `layer_field = "sample_rate"` drops
+    /// Requested output sample rate in hertz; unset uses the device default.
+    ///
+    /// If the device doesn't support the requested rate, boot falls back
+    /// to nop (ADR-0039 — non-fatal). `layer_field = "sample_rate"` drops
     /// the `requested_` prefix on the Layer / env / CLI side so the
     /// historical names are unchanged.
     #[config(layer_field = "sample_rate", env = "AETHER_AUDIO_SAMPLE_RATE")]

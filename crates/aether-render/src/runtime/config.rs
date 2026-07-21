@@ -12,13 +12,13 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_RENDER", cli_prefix = "render")]
 pub struct RenderTuningConfig {
-    /// `AETHER_RENDER_VERTEX_BUFFER_BYTES=<bytes>` per-frame vertex
-    /// buffer cap: the size the GPU vertex buffer is created with and
-    /// the byte count the render accumulator truncates to (with a
-    /// warn) when a frame's triangles exceed it. Default
+    /// Per-frame vertex buffer size in bytes; frames beyond it are truncated.
+    ///
+    /// The size the GPU vertex buffer is created with and the byte count
+    /// the render accumulator truncates to (with a warn) when a frame's
+    /// triangles exceed it. Default
     /// [`VERTEX_BUFFER_BYTES`](aether_substrate::render::VERTEX_BUFFER_BYTES)
-    /// (64 MiB, ~932k triangles at 72 bytes
-    /// each).
+    /// (64 MiB, ~932k triangles at 72 bytes each).
     #[config(default = 67_108_864)]
     pub vertex_buffer_bytes: usize,
 }

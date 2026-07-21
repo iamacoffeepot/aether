@@ -47,75 +47,72 @@ const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_HUB", cli_prefix = "hub")]
 pub struct EngineConfig {
-    /// Heartbeat ping cadence in seconds
-    /// (`AETHER_HUB_HEARTBEAT_INTERVAL_SECS` /
-    /// `--hub-heartbeat-interval-secs`). `0` disables the heartbeat
-    /// entirely (engines are then only evicted on a
-    /// connection-close, never on a wedge).
+    /// Heartbeat ping interval in seconds; 0 disables liveness checks.
+    ///
+    /// `0` disables the heartbeat entirely (engines are then only evicted
+    /// on a connection-close, never on a wedge).
     #[config(default = 5)]
     pub heartbeat_interval_secs: u64,
-    /// Consecutive missed pings that mark an engine dead
-    /// (`AETHER_HUB_HEARTBEAT_MISS_LIMIT` /
-    /// `--hub-heartbeat-miss-limit`). Small N tolerates a transient
-    /// hiccup; `0` also disables the heartbeat. Detection latency is
-    /// `miss_limit × interval_secs`.
+    /// Consecutive missed pings before an engine is declared dead.
+    ///
+    /// Small N tolerates a transient hiccup; `0` also disables the
+    /// heartbeat. Detection latency is `miss_limit × interval_secs`.
     #[config(default = 3)]
     pub heartbeat_miss_limit: u32,
-    /// Total seconds a freshly-forked substrate's proxy keeps
-    /// retrying its startup dial before the spawn fails
-    /// (`AETHER_HUB_PROXY_CONNECT_BUDGET_SECS` /
-    /// `--hub-proxy-connect-budget-secs`, issue 2072). Generous by
-    /// default so a debug cold start under fork contention isn't
-    /// called dead prematurely; `0` is the wait-forever sentinel
-    /// (retry until the dial succeeds or hits a terminal error).
+    /// Seconds a freshly-spawned engine may take to connect before the spawn fails.
+    ///
+    /// The proxy keeps retrying its startup dial for this budget (issue
+    /// 2072). Generous by default so a debug cold start under fork
+    /// contention isn't called dead prematurely; `0` is the wait-forever
+    /// sentinel (retry until the dial succeeds or hits a terminal error).
     #[config(default = 30)]
     pub proxy_connect_budget_secs: u64,
-    /// How many times `on_spawn` re-forks a substrate on a fresh port
-    /// before giving up (`AETHER_HUB_PROXY_SPAWN_ATTEMPTS` /
-    /// `--hub-proxy-spawn-attempts`, issue 2422). A freshly-forked
-    /// substrate can lose its guessed RPC port to another socket in
+    /// How many times a failed engine spawn is retried on a fresh port.
+    ///
+    /// `on_spawn` re-forks a substrate on a fresh port up to this many
+    /// times before giving up (issue 2422). A freshly-forked substrate
+    /// can lose its guessed RPC port to another socket in
     /// `free_local_port`'s TOCTOU window and exit on a fatal bind; a
-    /// re-fork on a fresh port escapes the stolen port, since the theft
-    /// is per-port and independent across attempts, so N attempts drop
-    /// the failure probability geometrically. `1` preserves the
+    /// re-fork on a fresh port escapes the stolen port, since the theft is
+    /// per-port and independent across attempts, so N attempts drop the
+    /// failure probability geometrically. `1` preserves the
     /// single-attempt behavior (no re-fork).
     #[config(default = 3)]
     pub proxy_spawn_attempts: u32,
-    /// Layout-root override for the hub's content-addressed binary
-    /// store (`AETHER_BINARY_STORE_DIR`, unprefixed — the ops escape
-    /// hatch and the fleet tests' per-process isolation knob). Unset
-    /// (`None`) → the computed default `data_dir/aether/binaries/v1`
+    /// Directory for the hub's content-addressed binary store; unset uses the platform data dir.
+    ///
+    /// The ops escape hatch and the fleet tests' per-process isolation
+    /// knob. Unset → the computed default `data_dir/aether/binaries/v1`
     /// (`ArtifactStore::default_root`). A bare `Option<String>` (not a
     /// `PathBuf`) keeps that runtime-computed default in `init`, so
     /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
     /// joins the store's layout-version dir to a set override.
     #[config(env = "AETHER_BINARY_STORE_DIR")]
     pub binary_store_dir: Option<String>,
-    /// Parent-dir override for the per-engine spawn / handle-store
-    /// dirs (`AETHER_ENGINE_STORE_ROOT`, unprefixed — the ops escape
-    /// hatch and the fleet tests' per-process isolation knob, issue
-    /// 1274). Unset (`None`) → `dirs::data_dir().join("aether/engines")`,
-    /// falling back to `std::env::temp_dir().join("aether-engines")`
-    /// if no data dir is resolvable. A bare `Option<String>` (not a
-    /// `PathBuf`) keeps that runtime-computed fallback chain in
-    /// `init`, so `EngineConfig` needs no `skip_from_layer`;
-    /// `EngineServer::init` resolves it once into
-    /// `EngineServerState::engine_store_root`.
+    /// Parent directory for per-engine spawn and handle-store dirs; unset uses the platform data dir.
+    ///
+    /// The ops escape hatch and the fleet tests' per-process isolation
+    /// knob (issue 1274). Unset → `dirs::data_dir().join("aether/engines")`,
+    /// falling back to `std::env::temp_dir().join("aether-engines")` if no
+    /// data dir is resolvable. A bare `Option<String>` (not a `PathBuf`)
+    /// keeps that runtime-computed fallback chain in `init`, so
+    /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
+    /// resolves it once into `EngineServerState::engine_store_root`.
     #[config(env = "AETHER_ENGINE_STORE_ROOT")]
     pub engine_store_root: Option<String>,
-    /// On-disk byte budget for the binary store
-    /// (`AETHER_HUB_BINARY_DISK_BUDGET_BYTES`, derived from the
-    /// `AETHER_HUB` prefix / `--hub-binary-disk-budget-bytes`). Default
-    /// 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over unpinned,
-    /// unnamed entries holds it.
+    /// On-disk byte budget for the binary store.
+    ///
+    /// Default 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over
+    /// unpinned, unnamed entries holds it.
     #[config(default = 17_179_869_184u64)]
     pub binary_disk_budget_bytes: u64,
-    /// Chassis bins to bootstrap-ingest at init so a `default` / `name`
-    /// selector resolves in a fresh or `restart-hub`'d hub
-    /// (`AETHER_BINARY_BOOTSTRAP`, unprefixed, comma-separated). Each is
-    /// ingested content-addressed and named by its file stem;
-    /// idempotent via content dedup. `ensure-tunnel.sh` exports the
-    /// freshly-built chassis bins here.
+    /// Chassis binaries to ingest at startup so a name selector resolves in a fresh hub.
+    ///
+    /// A comma-separated list bootstrap-ingested at init so a `default` /
+    /// `name` selector resolves in a fresh or `restart-hub`'d hub. Each is
+    /// ingested content-addressed and named by its file stem; idempotent
+    /// via content dedup. `ensure-tunnel.sh` exports the freshly-built
+    /// chassis bins here.
     #[config(env = "AETHER_BINARY_BOOTSTRAP", default = [], csv_set)]
     pub binary_bootstrap: HashSet<String>,
 }

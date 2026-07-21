@@ -29,16 +29,19 @@ use std::fmt;
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 #[cfg_attr(feature = "runtime", config(env_prefix = "AETHER", cli_prefix = "", skip_from_layer))]
 pub struct NamespaceRoots {
+    /// Writable directory for the persistent save namespace; unset uses the platform data dir.
     #[cfg_attr(
         feature = "runtime",
         config(env = "AETHER_SAVE_DIR", cli_long = "save-dir", parse = parse_dir)
     )]
     pub save: PathBuf,
+    /// Read-only directory for the assets namespace; unset uses the directory beside the binary.
     #[cfg_attr(
         feature = "runtime",
         config(env = "AETHER_ASSETS_DIR", cli_long = "assets-dir", parse = parse_dir)
     )]
     pub assets: PathBuf,
+    /// Writable directory for the config namespace; unset uses the platform config dir.
     #[cfg_attr(
         feature = "runtime",
         config(env = "AETHER_CONFIG_DIR", cli_long = "config-dir", parse = parse_dir)

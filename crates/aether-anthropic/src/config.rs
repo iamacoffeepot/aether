@@ -17,28 +17,33 @@ use std::time::Duration;
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 #[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_ANTHROPIC", cli_prefix = "anthropic"))]
 pub struct AnthropicConfig {
-    /// The Messages-API key. `None` (or `disabled`) wires the
-    /// `DisabledAnthropicAdapter` so Messages requests reply
-    /// `Unauthorized` while the CLI path still works. `env`
-    /// override pins the unprefixed `ANTHROPIC_API_KEY` key.
+    /// Anthropic Messages API key; unset leaves the provider disabled.
+    ///
+    /// Unset (or `disabled`) wires the `DisabledAnthropicAdapter` so
+    /// Messages requests reply `Unauthorized` while the CLI path still
+    /// works. `env` override pins the unprefixed `ANTHROPIC_API_KEY` key.
     #[cfg_attr(feature = "runtime", config(env = "ANTHROPIC_API_KEY"))]
     pub api_key: Option<String>,
-    /// `AETHER_ANTHROPIC_DISABLE=1` forces the disabled adapter
-    /// even when a key is present. `env` + `cli_long` overrides
-    /// pin the historical wire shape (no `D` suffix on `DISABLE`).
+    /// Disable the Anthropic provider even when a key is present.
+    ///
+    /// Forces the disabled adapter. `env` + `cli_long` overrides pin the
+    /// historical wire shape (no `D` suffix on `DISABLE`).
     #[cfg_attr(
         feature = "runtime",
         config(env = "AETHER_ANTHROPIC_DISABLE", cli_long = "anthropic-disable", default = false)
     )]
     pub disabled: bool,
-    /// Per-cap concurrency bound (doubles as rate-limit throttling).
-    /// The `nonzero` hint coerces a resolved `0` (a zero-concurrency
-    /// provider deadlocks) back to the default.
+    /// Maximum number of concurrent in-flight requests.
+    ///
+    /// A per-cap concurrency bound (doubles as rate-limit throttling). The
+    /// `nonzero` hint coerces a resolved `0` (a zero-concurrency provider
+    /// deadlocks) back to the default.
     #[cfg_attr(feature = "runtime", config(default = 2, nonzero))]
     pub max_in_flight: usize,
-    /// Per-request timeout for the Messages API. The derive's
-    /// `ms_duration` hint + `layer_field = "timeout_ms"` pin the
-    /// Layer / env / CLI shape to the pre-derive name
+    /// Per-request timeout for the Messages API in milliseconds.
+    ///
+    /// The derive's `ms_duration` hint + `layer_field = "timeout_ms"` pin
+    /// the Layer / env / CLI shape to the pre-derive name
     /// (`AETHER_ANTHROPIC_TIMEOUT_MS`, `--anthropic-timeout-ms`).
     #[cfg_attr(feature = "runtime", config(default = 120_000, ms_duration, layer_field = "timeout_ms"))]
     pub timeout: Duration,

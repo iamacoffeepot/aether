@@ -23,9 +23,10 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_TICK", cli_prefix = "tick")]
 pub struct TickConfig {
-    /// `AETHER_TICK_HZ=<hz>` headless tick cadence in hertz (default 60).
-    /// `nonzero` maps `0` to the default so the timer always gets a valid
-    /// period; a garbage string hard-errors at boot.
+    /// Headless tick rate in hertz.
+    ///
+    /// Default 60. `nonzero` maps `0` to the default so the timer always
+    /// gets a valid period; a garbage string hard-errors at boot.
     #[config(default = 60, nonzero)]
     pub hz: u32,
 }
