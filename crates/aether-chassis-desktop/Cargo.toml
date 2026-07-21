@@ -34,10 +34,8 @@ aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
-aether-fs = { path = "../aether-fs" }
 aether-input = { path = "../aether-input" }
 aether-game = { path = "../aether-game" }
-aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

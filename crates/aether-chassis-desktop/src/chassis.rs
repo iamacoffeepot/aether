@@ -16,13 +16,10 @@
 use std::io;
 use std::mem;
 use std::sync::Arc;
-use std::time::Duration;
 
 use aether_audio::AudioCapability;
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::ComponentHostParams;
-use aether_contentgen::ContentGenConfig;
-use aether_fs::NamespaceRoots;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_kinds::BinaryManifest;
@@ -37,18 +34,12 @@ use winit::event_loop::EventLoop;
 use aether_chassis::{WindowConfig, WindowSettings};
 
 use super::driver::DesktopDriverCapability;
-use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
-use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
-    chassis_residual_knobs, install_frame_size, load_chassis_config, with_common_caps, with_rpc_server,
-};
+use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
+use aether_chassis::boot::{CommonEnv, chassis_residual_knobs, load_chassis_config, with_common_caps, with_rpc_server};
 use aether_chassis::cli::DesktopCli;
-use aether_substrate::config::{
-    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, StageArgv, validate_env,
-};
+use aether_substrate::config::{ConfigError, ConfigManifest, ConfigSources, StageArgv, validate_env};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
-use std::path::Path;
 use winit::event_loop::ControlFlow;
 
 /// Event the event-loop thread consumes from the desktop chassis.
@@ -158,46 +149,17 @@ impl DesktopChassis {
 /// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
 /// thread, so it stays local to the boot call `main()` makes).
 pub struct DesktopEnv {
-    /// ADR-0156 §5: the config source stack (file + per-cap argv overlays) the
-    /// builder resolves each composed cap's `Config` off (http / http-server /
-    /// audio / render tuning / lifecycle). The cap `Config`s no longer ride as
-    /// fields — a test stages programmatic overrides here.
-    pub sources: ConfigSources,
-    pub namespace_roots: NamespaceRoots,
-    /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
-    /// into the staging root in `with_common_caps`.
-    pub generated_asset_staging: ContentGenConfig,
+    /// The config fields every full-stack chassis shares (source stack, fs roots,
+    /// content-gen staging, runtime knobs, pool / ring / scheduler / teardown
+    /// knobs). Resolved by [`CommonEnv::resolve`] — the single declaration, so a
+    /// shared knob can't exist on one chassis and silently not the other.
+    pub common: CommonEnv,
     /// Lowered desktop window boot knobs (mode / size / title / wireframe),
     /// grouped into one embedded unit like the other knob groups and
     /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
     /// `wireframe` reaches `Gpu::new` via `WireframeMode::from_config_value`,
     /// which owns the tri-state parse.
     pub window: WindowSettings,
-    /// The substrate runtime knobs (#3849), resolved off the source stack. Only
-    /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
-    /// the subscriber installs, in `DesktopChassis::build_inner`). The
-    /// `aether.rpc.server` bind port rides the source stack too now
-    /// (`RpcServerConfig`) — the builder resolves it (unset → claimed but
-    /// unbound, ADR-0155 §3), so there is no separate `rpc_address` field.
-    pub runtime: RuntimeConfig,
-    /// Issue 745: optional worker-pool size override. Populated from
-    /// `AETHER_WORKERS` / `--workers`; `None` keeps `PoolConfig::default()`
-    /// behavior (`available_parallelism() - 1`, min 1).
-    pub workers: Option<usize>,
-    /// Issue 1990: per-actor ring capacities resolved from the
-    /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
-    /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
-    /// [`RingCapacities::default`] (the `aether-actor` const caps).
-    pub ring_capacities: RingCapacities,
-    /// Issue 2485: scheduler hot-path tuning resolved from the
-    /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
-    /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
-    /// [`SchedulerTuning::default`] (the built-in scheduler literals).
-    pub scheduler_tuning: SchedulerTuning,
-    /// Issue #2509: cumulative patience for the instanced-actor teardown
-    /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
-    /// `[settlement]`.
-    pub teardown_budget: Duration,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin
     /// leaves it empty and loads components over the hub instead.
@@ -254,56 +216,21 @@ impl DesktopEnv {
         let mut sources = ConfigSources::new(config_file);
         cli.stage(&mut sources);
 
-        // Chassis-side reads of resolved members (ADR-0156 §5): the derived
-        // staging inputs (fs roots + content-gen), the driver-only window boot
-        // knobs, and the non-cap pool / ring / scheduler / teardown knobs. Each
-        // resolves off the same stack via its `ConfigMember` section.
-        let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
-        let namespace_roots = sources.resolve::<NamespaceRoots>()?;
-        let generated_asset_staging = sources.resolve::<ContentGenConfig>()?;
-        let window_config = sources.resolve::<WindowConfig>()?;
-        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
-        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
-        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
-        // #3849: resolve the substrate runtime knobs (log filter + panic-hook
-        // knobs) off the same stack; `build_inner` re-applies `log_filter`.
-        let runtime = sources.resolve::<RuntimeConfig>()?;
-        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
-        // here, before the RPC server binds and any framing runs — the codec
-        // cannot pull the knob itself.
-        install_frame_size(&mut sources)?;
+        // Desktop-only window boot knobs: resolved through `WindowConfig` (argv >
+        // env > default) and lowered as a unit off the shared stack. `lower`
+        // delegates the mode to `parse_window_mode_env` — a present-but-bad
+        // `AETHER_WINDOW_MODE` aborts boot via `ConfigError` (ADR-0090 §4), an
+        // absent value resolves to `Windowed` — and maps `None` / empty title to
+        // `"aether"`. Resolved before the shared block: these are independent
+        // reads off the same stack, so the interleaving order is arbitrary.
+        let window = sources.resolve::<WindowConfig>()?.lower()?;
 
-        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
-        // through `ChassisBootConfig`). When set, the listed components'
-        // wasm + config are read into the autoload list `build_inner`
-        // drains into `aether.component.load`; an unreadable manifest
-        // aborts boot (ADR-0090 §4) via `ConfigError`.
-        let autoload = match chassis_boot.boot_manifest.clone() {
-            Some(path) => boot_manifest_autoload(Path::new(&path))?,
-            None => Vec::new(),
-        };
+        // The shared block (fs roots, content-gen, runtime, pool / ring /
+        // scheduler / teardown knobs) plus the boot-manifest autoload list, both
+        // resolved by the single common resolver off the same stack.
+        let (common, autoload) = CommonEnv::resolve(sources)?;
 
-        // Window boot knobs: resolved through `WindowConfig` (argv > env >
-        // default) and lowered as a unit. `lower` delegates the mode to
-        // `parse_window_mode_env` — a present-but-bad `AETHER_WINDOW_MODE`
-        // aborts boot via `ConfigError` (ADR-0090 §4), an absent value
-        // resolves to `Windowed` — and maps `None` / empty title to `"aether"`.
-        let window = window_config.lower()?;
-
-        let workers = chassis_boot.to_workers();
-
-        Ok(Self {
-            sources,
-            namespace_roots,
-            generated_asset_staging,
-            window,
-            runtime,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            teardown_budget,
-            autoload,
-        })
+        Ok(Self { common, window, autoload })
     }
 }
 
@@ -323,18 +250,7 @@ impl DesktopChassis {
     /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
     /// no part in the claim chain, so they are ignored here.
     fn compose(boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
-        let DesktopEnv {
-            sources,
-            namespace_roots,
-            generated_asset_staging,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            teardown_budget,
-            window: _,
-            runtime: _,
-            autoload: _,
-        } = env;
+        let DesktopEnv { common, window: _, autoload: _ } = env;
 
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -353,7 +269,7 @@ impl DesktopChassis {
             // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
             // reads its reference image from the same `assets` root the fs
             // cap serves, so the render cap loads it off the hot path.
-            assets_dir: Some(namespace_roots.assets.clone()),
+            assets_dir: Some(common.namespace_roots.assets.clone()),
             ..RenderParams::default()
         };
 
@@ -367,21 +283,13 @@ impl DesktopChassis {
         // Boot order is declaration order — `with_common_caps` runs
         // log first so other capabilities' boot tracing routes
         // through the log capture; render last so it claims its
-        // mailboxes after every other chassis cap.
-        let common = CommonBoot {
-            aborter,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            // Issue #2509: the instanced-actor teardown gate honors the
-            // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
-            // `0 → wait forever` sentinel) as the settlement gates.
-            teardown_budget,
-            component_host_params,
-            namespace_roots,
-            generated_asset_staging,
-            game_gateway_params: aether_game::GameGatewayParams::default(),
-        };
+        // mailboxes after every other chassis cap. `into_common_boot` reads the
+        // six env-sourced `CommonBoot` fields off the shared env in one place
+        // (the teardown budget honors the same `AETHER_SETTLEMENT_CAP_SECS` knob,
+        // `0 → wait forever` sentinel and all, as the settlement gates) and
+        // threads the source stack back out for the builder.
+        let (common, sources) =
+            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`
         // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
@@ -431,14 +339,14 @@ impl DesktopChassis {
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
         // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.runtime.log_filter);
+        apply_filter(&env.common.runtime.log_filter);
         let mailer = Arc::clone(&boot.queue);
 
         // Driver-only / post-build fields, read out before `compose` consumes
         // `env`: the window boot knobs ride the desktop driver, the autoload
         // list is drained after build. `WindowSettings` is `Clone` (not `Copy`);
         // it is tiny, so the clone is free.
-        let workers = env.workers;
+        let workers = env.common.workers;
         let window = env.window.clone();
         let autoload = mem::take(&mut env.autoload);
 

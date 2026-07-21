@@ -32,7 +32,6 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
-aether-fs = { path = "../aether-fs" }
 # The headless chassis absorbs audio mail with a typed Err reply, so it
 # names the `SetMasterGain` kind pair without the cpal runtime.
 aether-audio = { path = "../aether-audio", features = ["runtime"] }

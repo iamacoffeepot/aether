@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::AutoloadComponent;
-use aether_chassis::boot::RuntimeConfig;
+use aether_chassis::boot::{CommonEnv, RuntimeConfig};
 use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
 use aether_contentgen::ContentGenConfig;
@@ -360,15 +360,17 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving");
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(sandbox),
-            sources: base_sources(server_config),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                sources: base_sources(server_config),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(100),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -468,15 +470,17 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving-stream");
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(sandbox),
-            sources: base_sources(server_config),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                sources: base_sources(server_config),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(100),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -571,15 +575,17 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving-stream-route");
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(sandbox),
-            sources: base_sources(server_config),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                sources: base_sources(server_config),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(100),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -679,15 +685,17 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving-websocket");
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(sandbox),
-            sources: base_sources(server_config),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                sources: base_sources(server_config),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(100),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -901,15 +909,17 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-route-drop");
         let env = HeadlessEnv {
-            namespace_roots: test_namespace_roots(sandbox),
-            sources: base_sources(server_config),
-            generated_asset_staging: ContentGenConfig::default(),
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                sources: base_sources(server_config),
+                generated_asset_staging: ContentGenConfig::default(),
+                runtime: RuntimeConfig::default(),
+                workers: None,
+                ring_capacities: aether_substrate::RingCapacities::default(),
+                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
+                teardown_budget: Duration::from_millis(100),
+            },
             tick_period: Duration::from_millis(100),
-            runtime: RuntimeConfig::default(),
-            workers: None,
-            ring_capacities: aether_substrate::RingCapacities::default(),
-            scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-            teardown_budget: Duration::from_millis(100),
             autoload: vec![
                 AutoloadComponent {
                     wasm: wasm.clone(),

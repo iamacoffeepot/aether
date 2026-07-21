@@ -44,6 +44,7 @@ use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
+use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
 use crate::tick::TickConfig;
 use crate::window::WindowConfig;
 
@@ -636,6 +637,171 @@ pub struct CommonBoot {
     /// The default has no configured `TurnSim`, so merely linking the common
     /// chassis opens no player listener.
     pub game_gateway_params: GameGatewayParams,
+}
+
+/// The resolved config *data* every full-stack chassis (desktop + headless)
+/// carries identically — the single declaration of the shared env, so a knob
+/// added here exists on both chassis instead of being hand-copied into one and
+/// silently missing from the other. `DesktopEnv` / `HeadlessEnv` embed it as a
+/// `common` field and add only their genuinely per-chassis knobs (the desktop
+/// window boot knobs, the headless tick cadence) plus their autoload list.
+///
+/// [`Self::resolve`] is the one shared resolver: it consumes the staged config
+/// source stack and produces this struct (the env-side twin of the CLI's
+/// `CommonOverlay`). [`Self::into_common_boot`] reads it off into the shared
+/// [`CommonBoot`] cap args in one place.
+///
+/// ADR-0155 §4: this is config only — every field resolves through the
+/// argv/env/file path a real boot uses, so `--describe` resolves it on a
+/// headless host. A test constructs one by staging programmatic overrides into
+/// `sources` (`ConfigSources::set_override`).
+pub struct CommonEnv {
+    /// ADR-0156 §5: the config source stack (file + per-cap argv overlays) the
+    /// builder resolves each composed cap's `Config` off (http / http-server /
+    /// anthropic / gemini / audio / render tuning / lifecycle). The cap
+    /// `Config`s no longer ride as fields — a test stages programmatic overrides
+    /// here.
+    pub sources: ConfigSources,
+    /// The resolved `aether.fs` namespace roots (save / assets / config). Its
+    /// `save` root is the fallback staging root for content-gen, so it resolves
+    /// chassis-side and is passed to the fs cap programmatically so the cap uses
+    /// the exact same value.
+    pub namespace_roots: NamespaceRoots,
+    /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
+    /// into the staging root in [`with_common_caps`].
+    pub generated_asset_staging: ContentGenConfig,
+    /// The substrate runtime knobs (#3849), resolved off the source stack. Only
+    /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
+    /// the subscriber installs, in each chassis's `build_inner`); the field
+    /// carries the whole resolved member so its `[runtime]` file / env values are
+    /// resolved once. `aether.rpc.server`'s bind port rides the source stack too
+    /// (`RpcServerConfig`), so there is no separate `rpc_address` field — the
+    /// builder resolves it (unset → claimed but unbound, ADR-0155 §3).
+    pub runtime: RuntimeConfig,
+    /// Issue 745: optional worker-pool size override. Populated from
+    /// `AETHER_WORKERS` / `--workers`; `None` keeps `PoolConfig::default()`
+    /// behavior (`available_parallelism() - 1`, min 1).
+    pub workers: Option<usize>,
+    /// Issue 1990: per-actor ring capacities resolved from the
+    /// `ActorRingConfig` knob (`AETHER_ACTOR_LOG_RING_SIZE` /
+    /// `AETHER_ACTOR_TRACE_RING_SIZE`). Default is
+    /// [`RingCapacities::default`] (the `aether-actor` const caps).
+    pub ring_capacities: RingCapacities,
+    /// Issue 2485: scheduler hot-path tuning resolved from the
+    /// `SchedulerTuningConfig` knob (`AETHER_SPIN_WINDOW_USEC` /
+    /// `AETHER_LOCAL_STICKY_MAX` / …). Default is
+    /// [`SchedulerTuning::default`] (the built-in scheduler literals).
+    pub scheduler_tuning: SchedulerTuning,
+    /// Issue #2509: cumulative patience for the instanced-actor teardown
+    /// close-done gate, resolved from `AETHER_SETTLEMENT_CAP_SECS` /
+    /// `[settlement]`.
+    pub teardown_budget: Duration,
+}
+
+impl CommonEnv {
+    /// Resolve the shared chassis config off the already-staged source stack —
+    /// the one place the common `AETHER_*` knobs are read, replacing the
+    /// per-chassis copies of this block. The caller stages `sources` (config
+    /// file + `cli.stage`) and resolves its own per-chassis knob (window / tick)
+    /// off the same stack first; this then consumes `sources` into the returned
+    /// [`CommonEnv`].
+    ///
+    /// The boot-manifest autoload list is returned alongside rather than held as
+    /// a field: it rides each chassis's own struct (its bring-up is
+    /// chassis-flavored), but its production shares the [`ChassisBootConfig`]
+    /// resolve with `workers`, so it is resolved here once and handed back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a known `AETHER_*` member (or argv overlay
+    /// value) holds an unparseable value (ADR-0090 §4), or when a boot manifest
+    /// named by `AETHER_BOOT_MANIFEST` / `--boot-manifest` cannot be read.
+    pub fn resolve(mut sources: ConfigSources) -> Result<(Self, Vec<AutoloadComponent>), ConfigError> {
+        // Chassis-side reads of resolved members (ADR-0156 §5) — each resolves
+        // off the same stack via its `ConfigMember` section: the derived staging
+        // inputs (fs roots + content-gen) and the non-cap pool / ring / scheduler
+        // / teardown / runtime knobs.
+        let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
+        let namespace_roots = sources.resolve::<NamespaceRoots>()?;
+        let generated_asset_staging = sources.resolve::<ContentGenConfig>()?;
+        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
+        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
+        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
+        // #3849: resolve the substrate runtime knobs (log filter + panic-hook
+        // knobs) off the same stack; `build_inner` re-applies `log_filter` once
+        // the subscriber is installed.
+        let runtime = sources.resolve::<RuntimeConfig>()?;
+        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
+        // here, before the RPC server binds and any framing runs — the codec
+        // cannot pull the knob itself.
+        install_frame_size(&mut sources)?;
+
+        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved through
+        // `ChassisBootConfig`). When set, the listed components' wasm + config are
+        // read into the autoload list `build_inner` drains into
+        // `aether.component.load`; an unreadable manifest aborts boot (ADR-0090
+        // §4) via `ConfigError`.
+        let autoload = match chassis_boot.boot_manifest.clone() {
+            Some(path) => boot_manifest_autoload(Path::new(&path))?,
+            None => Vec::new(),
+        };
+        let workers = chassis_boot.to_workers();
+
+        Ok((
+            Self {
+                sources,
+                namespace_roots,
+                generated_asset_staging,
+                runtime,
+                workers,
+                ring_capacities,
+                scheduler_tuning,
+                teardown_budget,
+            },
+            autoload,
+        ))
+    }
+
+    /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
+    /// place, so neither chassis's `compose` hand-copies the same six env-sourced
+    /// fields. The three composer-constructed handles (`aborter`,
+    /// `component_host_params`, `game_gateway_params`) are supplied by the caller;
+    /// the source stack is threaded back out for the builder's
+    /// `with_config_sources`. `runtime` is dropped here — it is consumed
+    /// chassis-side (`apply_filter`)
+    /// before `compose` runs and is not a `CommonBoot` field.
+    #[must_use]
+    pub fn into_common_boot(
+        self,
+        aborter: Arc<dyn FatalAborter>,
+        component_host_params: ComponentHostParams,
+        game_gateway_params: GameGatewayParams,
+    ) -> (CommonBoot, ConfigSources) {
+        let Self {
+            sources,
+            namespace_roots,
+            generated_asset_staging,
+            runtime: _,
+            workers,
+            ring_capacities,
+            scheduler_tuning,
+            teardown_budget,
+        } = self;
+        (
+            CommonBoot {
+                aborter,
+                workers,
+                ring_capacities,
+                scheduler_tuning,
+                teardown_budget,
+                component_host_params,
+                namespace_roots,
+                generated_asset_staging,
+                game_gateway_params,
+            },
+            sources,
+        )
+    }
 }
 
 /// Wire the aborter, worker count, and the common caps every full-
