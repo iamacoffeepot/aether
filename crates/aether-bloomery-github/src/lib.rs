@@ -3,7 +3,7 @@
 //!
 //! The only crate in the workspace permitted to name a GitHub type. It is a
 //! plain adapter rlib (no cdylib, no wasm actors, no `aether-data` kinds),
-//! statically linked into `aether-bloomery-host` per ADR-0149 §Packaging, and
+//! statically linked into `aether-chassis-bloomery` per ADR-0149 §Packaging, and
 //! it depends *inward* on the control core ([`aether_bloomery`]) so the
 //! static-link DAG stays cycle-free.
 //!

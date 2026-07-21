@@ -18,7 +18,7 @@ write and live-read routes need the control-core reducer, so autoload it with
 AETHER_HTTP_PORT=8910 \
 AETHER_STORE_PATH=bloomery.db \
 AETHER_CONTROL_CORE_WASM=target/wasm32-unknown-unknown/release/aether_bloomery.wasm \
-  cargo run -p aether-bloomery-host --bin bloomery
+  cargo run -p aether-chassis-bloomery --bin bloomery
 ```
 
 The ingress is an internal, unversioned, localhost-only control surface — no

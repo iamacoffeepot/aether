@@ -62,7 +62,7 @@ When that happens, work the loop:
    failing test names the consumer.
 3. Add one `[[path-rule]]` block (`globs` → `mark-changed`) to
    `PATH_RULES_TOML`, mirroring the existing `bloomery/**` →
-   `aether-bloomery-host` rule, with a comment naming the coupling. The rule
+   `aether-chassis-bloomery` rule, with a comment naming the coupling. The rule
    PR self-validates: `xtask/` is in `RUN_ALL_PREFIXES`, so it runs the full
    suite.
 4. Land the rule fix alongside (or before) the breakage fix so the selection

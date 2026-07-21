@@ -161,36 +161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-bloomery-host"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-bloomery",
- "aether-bloomery-github",
- "aether-codec",
- "aether-component",
- "aether-data",
- "aether-http",
- "aether-kinds",
- "aether-rpc",
- "aether-substrate",
- "aether-trace",
- "anyhow",
- "clap",
- "confique",
- "dirs",
- "ed25519-dalek",
- "inventory",
- "jsonwebtoken",
- "rusqlite",
- "serde",
- "serde_json",
- "signal-hook 0.3.18",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "aether-chassis"
 version = "0.3.0-alpha"
 dependencies = [
@@ -221,6 +191,36 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
+name = "aether-chassis-bloomery"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery",
+ "aether-bloomery-github",
+ "aether-codec",
+ "aether-component",
+ "aether-data",
+ "aether-http",
+ "aether-kinds",
+ "aether-rpc",
+ "aether-substrate",
+ "aether-trace",
+ "anyhow",
+ "clap",
+ "confique",
+ "dirs",
+ "ed25519-dalek",
+ "inventory",
+ "jsonwebtoken",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "signal-hook 0.3.18",
+ "tempfile",
  "tracing",
 ]
 

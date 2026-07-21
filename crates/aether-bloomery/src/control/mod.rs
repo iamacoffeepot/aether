@@ -7,14 +7,14 @@
 //! definition. The control core that owns the live
 //! [`Snapshot`](crate::reduce::Snapshot), drives [`reduce`](crate::reduce::reduce),
 //! and commits through `aether.store` is a **native** capability in
-//! `aether-bloomery-host` (ADR-0149 §The boundary, amended); this crate is the
+//! `aether-chassis-bloomery` (ADR-0149 §The boundary, amended); this crate is the
 //! pure leaf it and the GitHub adapter both depend on.
 //!
 //! # Why the store transact-mails live here
 //!
 //! [`Commit`] and the [`ReplayJournal`] family are the store's own
 //! transact-mails (ADR-0149 §The boundary), defined here in `aether-bloomery`
-//! rather than in `aether-bloomery-host` alongside the rest of the
+//! rather than in `aether-chassis-bloomery` alongside the rest of the
 //! `aether.store.*` family, so the value layer and the host's store + control
 //! caps share one definition. The wire contract is the `#[kind(name = "…")]`
 //! literal wherever the type is declared, and the host's `StoreCapability`

@@ -1055,7 +1055,7 @@ fn resolve_dispatches_the_aggregate_review_and_the_passing_verdict_lands() {
     assert_eq!(record.aggregate_rolls, 1, "the verdict consumed one review pass");
 }
 
-// Tripwire: the genesis reconcile (aether-bloomery-host) seeds
+// Tripwire: the genesis reconcile (aether-chassis-bloomery) seeds
 // `Snapshot::GENESIS_MAINLINE`, and the control core starts every fresh snapshot
 // at `Snapshot::default().mainline` — the two must name the same genesis base or
 // the seeded correspondence and the reducer's first land address different
