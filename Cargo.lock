@@ -244,7 +244,6 @@ name = "aether-chassis-desktop"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-anthropic",
  "aether-audio",
  "aether-chassis",
  "aether-clipboard",
@@ -253,7 +252,6 @@ dependencies = [
  "aether-data",
  "aether-fs",
  "aether-game",
- "aether-gemini",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-http",

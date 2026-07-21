@@ -8,6 +8,17 @@
 //! fall through to env-only resolution — boot is byte-identical when
 //! argv is empty.
 //!
+//! ADR-0156 §5 (issue 3872): staging each overlay onto the source stack is
+//! **derived**, not hand-maintained. `#[derive(aether_substrate::Config)]` emits
+//! a leaf `StageArgv` on every `*Overlay`, and each root here carries
+//! `#[derive(aether_substrate::StageArgv)]` — the container half that delegates
+//! to every field's `stage`. A chassis then stages its whole CLI in one
+//! `cli.stage(&mut sources)` call, so adding an overlay field to a root IS
+//! staging it. Non-overlay meta fields (`config` / `print_config` / `describe`)
+//! carry `#[stage(skip)]`; an unannotated non-overlay field fails to compile,
+//! and a staged-but-never-composed overlay fails boot loudly
+//! (`ConfigSources::validate_no_orphan_argv`).
+//!
 //! Flag naming is mechanical: strip an `AETHER_` (or top-level)
 //! prefix, lowercase, hyphenate. `AETHER_HTTP_TIMEOUT_MS` →
 //! `--http-timeout-ms`, `GEMINI_API_KEY` → `--gemini-api-key`.
@@ -60,7 +71,7 @@ pub use crate::window::WindowOverlay;
 /// headless). Captures every cap whose config layer is the same on
 /// both chassis. Per-chassis extras (audio for desktop, tick / window
 /// for desktop) live on their own root struct.
-#[derive(Args, Debug, Default, Clone)]
+#[derive(Args, Debug, Default, Clone, aether_substrate::StageArgv)]
 pub struct CommonOverlay {
     #[command(flatten)]
     pub http: HttpOverlay,
@@ -92,7 +103,7 @@ pub struct CommonOverlay {
 }
 
 /// Desktop chassis CLI root.
-#[derive(Parser, Debug, Default, Clone)]
+#[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
     name = "aether-substrate",
     about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.",
@@ -113,11 +124,13 @@ pub struct DesktopCli {
     /// Sectioned TOML chassis config file. Values from this file sit
     /// below env and argv in the source stack.
     #[arg(long = "config", value_name = "PATH")]
+    #[stage(skip)]
     pub config: Option<String>,
 
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
     #[arg(long = "print-config")]
+    #[stage(skip)]
     pub print_config: bool,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
@@ -125,11 +138,12 @@ pub struct DesktopCli {
     /// 1953). The hub's binary store forks `<binary> --describe` once at
     /// upload time to capture what a stored binary is.
     #[arg(long = "describe")]
+    #[stage(skip)]
     pub describe: bool,
 }
 
 /// Headless chassis CLI root.
-#[derive(Parser, Debug, Default, Clone)]
+#[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
     name = "aether-substrate-headless",
     about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.",
@@ -148,11 +162,13 @@ pub struct HeadlessCli {
     /// Sectioned TOML chassis config file. Values from this file sit
     /// below env and argv in the source stack.
     #[arg(long = "config", value_name = "PATH")]
+    #[stage(skip)]
     pub config: Option<String>,
 
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
     #[arg(long = "print-config")]
+    #[stage(skip)]
     pub print_config: bool,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
@@ -160,11 +176,12 @@ pub struct HeadlessCli {
     /// 1953). The hub's binary store forks `<binary> --describe` once at
     /// upload time to capture what a stored binary is.
     #[arg(long = "describe")]
+    #[stage(skip)]
     pub describe: bool,
 }
 
 /// Hub chassis CLI root — coordinator-only, no full-stack caps.
-#[derive(Parser, Debug, Default, Clone)]
+#[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
     name = "aether-substrate-hub",
     about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.",
@@ -188,11 +205,13 @@ pub struct HubCli {
     /// Sectioned TOML chassis config file. Values from this file sit
     /// below env and argv in the source stack.
     #[arg(long = "config", value_name = "PATH")]
+    #[stage(skip)]
     pub config: Option<String>,
 
     /// Print every config knob (source-resolved value, default, doc)
     /// and exit before boot (ADR-0090 §4 discovery dump).
     #[arg(long = "print-config")]
+    #[stage(skip)]
     pub print_config: bool,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
@@ -200,6 +219,7 @@ pub struct HubCli {
     /// 1953). The hub's binary store forks `<binary> --describe` once at
     /// upload time to capture what a stored binary is.
     #[arg(long = "describe")]
+    #[stage(skip)]
     pub describe: bool,
 }
 

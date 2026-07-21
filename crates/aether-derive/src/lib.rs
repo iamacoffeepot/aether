@@ -11,6 +11,7 @@
 use proc_macro::TokenStream;
 
 mod config;
+mod stage_argv;
 
 /// Derive macro that turns a cap's resolved-config struct into the full
 /// ADR-0090 quartet (Layer / Overlay / `FromArgvThenEnv` /
@@ -85,4 +86,23 @@ mod config;
 #[proc_macro_derive(Config, attributes(config))]
 pub fn derive_config(input: TokenStream) -> TokenStream {
     config::derive(input)
+}
+
+/// Derive macro for the hand-written chassis CLI roots (ADR-0156 §5, issue
+/// 3872): emit a `StageArgv` impl that stages the whole root onto a
+/// `ConfigSources` by delegating to every field's own `stage`.
+///
+/// Re-exported from `aether_substrate::StageArgv`; downstream chassis write
+/// `#[derive(aether_substrate::StageArgv)]`.
+///
+/// ## Field attribute
+///
+/// - `#[stage(skip)]` — the field takes no part in staging (`config` /
+///   `print_config` / `describe`, and any per-chassis non-overlay extra). An
+///   unannotated field whose type does not implement `StageArgv` is a compile
+///   error, so a cap overlay added to a root IS staged and a stray non-overlay
+///   field cannot be silently dropped.
+#[proc_macro_derive(StageArgv, attributes(stage))]
+pub fn derive_stage_argv(input: TokenStream) -> TokenStream {
+    stage_argv::derive(input)
 }

@@ -34,13 +34,12 @@ use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
 use aether_render::RenderTuningConfig;
-use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerParams};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{ConfigError, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 
-use crate::cli::RpcServerOverlay;
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
@@ -747,21 +746,12 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
 /// identifies the chassis profile in the `HelloAck` peer-kind.
 ///
 /// The config is not staged here (#3849 retired the programmatic-`bind_addr`
-/// bridge): desktop / headless `set_argv::<RpcServerConfig>` the `--rpc-port`
-/// overlay into the source stack, and the builder resolves it — unset falls
-/// through to the member's `None` default (unbound). Only the hub overrides
-/// this with its `DEFAULT_RPC_PORT` fallback, via `with_actor_configured` at
-/// its own compose site.
-/// Stage the `--rpc-port` argv overlay into the source stack so the builder
-/// resolves `RpcServerConfig` (argv > `AETHER_RPC_PORT` env > `[rpc]` file >
-/// default) like any other composed member. Keeps the `RpcServerConfig` type
-/// internal to `aether-chassis` — the full-stack chassis crates need no direct
-/// `aether-rpc` dependency to stage the port, they just hand this the overlay
-/// `CommonOverlay.rpc` carries.
-pub fn stage_rpc_argv(sources: &mut ConfigSources, overlay: RpcServerOverlay) {
-    sources.set_argv::<RpcServerConfig>(overlay.into_layer());
-}
-
+/// bridge): the `--rpc-port` overlay `CommonOverlay.rpc` carries rides the CLI
+/// root's derived `StageArgv` into the source stack like every other member
+/// (issue 3872), and the builder resolves it — unset falls through to the
+/// member's `None` default (unbound). Only the hub overrides this with its
+/// `DEFAULT_RPC_PORT` fallback, via `with_actor_configured` at its own compose
+/// site.
 #[must_use]
 pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, engine_name: &str) -> Builder<C> {
     builder.with_actor::<RpcServerCapability>(RpcServerParams {

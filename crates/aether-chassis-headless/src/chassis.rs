@@ -17,19 +17,17 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_component::ComponentHostParams;
 use aether_contentgen::ContentGenConfig;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
-use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
-use aether_http::{HttpConfig, HttpServerCapability, HttpServerConfig};
+use aether_http::HttpServerCapability;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
-use aether_lifecycle::{LifecycleCapability, LifecycleConfig};
+use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -42,12 +40,12 @@ use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
-    chassis_residual_knobs, install_frame_size, load_chassis_config, stage_rpc_argv, tick_only_lifecycle_params,
-    with_common_caps, with_rpc_server,
+    chassis_residual_knobs, install_frame_size, load_chassis_config, tick_only_lifecycle_params, with_common_caps,
+    with_rpc_server,
 };
-use aether_chassis::cli::{CommonOverlay, HeadlessCli};
+use aether_chassis::cli::HeadlessCli;
 use aether_substrate::config::{
-    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, validate_env,
+    ConfigError, ConfigManifest, ConfigSources, RingCapacities, SchedulerTuning, StageArgv, validate_env,
 };
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::lifecycle::FatalAborter;
@@ -204,48 +202,21 @@ impl HeadlessEnv {
         // where the composed builder's `config_manifest` supplies the
         // per-chassis known-key set (headless no longer "knows" the window /
         // audio / render knobs it never composes).
-        let HeadlessCli {
-            common,
-            tick: tick_overlay,
-            // The bin handles `--print-config` / `--describe` (print + exit)
-            // before this resolver runs.
-            config,
-            print_config: _,
-            describe: _,
-        } = cli;
-        let config_file = load_chassis_config(config)?;
-        let CommonOverlay {
-            http,
-            http_server: http_server_overlay,
-            fs,
-            anthropic,
-            gemini,
-            contentgen,
-            chassis_boot: chassis_boot_overlay,
-            lifecycle: lifecycle_overlay,
-            rpc: rpc_overlay,
-        } = common;
+        // The bin handles `--print-config` / `--describe` (print + exit) before
+        // this resolver runs; `config` names the file source and takes no part
+        // in staging.
+        let config_file = load_chassis_config(cli.config.clone())?;
 
-        // ADR-0156 §5: assemble the source stack — the loaded config file plus
-        // each cap member's typed argv overlay (`Overlay::into_layer`). The
-        // builder resolves the composed cap configs (http / http-server /
-        // anthropic / gemini / lifecycle) off this ahead of `init`; section
-        // identity comes from each member's `ConfigMember` declaration, so no
-        // chassis-side section string survives.
+        // ADR-0156 §5 (issue 3872): assemble the source stack — the loaded
+        // config file plus every cap member's typed argv overlay, staged in one
+        // derived `StageArgv` call off the CLI declaration itself (each `*Overlay`
+        // carries a leaf `StageArgv` and each root delegates to its fields). No
+        // hand-maintained per-cap `set_argv` block to forget, and a
+        // staged-but-never-composed overlay fails boot loudly. Section identity
+        // comes from each member's `ConfigMember` declaration, so no chassis-side
+        // section string survives.
         let mut sources = ConfigSources::new(config_file);
-        sources.set_argv::<HttpConfig>(http.into_layer());
-        sources.set_argv::<HttpServerConfig>(http_server_overlay.into_layer());
-        sources.set_argv::<NamespaceRoots>(fs.into_layer());
-        sources.set_argv::<AnthropicConfig>(anthropic.into_layer());
-        sources.set_argv::<GeminiConfig>(gemini.into_layer());
-        sources.set_argv::<ContentGenConfig>(contentgen.into_layer());
-        sources.set_argv::<ChassisBootConfig>(chassis_boot_overlay.into_layer());
-        sources.set_argv::<LifecycleConfig>(lifecycle_overlay.into_layer());
-        sources.set_argv::<TickConfig>(tick_overlay.into_layer());
-        // #3849: `aether.rpc.server`'s bind port resolves through the source
-        // stack like any member — stage the `--rpc-port` overlay so the builder
-        // resolves it (argv > `AETHER_RPC_PORT` > `[rpc]` file > unset/unbound).
-        stage_rpc_argv(&mut sources, rpc_overlay);
+        cli.stage(&mut sources);
 
         // Chassis-side reads of resolved members (ADR-0156 §5) — resolved off
         // the same stack via each member's `ConfigMember` section: the derived

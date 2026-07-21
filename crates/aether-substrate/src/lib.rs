@@ -81,7 +81,7 @@ pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError}
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::Addressable;
 pub use aether_actor::{Emit, Manual, Multi, ReplyMode, Single};
-pub use aether_derive::Config;
+pub use aether_derive::{Config, StageArgv};
 #[cfg(feature = "wasm")]
 pub use boot::SubstrateBoot;
 pub use chassis::Chassis;
@@ -96,7 +96,7 @@ pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};
 pub use config::{
     ConfigError, ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, FromArgvThenEnv,
-    KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config, file_section, known_keys,
+    KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, StageArgv, dump_config, file_section, known_keys,
     validate_env,
 };
 pub use mail::mailer::Mailer;
