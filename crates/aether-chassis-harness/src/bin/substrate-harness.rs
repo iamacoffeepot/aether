@@ -49,8 +49,6 @@ fn main() -> anyhow::Result<()> {
     let namespace_roots = NamespaceRoots::from_env();
 
     let env = SubstrateHarnessEnv {
-        name: "substrate-harness".to_owned(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
         workers: WORKERS,
         pool_workers: None,
         // Issue 1990: the standalone substrate-harness binary keeps the default
