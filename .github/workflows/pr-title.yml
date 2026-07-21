@@ -1,8 +1,17 @@
 name: PR title
 
+# Enforces Conventional Commit PR titles (main squash-merges with the PR
+# title as the commit subject, so title quality is commit quality). Its own
+# workflow, not a ci.yml job: the `edited` trigger re-lints a fixed title
+# without re-running the Rust suite. `Lint PR title` is a required check in
+# branch protection alongside `CI pass`.
+
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
 
 jobs:
   lint:

@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 # A push to a branch supersedes that branch's in-flight run: cancel it
 # instead of letting it hold 8-vCPU runners to completion (the account
 # spot quota is the scarce resource). Main is exempt — every main push
@@ -41,11 +44,10 @@ jobs:
               - 'clippy.toml'
               - '.cargo/**'
               - '.config/**'
-              # ci.yml only, not workflows/**: the fleet workflows
-              # (agent-work, review, dogfood, judge, chat, ...) cannot
-              # change a Rust build's outcome, and re-running the whole
-              # suite on their edits stalls the workflow-iteration loop
-              # (#3297). ci.yml defines these jobs, so it stays.
+              # ci.yml only, not workflows/**: the other workflows
+              # (nightlies, docs, release, ...) cannot change a Rust
+              # build's outcome, so their edits skip the Rust suite.
+              # ci.yml defines these jobs, so it stays.
               - '.github/workflows/ci.yml'
               # jscpd's gate threshold lives in .jscpd.json, so a config
               # edit must re-run the dup-check job.
@@ -60,31 +62,6 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
-
-  dogfood-token-table:
-    name: Dogfood contracts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - run: node --test scripts/dogfood-token-table.test.mjs scripts/post-dogfood-rollup.test.mjs scripts/dogfood-action-contract.test.mjs scripts/post-review-rollup.test.mjs scripts/review-args-completeness.test.mjs scripts/agent-pool.test.mjs scripts/agent-usage-record.test.mjs scripts/quality-eval.test.mjs
-
-  # The declared-surface matcher and the approval-tier resolver gate what the
-  # unattended fleet may advance, and their strict policy parser fails closed:
-  # a malformed .github/approval-policy.yml would silently stop every auto
-  # dispatch. These suites (which also parse the real policy file) are the loud
-  # version of that failure. Cheap and unconditional, like the dogfood
-  # contracts above.
-  approval-machinery:
-    name: Approval machinery
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - run: python3 scripts/test-surface-match.py
-      - run: python3 .agents/skills/approve/scripts/test_resolve_approval_tier.py
-      - run: bash scripts/test-agent-tick-lib.sh
 
   clippy:
     name: Clippy
@@ -110,8 +87,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Not the guide: docs.yml builds the mdBook. This job denies the
+  # tracked rustdoc lints over the API docs.
   docs:
-    name: Docs
+    name: Rustdoc
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -142,7 +121,7 @@ jobs:
   # triples CI time without catching anything new. See ADR-0035 § CI
   # matrix scope.
   test:
-    name: Test (workspace, linux)
+    name: Test
     needs: changes
     if: needs.changes.outputs.code == 'true'
     # PR runs on the fast spot runner, main pushes on GitHub-hosted —
@@ -365,15 +344,13 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, test, dup-check, unused-deps ]
+    needs: [ changes, fmt, clippy, docs, test, dup-check, unused-deps ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
-          echo "dogfood-token-table: ${{ needs.dogfood-token-table.result }}"
-          echo "approval-machinery: ${{ needs.approval-machinery.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
           echo "test:    ${{ needs.test.result }}"
@@ -382,8 +359,6 @@ jobs:
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
-          [[ "${{ needs.dogfood-token-table.result }}" == "success" ]] || fail=1
-          [[ "${{ needs.approval-machinery.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1

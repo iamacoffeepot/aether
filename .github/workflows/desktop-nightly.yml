@@ -67,8 +67,7 @@ jobs:
             gh issue comment "$existing" --body-file issue_body.md
           else
             echo "Filing new failure issue."
-            # --label alert: a machine-filed alert is not a pipeline work item,
-            # and the fleet's dispatcher skips anything carrying it. Without the
-            # label an unlabelled issue reads as Backlog and gets scoped (#3180).
+            # --label alert: marks a machine-filed triage ticket, which
+            # issue-labels.yml exempts from the title lint.
             gh issue create --title "$title" --body-file issue_body.md --label alert
           fi

@@ -226,7 +226,7 @@ not translated by mechanical substitution. Human contributors can start at
 - `docs/adr/` — numbered decision records; check status and supersession.
 - `AGENTS.md` — concise Codex repository constraints.
 - `.agents/skills/` — executable Codex issue/PR workflows.
-- `.github/workflows/` — current hosted CI/review/dogfood/reconciliation behavior.
+- `.github/workflows/` — hosted CI; conventions in its README.
 
 Build the guide with:
 
