@@ -227,13 +227,16 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     }
 
     /// Declare a native actor to boot with the chassis, configured per
-    /// ADR-0090's derive-`Config` path.
+    /// ADR-0090's derive-`Config` path and constructed with the ADR-0156
+    /// composer-supplied `params`. This slice threads the channel through
+    /// every call site as `()`; a later slice moves real construction input
+    /// off `Config` and onto `Params`.
     #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config) -> Self
+    pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
     where
         A: NativeActor,
     {
-        self.passives.push(Box::new(NativeActorBoot::<A>::new(config)));
+        self.passives.push(Box::new(NativeActorBoot::<A>::new(config, params)));
         self
     }
 

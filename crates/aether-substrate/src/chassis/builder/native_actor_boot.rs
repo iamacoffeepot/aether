@@ -32,11 +32,11 @@ struct ClaimResources {
 /// state assignment, so each transition is atomic w.r.t. partial
 /// moves.
 enum BootState<A: NativeActor> {
-    /// Pre-claim — only the cap config is held.
-    Pending { config: A::Config },
+    /// Pre-claim — only the cap config + ADR-0156 params are held.
+    Pending { config: A::Config, params: A::Params },
     /// Post-claim, pre-init — mailbox + transport + slots claimed,
-    /// config still pending consumption by `init`.
-    Claimed { resources: ClaimResources, config: A::Config },
+    /// config + params still pending consumption by `init`.
+    Claimed { resources: ClaimResources, config: A::Config, params: A::Params },
     /// Post-init, pre-wire — actor instance constructed.
     Initialized { resources: ClaimResources, actor: Box<A::State> },
     /// Post-wire, pre-spawn — wire ran. The dispatcher is next.
@@ -68,14 +68,14 @@ pub(super) struct NativeActorBoot<A: NativeActor> {
 }
 
 impl<A: NativeActor> NativeActorBoot<A> {
-    pub(super) fn new(config: A::Config) -> Self {
-        Self { state: BootState::Pending { config } }
+    pub(super) fn new(config: A::Config, params: A::Params) -> Self {
+        Self { state: BootState::Pending { config, params } }
     }
 }
 
 impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
-        let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning) else {
+        let BootState::Pending { config, params } = mem::replace(&mut self.state, BootState::Transitioning) else {
             panic!("PassiveBoot::claim called in non-Pending state");
         };
 
@@ -140,12 +140,14 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         self.state = BootState::Claimed {
             resources: ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots },
             config,
+            params,
         };
         Ok(())
     }
 
     fn init(&mut self, ctx: &mut ChassisCtx<'_>, handles: &mut ExportedHandles) -> Result<(), BootError> {
-        let BootState::Claimed { resources, config } = mem::replace(&mut self.state, BootState::Transitioning) else {
+        let BootState::Claimed { resources, config, params } = mem::replace(&mut self.state, BootState::Transitioning)
+        else {
             panic!("PassiveBoot::init called in non-Claimed state");
         };
 
@@ -156,13 +158,13 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         let init_result = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
-            local::with_stamped(&resources.slots, || A::init(config, &mut init_ctx))
+            local::with_stamped(&resources.slots, || A::init(config, params, &mut init_ctx))
         };
         let actor = match init_result {
             Ok(a) => a,
             Err(e) => {
-                // A::init consumed `config`, so we can't restore the
-                // Claimed variant. Inline the same cleanup
+                // A::init consumed `config` + `params`, so we can't restore
+                // the Claimed variant. Inline the same cleanup
                 // `cleanup_after_failure` would do for Claimed: release
                 // the mailbox + namespace claim, then let `resources`
                 // drop at end of scope (closing transport + sender).

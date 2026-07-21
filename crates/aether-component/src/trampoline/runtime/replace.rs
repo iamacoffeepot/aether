@@ -51,7 +51,7 @@ impl WasmTrampolineState {
             type_tag: Some(pending.tag),
             actor_caps: self.actor_caps.clone(),
         };
-        if let Err(e) = ctx.spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config).finish() {
+        if let Err(e) = ctx.spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config, ()).finish() {
             tracing::warn!(
                 target: "aether_component",
                 parent = %self.mailbox,

@@ -210,7 +210,10 @@ where
         return false;
     };
     let mut init_ctx = WasmInitCtx::__new(to_reconstruct.alias.0);
-    let Ok(mut child) = A::init(config, &mut init_ctx) else {
+    // ADR-0156 §2: empty params for now — resolve `Params` to the compiled
+    // default, mirroring the real-config decode above.
+    let params = <A::Params as Default>::default();
+    let Ok(mut child) = A::init(config, params, &mut init_ctx) else {
         return false;
     };
 
@@ -492,11 +495,12 @@ mod tests {
 
     impl Lifecycle<Self> for TypedConfigChild {
         type Config = TypedConfig;
+        type Params = ();
         type InitError = ActorInitError;
         type InitCtx<'a> = WasmInitCtx<'a>;
         type Ctx<'a> = WasmCtx<'a>;
 
-        fn init(config: TypedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        fn init(config: TypedConfig, _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
             Ok(Self { observed: config.0 })
         }
     }

@@ -190,6 +190,7 @@ impl NativeActor for GameGatewayCapability {
                     interval_nanos: state.interval_nanos,
                     max_pending_live_bundles: state.max_pending_live_bundles,
                 },
+                (),
             )
             .after_init(mail)
             .finish()

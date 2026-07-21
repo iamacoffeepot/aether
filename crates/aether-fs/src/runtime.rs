@@ -517,7 +517,7 @@ mod tests {
         let root = scratch_root("boots");
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<FsCapability>(roots_under(&root))
+            .with_actor::<FsCapability>(roots_under(&root), ())
             .build_passive()
             .expect("io capability boots");
         assert!(registry.lookup(FsCapability::NAMESPACE).is_some(), "io mailbox registered");
@@ -540,7 +540,7 @@ mod tests {
 
         let (registry, mailer) = fresh_substrate();
         let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<FsCapability>(roots)
+            .with_actor::<FsCapability>(roots, ())
             .build_passive();
         assert!(result.is_err(), "save root being a file must fail cap init");
         cleanup(&root);

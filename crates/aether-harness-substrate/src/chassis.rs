@@ -417,13 +417,16 @@ impl SubstrateHarnessChassis {
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_cap(teardown_cap)
-            .with_actor::<TraceDispatchCapability>(());
+            .with_actor::<TraceDispatchCapability>((), ());
         if component_host {
-            builder = builder.with_actor::<ComponentHostCapability>(ComponentHostConfig {
-                engine: Arc::clone(&boot.engine),
-                linker: Arc::clone(&boot.linker),
-                hub_outbound: Arc::clone(&boot.outbound),
-            });
+            builder = builder.with_actor::<ComponentHostCapability>(
+                ComponentHostConfig {
+                    engine: Arc::clone(&boot.engine),
+                    linker: Arc::clone(&boot.linker),
+                    hub_outbound: Arc::clone(&boot.outbound),
+                },
+                (),
+            );
         }
         if let Some(ext) = &render_ext {
             builder = ext.compose(&wiring, builder);
@@ -432,11 +435,11 @@ impl SubstrateHarnessChassis {
             builder = apply(builder);
         }
         builder = builder
-            .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config)
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT));
+            .with_actor::<HeadlessWindowCapability>((), ())
+            .with_actor::<SubstrateHarnessCapability>(substrate_harness_cap_config, ())
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT), ());
         if let Some(roots) = io_roots {
-            builder = builder.with_actor::<FsCapability>(roots);
+            builder = builder.with_actor::<FsCapability>(roots, ());
         }
         let passive = builder.build_passive()?;
 

@@ -151,11 +151,12 @@ impl HubChassis {
             .with_ring_caps(ring_caps)
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_cap(teardown_cap)
-            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<TraceDispatchCapability>((), ())
             // Liveness-heartbeat tuning (issue 1339), resolved
             // argv-then-env in `HubEnv::from_env_with_argv`.
-            .with_actor::<EngineServer>(engine)
-            .with_actor::<RpcServerCapability>(RpcServerConfig {
+            .with_actor::<EngineServer>(engine, ())
+            .with_actor::<RpcServerCapability>(
+                RpcServerConfig {
                 bind_addr: Some(rpc_addr.to_string()),
                 peer_kind: PeerKind::Substrate {
                     engine_name: "aether-hub".into(),
@@ -164,7 +165,9 @@ impl HubChassis {
                 },
                 #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
                 route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
-            })
+            },
+                (),
+            )
     }
 
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {

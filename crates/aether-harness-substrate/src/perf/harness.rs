@@ -166,10 +166,11 @@ impl aether_actor::Addressable for Relay {
 impl aether_actor::HandlesKind<Ping> for Relay {}
 impl aether_actor::Lifecycle<Self> for Relay {
     type Config = RelayConfig;
+    type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a>;
-    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { downstreams: config.downstreams, work_iters: config.work_iters, received: 0, sent: 0 })
     }
 }
@@ -255,10 +256,11 @@ impl aether_actor::Lifecycle<Self> for TickSource {
     /// `(entry, burst)`: the relay-0 mailbox and the number of `Ping`s to
     /// emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
     type Config = (MailboxId, u32);
+    type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a>;
-    fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let (entry, burst) = config;
         Ok(Self { entry, burst, seq: 0, sent: 0 })
     }
@@ -1280,7 +1282,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
                 let sub = i.to_string();
                 let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
-                if let Err(e) = tb.spawn_actor::<Relay>(Subname::Named(&sub), config).finish() {
+                if let Err(e) = tb.spawn_actor::<Relay>(Subname::Named(&sub), config, ()).finish() {
                     tracing::warn!(target: "aether_perf", topo = %topo.name, relay = i, error = ?e, "relay spawn failed");
                     spawned_ok = false;
                     break;
@@ -1316,7 +1318,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                     backlog.min(ring_cap / fanout_divisor)
                 }
             };
-            if let Err(e) = tb.spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst)).finish() {
+            if let Err(e) = tb.spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst), ()).finish() {
                 tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
                 continue;
             }

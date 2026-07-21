@@ -42,6 +42,12 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // emitted `export!` shim can decode 0 config bytes via
     // `impl Kind for ()` and the user's `init` body stays 1-param.
     let mut config_type: Option<syn::ImplItemType> = None;
+    // ADR-0156 §1/§2 (issue 3845): optional `type Params = …` declaration.
+    // When omitted, the macro synthesizes `type Params = ();` and injects a
+    // `_params: ()` leading param into `init` — the same stand-in the `Config`
+    // slot uses — so the author's `init` body stays unchanged and the emitted
+    // shim resolves 0 params bytes via `impl Kind for ()`.
+    let mut params_type: Option<syn::ImplItemType> = None;
     // ADR-0113 (issue 1855): optional `type State = …` declaration plus
     // the `dehydrate` / `rehydrate` accessor pair. When `type State` is
     // declared the macro generates the `on_dehydrate` / `on_rehydrate`
@@ -62,6 +68,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             ImplItem::Type(it) if it.ident == "Config" => {
                 config_type = Some(it);
+            }
+            ImplItem::Type(it) if it.ident == "Params" => {
+                params_type = Some(it);
             }
             ImplItem::Type(it) if it.ident == "State" => {
                 state_type = Some(it);
@@ -239,7 +248,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // always decodes `<Self as WasmActor>::Config` from bytes, so the
     // synthesized `_config: ()` path round-trips uniformly via
     // `impl Kind for ()`.
-    let (synthesized_config_type, init_method_emitted) = if config_type.is_some() {
+    let (synthesized_config_type, mut init_method_emitted) = if config_type.is_some() {
         // User declared the config type; trust their init signature.
         (None, init_method)
     } else {
@@ -255,6 +264,26 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         // method), so index 0 is the right slot.
         init_method.sig.inputs.insert(0, config_param);
         (Some(synth), init_method)
+    };
+
+    // ADR-0156 §2 (issue 3845): the trait factory is now
+    // `init(config, params, ctx)`. Mirror the `Config` stand-in for the
+    // second channel: when the author omits `type Params`, synthesize
+    // `type Params = ();` and inject a `_params: ()` param. After the config
+    // handling above, `config` sits at index 0 (declared or synthesized) and
+    // `ctx` at index 1, so inserting `params` at index 1 pushes `ctx` to 2 —
+    // giving the `(config, params, ctx)` shape for every declared/omitted
+    // combination without special-casing.
+    let synthesized_params_type = if params_type.is_some() {
+        // User declared `type Params`; trust their init signature.
+        None
+    } else {
+        let synth: syn::ImplItemType = syn::parse_quote!(
+            type Params = ();
+        );
+        let params_param: FnArg = syn::parse_quote!(_params: ());
+        init_method_emitted.sig.inputs.insert(1, params_param);
+        Some(synth)
     };
 
     // Issue #403: the SDK no longer prepends `ctx.subscribe_input::<K>()`
@@ -344,6 +373,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         (Some(user), _) => quote! { #user },
         (None, Some(synth)) => quote! { #synth },
         (None, None) => unreachable!("synthesized_config_type is Some when user omitted"),
+    };
+
+    // ADR-0156 §2: the `type Params = …` line — the user's declaration passed
+    // through, or the macro's synthesized `type Params = ();`.
+    let params_type_tokens = match (params_type.as_ref(), synthesized_params_type.as_ref()) {
+        (Some(user), _) => quote! { #user },
+        (None, Some(synth)) => quote! { #synth },
+        (None, None) => unreachable!("synthesized_params_type is Some when user omitted"),
     };
 
     // ADR-0113: when the author declared `type State`, generate the
@@ -451,6 +488,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         // receiver. The per-target ctx GATs pin the concrete FFI ctx types.
         impl #impl_generics ::aether_actor::Lifecycle<Self> for #self_ty #where_clause {
             #config_type_tokens
+            #params_type_tokens
             type InitError = ::aether_actor::ActorInitError;
             type InitCtx<'__a> = ::aether_actor::WasmInitCtx<'__a>;
             type Ctx<'__a> = ::aether_actor::WasmCtx<'__a>;

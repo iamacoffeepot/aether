@@ -355,17 +355,20 @@ impl SubstrateHarnessBuilder {
     /// its basics (trace dispatch, the harness cap, lifecycle, fail-fast
     /// headless window) and each scenario composes exactly the caps it
     /// needs on top (issue #3764); this is the generic surface for any
-    /// cap without boot-internal wiring — `.with_actor::<TextCapability>(())`,
-    /// `.with_actor::<InputCapability>(config)`, a scenario-local
+    /// cap without boot-internal wiring — `.with_actor::<TextCapability>((), (), ())`,
+    /// `.with_actor::<InputCapability>(config, (), ())`, a scenario-local
     /// `NativeActor`, and so on. Applied to the chassis builder in push
-    /// order, between the harness basics and lifecycle.
+    /// order, between the harness basics and lifecycle. `params` is the
+    /// ADR-0156 composer-supplied construction input, `()` for every cap in
+    /// this slice.
     #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config) -> Self
+    pub fn with_actor<A>(mut self, config: A::Config, params: A::Params) -> Self
     where
         A: NativeActor,
         A::Config: Send + 'static,
+        A::Params: Send + 'static,
     {
-        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(config)));
+        self.compose.push(Box::new(move |builder| builder.with_actor::<A>(config, params)));
         self
     }
 
@@ -720,11 +723,12 @@ impl SubstrateHarness {
         &'a self,
         subname: aether_substrate::Subname<'a>,
         config: A::Config,
+        params: A::Params,
     ) -> aether_substrate::SpawnBuilder<'a, A>
     where
         A: aether_actor::Instanced + NativeActor,
     {
-        self.passive.spawn_actor::<A>(subname, config)
+        self.passive.spawn_actor::<A>(subname, config, params)
     }
 
     /// Borrow the harness's [`aether_substrate::ActorRegistry`]. Used
@@ -1610,10 +1614,11 @@ mod tests {
         impl HandlesKind<Bump> for Child {}
         impl aether_actor::Lifecycle<Self> for Child {
             type Config = Arc<AtomicU32>;
+            type Params = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
             type Ctx<'a> = NativeCtx<'a>;
-            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
@@ -1648,7 +1653,7 @@ mod tests {
 
         // Subname::Counter — first instance, full name "test.spawn.child:0".
         let id_a = tb
-            .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received))
+            .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received), ())
             .after_init(Bump { tag: 1 })
             .after_init(Bump { tag: 2 })
             .finish()
@@ -1661,12 +1666,12 @@ mod tests {
 
         // Subname::Named — second instance, full name "test.spawn.child:alpha".
         let id_b =
-            tb.spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received)).finish().expect("named spawn");
+            tb.spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received), ()).finish().expect("named spawn");
         assert_eq!(id_b, MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),);
 
         // Reused subname → SubnameInUse.
         let err = tb
-            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
+            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received), ())
             .finish()
             .expect_err("reused subname must fail");
         assert!(matches!(err, SpawnError::SubnameInUse { .. }), "expected SubnameInUse, got {err:?}");

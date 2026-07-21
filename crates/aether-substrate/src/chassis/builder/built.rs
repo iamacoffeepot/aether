@@ -26,11 +26,12 @@ macro_rules! chassis_accessors {
             &'a self,
             subname: crate::Subname<'a>,
             config: A::Config,
+            params: A::Params,
         ) -> crate::SpawnBuilder<'a, A>
         where
             A: aether_actor::Instanced + NativeActor,
         {
-            spawn_actor(&self.booted, subname, config)
+            spawn_actor(&self.booted, subname, config, params)
         }
 
         #[must_use]
@@ -145,6 +146,7 @@ fn spawn_actor<'a, A>(
     booted: &'a BootedPassives,
     subname: crate::Subname<'a>,
     config: A::Config,
+    params: A::Params,
 ) -> crate::SpawnBuilder<'a, A>
 where
     A: aether_actor::Instanced + NativeActor,
@@ -153,6 +155,7 @@ where
         Arc::clone(&booted.spawner),
         subname,
         config,
+        params,
         crate::Source::NONE,
         // Chassis-level spawn: a top-level instanced actor with no
         // parent actor, so it is the depth-1 root of its own lineage

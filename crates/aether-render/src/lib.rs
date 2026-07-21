@@ -181,7 +181,7 @@ mod tests {
     fn boot_render(config: RenderConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>) {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(config)
+            .with_actor::<RenderCapability>(config, ())
             .build_passive()
             .expect("build succeeds");
         (registry, chassis)

@@ -193,6 +193,21 @@ pub trait Lifecycle<S> {
     /// config stays a live Rust value.
     type Config: Send + 'static;
 
+    /// ADR-0156 §1/§2 composer-supplied construction input the composer
+    /// threads into [`Self::init`] beside [`Self::Config`]. Where `Config`
+    /// is the ADR-0090 argv/env/default-resolved settings, `Params` is the
+    /// second, orthogonal channel: values the composer computes and hands in
+    /// at boot. `Send + 'static` only here; [`crate::WasmActor`] tightens it
+    /// to `Kind + Default` (FFI params cross the wasm boundary as bytes, an
+    /// empty slice resolving to the default), while a native cap shares the
+    /// composer's address space and keeps `Params` a live Rust value.
+    ///
+    /// The `#[actor]` macro synthesizes `type Params = ();` when the author
+    /// omits it (stable Rust has no associated-type defaults), mirroring the
+    /// [`crate::WasmActor::Persist`] stand-in, so an actor that needs no
+    /// composer input pays nothing.
+    type Params: Send + 'static;
+
     /// The error [`Self::init`] returns when the actor cannot start. Pinned
     /// to the concrete boot error on each transport subtrait.
     type InitError;
@@ -206,9 +221,12 @@ pub trait Lifecycle<S> {
     type Ctx<'a>;
 
     /// Runs once before any mail. Resolves kinds/handles via `ctx` and
-    /// returns the initial runtime state `S`. ADR-0079: the init ctx carries
-    /// no send surface — use [`Self::wire`] for mail-driven setup.
-    fn init(config: Self::Config, ctx: &mut Self::InitCtx<'_>) -> Result<S, Self::InitError>;
+    /// returns the initial runtime state `S`. Receives the ADR-0090
+    /// [`Config`](Self::Config) and the ADR-0156 composer-supplied
+    /// [`Params`](Self::Params) as the two construction channels. ADR-0079:
+    /// the init ctx carries no send surface — use [`Self::wire`] for
+    /// mail-driven setup.
+    fn init(config: Self::Config, params: Self::Params, ctx: &mut Self::InitCtx<'_>) -> Result<S, Self::InitError>;
 
     /// Post-init, mail-allowed hook (ADR-0079). Runs after `init` returned
     /// `Ok` and the mailbox is published, before the first envelope.

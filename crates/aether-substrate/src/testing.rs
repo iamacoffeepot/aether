@@ -101,12 +101,13 @@ pub fn boot_test_chassis_with<A>(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
     config: A::Config,
+    params: A::Params,
 ) -> PassiveChassis<TestChassis>
 where
     A: NativeActor,
 {
     Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
-        .with_actor::<A>(config)
+        .with_actor::<A>(config, params)
         .build_passive()
         .expect("test chassis boots")
 }

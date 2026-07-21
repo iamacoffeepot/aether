@@ -34,11 +34,14 @@ impl RenderExt for GpuRenderExt {
         wiring: &BenchWiring,
         builder: Builder<SubstrateHarnessChassis>,
     ) -> Builder<SubstrateHarnessChassis> {
-        builder.with_actor::<RenderCapability>(RenderConfig {
-            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-            observed_kinds: wiring.observed_kinds.clone(),
-            assets_dir: wiring.assets_dir.clone(),
-        })
+        builder.with_actor::<RenderCapability>(
+            RenderConfig {
+                vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+                observed_kinds: wiring.observed_kinds.clone(),
+                assets_dir: wiring.assets_dir.clone(),
+            },
+            (),
+        )
     }
 
     fn install_capture_backend(&self, wiring: &BenchWiring, passive: &PassiveChassis<SubstrateHarnessChassis>) {

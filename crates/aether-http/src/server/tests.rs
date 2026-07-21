@@ -924,12 +924,12 @@ fn config_for(max_request_bytes: usize) -> HttpServerConfig {
 /// call sites.
 fn boot_chassis<H>(config: HttpServerConfig) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = ()>,
+    H: NativeActor<Config = (), Params = ()>,
 {
     let (registry, mailer) = fresh_substrate();
     Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<H>(())
-        .with_actor::<HttpServerCapability>(config)
+        .with_actor::<H>((), ())
+        .with_actor::<HttpServerCapability>(config, ())
         .build_passive()
         .expect("caps boot")
 }
@@ -948,7 +948,7 @@ fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
 /// buffered [`config_for`] config (`max_request_bytes`).
 fn boot_buffered<H>(max_request_bytes: usize) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = ()>,
+    H: NativeActor<Config = (), Params = ()>,
 {
     boot_chassis::<H>(config_for(max_request_bytes))
 }
@@ -957,7 +957,7 @@ where
 /// config (credit `window`).
 fn boot_response_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = ()>,
+    H: NativeActor<Config = (), Params = ()>,
 {
     boot_chassis::<H>(stream_config_for(window))
 }
@@ -966,7 +966,7 @@ where
 /// [`request_stream_config_for`] config (credit `window`).
 fn boot_request_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = ()>,
+    H: NativeActor<Config = (), Params = ()>,
 {
     boot_chassis::<H>(request_stream_config_for(window))
 }
@@ -1069,7 +1069,7 @@ fn round_trip(port: u16, request: &[u8]) -> String {
 fn binds_and_publishes_port() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(config_for(1024))
+        .with_actor::<HttpServerCapability>(config_for(1024), ())
         .build_passive()
         .expect("http server boots");
     assert!(port_of(&chassis) > 0, "bound to an OS-picked port");
@@ -1084,7 +1084,7 @@ fn binds_and_publishes_port() {
 fn disabled_http_server_claims_mailbox_and_binds_nothing() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(HttpServerConfig::default())
+        .with_actor::<HttpServerCapability>(HttpServerConfig::default(), ())
         .build_passive()
         .expect("disabled http server boots");
 
@@ -1219,7 +1219,7 @@ fn no_handler_is_503() {
     // No handler actor is booted, so nothing registers a `/` catch-all —
     // every request matches no route.
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(config_for(1024))
+        .with_actor::<HttpServerCapability>(config_for(1024), ())
         .build_passive()
         .expect("server boots");
 
@@ -1236,9 +1236,9 @@ fn response_less_chain_is_502() {
         // TraceDispatchCapability folds trace events into per-root
         // counters and fires settlement once a root drains; without it
         // the server's settlement subscription never wakes.
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<SilentHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(1024))
+        .with_actor::<TraceDispatchCapability>((), ())
+        .with_actor::<SilentHttpHandler>((), ())
+        .with_actor::<HttpServerCapability>(config_for(1024), ())
         .build_passive()
         .expect("caps boot");
 
@@ -1596,9 +1596,9 @@ macro_rules! routed_chassis {
     ($($handler:ty),+ $(,)?) => {{
         let (registry, mailer) = fresh_substrate();
         Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<HttpServerCapability>(config_for(1024))
-            .with_actor::<FixedBodyHttpHandler>(())
-            $(.with_actor::<$handler>(()))+
+            .with_actor::<HttpServerCapability>(config_for(1024), ())
+            .with_actor::<FixedBodyHttpHandler>((), ())
+            $(.with_actor::<$handler>((), ()))+
             .build_passive()
             .expect("caps boot")
     }};
@@ -1795,11 +1795,11 @@ fn method_specific_route_beats_agnostic() {
 fn bare_router_stays_exclusive_second_claim_rejected() {
     let chassis = boot_single_shard_fixed_body();
     chassis
-        .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("alpha"), b"excl-macro-alpha")
+        .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("alpha"), b"excl-macro-alpha", ())
         .finish()
         .expect("spawn alpha");
     chassis
-        .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("beta"), b"excl-macro-beta")
+        .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("beta"), b"excl-macro-beta", ())
         .finish()
         .expect("spawn beta");
     let port = port_of(&chassis);
@@ -1842,10 +1842,13 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
     // registration, so both carry the same minted `Kind::ID` and can join
     // one member set.
     chassis
-        .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("alpha"), b"macro-alpha")
+        .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("alpha"), b"macro-alpha", ())
         .finish()
         .expect("spawn alpha");
-    chassis.spawn_actor::<SharedMacroPoolHandler>(Subname::Named("beta"), b"macro-beta").finish().expect("spawn beta");
+    chassis
+        .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("beta"), b"macro-beta", ())
+        .finish()
+        .expect("spawn beta");
     let port = port_of(&chassis);
 
     // Wait until both registrations are live: with the set complete a
@@ -1949,9 +1952,9 @@ fn stalled_peer_does_not_block_sibling_connections() {
 fn route_registered_mid_connection_serves_next_request() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<EchoHttpHandler>(())
-        .with_actor::<WiredRouteHandler>(())
-        .with_actor::<HttpServerCapability>(keep_alive_config_for(5_000))
+        .with_actor::<EchoHttpHandler>((), ())
+        .with_actor::<WiredRouteHandler>((), ())
+        .with_actor::<HttpServerCapability>(keep_alive_config_for(5_000), ())
         .build_passive()
         .expect("caps boot");
     let port = port_of(&chassis);
@@ -2011,16 +2014,19 @@ fn route_registered_mid_connection_serves_next_request() {
 fn shared_route_spreads_across_members() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(HttpServerConfig {
-            enabled: true,
-            bind_addr: "127.0.0.1:0".to_string(),
-            request_timeout_millis: 5_000,
-            dispatch_shards: 1,
-            ..HttpServerConfig::default()
-        })
-        .with_actor::<FixedBodyHttpHandler>(())
-        .with_actor::<SharedAlphaHandler>(())
-        .with_actor::<SharedBetaHandler>(())
+        .with_actor::<HttpServerCapability>(
+            HttpServerConfig {
+                enabled: true,
+                bind_addr: "127.0.0.1:0".to_string(),
+                request_timeout_millis: 5_000,
+                dispatch_shards: 1,
+                ..HttpServerConfig::default()
+            },
+            (),
+        )
+        .with_actor::<FixedBodyHttpHandler>((), ())
+        .with_actor::<SharedAlphaHandler>((), ())
+        .with_actor::<SharedBetaHandler>((), ())
         .build_passive()
         .expect("caps boot");
     let port = port_of(&chassis);

@@ -694,17 +694,17 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_ring_caps(boot.ring_caps)
         .with_scheduler_tuning(boot.scheduler_tuning)
         .with_teardown_cap(boot.teardown_cap)
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<InputCapability>(boot.input_config)
-        .with_actor::<ComponentHostCapability>(boot.component_host_config)
-        .with_actor::<FsCapability>(boot.namespace_roots)
-        .with_actor::<TextCapability>(())
-        .with_actor::<InventoryCapability>(())
-        .with_actor::<HttpCapability>(boot.http)
-        .with_actor::<TcpCapability>(())
-        .with_actor::<GameGatewayCapability>(boot.game_gateway)
-        .with_actor::<AnthropicCapability>(boot.anthropic)
-        .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root })
+        .with_actor::<TraceDispatchCapability>((), ())
+        .with_actor::<InputCapability>(boot.input_config, ())
+        .with_actor::<ComponentHostCapability>(boot.component_host_config, ())
+        .with_actor::<FsCapability>(boot.namespace_roots, ())
+        .with_actor::<TextCapability>((), ())
+        .with_actor::<InventoryCapability>((), ())
+        .with_actor::<HttpCapability>(boot.http, ())
+        .with_actor::<TcpCapability>((), ())
+        .with_actor::<GameGatewayCapability>(boot.game_gateway, ())
+        .with_actor::<AnthropicCapability>(boot.anthropic, ())
+        .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root }, ())
 }
 
 /// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,
@@ -742,17 +742,20 @@ pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest 
 /// `HelloAck` peer-kind.
 #[must_use]
 pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, rpc_addr: Option<SocketAddr>, engine_name: &str) -> Builder<C> {
-    builder.with_actor::<RpcServerCapability>(RpcServerConfig {
-        bind_addr: rpc_addr.map(|addr| addr.to_string()),
-        peer_kind: PeerKind::Substrate {
-            engine_name: engine_name.into(),
-            engine_version: env!("CARGO_PKG_VERSION").into(),
-            kinds: vec![],
+    builder.with_actor::<RpcServerCapability>(
+        RpcServerConfig {
+            bind_addr: rpc_addr.map(|addr| addr.to_string()),
+            peer_kind: PeerKind::Substrate {
+                engine_name: engine_name.into(),
+                engine_version: env!("CARGO_PKG_VERSION").into(),
+                kinds: vec![],
+            },
+            // A forked substrate peer never fields engine-addressed forwards
+            // (only the hub does), so it needs no route target.
+            route_target: None,
         },
-        // A forked substrate peer never fields engine-addressed forwards
-        // (only the hub does), so it needs no route target.
-        route_target: None,
-    })
+        (),
+    )
 }
 
 /// Parse the `AETHER_RPC_PORT` env var into an optional port number

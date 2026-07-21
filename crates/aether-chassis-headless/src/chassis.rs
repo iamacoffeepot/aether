@@ -369,12 +369,12 @@ impl HeadlessChassis {
         // the timer pushes `LifecycleAdvance` and the driver broadcasts
         // Tick to `aether.input` via the relay subscriber.
         let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
-            .with_actor::<HeadlessRenderCapability>(())
-            .with_actor::<HeadlessClipboardCapability>(())
-            .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<UnsupportedSubstrateHarnessCapability>(())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis));
-        with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(http_server)
+            .with_actor::<HeadlessRenderCapability>((), ())
+            .with_actor::<HeadlessClipboardCapability>((), ())
+            .with_actor::<HeadlessWindowCapability>((), ())
+            .with_actor::<UnsupportedSubstrateHarnessCapability>((), ())
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis), ());
+        with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(http_server, ())
     }
 
     /// Build the headless chassis: stand up substrate-core internals,

@@ -35,7 +35,7 @@ const KEY_CODE: u32 = 65;
 fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default())
+        .with_actor::<InputCapability>(InputConfig::default(), ())
         .build()
         .expect("boot")
 }

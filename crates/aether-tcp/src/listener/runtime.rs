@@ -185,7 +185,7 @@ impl NativeActor for TcpListenerActor {
                 consumer: state.consumer,
             };
             match ctx
-                .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config)
+                .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config, ())
                 .finish()
             {
                 Ok(_) => {
