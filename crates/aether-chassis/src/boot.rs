@@ -404,22 +404,12 @@ impl ChassisBootConfig {
     }
 }
 
-/// The residual hand-registered knobs the composition-derived
-/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) doesn't yet
-/// own (ADR-0156 §6 folds these in on later slices): the chassis-direct
-/// records ([`CHASSIS_KNOBS`] — the config-file path, RPC port, orphaned
-/// frame-size knob) plus the runtime log-filter / panic-hook knobs
-/// (`aether_substrate::runtime::RUNTIME_KNOBS`). Folded in beside the
-/// manifest metas by every chassis's known-keys sweep and `--print-config`
-/// dump ([`ConfigManifest::known_keys`](aether_substrate::config::ConfigManifest::known_keys)
-/// / [`dump`](aether_substrate::config::ConfigManifest::dump)).
 /// Resolve the [`FrameSizeConfig`] member off the assembled source stack and
 /// push it set-once into `aether-codec` (ADR-0156 §6). Each chassis calls this
 /// once during config resolution — before the RPC server binds or dials, so it
 /// runs before any framing. `aether-codec` sits below the config system and
 /// cannot pull the knob itself; this is the push half of the inversion, the
-/// codec's [`install_max_frame_size`](aether_codec::frame::install_max_frame_size)
-/// the receiving half.
+/// codec's [`install_max_frame_size`] the receiving half.
 ///
 /// # Errors
 ///
@@ -430,6 +420,15 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
     Ok(())
 }
 
+/// The residual hand-registered knobs the composition-derived
+/// [`ConfigManifest`](aether_substrate::config::ConfigManifest) doesn't yet
+/// own (ADR-0156 §6 folds these in on later slices): the chassis-direct
+/// records ([`CHASSIS_KNOBS`] — the config-file path and RPC port) plus the
+/// runtime log-filter / panic-hook knobs
+/// (`aether_substrate::runtime::RUNTIME_KNOBS`). Folded in beside the
+/// manifest metas by every chassis's known-keys sweep and `--print-config`
+/// dump ([`ConfigManifest::known_keys`](aether_substrate::config::ConfigManifest::known_keys)
+/// / [`dump`](aether_substrate::config::ConfigManifest::dump)).
 #[must_use]
 pub fn chassis_residual_knobs() -> Vec<KnobRecord> {
     let mut records: Vec<KnobRecord> = CHASSIS_KNOBS.to_vec();
