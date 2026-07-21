@@ -29,7 +29,6 @@ aether-substrate = { path = "../aether-substrate" }
 aether-engine = { path = "../aether-engine" }
 aether-rpc = { path = "../aether-rpc" }
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
-aether-actor = { path = "../aether-actor" }
 # Fully-qualified `aether_data::mailbox_id_from_name` resolves the
 # engines-cap route target.
 aether-data = { path = "../aether-data" }
