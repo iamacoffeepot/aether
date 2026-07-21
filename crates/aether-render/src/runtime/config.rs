@@ -1,16 +1,14 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use aether_substrate::render::VERTEX_BUFFER_BYTES;
-
 /// Boot knobs for `RenderCapability` (ADR-0090). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `RenderTuningConfigLayer`, the clap-shaped `RenderTuningOverlay`,
 /// the `FromArgvThenEnv` impl, and the inherent `from_env` /
-/// `from_argv_then_env` shims — mirrors `AudioConfig`. The chassis
-/// main resolves it and threads the value into the hand-built
-/// [`RenderConfig`], which also carries non-knob wiring (capture
-/// backend, test observability) and so can't ride the derive itself.
+/// `from_argv_then_env` shims — mirrors `AudioConfig`. This is the cap's
+/// operator-resolvable `Config` (ADR-0156 §3); the non-knob wiring
+/// (chassis-derived assets root, test observability) rides the separate
+/// [`RenderParams`] channel instead.
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_RENDER", cli_prefix = "render")]
 pub struct RenderTuningConfig {
@@ -18,17 +16,16 @@ pub struct RenderTuningConfig {
     /// buffer cap: the size the GPU vertex buffer is created with and
     /// the byte count the render accumulator truncates to (with a
     /// warn) when a frame's triangles exceed it. Default
-    /// [`VERTEX_BUFFER_BYTES`] (64 MiB, ~932k triangles at 72 bytes
+    /// [`VERTEX_BUFFER_BYTES`](aether_substrate::render::VERTEX_BUFFER_BYTES)
+    /// (64 MiB, ~932k triangles at 72 bytes
     /// each).
     #[config(default = 67_108_864)]
     pub vertex_buffer_bytes: usize,
 }
 
-/// Configuration for `RenderCapability`. `vertex_buffer_bytes` is
-/// the maximum bytes the render accumulator will hold before
-/// truncating with a warn, and the size the GPU vertex buffer is
-/// created with — default [`VERTEX_BUFFER_BYTES`]; the chassis main
-/// overrides it from the resolved [`RenderTuningConfig`] knob.
+/// Composer-supplied construction params for `RenderCapability`
+/// (ADR-0156 §3): the non-knob wiring the chassis computes at boot, kept
+/// off the operator-resolvable [`RenderTuningConfig`] `Config`.
 ///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`
@@ -40,9 +37,8 @@ pub struct RenderTuningConfig {
 /// path pushed the raw `kind_name` regardless of dispatch outcome,
 /// but tests only use the list as a diagnostic in failure messages
 /// so the narrower semantic is fine.
-#[derive(Clone)]
-pub struct RenderConfig {
-    pub vertex_buffer_bytes: usize,
+#[derive(Clone, Default)]
+pub struct RenderParams {
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Resolved path for the `"assets"` namespace, used by the
     /// `capture_frame` handler to read reference images for
@@ -52,10 +48,4 @@ pub struct RenderConfig {
     /// through `PendingCapture.reference`. `None` disables
     /// similarity checks with a descriptive `Err` reply.
     pub assets_dir: Option<PathBuf>,
-}
-
-impl Default for RenderConfig {
-    fn default() -> Self {
-        Self { vertex_buffer_bytes: VERTEX_BUFFER_BYTES, observed_kinds: None, assets_dir: None }
-    }
 }

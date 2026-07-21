@@ -53,7 +53,7 @@ use aether_harness_substrate_capture::{
     test_helpers::{init_save_sandbox, require_runtime},
     visual::{Image, decode_png},
 };
-use aether_input::{InputCapability, InputConfig};
+use aether_input::InputCapability;
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     KEY_V, KEY_X,
@@ -156,7 +156,7 @@ fn build_bench() -> SubstrateHarness {
     SubstrateHarness::builder()
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .with_actor::<TextCapability>((), ())
         .with_actor::<ClipboardCapability>(ClipboardConfig::InMemory, ())
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)

@@ -42,18 +42,19 @@ pub struct GeminiCapabilityState {
     pub adapter: Arc<dyn GeminiAdapter>,
     pub tasks: TaskQueue,
     /// Filesystem root generated artifacts stage under, resolved once at
-    /// chassis boot ([`GeminiBoot::gen_root`]) and threaded in here.
+    /// chassis boot ([`GeminiParams::gen_root`]) and threaded in here.
     pub gen_root: PathBuf,
 }
 
-/// Boot input for the `aether.gemini` cap: the resolved cap config plus
-/// the staging root the chassis resolves from `ContentGenConfig` (falling
-/// back to the `save`-namespace root). Widening `NativeActor::Config`
-/// beyond `GeminiConfig` keeps the staging-root resolution at chassis boot
-/// (where `NamespaceRoots.save` is in scope) rather than a raw env read at
-/// stage time.
-pub struct GeminiBoot {
-    pub config: GeminiConfig,
+/// Composer-supplied construction params for the `aether.gemini` cap
+/// (ADR-0156 §3): the staging root the chassis resolves from
+/// `ContentGenConfig` (falling back to the `save`-namespace root). It is a
+/// value computed at Compose from other resolved members — not
+/// operator-typable config — so it rides `Params` while the cap's `Config`
+/// stays the derive-`Config` [`GeminiConfig`]. Resolving the root at chassis
+/// boot (where `NamespaceRoots.save` is in scope) keeps it off a raw env
+/// read at stage time.
+pub struct GeminiParams {
     pub gen_root: PathBuf,
 }
 
@@ -74,16 +75,21 @@ impl NativeActor for GeminiCapability {
     /// state-bearing struct holding the adapter + the rate-limit queue.
     type State = GeminiCapabilityState;
 
-    type Config = GeminiBoot;
+    type Config = GeminiConfig;
+    type Params = GeminiParams;
 
     /// ADR-0050 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.gemini";
 
-    fn init(boot: GeminiBoot, _ctx: &mut NativeInitCtx<'_>) -> Result<GeminiCapabilityState, BootError> {
+    fn init(
+        config: GeminiConfig,
+        params: GeminiParams,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<GeminiCapabilityState, BootError> {
         Ok(GeminiCapabilityState {
-            adapter: build_adapter(&boot.config),
-            tasks: TaskQueue::new(boot.config.max_in_flight),
-            gen_root: boot.gen_root,
+            adapter: build_adapter(&config),
+            tasks: TaskQueue::new(config.max_in_flight),
+            gen_root: params.gen_root,
         })
     }
 

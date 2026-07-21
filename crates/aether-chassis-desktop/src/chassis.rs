@@ -22,17 +22,16 @@ use std::time::Duration;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
-use aether_component::ComponentHostConfig;
+use aether_component::ComponentHostParams;
 use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::{HttpConfig as HttpConf, HttpServerCapability, HttpServerConfig};
-use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
-use aether_lifecycle::{LifecycleCapability, frame_lifecycle_config};
-use aether_render::{RenderCapability, RenderConfig, RenderTuningConfig};
+use aether_lifecycle::{LifecycleCapability, LifecycleConfig, frame_lifecycle_params};
+use aether_render::{RenderCapability, RenderParams, RenderTuningConfig};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
@@ -190,10 +189,12 @@ pub struct DesktopEnv {
     /// Threaded into the render cap's `RenderConfig` in `build_inner`.
     pub render_tuning: RenderTuningConfig,
     /// Force-complete deadline (ms) for a pending lifecycle advance's
-    /// `Settled` (issue 1048). Resolved from
-    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via `ChassisBootConfig`;
-    /// default [`aether_lifecycle::LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT`].
-    pub lifecycle_advance_timeout_millis: u64,
+    /// `Settled` (issue 1048). ADR-0156 §3: resolved from
+    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` via the lifecycle cap's own
+    /// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) (relocated off
+    /// `ChassisBootConfig`); default
+    /// [`ADVANCE_TIMEOUT_MS_DEFAULT`](aether_lifecycle::LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT).
+    pub lifecycle: LifecycleConfig,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin
     /// leaves it empty and loads components over the hub instead.
@@ -252,11 +253,13 @@ impl DesktopEnv {
             gemini,
             contentgen,
             chassis_boot: chassis_boot_overlay,
+            lifecycle: lifecycle_overlay,
             rpc_port: cli_rpc_port,
         } = common;
 
         let chassis_boot =
             resolve_with_file::<ChassisBootConfig>(chassis_boot_overlay.into_layer(), config_file, "chassis")?;
+        let lifecycle = resolve_with_file::<LifecycleConfig>(lifecycle_overlay.into_layer(), config_file, "lifecycle")?;
         let window_config = resolve_with_file::<WindowConfig>(window_overlay.into_layer(), config_file, "window")?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
@@ -297,7 +300,6 @@ impl DesktopEnv {
         };
 
         let workers = chassis_boot.to_workers();
-        let lifecycle_advance_timeout_millis = chassis_boot.lifecycle_advance_timeout_millis;
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `DesktopBootError::Config`).
@@ -332,7 +334,7 @@ impl DesktopEnv {
             scheduler_tuning,
             teardown_cap,
             render_tuning,
-            lifecycle_advance_timeout_millis,
+            lifecycle,
             autoload,
         })
     }
@@ -368,7 +370,7 @@ impl DesktopChassis {
             scheduler_tuning,
             teardown_cap,
             render_tuning,
-            lifecycle_advance_timeout_millis,
+            lifecycle,
             boot_mode: _,
             boot_size: _,
             boot_title: _,
@@ -376,28 +378,25 @@ impl DesktopChassis {
             autoload: _,
         } = env;
 
-        let component_host_config = ComponentHostConfig {
+        let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        let input_config = InputConfig::default();
         // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
         // config field. The driver builds it from the `CaptureQueue` +
         // `EventLoopProxy` wake + reply egress and installs it into the
         // published `RenderHandles` in its `boot` (Start), so the cap's
-        // `on_capture_frame` reads it there. The render *config* stays pure
-        // data.
-        let render_config = RenderConfig {
-            // Issue 2706: the resolved vertex-buffer cap sizes both the
-            // cap accumulator's truncation and (via `RenderHandles`)
-            // the GPU vertex buffer the driver creates.
-            vertex_buffer_bytes: render_tuning.vertex_buffer_bytes,
+        // `on_capture_frame` reads it there. Issue 2706: the resolved
+        // vertex-buffer cap (`RenderTuningConfig`) sizes both the cap
+        // accumulator's truncation and (via `RenderHandles`) the GPU vertex
+        // buffer the driver creates; the assets-root wiring rides `RenderParams`.
+        let render_params = RenderParams {
             // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
             // reads its reference image from the same `assets` root the fs
             // cap serves, so the render cap loads it off the hot path.
             assets_dir: Some(namespace_roots.assets.clone()),
-            ..RenderConfig::default()
+            ..RenderParams::default()
         };
 
         let registry = Arc::clone(&boot.registry);
@@ -420,14 +419,14 @@ impl DesktopChassis {
             // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
             // `0 → wait forever` sentinel) as the settlement gates.
             teardown_cap,
-            input_config,
-            component_host_config,
+            component_host_params,
             namespace_roots,
             http,
             anthropic,
             gemini,
             contentgen,
             game_gateway: aether_game::GameGatewayConfig::default(),
+            game_gateway_params: aether_game::GameGatewayParams::default(),
         };
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`
@@ -437,9 +436,9 @@ impl DesktopChassis {
         let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
             .with_actor::<AudioCapability>(audio, ())
             .with_actor::<ClipboardCapability>(ClipboardConfig::System, ())
-            .with_actor::<RenderCapability>(render_config, ())
+            .with_actor::<RenderCapability>(render_tuning, render_params)
             .with_actor::<UnsupportedSubstrateHarnessCapability>((), ())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis), ());
+            .with_actor::<LifecycleCapability>(lifecycle, frame_lifecycle_params());
         with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(http_server, ())
     }
 

@@ -55,12 +55,12 @@ mod route;
 pub use route::ComponentHostNativeExt;
 pub use route::{ComponentHostWasmExt, resolve_embedded};
 
-// `load` (the `handle_load` sequence) and `config` (the `ComponentHostConfig`
+// `load` (the `handle_load` sequence) and `config` (the `ComponentHostParams`
 // init bundle) now live under the `runtime` directory beside the rest of the
 // runtime half, covered by the one `mod runtime;` gate. The cap-root
-// re-export sources `ComponentHostConfig` through `runtime`.
+// re-export sources `ComponentHostParams` through `runtime`.
 #[cfg(feature = "runtime")]
-pub use runtime::ComponentHostConfig;
+pub use runtime::ComponentHostParams;
 
 // Handler-signature kinds resolve at file root always-on: `#[actor]` emits the
 // `impl HandlesKind<K>` markers AND the `aether.kinds.inputs` handler-inventory

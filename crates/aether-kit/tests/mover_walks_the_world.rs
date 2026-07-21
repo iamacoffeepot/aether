@@ -27,7 +27,7 @@ use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{
     ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats,
 };
-use aether_input::{InputCapability, InputConfig};
+use aether_input::InputCapability;
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
@@ -257,7 +257,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .build()
         .expect("boot");
     let world = component_address("world");
@@ -340,7 +340,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .build()
         .expect("boot");
 

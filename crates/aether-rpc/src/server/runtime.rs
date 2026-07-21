@@ -25,7 +25,7 @@
 // visible to it). `RpcServerConfig` is named by `init`'s signature; the cap
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
-use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, Settled};
+use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, RpcServerParams, Settled};
 use aether_actor::runtime;
 use aether_substrate::net::teardown_connect_addr;
 
@@ -87,7 +87,7 @@ pub struct RpcServerState {
     pub peer_kind: PeerKind,
     pub self_mailbox: MailboxId,
     /// Mailbox that envelope-requested forwards (`to.engine.is_some()`)
-    /// route to, from `RpcServerConfig::route_target`. `None` on chassis
+    /// route to, from `RpcServerParams::route_target`. `None` on chassis
     /// that don't forward — the forward branch drops, as today.
     pub route_target: Option<MailboxId>,
     /// Cached `Arc<Mailer>` so per-handler ctxs (`NativeCtx`,
@@ -353,9 +353,14 @@ impl NativeActor for RpcServerCapability {
     /// per-connection state.
     type State = RpcServerState;
     type Config = RpcServerConfig;
+    type Params = RpcServerParams;
     const NAMESPACE: &'static str = "aether.rpc.server";
 
-    fn init(config: RpcServerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<RpcServerState, BootError> {
+    fn init(
+        config: RpcServerConfig,
+        params: RpcServerParams,
+        ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<RpcServerState, BootError> {
         let self_id = ctx.self_id();
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
 
@@ -371,9 +376,9 @@ impl NativeActor for RpcServerCapability {
                 "rpc server composed disabled (no bind address); claiming mailbox, binding no socket",
             );
             return Ok(RpcServerState {
-                peer_kind: config.peer_kind,
+                peer_kind: params.peer_kind,
                 self_mailbox: self_id,
-                route_target: config.route_target,
+                route_target: params.route_target,
                 mailer: ctx.mailer(),
                 bind_addr: None,
                 listener_port: 0,
@@ -433,9 +438,9 @@ impl NativeActor for RpcServerCapability {
         ctx.publish_handle(RpcServerHandle { local_port: port });
 
         Ok(RpcServerState {
-            peer_kind: config.peer_kind,
+            peer_kind: params.peer_kind,
             self_mailbox: self_id,
-            route_target: config.route_target,
+            route_target: params.route_target,
             mailer: ctx.mailer(),
             bind_addr: Some(bind_addr),
             listener_port: port,

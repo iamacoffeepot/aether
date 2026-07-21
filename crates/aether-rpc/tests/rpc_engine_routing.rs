@@ -28,8 +28,8 @@ use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
 use aether_rpc::RpcServerHandle;
 use aether_rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, WIRE_VERSION,
-    WireFrame,
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams,
+    WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -58,8 +58,8 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
         .with_actor::<TraceDispatchCapability>((), ())
         .with_actor::<EngineServer>(engine_config, ())
         .with_actor::<RpcServerCapability>(
-            RpcServerConfig {
-                bind_addr: Some("127.0.0.1:0".into()),
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerParams {
                 peer_kind: PeerKind::Substrate {
                     engine_name: "test-hub".into(),
                     engine_version: "0.1.0".into(),
@@ -67,7 +67,6 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
                 },
                 route_target: Some(mailbox_id_from_name("aether.engine")),
             },
-            (),
         )
         .build_passive()
         .expect("hub caps boot");

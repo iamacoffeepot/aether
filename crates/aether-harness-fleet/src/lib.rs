@@ -64,7 +64,7 @@ use aether_kinds::{
 };
 use aether_rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
-    WIRE_VERSION, WireFrame,
+    RpcServerParams, WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -1009,8 +1009,8 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
             (),
         )
         .with_actor::<RpcServerCapability>(
-            RpcServerConfig {
-                bind_addr: Some("127.0.0.1:0".into()),
+            RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+            RpcServerParams {
                 peer_kind: PeerKind::Substrate {
                     engine_name: "fleetharness-hub".into(),
                     engine_version: "0.1.0".into(),
@@ -1018,7 +1018,6 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
                 },
                 route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
             },
-            (),
         )
         .build_passive()
         .expect("test setup: hub caps boot");

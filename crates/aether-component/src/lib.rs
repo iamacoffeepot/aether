@@ -46,7 +46,7 @@
 //! `ctx.actor::<ComponentHostCapability>()` and resolve a loaded peer
 //! without naming the substrate. The state-bearing wasmtime half
 //! (`ComponentHostCapabilityState`, `WasmTrampolineState`, and the
-//! [`ComponentHostConfig`] / [`WasmTrampolineConfig`] init bundles that
+//! [`ComponentHostParams`] / [`WasmTrampolineConfig`] init bundles that
 //! hold `Arc<Engine>` / `Arc<Linker<ComponentCtx>>`) is gated behind it,
 //! so nothing but a native chassis pulls wasmtime through this crate.
 
@@ -56,14 +56,14 @@ pub mod component;
 pub mod trampoline;
 
 pub use component::{ComponentHostCapability, resolve_embedded};
-// `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
+// `ComponentHostParams` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
 // the `feature = "runtime"` gate (only the runtime half names it), so it
 // re-exports only when that feature is on — a transport-only build sees the
 // cap stub via `ComponentHostCapability` for typed `ctx.actor::<...>()`
 // addressing without dragging the wasmtime stack in.
 #[cfg(feature = "runtime")]
-pub use component::ComponentHostConfig;
+pub use component::ComponentHostParams;
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]
 pub use trampoline::WasmTrampolineConfig;

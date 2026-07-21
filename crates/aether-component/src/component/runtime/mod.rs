@@ -23,9 +23,9 @@ mod config;
 mod load;
 
 use super::ComponentHostCapability;
-// `ComponentHostConfig` rides up to the cap root through this `pub use`: the
-// cap-root `pub use runtime::ComponentHostConfig;` re-export sources it here.
-pub use self::config::ComponentHostConfig;
+// `ComponentHostParams` rides up to the cap root through this `pub use`: the
+// cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
+pub use self::config::ComponentHostParams;
 
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
@@ -156,21 +156,23 @@ impl NativeActor for ComponentHostCapability {
     /// counter every load instantiates against.
     type State = ComponentHostCapabilityState;
 
-    type Config = ComponentHostConfig;
+    type Config = ();
+    type Params = ComponentHostParams;
     const NAMESPACE: &'static str = "aether.component";
 
     fn init(
-        config: ComponentHostConfig,
+        _config: (),
+        params: ComponentHostParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<ComponentHostCapabilityState, BootError> {
         let mailer = ctx.mailer();
         let registry = Arc::clone(mailer.registry());
         Ok(ComponentHostCapabilityState {
-            engine: config.engine,
-            linker: config.linker,
+            engine: params.engine,
+            linker: params.linker,
             registry,
             mailer,
-            outbound: config.hub_outbound,
+            outbound: params.hub_outbound,
             default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),

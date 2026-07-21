@@ -19,27 +19,38 @@ use aether_tcp::{TcpCapability, TcpNativeExt, TcpSessionActor};
 const DEFAULT_LISTENER_NAME: &str = "players";
 const DEFAULT_INTERVAL_NANOS: u64 = 1_000_000_000 / 60;
 
-/// Inert-by-default game-listener and authoritative-simulation wiring.
+/// Inert-by-default game-listener config (ADR-0156 §3). The operator-typable
+/// listener + session knobs; the resolved authoritative-simulation mailbox is
+/// composer wiring and rides [`GameGatewayParams`] instead.
 ///
-/// An active server supplies both `listener_addr` and `turn_sim_mailbox`.
-/// The gateway captures its resolved `ctx.self_id()` at init, then actor wiring
-/// binds `listener_addr` under `listener_name` and passes that exact mailbox as
-/// the tcp consumer.
+/// An active server supplies both `listener_addr` (here) and `turn_sim_mailbox`
+/// (on `GameGatewayParams`). The gateway captures its resolved `ctx.self_id()`
+/// at init, then actor wiring binds `listener_addr` under `listener_name` and
+/// passes that exact mailbox as the tcp consumer.
 /// `listener_name` is retained only to address the trusted tcp listener/session
 /// topology for outbound writes; it never enters the player wire as a recipient.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// ADR-0090: the `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `GameGatewayConfigLayer`, the clap-shaped `GameGatewayOverlay`, the
+/// `FromArgvThenEnv` impl, and the inherent `from_env` / `from_argv_then_env`
+/// shims. `env_prefix = "AETHER_GAME_GATEWAY"` joins the field env keys.
+#[derive(Clone, Debug, PartialEq, Eq, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_GAME_GATEWAY", cli_prefix = "game-gateway")]
 pub struct GameGatewayConfig {
     /// Listener address to bind, or `None` to leave the gateway inert.
     pub listener_addr: Option<String>,
     /// Trusted TCP listener topology name used for transport demultiplexing.
+    #[config(default = "players")]
     pub listener_name: String,
-    /// Exact resolved `TurnSim` mailbox used for intent dispatch and polling.
-    pub turn_sim_mailbox: Option<MailboxId>,
-    /// Authoritative simulation interval included in player clock beacons.
+    /// Authoritative simulation interval (nanoseconds) included in player clock
+    /// beacons. Default `1_000_000_000 / 60` (60 Hz).
+    #[config(default = 16_666_666)]
     pub interval_nanos: u64,
     /// Maximum number of simultaneously supervised player sessions.
+    #[config(default = 1024)]
     pub max_active_sessions: usize,
     /// Maximum distinct live ticks buffered by each catching-up player session.
+    #[config(default = 64)]
     pub max_pending_live_bundles: usize,
 }
 
@@ -55,12 +66,21 @@ impl Default for GameGatewayConfig {
         Self {
             listener_addr: None,
             listener_name: DEFAULT_LISTENER_NAME.into(),
-            turn_sim_mailbox: None,
             interval_nanos: DEFAULT_INTERVAL_NANOS,
             max_active_sessions: Self::DEFAULT_MAX_ACTIVE_SESSIONS,
             max_pending_live_bundles: Self::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         }
     }
+}
+
+/// Composer-supplied construction params for `GameGatewayCapability`
+/// (ADR-0156 §3). The exact resolved `TurnSim` mailbox used for intent
+/// dispatch and polling — a resolved `MailboxId`, so by definition `Params`,
+/// never `Config`. `None` leaves the gateway inert.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GameGatewayParams {
+    /// Exact resolved `TurnSim` mailbox used for intent dispatch and polling.
+    pub turn_sim_mailbox: Option<MailboxId>,
 }
 
 pub struct GameGatewayState {
@@ -84,14 +104,19 @@ struct PlayerSessionEntry {
 impl NativeActor for GameGatewayCapability {
     type State = GameGatewayState;
     type Config = GameGatewayConfig;
+    type Params = GameGatewayParams;
     const NAMESPACE: &'static str = "aether.game.gateway";
 
-    fn init(config: GameGatewayConfig, ctx: &mut NativeInitCtx<'_>) -> Result<GameGatewayState, BootError> {
+    fn init(
+        config: GameGatewayConfig,
+        params: GameGatewayParams,
+        ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<GameGatewayState, BootError> {
         Ok(GameGatewayState {
             self_mailbox: ctx.self_id(),
             listener_addr: config.listener_addr,
             listener_name: config.listener_name,
-            turn_sim_mailbox: config.turn_sim_mailbox,
+            turn_sim_mailbox: params.turn_sim_mailbox,
             interval_nanos: config.interval_nanos,
             max_active_sessions: config.max_active_sessions,
             max_pending_live_bundles: config.max_pending_live_bundles,

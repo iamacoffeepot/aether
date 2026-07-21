@@ -23,7 +23,7 @@ use aether_data::{Kind, MailboxId};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime};
-use aether_input::{InputCapability, InputConfig};
+use aether_input::InputCapability;
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
@@ -69,7 +69,7 @@ fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateHarn
     SubstrateHarness::builder()
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .with_actor::<TextCapability>((), ())
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .namespace_roots(roots)

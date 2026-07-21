@@ -24,15 +24,15 @@
 use crate::kinds::RpcInboundReady;
 use aether_kinds::trace::Settled;
 
-// Re-export the cap's config at file root for chassis builders. The
-// `RpcServerConfig` type names no `aether_substrate` type, so it stays a
-// top-level `not(wasm32)` plain struct; the `RpcServerHandle` boot artifact
-// lives in the runtime half and is re-exported below under the runtime
-// gate.
+// Re-export the cap's config + params at file root for chassis builders. The
+// `RpcServerConfig` / `RpcServerParams` types name no `aether_substrate` type,
+// so they stay top-level `not(wasm32)` plain structs; the `RpcServerHandle`
+// boot artifact lives in the runtime half and is re-exported below under the
+// runtime gate.
 #[cfg(not(target_family = "wasm"))]
 mod config;
 #[cfg(not(target_family = "wasm"))]
-pub use config::RpcServerConfig;
+pub use config::{RpcServerConfig, RpcServerParams};
 pub use runtime::RpcServerHandle;
 
 // Named at file root so the runtime half reaches it through `super::`

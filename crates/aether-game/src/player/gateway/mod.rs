@@ -14,4 +14,4 @@ use aether_actor::actor;
 mod runtime;
 
 #[cfg(feature = "runtime")]
-pub use runtime::GameGatewayConfig;
+pub use runtime::{GameGatewayConfig, GameGatewayConfigLayer, GameGatewayOverlay, GameGatewayParams};

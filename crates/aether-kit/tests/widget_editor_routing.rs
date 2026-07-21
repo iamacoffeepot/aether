@@ -6,7 +6,7 @@ use std::path::Path;
 use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_input::{InputCapability, InputConfig};
+use aether_input::InputCapability;
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
@@ -86,7 +86,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     let mut harness = SubstrateHarness::builder()
         .size(200, 100)
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .build()
         .expect("boot");
     let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
@@ -161,7 +161,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     let mut harness = SubstrateHarness::builder()
         .size(200, 100)
         .with_component_host()
-        .with_actor::<InputCapability>(InputConfig::default(), ())
+        .with_actor::<InputCapability>((), ())
         .build()
         .expect("boot");
     let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");

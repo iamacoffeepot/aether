@@ -24,7 +24,9 @@ use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::testing::{TestChassis, fresh_substrate_and_rx};
 use serde::{Deserialize, Serialize};
 
-use super::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+use super::{
+    GameGatewayCapability, GameGatewayConfig, GameGatewayParams, PlayerFrame, PlayerSessionActor, WIRE_VERSION,
+};
 use crate::{GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary, TickBundle};
 use aether_tcp::{BindListener, ListListeners, ListListenersResult, TcpCapability, TcpListenerActor, TcpSessionActor};
 
@@ -183,12 +185,12 @@ fn boot_player_substrate_with_limits(
             GameGatewayConfig {
                 listener_addr: Some("127.0.0.1:0".into()),
                 listener_name: LISTENER_NAME.into(),
-                turn_sim_mailbox: Some(turn_sim_mailbox),
+
                 interval_nanos: INTERVAL_NANOS,
                 max_active_sessions,
                 max_pending_live_bundles,
             },
-            (),
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
         )
         .build_passive()
         .expect("player test chassis boots");
@@ -313,7 +315,9 @@ fn expect_fact(stream: &mut TcpStream, expected_tick: u64) {
 fn gateway_config_is_inert_by_default() {
     let config = GameGatewayConfig::default();
     assert_eq!(config.listener_addr, None);
-    assert_eq!(config.turn_sim_mailbox, None);
+    // ADR-0156 §3: the resolved `TurnSim` mailbox moved to `GameGatewayParams`;
+    // its default is `None`, so a default-composed gateway stays inert.
+    assert_eq!(GameGatewayParams::default().turn_sim_mailbox, None);
     assert_eq!(config.max_active_sessions, GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS);
     assert_eq!(config.max_pending_live_bundles, GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES);
 }
@@ -339,12 +343,12 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
             GameGatewayConfig {
                 listener_addr: Some("127.0.0.1:0".into()),
                 listener_name: LISTENER_NAME.into(),
-                turn_sim_mailbox: Some(turn_sim_mailbox),
+
                 interval_nanos: INTERVAL_NANOS,
                 max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
                 max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
             },
-            (),
+            GameGatewayParams { turn_sim_mailbox: Some(turn_sim_mailbox) },
         )
         .build_passive()
         .expect("gateway observer chassis boots");

@@ -18,7 +18,9 @@ mod settlement;
 // and exempts only `pub use`).
 use super::{LifecycleCapability, LifecycleGraphData};
 
-pub use self::config::{LifecycleConfig, frame_lifecycle_config};
+pub use self::config::{
+    LifecycleConfig, LifecycleConfigLayer, LifecycleOverlay, LifecycleParams, frame_lifecycle_params,
+};
 #[cfg(test)]
 pub use self::settlement::ADVANCE_TIMEOUT_MS_DEFAULT;
 pub use self::settlement::{PendingAdvance, Step, resolve_edge};
@@ -212,10 +214,16 @@ impl NativeActor for LifecycleCapability {
     type State = LifecycleCapabilityState;
 
     type Config = LifecycleConfig;
+    type Params = LifecycleParams;
     const NAMESPACE: &'static str = "aether.lifecycle";
 
-    fn init(config: LifecycleConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LifecycleCapabilityState, BootError> {
-        let LifecycleConfig { graph, initial_subscribers, advance_timeout_millis } = config;
+    fn init(
+        config: LifecycleConfig,
+        params: LifecycleParams,
+        ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<LifecycleCapabilityState, BootError> {
+        let LifecycleConfig { advance_timeout_millis } = config;
+        let LifecycleParams { graph, initial_subscribers } = params;
         let current_state = graph.start();
         let mailer = ctx.mailer();
         let mut subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>> = BTreeMap::new();

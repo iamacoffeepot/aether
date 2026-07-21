@@ -54,7 +54,7 @@ pub use config::GeminiConfig;
 pub use config::{GeminiConfigLayer, GeminiOverlay};
 pub use kinds::*;
 #[cfg(feature = "runtime")]
-pub use runtime::GeminiBoot;
+pub use runtime::GeminiParams;
 
 /// Default per-cap concurrency bound when `AETHER_GEMINI_MAX_IN_FLIGHT`
 /// is unset. Conservative — image / music generation is multi-second

@@ -21,17 +21,16 @@ use std::time::Duration;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_clipboard::HeadlessClipboardCapability;
-use aether_component::ComponentHostConfig;
+use aether_component::ComponentHostParams;
 use aether_contentgen::ContentGenConfig;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_gemini::GeminiConfig;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::{HttpConfig as HttpConf, HttpServerCapability, HttpServerConfig};
-use aether_input::InputConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
-use aether_lifecycle::LifecycleCapability;
+use aether_lifecycle::{LifecycleCapability, LifecycleConfig};
 use aether_render::HeadlessRenderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -45,7 +44,7 @@ use aether_chassis::autoload::{AutoloadComponent, autoload_mail, boot_manifest_a
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
     resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file, rpc_port_from_env,
-    tick_only_lifecycle_config, with_common_caps, with_rpc_server,
+    tick_only_lifecycle_params, with_common_caps, with_rpc_server,
 };
 use aether_chassis::cli::{CommonOverlay, HeadlessCli};
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
@@ -142,8 +141,9 @@ pub struct HeadlessEnv {
     pub teardown_cap: Duration,
     /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS` — timeout for one lifecycle
     /// advance step (Tick) before the scheduler logs a slow-frame warning.
-    /// Resolved through `ChassisBootConfig`; default is 1000 ms.
-    pub lifecycle_advance_timeout_millis: u64,
+    /// ADR-0156 §3: resolved through the lifecycle cap's own `LifecycleConfig`
+    /// (relocated off `ChassisBootConfig`); default is 1000 ms.
+    pub lifecycle: LifecycleConfig,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the components come up with no hub; the normal
     /// headless bin leaves it empty and loads components over the hub instead.
@@ -199,11 +199,13 @@ impl HeadlessEnv {
             gemini,
             contentgen,
             chassis_boot: chassis_boot_overlay,
+            lifecycle: lifecycle_overlay,
             rpc_port: cli_rpc_port,
         } = common;
 
         let chassis_boot =
             resolve_with_file::<ChassisBootConfig>(chassis_boot_overlay.into_layer(), config_file, "chassis")?;
+        let lifecycle = resolve_with_file::<LifecycleConfig>(lifecycle_overlay.into_layer(), config_file, "lifecycle")?;
         let tick_config = resolve_with_file::<TickConfig>(tick_overlay.into_layer(), config_file, "tick")?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
@@ -233,7 +235,6 @@ impl HeadlessEnv {
         let rpc_addr =
             cli_rpc_port.or_else(rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = chassis_boot.to_workers();
-        let lifecycle_advance_timeout_millis = chassis_boot.lifecycle_advance_timeout_millis;
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `ConfigError`).
@@ -257,7 +258,7 @@ impl HeadlessEnv {
             ring_caps,
             scheduler_tuning,
             teardown_cap,
-            lifecycle_advance_timeout_millis,
+            lifecycle,
             autoload,
         })
     }
@@ -291,17 +292,16 @@ impl HeadlessChassis {
             ring_caps,
             scheduler_tuning,
             teardown_cap,
-            lifecycle_advance_timeout_millis,
+            lifecycle,
             tick_period: _,
             autoload: _,
         } = env;
 
-        let component_host_config = ComponentHostConfig {
+        let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        let input_config = InputConfig::default();
 
         // Audio nop sink — NoteOn/NoteOff fall through silently;
         // SetMasterGain replies Err so agents fail fast rather than
@@ -355,14 +355,14 @@ impl HeadlessChassis {
             // same `AETHER_SETTLEMENT_CAP_SECS` knob (including its
             // `0 → wait forever` sentinel) as the settlement gates.
             teardown_cap,
-            input_config,
-            component_host_config,
+            component_host_params,
             namespace_roots,
             http,
             anthropic,
             gemini,
             contentgen,
             game_gateway: aether_game::GameGatewayConfig::default(),
+            game_gateway_params: aether_game::GameGatewayParams::default(),
         };
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
@@ -373,7 +373,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessClipboardCapability>((), ())
             .with_actor::<HeadlessWindowCapability>((), ())
             .with_actor::<UnsupportedSubstrateHarnessCapability>((), ())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis), ());
+            .with_actor::<LifecycleCapability>(lifecycle, tick_only_lifecycle_params());
         with_rpc_server(builder, rpc_addr, "aether-headless").with_actor::<HttpServerCapability>(http_server, ())
     }
 

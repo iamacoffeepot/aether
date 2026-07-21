@@ -127,7 +127,7 @@ mod tests {
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
-    use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle};
+    use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
     use aether_rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use aether_substrate::Subname;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
@@ -163,12 +163,8 @@ mod tests {
             .with_actor::<TestEchoActor>((), ())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded), ())
             .with_actor::<RpcServerCapability>(
-                RpcServerConfig {
-                    bind_addr: Some("127.0.0.1:0".into()),
-                    peer_kind: substrate_peer_kind(),
-                    route_target: None,
-                },
-                (),
+                RpcServerConfig { bind_addr: Some("127.0.0.1:0".into()) },
+                RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None },
             )
             .build_passive()
             .expect("caps boot");

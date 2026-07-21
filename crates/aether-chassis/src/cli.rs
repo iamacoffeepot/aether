@@ -15,12 +15,12 @@
 //! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching
 //! confique's native env-side bool deserialization.
 //!
-//! Chassis-wide knobs (`workers`, `boot_manifest`,
-//! `lifecycle_advance_timeout_millis`, `rpc_port`) and per-chassis knobs
-//! (`window_mode` / `window_title` for desktop, `tick_hz` for headless)
-//! are now fully migrated to `#[derive(aether_substrate::Config)]` overlays:
-//! `ChassisBootOverlay` / `WindowOverlay` / `TickOverlay`. Only
-//! `rpc_port` remains hand-written (its per-chassis default differs).
+//! Chassis-wide knobs (`workers`, `boot_manifest`, `rpc_port`), the lifecycle
+//! cap's `advance_timeout_millis`, and per-chassis knobs (`window_mode` /
+//! `window_title` for desktop, `tick_hz` for headless) are now fully migrated
+//! to `#[derive(aether_substrate::Config)]` overlays: `ChassisBootOverlay` /
+//! `LifecycleOverlay` / `WindowOverlay` / `TickOverlay`. Only `rpc_port`
+//! remains hand-written (its per-chassis default differs).
 //!
 //! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
 //! structs now ride the `#[derive(aether_substrate::Config)]` next to
@@ -47,6 +47,7 @@ pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_gemini::GeminiOverlay;
 pub use aether_http::HttpOverlay;
 pub use aether_http::HttpServerOverlay;
+pub use aether_lifecycle::LifecycleOverlay;
 
 pub use crate::boot::ChassisBootOverlay;
 pub use crate::tick::TickOverlay;
@@ -71,10 +72,13 @@ pub struct CommonOverlay {
     /// Content-gen staging root: `--gen-dir` / `AETHER_GEN_DIR`.
     #[command(flatten)]
     pub contentgen: ContentGenOverlay,
-    /// Shared chassis boot knobs: `--workers`, `--boot-manifest`,
-    /// `--lifecycle-advance-timeout-millis`.
+    /// Shared chassis boot knobs: `--workers`, `--boot-manifest`.
     #[command(flatten)]
     pub chassis_boot: ChassisBootOverlay,
+    /// Lifecycle cap knob: `--lifecycle-advance-timeout-millis` (ADR-0156 §3
+    /// relocated it off `ChassisBootConfig` onto the lifecycle cap's config).
+    #[command(flatten)]
+    pub lifecycle: LifecycleOverlay,
 
     /// `AETHER_RPC_PORT` — `aether.rpc.server` bind port. Absent →
     /// chassis-specific default (desktop / headless skip the RPC

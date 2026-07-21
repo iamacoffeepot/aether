@@ -68,7 +68,7 @@ use aether_kinds::CaptureFrame;
 // GPU-bound types.
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig, RenderTuningConfigLayer,
+    CaptureBackend, RenderGpu, RenderHandles, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
     RenderTuningOverlay, WHITE_TEXTURE_ID,
 };
 
@@ -178,10 +178,13 @@ mod tests {
         StagedTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels, realized: None, dirty: true }
     }
 
-    fn boot_render(config: RenderConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>) {
+    fn boot_render(params: RenderParams) -> (Arc<Registry>, PassiveChassis<TestChassis>) {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(config, ())
+            .with_actor::<RenderCapability>(
+                RenderTuningConfig { vertex_buffer_bytes: aether_substrate::render::VERTEX_BUFFER_BYTES },
+                params,
+            )
             .build_passive()
             .expect("build succeeds");
         (registry, chassis)
@@ -198,7 +201,7 @@ mod tests {
     #[test]
     fn destroy_texture_removes_registry_entry() {
         let observed = Arc::new(Mutex::new(Vec::<String>::new()));
-        let config = RenderConfig { observed_kinds: Some(Arc::clone(&observed)), ..RenderConfig::default() };
+        let config = RenderParams { observed_kinds: Some(Arc::clone(&observed)), ..RenderParams::default() };
         let (registry, chassis) = boot_render(config);
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         let texture_id = 7;
@@ -230,7 +233,7 @@ mod tests {
     /// warn-drop and leave the registry untouched.
     #[test]
     fn destroy_texture_unknown_and_reserved_ids_leave_registry_untouched() {
-        let (registry, chassis) = boot_render(RenderConfig::default());
+        let (registry, chassis) = boot_render(RenderParams::default());
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         let user_texture_id = 3;
         {
@@ -260,7 +263,7 @@ mod tests {
     /// draws through the shared sentinel texel.
     #[test]
     fn update_texture_reserved_id_leaves_white_pixels_untouched() {
-        let (registry, chassis) = boot_render(RenderConfig::default());
+        let (registry, chassis) = boot_render(RenderParams::default());
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         {
             let mut textures = handles.textures.lock().expect("textures mutex is not poisoned");
@@ -289,7 +292,7 @@ mod tests {
     #[test]
     fn draw_solid_quads_accumulates_and_observed() {
         let observed = Arc::new(Mutex::new(Vec::<String>::new()));
-        let config = RenderConfig { observed_kinds: Some(Arc::clone(&observed)), ..RenderConfig::default() };
+        let config = RenderParams { observed_kinds: Some(Arc::clone(&observed)), ..RenderParams::default() };
         let (registry, chassis) = boot_render(config);
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
 
