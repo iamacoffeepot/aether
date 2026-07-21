@@ -249,12 +249,11 @@ Where that line goes depends on which chassis should carry the cap:
 
 - **Desktop and headless together** — add it to `with_common_caps` in
   [`crates/aether-chassis/src/boot.rs`][common], the
-  shared composition those two chassis call. `TextCapability` lives here — and
-  a cap added to that `.with_actor::<_>()` chain must also join the
-  `common_cap_namespaces()`
-  list in the same file, in lockstep: that list is read straight off each
-  cap's `Addressable::NAMESPACE` for the `--describe` manifest, so its
-  *membership* has to track the chain by hand.
+  shared composition those two chassis call. `TextCapability` lives here.
+  Adding it to the `.with_actor::<_>()` chain is all it takes: the
+  `--describe` manifest is claim-derived ([ADR-0155][adr155]), so a cap
+  appears in the roster the moment it claims a mailbox — there is no
+  parallel namespace list to keep in lockstep.
 - **The substrate-harness chassis** — the in-process harness does not call
   `with_common_caps`; it has a separate, reduced builder chain in
   [`crates/aether-harness-substrate/src/chassis.rs`][substrateharness];
@@ -282,6 +281,7 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 
 [adr70]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0070-native-capabilities-and-chassis-as-builder.md
 [adr71]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0071-driver-capabilities-and-chassis-composition.md
+[adr155]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0155-staged-chassis-boot-and-claim-derived-describe.md
 [common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis/src/boot.rs
 [substrateharness]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs
 

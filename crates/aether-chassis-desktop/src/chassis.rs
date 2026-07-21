@@ -14,11 +14,11 @@
 //! an occluded window (iamacoffeepot/aether#1318).
 
 use std::io;
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::Addressable;
 use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
@@ -33,7 +33,6 @@ use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_config};
 use aether_render::{RenderCapability, RenderConfig, RenderTuningConfig};
-use aether_rpc::RpcServerCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
@@ -99,25 +98,28 @@ impl Chassis for DesktopChassis {
 }
 
 impl DesktopChassis {
-    /// The `--describe` manifest (ADR-0115, issue 1953): the chassis
-    /// profile, the mailbox namespaces this binary links, and the
-    /// `build.rs` provenance. The desktop chassis layers the audio /
-    /// render / substrate-harness / lifecycle caps plus the RPC server onto the
-    /// shared [`common_cap_namespaces`](aether_chassis::common_cap_namespaces)
-    /// base. `--describe` prints this without opening a winit event loop —
-    /// the hub can capture a desktop binary's manifest on a headless host.
-    #[must_use]
-    pub fn describe_manifest() -> BinaryManifest {
-        let mut caps = aether_chassis::common_cap_namespaces();
-        caps.extend([
-            <AudioCapability as Addressable>::NAMESPACE,
-            <ClipboardCapability as Addressable>::NAMESPACE,
-            <RenderCapability as Addressable>::NAMESPACE,
-            <UnsupportedSubstrateHarnessCapability as Addressable>::NAMESPACE,
-            <LifecycleCapability as Addressable>::NAMESPACE,
-            <RpcServerCapability as Addressable>::NAMESPACE,
-        ]);
-        aether_chassis::binary_manifest(Self::PROFILE, caps)
+    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the
+    /// chassis profile, the mailbox namespaces this binary claims, and the
+    /// `build.rs` provenance. Resolves the chassis config the same
+    /// argv/env/file way a real boot does (config only — the winit event
+    /// loop and capture queue are Start-stage handles, ADR-0155 §4), composes
+    /// the exact capability chain `build_inner` runs (via `compose`), then
+    /// runs the ADR-0155 claim-only terminal and
+    /// reads the claimed namespaces off the registry — the driver's
+    /// `aether.window` claim rides the `DriverCapability::claim` hook, so it
+    /// appears without an event loop. `--describe` therefore captures a
+    /// desktop binary's manifest on a headless host, opening no window and
+    /// binding no socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when config resolution ([`DesktopEnv::from_env`]),
+    /// substrate boot, or the claim pass fails.
+    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
+        let env = DesktopEnv::from_env().map_err(|e| BootError::Other(Box::new(e)))?;
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        let caps = Self::compose(&boot, env).claim_namespaces()?;
+        Ok(aether_chassis::binary_manifest(Self::PROFILE, caps))
     }
 }
 
@@ -337,15 +339,21 @@ impl DesktopEnv {
 }
 
 impl DesktopChassis {
-    /// Build the desktop chassis: stand up substrate-core internals,
-    /// compose the native passives (log, io, http, audio, render+camera)
-    /// through the `chassis_builder` `.with()` chain, then wrap everything
-    /// in a [`DesktopDriverCapability`] and hand it to the builder.
-    /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
-    /// on the winit event loop.
+    /// Compose the desktop capability chain — the single claim/build path
+    /// (ADR-0155) both [`Self::build_inner`] and [`Self::describe_manifest`]
+    /// run, so the manifest roster can never drift from what boots. Composes
+    /// the common caps plus the audio / clipboard / render / substrate-harness
+    /// / lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3).
+    /// Returns the composed builder before the driver is installed:
+    /// `build_inner` adds the desktop driver and starts (the driver's
+    /// `aether.window` claim rides its Claim-stage hook either way), while
+    /// `describe_manifest` calls `claim_namespaces` on it.
     ///
-    /// The trait method [`Chassis::build`] forwards here.
-    fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<Self>, BootError> {
+    /// Takes the boot handle by reference — `build_inner` moves the same
+    /// `boot` into the driver afterward. The window boot knobs (mode / size /
+    /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
+    /// no part in the claim chain, so they are ignored here.
+    fn compose(boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
         let DesktopEnv {
             namespace_roots,
             http,
@@ -354,10 +362,6 @@ impl DesktopChassis {
             gemini,
             contentgen,
             audio,
-            boot_mode,
-            boot_size,
-            boot_title,
-            boot_wireframe,
             rpc_addr,
             workers,
             ring_caps,
@@ -365,24 +369,12 @@ impl DesktopChassis {
             teardown_cap,
             render_tuning,
             lifecycle_advance_timeout_millis,
-            autoload,
+            boot_mode: _,
+            boot_size: _,
+            boot_title: _,
+            boot_wireframe: _,
+            autoload: _,
         } = env;
-
-        // ADR-0155 §4: the winit `EventLoop` and the capture `CaptureQueue`
-        // are Start-stage runtime handles, not config — construct them here
-        // on the boot path (`main()` calls this on the chassis main thread,
-        // where winit's `!Send` `EventLoop` must live). `--describe` never
-        // reaches this method, so it opens no event loop. The `EventLoop`
-        // build fault (never `Send + Sync` across winit's platform impls) is
-        // stringified into `BootError::Other`, the same shape a wasmtime boot
-        // fault takes.
-        let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
-            BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
-        })?;
-        event_loop.set_control_flow(ControlFlow::Poll);
-        let capture_queue = CaptureQueue::new();
-
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
 
         let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
@@ -408,34 +400,12 @@ impl DesktopChassis {
             ..RenderConfig::default()
         };
 
-        tracing::info!(
-            target: "aether_substrate::boot",
-            workers_override = ?workers,
-            "componentless boot — close window to exit; load a component via aether.component.load",
-        );
-
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         // ADR-0063: production chassis configures the fatal-abort
         // aborter so a wasm guest trap exits the substrate via
-        // `lifecycle::fatal_abort` instead of unwinding. Built before
-        // `boot` moves into the driver.
+        // `lifecycle::fatal_abort` instead of unwinding.
         let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
-
-        // Issue 552 stage 2d: render is a NativeActor. The chassis
-        // builder constructs the cap inside `init` (called from
-        // `with_actor::<RenderCapability>(config)`); `init` publishes the
-        // `RenderHandles` bundle on the exported-handle map, and the driver
-        // fetches it via `DriverCtx::handle::<RenderHandles>()`.
-        let driver = DesktopDriverCapability {
-            event_loop,
-            boot,
-            capture_queue,
-            boot_mode,
-            boot_size,
-            boot_title,
-            boot_wireframe,
-        };
 
         // Boot order is declaration order — `with_common_caps` runs
         // log first so other capabilities' boot tracing routes
@@ -464,14 +434,74 @@ impl DesktopChassis {
         // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
         // in-flight frame before shutting down (see the driver's
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
-        let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
+        let builder = with_common_caps(Builder::<Self>::new(registry, mailer), common)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<ClipboardCapability>(ClipboardConfig::System)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis));
-        let builder =
-            with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(http_server);
+        with_rpc_server(builder, rpc_addr, "aether-desktop").with_actor::<HttpServerCapability>(http_server)
+    }
+
+    /// Build the desktop chassis: construct the Start-stage runtime handles
+    /// (winit event loop + capture queue), stand up substrate-core internals,
+    /// compose the capability chain via [`Self::compose`], then wrap
+    /// everything in a [`DesktopDriverCapability`] and hand it to the builder.
+    /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the
+    /// winit event loop.
+    ///
+    /// The trait method [`Chassis::build`] forwards here.
+    fn build_inner(mut env: DesktopEnv) -> Result<BuiltChassis<Self>, BootError> {
+        // ADR-0155 §4: the winit `EventLoop` and the capture `CaptureQueue`
+        // are Start-stage runtime handles, not config — construct them here
+        // on the boot path (`main()` calls this on the chassis main thread,
+        // where winit's `!Send` `EventLoop` must live). `--describe` never
+        // reaches this method, so it opens no event loop. The `EventLoop`
+        // build fault (never `Send + Sync` across winit's platform impls) is
+        // stringified into `BootError::Other`, the same shape a wasmtime boot
+        // fault takes.
+        let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
+            BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
+        })?;
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let capture_queue = CaptureQueue::new();
+
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        let mailer = Arc::clone(&boot.queue);
+
+        // Driver-only / post-build fields, read out before `compose` consumes
+        // `env`: the window boot knobs ride the desktop driver, the autoload
+        // list is drained after build. `WindowMode` is `Clone` (not `Copy`);
+        // these are tiny, so the clones are free.
+        let workers = env.workers;
+        let boot_mode = env.boot_mode.clone();
+        let boot_size = env.boot_size;
+        let boot_title = env.boot_title.clone();
+        let boot_wireframe = env.boot_wireframe.clone();
+        let autoload = mem::take(&mut env.autoload);
+
+        tracing::info!(
+            target: "aether_substrate::boot",
+            workers_override = ?workers,
+            "componentless boot — close window to exit; load a component via aether.component.load",
+        );
+
+        let builder = Self::compose(&boot, env);
+        // Issue 552 stage 2d: render is a NativeActor. The chassis builder
+        // constructs the cap inside `init` (called from
+        // `with_actor::<RenderCapability>(config)`); `init` publishes the
+        // `RenderHandles` bundle on the exported-handle map, and the driver
+        // fetches it via `DriverCtx::handle::<RenderHandles>()`. `boot` moves
+        // into the driver here, after `compose` finished borrowing it.
+        let driver = DesktopDriverCapability {
+            event_loop,
+            boot,
+            capture_queue,
+            boot_mode,
+            boot_size,
+            boot_title,
+            boot_wireframe,
+        };
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load off

@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     // `--describe` (ADR-0115): print this binary's manifest — chassis kind,
     // linked caps, build provenance — as JSON, then exit before boot.
     if cli.describe {
-        println!("{}", serde_json::to_string(&BloomeryChassis::describe_manifest())?);
+        println!("{}", serde_json::to_string(&BloomeryChassis::describe_manifest()?)?);
         return Ok(());
     }
     let env = BloomeryEnv::from_env_with_argv(&cli)?;

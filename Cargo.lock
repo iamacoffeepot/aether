@@ -260,7 +260,6 @@ dependencies = [
  "aether-kinds",
  "aether-lifecycle",
  "aether-render",
- "aether-rpc",
  "aether-substrate",
  "aether-window",
  "anyhow",
@@ -319,7 +318,6 @@ dependencies = [
  "aether-kinds",
  "aether-lifecycle",
  "aether-render",
- "aether-rpc",
  "aether-substrate",
  "aether-window",
  "anyhow",
@@ -334,7 +332,6 @@ dependencies = [
 name = "aether-chassis-hub"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-actor",
  "aether-chassis",
  "aether-data",
  "aether-engine",
