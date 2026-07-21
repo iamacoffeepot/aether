@@ -18,10 +18,12 @@ use super::super::LifecycleGraphData;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_LIFECYCLE", cli_prefix = "lifecycle")]
 pub struct LifecycleConfig {
-    /// `AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS=<ms>` force-complete deadline
-    /// (ms) for a pending advance's `Settled` (iamacoffeepot/aether#1048,
-    /// ADR-0082). Default [`Self::ADVANCE_TIMEOUT_MS_DEFAULT`] (1 s). A
-    /// garbage value hard-errors at boot (ADR-0090 §4 strict path).
+    /// Deadline in milliseconds to force-complete a stalled frame advance.
+    ///
+    /// The force-complete deadline for a pending advance's `Settled`
+    /// (iamacoffeepot/aether#1048, ADR-0082). Default
+    /// [`Self::ADVANCE_TIMEOUT_MS_DEFAULT`] (1 s). A garbage value
+    /// hard-errors at boot (ADR-0090 §4 strict path).
     #[config(
         env = "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS",
         cli_long = "lifecycle-advance-timeout-millis",

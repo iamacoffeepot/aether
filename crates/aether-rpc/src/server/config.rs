@@ -25,9 +25,11 @@ use aether_data::MailboxId;
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_RPC", cli_prefix = "rpc")]
 pub struct RpcServerConfig {
-    /// `AETHER_RPC_PORT=<port>` / `--rpc-port <port>` localhost port
-    /// `aether.rpc.server` binds. Unset composes the cap disabled (claimed,
-    /// unbound); `0` binds an OS-assigned ephemeral port.
+    /// Localhost port the RPC server binds; unset disables it, 0 picks any free port.
+    ///
+    /// Binds `aether.rpc.server` on this loopback port. Unset composes the
+    /// cap disabled (claimed, unbound); `0` binds an OS-assigned ephemeral
+    /// port.
     #[config(env = "AETHER_RPC_PORT")]
     pub port: Option<u16>,
 }

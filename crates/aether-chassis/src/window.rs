@@ -20,22 +20,24 @@ use aether_kinds::WindowMode;
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_WINDOW", cli_prefix = "window")]
 pub struct WindowConfig {
-    /// `AETHER_WINDOW_MODE=<value>` desktop window mode at boot:
-    /// `windowed[:WxH]` / `fullscreen-borderless` / `exclusive:WxH@HZ`.
-    /// Lowered via [`Self::lower`] which delegates to
-    /// [`parse_window_mode_env`] and soft-falls back to `Windowed` on
-    /// a bad value (keeping the pre-migration behaviour).
+    /// Window mode at boot: windowed, fullscreen-borderless, or exclusive fullscreen.
+    ///
+    /// Accepts `windowed`, `windowed:WxH`, `fullscreen-borderless`, or
+    /// `exclusive:WxH@HZ`. Lowered via [`Self::lower`], which delegates to
+    /// [`parse_window_mode_env`] and soft-falls back to `Windowed` on a
+    /// bad value (keeping the pre-migration behaviour).
     pub mode: Option<String>,
-    /// `AETHER_WINDOW_TITLE=<text>` desktop window title at boot.
+    /// Window title at boot; unset uses "aether".
+    ///
     /// Lowered via [`Self::lower`]; empty / unset → `"aether"`.
     pub title: Option<String>,
-    /// `AETHER_WIREFRAME=<value>` desktop GPU wireframe mode at boot:
-    /// `off` (default) / `line` / `overlay`. The env key is pinned back
-    /// to `AETHER_WIREFRAME` (not `AETHER_WINDOW_WIREFRAME`) and the
-    /// argv flag to `--wireframe` (not `--window-wireframe`) since the
-    /// knob predates joining `WindowConfig`. Threaded verbatim to
-    /// the desktop render driver's `WireframeMode::from_config_value`,
-    /// which owns the tri-state parse.
+    /// GPU wireframe mode at boot: off (default), line, or overlay.
+    ///
+    /// The env key is pinned back to `AETHER_WIREFRAME` (not
+    /// `AETHER_WINDOW_WIREFRAME`) and the argv flag to `--wireframe` (not
+    /// `--window-wireframe`) since the knob predates joining
+    /// `WindowConfig`. Threaded verbatim to the desktop render driver's
+    /// `WireframeMode::from_config_value`, which owns the tri-state parse.
     #[config(env = "AETHER_WIREFRAME", cli_long = "wireframe")]
     pub wireframe: Option<String>,
 }

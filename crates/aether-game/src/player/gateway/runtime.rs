@@ -37,13 +37,14 @@ const DEFAULT_INTERVAL_NANOS: u64 = 1_000_000_000 / 60;
 #[derive(Clone, Debug, PartialEq, Eq, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_GAME_GATEWAY", cli_prefix = "game-gateway")]
 pub struct GameGatewayConfig {
-    /// Listener address to bind, or `None` to leave the gateway inert.
+    /// Address the player gateway listens on; unset leaves the gateway inert.
     pub listener_addr: Option<String>,
-    /// Trusted TCP listener topology name used for transport demultiplexing.
+    /// Name of the trusted TCP listener topology used for transport demultiplexing.
     #[config(default = "players")]
     pub listener_name: String,
-    /// Authoritative simulation interval (nanoseconds) included in player clock
-    /// beacons. Default `1_000_000_000 / 60` (60 Hz).
+    /// Authoritative simulation interval in nanoseconds sent in player clock beacons.
+    ///
+    /// Default `1_000_000_000 / 60` (60 Hz).
     #[config(default = 16_666_666)]
     pub interval_nanos: u64,
     /// Maximum number of simultaneously supervised player sessions.

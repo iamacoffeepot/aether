@@ -41,10 +41,11 @@ const _: () = assert!(
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "frame")]
 pub struct FrameSizeConfig {
-    /// `AETHER_MAX_FRAME_SIZE=<bytes>` — the maximum accepted wire-frame body
-    /// size. Unset resolves to the codec's compiled default (64 MiB); the codec
-    /// clamps the installed value to its 1 GiB ceiling so a runaway override
-    /// cannot defeat the OOM guard.
+    /// Maximum accepted wire-frame body size in bytes.
+    ///
+    /// Unset resolves to the codec's compiled default (64 MiB); the codec
+    /// clamps the installed value to its 1 GiB ceiling so a runaway
+    /// override cannot defeat the OOM guard.
     #[config(env = "AETHER_MAX_FRAME_SIZE", default = 67_108_864)]
     pub max_frame_size: usize,
 }

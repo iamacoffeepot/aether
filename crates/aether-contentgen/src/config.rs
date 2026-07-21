@@ -23,9 +23,10 @@ use std::path::PathBuf;
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
 #[cfg_attr(feature = "runtime", config(env_prefix = "AETHER", cli_prefix = ""))]
 pub struct ContentGenConfig {
-    /// Override root generated artifacts stage under. `env` pins the
-    /// unprefixed `AETHER_GEN_DIR` key; `None` (unset / empty) tracks the
-    /// resolved `save`-namespace root at chassis boot.
+    /// Directory generated artifacts are staged under.
+    ///
+    /// `env` pins the unprefixed `AETHER_GEN_DIR` key; unset (or empty)
+    /// tracks the resolved `save`-namespace root at chassis boot.
     #[cfg_attr(feature = "runtime", config(env = "AETHER_GEN_DIR", cli_long = "gen-dir"))]
     pub gen_dir: Option<PathBuf>,
 }

@@ -26,8 +26,9 @@ const DEFAULT_SETTLEMENT_CAP_SECS: u64 = 300;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_SETTLEMENT", cli_prefix = "settlement")]
 pub struct SettlementConfig {
-    /// `AETHER_SETTLEMENT_CAP_SECS=<seconds>` cumulative settlement
-    /// patience before a gate is declared wedged (default
+    /// Seconds to wait for a chain to settle before it is declared wedged; 0 waits forever.
+    ///
+    /// A cumulative settlement-patience backstop (default
     /// `DEFAULT_SETTLEMENT_CAP_SECS`). `0` is the sentinel for "no cap —
     /// wait forever," for attaching a debugger to a suspected deadlock; in
     /// that mode the per-round warn log stays the live signal.

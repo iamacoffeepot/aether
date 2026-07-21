@@ -129,19 +129,22 @@ pub fn load_chassis_config(argv: Option<String>) -> Result<Option<toml::Table>, 
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_ACTOR", cli_prefix = "actor")]
 pub struct ActorRingConfig {
-    /// `AETHER_ACTOR_LOG_RING_SIZE=<entries>` per-actor log-ring capacity
-    /// (default [`DEFAULT_RING_CAP`]). Zero clamps to 1 inside
+    /// Per-actor log-ring capacity in entries.
+    ///
+    /// Default [`DEFAULT_RING_CAP`]. Zero clamps to 1 inside
     /// `ActorLogRing::with_capacity`.
     #[config(env = "AETHER_ACTOR_LOG_RING_SIZE", default = 1024)]
     pub log_ring_capacity: usize,
-    /// `AETHER_ACTOR_TRACE_RING_SIZE=<entries>` per-actor (and
-    /// chassis-host) trace-ring *floor* — the size each ring starts at
-    /// (default [`DEFAULT_TRACE_RING_CAP`]). Zero clamps to 1 inside
-    /// `ActorTraceRing::with_growth`.
+    /// Starting per-actor trace-ring capacity in entries.
+    ///
+    /// The per-actor (and chassis-host) trace-ring *floor* — the size each
+    /// ring starts at (default [`DEFAULT_TRACE_RING_CAP`]). Zero clamps to
+    /// 1 inside `ActorTraceRing::with_growth`.
     #[config(env = "AETHER_ACTOR_TRACE_RING_SIZE", default = 4096)]
     pub trace_ring_capacity: usize,
-    /// `AETHER_ACTOR_TRACE_RING_MAX_SIZE=<entries>` ceiling a saturating
-    /// trace ring grows to before it resumes drop-oldest (default
+    /// Maximum trace-ring capacity in entries before it resumes dropping oldest.
+    ///
+    /// The ceiling a saturating trace ring grows to (default
     /// [`DEFAULT_TRACE_RING_MAX_CAP`]). A value below the floor clamps up
     /// to the floor inside `ActorTraceRing::with_growth`.
     #[config(env = "AETHER_ACTOR_TRACE_RING_MAX_SIZE", default = 65536)]
@@ -191,46 +194,60 @@ impl ActorRingConfig {
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "scheduler")]
 pub struct SchedulerTuningConfig {
-    /// `AETHER_SPIN_WINDOW_USEC=<micros>` route-to-spinner spin-window
-    /// before a worker parks (default `50`). A `0` is valid (no spin).
+    /// Microseconds a worker spins for more work before parking.
+    ///
+    /// The route-to-spinner spin-window before a worker parks (default
+    /// `50`). A `0` is valid (no spin).
     #[config(env = "AETHER_SPIN_WINDOW_USEC", default = 50)]
     pub spin_window_micros: u64,
-    /// `AETHER_LOCAL_STICKY_MAX=<slots>` deque-length backstop (default
-    /// `256`; a resolved `0` coerces to the default).
+    /// Maximum tasks a worker keeps on its local queue before spilling.
+    ///
+    /// The deque-length backstop (default `256`; a resolved `0` coerces to
+    /// the default).
     #[config(env = "AETHER_LOCAL_STICKY_MAX", default = 256, nonzero)]
     pub local_sticky_max: usize,
-    /// `AETHER_LOCAL_TIME_BUDGET_US=<micros>` keep-local time valve.
-    /// Unset → adaptive (derived from the measured handoff cost); `0`
-    /// disables the valve (pure inline-cascade).
+    /// Microseconds a worker keeps chaining work locally before spilling; unset auto-tunes.
+    ///
+    /// The keep-local time valve. Unset → adaptive (derived from the
+    /// measured handoff cost); `0` disables the valve (pure
+    /// inline-cascade).
     #[config(env = "AETHER_LOCAL_TIME_BUDGET_US")]
     pub time_budget_micros: Option<u64>,
-    /// `AETHER_PEER_STEAL=<bool>` whether idle workers may raid siblings'
-    /// deques (default `false` — owner-only). Accepts `1`/`true`/`yes`.
+    /// Allow idle workers to steal tasks from other workers' queues.
+    ///
+    /// Default `false` — owner-only. Accepts `1`/`true`/`yes`.
     #[config(env = "AETHER_PEER_STEAL", default = false)]
     pub peer_steal: bool,
-    /// `AETHER_LOCAL_CHAIN_BACKSTOP=<k>` every-K injector backstop for
-    /// keep-local chains (default `64`; a resolved `0` coerces to it).
+    /// How often a keep-local chain is forced back to the shared queue.
+    ///
+    /// The every-K injector backstop for keep-local chains (default `64`;
+    /// a resolved `0` coerces to it).
     #[config(env = "AETHER_LOCAL_CHAIN_BACKSTOP", default = 64, nonzero)]
     pub local_chain_backstop: u32,
-    /// `AETHER_HANDOFF_COST_NS=<nanos>` pins the cross-worker handoff-cost
-    /// estimate and freezes live refinement. Unset / `< 1` → boot-probed
-    /// and live-refined ([`Self::to_scheduler_tuning`] filters `< 1` to
-    /// `None`).
+    /// Pin the cross-worker handoff-cost estimate in nanoseconds; unset auto-tunes.
+    ///
+    /// Pins the estimate and freezes live refinement. Unset / `< 1` →
+    /// boot-probed and live-refined ([`Self::to_scheduler_tuning`] filters
+    /// `< 1` to `None`).
     #[config(env = "AETHER_HANDOFF_COST_NS")]
     pub handoff_cost_nanos: Option<u64>,
-    /// `AETHER_BLOB_RECRUIT_MIN=<groups>` minimum fresh-group count for a
-    /// flush to broadcast-recruit siblings (default `9`; `0` coerces to
-    /// it).
+    /// Minimum number of fresh groups before a flush recruits sibling workers.
+    ///
+    /// The minimum fresh-group count for a flush to broadcast-recruit
+    /// siblings (default `9`; `0` coerces to it).
     #[config(env = "AETHER_BLOB_RECRUIT_MIN", default = 9, nonzero)]
     pub blob_recruit_min: usize,
-    /// `AETHER_BLOB_RECRUIT_MAX=<copies>` cap on sibling copies a single
-    /// flush injects when recruiting (default `32`; `0` coerces to it).
+    /// Maximum number of sibling workers a single flush recruits.
+    ///
+    /// The cap on sibling copies a single flush injects when recruiting
+    /// (default `32`; `0` coerces to it).
     #[config(env = "AETHER_BLOB_RECRUIT_MAX", default = 32, nonzero)]
     pub blob_recruit_max: usize,
-    /// `AETHER_WAKE_COST_NANOS=<nanos>` pins the recruit wake break-even
-    /// and freezes live refinement. Unset / `< 1` → the box-measured
-    /// handoff cost ([`Self::to_scheduler_tuning`] filters `< 1` to
-    /// `None`).
+    /// Pin the recruit wake break-even cost in nanoseconds; unset auto-tunes.
+    ///
+    /// Pins the break-even and freezes live refinement. Unset / `< 1` →
+    /// the box-measured handoff cost ([`Self::to_scheduler_tuning`]
+    /// filters `< 1` to `None`).
     #[config(env = "AETHER_WAKE_COST_NANOS")]
     pub wake_cost_nanos: Option<u64>,
 }
@@ -297,9 +314,11 @@ pub use aether_harness_substrate::{SettlementConfig, SettlementConfigLayer};
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_SUBSTRATE_HARNESS", cli_prefix = "substrate-harness")]
 pub struct RenderSizeConfig {
-    /// `AETHER_SUBSTRATE_HARNESS_SIZE=WxH` render dimensions for the offscreen
-    /// wgpu surface. Falls back to `800x600` on missing/unparseable input
-    /// with a warn log (default `None`).
+    /// Offscreen render width and height in pixels; unset falls back to 800x600.
+    ///
+    /// Render dimensions for the offscreen wgpu surface, given as
+    /// `width x height`. Falls back to `800x600` on missing/unparseable
+    /// input with a warn log.
     #[config(env = "AETHER_SUBSTRATE_HARNESS_SIZE")]
     pub size: Option<String>,
 }
@@ -363,17 +382,20 @@ pub fn resolve_teardown_budget() -> Duration {
 #[derive(Clone, Debug, Default, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "chassis")]
 pub struct ChassisBootConfig {
-    /// `AETHER_WORKERS=<n>` worker-pool size override (unset →
-    /// `available_parallelism()-1`, min 1). `Option<usize>` soft-parses
-    /// (unparseable → `None`, matching the old `parse_workers_env`
-    /// fallback). The 0→1 clamp logic lives in [`Self::to_workers`].
+    /// Worker-pool thread count; unset uses one fewer than the available cores.
+    ///
+    /// Unset → `available_parallelism()-1`, min 1. `Option<usize>`
+    /// soft-parses (unparseable → `None`, matching the old
+    /// `parse_workers_env` fallback). The 0→1 clamp logic lives in
+    /// [`Self::to_workers`].
     #[config(cli_long = "workers")]
     pub workers: Option<usize>,
-    /// `AETHER_BOOT_MANIFEST=<path>` path to a `BundleManifest` JSON
-    /// of components to auto-load at boot (the runtime twin of the
-    /// standalone-bundle compile-time pack; injected by the engines cap
-    /// on a `spawn_substrate` carrying components). `Option<String>`
-    /// filters empty → `None`, exactly matching `boot_manifest_from_env`.
+    /// Path to a JSON manifest of components to auto-load at boot.
+    ///
+    /// The runtime twin of the standalone-bundle compile-time pack;
+    /// injected by the engines cap on a `spawn_substrate` carrying
+    /// components. `Option<String>` filters empty → `None`, exactly
+    /// matching `boot_manifest_from_env`.
     #[config(cli_long = "boot-manifest")]
     pub boot_manifest: Option<String>,
 }
@@ -437,23 +459,31 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "runtime")]
 pub struct RuntimeConfig {
-    /// `AETHER_LOG_FILTER=<directive>` tracing `EnvFilter` directive for the
-    /// substrate subscriber stack (default `info`). Re-applied after full
-    /// resolution so a `[runtime]` config-file value below env takes effect.
+    /// Log-level filter directive for the substrate; defaults to info.
+    ///
+    /// A tracing `EnvFilter` directive for the substrate subscriber stack.
+    /// Re-applied after full resolution so a `[runtime]` config-file value
+    /// below env takes effect.
     #[config(env = "AETHER_LOG_FILTER", default = "info")]
     pub log_filter: String,
-    /// `AETHER_BACKTRACE=<any>` forces backtrace capture on a substrate panic
-    /// without flipping the process-wide `RUST_BACKTRACE`. Presence-tested by
-    /// the panic hook; declared here for the aggregate.
+    /// Capture a backtrace on a substrate panic.
+    ///
+    /// Forces backtrace capture without flipping the process-wide
+    /// `RUST_BACKTRACE`. Presence-tested by the panic hook; declared here
+    /// for the aggregate.
     #[config(env = "AETHER_BACKTRACE")]
     pub backtrace: Option<String>,
-    /// `AETHER_CRASH_LOG_DISABLE=<truthy>` disables the ADR-0081 §4 JSONL
-    /// crash-dump path (the tracing event still fires). Consumed by the panic
-    /// hook's own lenient env read; declared here for the aggregate.
+    /// Disable writing a crash-dump file on a substrate panic.
+    ///
+    /// Disables the JSONL crash-dump path (the tracing event still fires).
+    /// Consumed by the panic hook's own lenient env read; declared here
+    /// for the aggregate.
     #[config(env = "AETHER_CRASH_LOG_DISABLE")]
     pub crash_log_disable: Option<String>,
-    /// `AETHER_CRASH_LOG_DIR=<path>` overrides the crash-dump base directory
-    /// (unset → `$XDG_DATA_HOME/aether/crash/`, then
+    /// Directory for crash-dump files; unset uses the platform data dir.
+    ///
+    /// Overrides the crash-dump base directory (unset →
+    /// `$XDG_DATA_HOME/aether/crash/`, then
     /// `$HOME/.local/share/aether/crash/`). Consumed by the panic hook;
     /// declared here for the aggregate.
     #[config(env = "AETHER_CRASH_LOG_DIR")]
