@@ -35,10 +35,6 @@ anyhow = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 clap = { workspace = true }
 confique = { workspace = true }
-# ADR-0161 R4: `push_and_settle` polls the crossbeam settlement receiver
-# `SettlementRegistry::subscribe_settlement` hands back, draining the pumped
-# render slot each round so a render-recipient chain settles.
-crossbeam-channel = "0.5"
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
@@ -52,6 +48,12 @@ ignored = ["clap", "confique"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }
+
+[dev-dependencies]
+# `SettlementRegistry::subscribe_settlement` hands back crossbeam
+# receivers; the in-crate mail-latency harness and settlement tests hold
+# them directly.
+crossbeam-channel = "0.5"
 
 [lints]
 workspace = true

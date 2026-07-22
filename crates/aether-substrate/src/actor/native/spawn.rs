@@ -296,23 +296,6 @@ impl Spawner {
         &self.actor_registry
     }
 
-    /// The chassis mailer, cloned into each booted [`NativeBinding`].
-    /// ADR-0161 slice R4: the passive pumped-actor boot
-    /// ([`crate::chassis::builder::PassiveChassis::boot_pumped_actor`])
-    /// reaches it through the `Spawner` the `PassiveChassis` holds, since a
-    /// no-driver chassis has no [`crate::chassis::ctx::ChassisCtx`] post-boot
-    /// to source it from.
-    pub(crate) fn mailer(&self) -> &Arc<Mailer> {
-        &self.mailer
-    }
-
-    /// The chassis fatal-abort handle, cloned into each booted
-    /// [`NativeBinding`]. Reached by the passive pumped-actor boot (ADR-0161
-    /// slice R4) the same way as [`Self::mailer`].
-    pub(crate) fn aborter(&self) -> &Arc<dyn FatalAborter> {
-        &self.aborter
-    }
-
     /// Spawn an instanced actor. Caller threads the bootstrap mail
     /// envelopes through `after_init_mail` (in delivery order); pass
     /// an empty Vec for plain spawn. The `sender_for_after_init`

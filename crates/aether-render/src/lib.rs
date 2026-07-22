@@ -72,17 +72,13 @@ pub use runtime::{
     RenderTuningOverlay, WHITE_TEXTURE_ID, acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline,
 };
 
-// The pumped render runtime's chassis-internal kinds + state (ADR-0161) —
-// the driver (R3) and harness (R4) mail these to the pumped actor. On the
-// `runtime` feature (ADR-0161 R4: the pumped runtime builds offscreen for
-// the harness without `desktop`). `PumpedRenderParams` rides `runtime` too;
-// the winit-typed `WindowCell` stays `desktop`-only.
-#[cfg(feature = "runtime")]
-pub use pumped_runtime::{Frame, Occluded, PreSettled, PumpedRenderCapabilityState};
-#[cfg(feature = "runtime")]
-pub use runtime::PumpedRenderParams;
+// The pumped render runtime's chassis-internal kinds + shared window-cell
+// type (ADR-0161 slice R2), behind the `desktop` feature — the driver
+// (R3) and harness (R4) mail these to the pumped actor and mint the cell.
 #[cfg(feature = "desktop")]
-pub use runtime::WindowCell;
+pub use pumped_runtime::{Frame, Occluded, PreSettled, PumpedRenderCapabilityState};
+#[cfg(feature = "desktop")]
+pub use runtime::{PumpedRenderParams, WindowCell};
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
 // form): it reads the cap's sibling runtime module off disk and emits the
@@ -111,12 +107,9 @@ mod runtime;
 mod headless_runtime;
 
 // The pumped render runtime (ADR-0161 slice R2), added beside the pooled
-// `runtime` module. Gated on the `runtime` feature: ADR-0161 R4 lifts it off
-// `desktop` so the substrate harness builds the offscreen (surfaceless)
-// pumped path without winit; the winit windowed boot inside is `desktop`-
-// gated line by line. The pooled runtime and headless companion never build
-// its actor.
-#[cfg(feature = "runtime")]
+// `runtime` module. Gated on the `desktop` feature (winit + the surface
+// state); the pooled runtime and headless companion never build it.
+#[cfg(feature = "desktop")]
 mod pumped_runtime;
 
 /// `aether.render` cap **identity** (ADR-0122 identity/runtime split). A
@@ -165,7 +158,7 @@ pub struct HeadlessRenderCapability;
 /// `pumped_runtime` module. Each chassis composes one of
 /// {this cap, [`RenderCapability`], [`HeadlessRenderCapability`]}, never
 /// more than one — the chassis builder rejects double-claiming a mailbox.
-#[cfg(feature = "runtime")]
+#[cfg(feature = "desktop")]
 #[actor(singleton, pumped_runtime)]
 pub struct PumpedRenderCapability;
 

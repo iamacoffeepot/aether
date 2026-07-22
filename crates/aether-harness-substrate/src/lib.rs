@@ -33,8 +33,8 @@ pub mod unsupported_cap;
 
 pub use cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 pub use chassis::{
-    BenchWiring, CaptureOutcome, ComposeFn, FrameHook, RenderExt, RenderHookWiring, SubstrateHarnessBuild,
-    SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
+    BenchWiring, CaptureOutcome, ComposeFn, FrameHook, RenderExt, SubstrateHarnessBuild, SubstrateHarnessChassis,
+    SubstrateHarnessEnv, WORKERS,
 };
 pub use execute::{ExecutionError, ExecutionResult, HarnessOp, HarnessOutput};
 pub use harness::{
