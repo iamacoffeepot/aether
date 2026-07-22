@@ -327,7 +327,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
 
     /// Declare a non-cap config member on the aggregate (ADR-0156 §4) *without*
     /// installing any value — purely type-level (`M::members()`), so the section
-    /// + `META` fold into the same walk but no builder seam is touched. After the
+    /// and `META` fold into the same walk but no builder seam is touched. After the
     /// chassis-member fuse, a declaration with no matching value install is
     /// legitimate only where value-free is the truth: the hub's fleet pass-through
     /// superset (which declares cap members it never composes, hence the
