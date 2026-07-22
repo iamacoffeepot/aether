@@ -20,22 +20,25 @@
 //! Gated behind the `desktop` feature (winit + the surface state); the
 //! pooled runtime and headless companion pay nothing.
 //!
-//! ## Deviations from ADR-0161 forced by the slicing state (documented in
-//! the R2 PR):
-//! - **Settlement bridge.** The ADR's callback-form `subscribe_settlement`
-//!   (R1) is not yet landed; [`on_capture_frame`](PumpedRenderCapability::on_capture_frame)
-//!   bridges each pre-mail settlement to a [`PreSettled`] mail through the
-//!   existing [`SettlementRegistry::subscribe_settlement_mail`], which
-//!   pushes a settlement-notice mail from whatever thread the settlement
-//!   fires on — the same mechanism, specialized to the mail-push case.
-//!   `PreSettled` is wire-identical to `aether.trace.settled` (a single
-//!   `MailId` field), so the pushed notice decodes as `PreSettled`.
-//! - **Capture scoring.** `FrameCheck` verdicts and similarity scoring live
-//!   in `aether-harness-substrate-capture`, which depends on `aether-render`
-//!   — so this crate cannot score them without a dependency cycle. The
-//!   ready-branch readback replies the PNG with `verdict` / `similarity`
-//!   `None`; full scoring lands with the driver swap (R3/R4), where the
-//!   scorer is reachable.
+//! ## Capture bridge notes (ADR-0161):
+//! - **Settlement bridge.** Per the R2 hand-off, the capture pre-settlement
+//!   path deliberately keeps the mail-push bridge rather than R1's
+//!   callback-form `subscribe_settlement`:
+//!   [`on_capture_frame`](PumpedRenderCapability::on_capture_frame) bridges
+//!   each pre-mail settlement to a [`PreSettled`] mail through
+//!   [`SettlementRegistry::subscribe_settlement_mail`], which pushes a
+//!   settlement-notice mail from whatever thread the settlement fires on. A
+//!   render handler must never block on a pre-mail settlement (the ADR
+//!   deadlock: pre-chains terminate back at this mailbox), so the bridge only
+//!   mails. `PreSettled` is wire-identical to `aether.trace.settled` (a single
+//!   `MailId` field), so the pushed notice decodes as `PreSettled`. The
+//!   advance-loop wait, by contrast, uses R1's `PumpWake` /
+//!   `await_settlement_pumped` on the driver side — the two are not unified.
+//! - **Capture scoring.** `FrameCheck` verdicts and similarity scoring live in
+//!   [`aether_substrate::render::visual`] (ADR-0161 R3 rehomed the scorer
+//!   below this crate), so the ready-branch readback scores the verdict and
+//!   similarity directly — `aether-harness-substrate-capture` re-exports the
+//!   same module for its own asserts.
 
 use std::io;
 use std::iter;
@@ -266,6 +269,38 @@ impl PumpedRenderCapabilityState {
         self.surface = Some(booted.surface);
         self.surface_config = Some(booted.config);
         self.gpu = Some(gpu);
+    }
+
+    /// Reconfigure the surface + offscreen targets when the window has
+    /// resized since the last frame (ADR-0161: the surface reconfigure rides
+    /// the next `on_frame` rather than a driver reach-in — the R2 pumped
+    /// shape carries no size on the frame mail). No-op until the GPU is
+    /// booted, when the size is unchanged, or on a `0×0` minimize (winit
+    /// reports `Resized(0, 0)` there, which `Targets::resize` also guards).
+    fn reconfigure_if_resized(&mut self) {
+        let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) else {
+            return;
+        };
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(config) = self.surface_config.as_mut() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 || (size.width == config.width && size.height == config.height) {
+            return;
+        }
+        config.width = size.width;
+        config.height = size.height;
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&gpu.device, config);
+        }
+        gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063").resize(
+            &gpu.device,
+            size.width,
+            size.height,
+        );
     }
 
     /// Record the world / material / overlay passes into `encoder` from the
@@ -608,6 +643,7 @@ impl NativeActor for PumpedRenderCapability {
     fn on_frame(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Frame) {
         state.observe(<Frame as Kind>::NAME);
         state.ensure_gpu_booted();
+        state.reconfigure_if_resized();
 
         // Deadline disposition first — a wedged pre-chain replies `Err`
         // even on a frame where nothing else happens.

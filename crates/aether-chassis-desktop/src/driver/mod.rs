@@ -16,6 +16,7 @@
 //! event loop exited cleanly; the `chassis_builder` then tears down
 //! every passive in reverse boot order via `BootedPassives::Drop`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -25,14 +26,16 @@ use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_input::InputCapability;
 use aether_kinds::{
-    CaptureFrameResult, ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    Quit, TextInput, Tick, WindowMode, WindowSize,
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, TextInput,
+    Tick, WindowMode, WindowSize,
 };
-use aether_render::{CaptureBackend, RenderHandles};
+use aether_render::{
+    Frame, Occluded, PumpedRenderCapability, PumpedRenderCapabilityState, PumpedRenderParams, RenderTuningConfig,
+};
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
+use aether_substrate::chassis::settlement::{PumpWake, TerminalDisposition, WaitOutcome, await_settlement_pumped};
 use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{
@@ -41,6 +44,7 @@ use aether_substrate::{
     mail::{Mail, MailId, MailboxId},
 };
 use aether_window::{DesktopWindowCapability, DesktopWindowParams, WindowCell, resolve_fullscreen};
+use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -48,16 +52,11 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 use super::chassis::UserEvent;
-use super::render::Gpu;
-use aether_substrate::capture::CaptureQueue;
-use capture::{OccludedCaptureDisposition, occluded_capture_disposition};
 use input::{TextSource, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
 use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply};
 use shutdown::install_shutdown_handler;
-use std::io;
 use winit::dpi::PhysicalSize;
 
-mod capture;
 mod input;
 mod lifecycle;
 mod shutdown;
@@ -119,18 +118,6 @@ pub struct App {
     /// a committed character is published once (via `Ime::Commit`), never
     /// doubled. Driven by [`text_input_gate`].
     composing: bool,
-    /// Cloned out of `RenderCapability::handles()` before the cap
-    /// moves into the chassis builder. The app holds a clone so
-    /// `Gpu::new` can install wgpu state and the per-frame loop can
-    /// call `record_frame` / `record_capture_copy` / `finish_capture`.
-    render_handles: RenderHandles,
-    /// Shared single-slot queue with the control plane. On each
-    /// redraw we `take()` any pending capture and, if present, use
-    /// `render_and_capture`, then reply to the sender through the
-    /// request's retained inbound guard (`req.reply.reply`, ADR-0106 /
-    /// #1758) — the reply joins the inbound's ADR-0080 causal chain and
-    /// settles it when the guard drops post-reply.
-    capture_queue: CaptureQueue,
     /// Hub outbound — held for log egress to the hub and
     /// `lifecycle::fatal_abort`. NOT used for chassis replies:
     /// `HubOutbound::send_reply` only routes `Session` / `EngineMailbox`
@@ -145,7 +132,25 @@ pub struct App {
     /// (iamacoffeepot/aether#1316).
     outbound: Arc<HubOutbound>,
     window: Option<Arc<Window>>,
-    gpu: Option<Gpu>,
+    /// The pumped `aether.render` runtime (ADR-0161 §Decision 1), dispatched
+    /// on this winit thread through a [`PumpedSlot`] — the same pump home the
+    /// `aether.window` actor uses. It owns the wgpu surface, the accumulators,
+    /// and the pending capture outright; the driver only pushes it
+    /// [`Frame`] / [`Occluded`] mail and drains. Booted from the driver's
+    /// Claim-stage `aether.render` reservation via [`DriverCtx::boot_pumped_actor`].
+    render_slot: PumpedSlot<PumpedRenderCapability>,
+    /// `aether.render` mailbox id, cached at boot — the recipient for the
+    /// per-frame [`Frame`] request and the [`Occluded`] forward.
+    render_mailbox: MailboxId,
+    /// Unified [`PumpWake`] channel (ADR-0161 §Decision 2). The render slot's
+    /// mailbox wake sends [`PumpWake::Mail`] here and each per-advance
+    /// settlement subscription sends [`PumpWake::Settled`];
+    /// [`await_settlement_pumped`] selects across both from the one channel
+    /// std `mpsc` could not. `render_pump_tx` is cloned into the per-advance
+    /// `subscribe_settlement_with` callback; `render_pump_rx` is the wait's
+    /// read end.
+    render_pump_tx: Sender<PumpWake>,
+    render_pump_rx: Receiver<PumpWake>,
     pub(crate) started: Option<Instant>,
     pub(crate) frame: u64,
     occluded: bool,
@@ -315,76 +320,120 @@ impl App {
         self.push_chassis_root(self.input_mailbox, self.kind_window_size, payload, 1);
     }
 
-    /// Fail-fast any parked `capture_frame` while the window is occluded
-    /// (iamacoffeepot/aether#1317). Returns `true` when the wake was
-    /// consumed (the window is occluded — whether or not a capture was
-    /// parked); `false` when the window is visible, signalling the caller
-    /// to fall through to its normal `request_redraw`.
-    ///
-    /// macOS does not deliver `RedrawRequested` to a hidden window, so a
-    /// capture parked while occluded would otherwise never be serviced and
-    /// the wire `Call` would hang on its open inbound chain until timeout.
-    /// Here we take the parked entry, drain its `after_mails` (parity with
-    /// the `RedrawRequested` service arm), reply `Err` through the parked
-    /// request's retained inbound guard (`request.reply.reply`, ADR-0106 /
-    /// #1758), then let the request drop *after* the reply so the inbound's
-    /// `Finished` records after the reply's `Sent` (ADR-0080 §6 /
-    /// iamacoffeepot/aether#1273). The reply joins the inbound's causal
-    /// chain through the same guard primitive every claimed-inbox consumer
-    /// uses, so it lifts into a `ReplyEvent` even for the `Component`
-    /// reply target an engine-local RPC Call carries
-    /// (iamacoffeepot/aether#1316).
-    ///
-    /// The slot is taken only when occluded, so a visible-window wake never
-    /// steals the entry `RedrawRequested` is about to service.
-    fn fail_capture_if_occluded(&mut self) -> bool {
-        let pending = if self.occluded {
-            self.capture_queue.take()
-        } else {
-            None
-        };
-        match occluded_capture_disposition(self.occluded, pending) {
-            OccludedCaptureDisposition::Redraw => false,
-            OccludedCaptureDisposition::Empty => true,
-            OccludedCaptureDisposition::FailFast { request, result } => {
-                // Move the request out of its box onto the stack so the
-                // partial-move drain + retained-guard reply read cleanly.
-                let request = *request;
-                for mail in request.after_mails {
-                    self.queue.push(mail);
-                }
-                // Reply through the retained inbound guard, then let
-                // `request` (which still owns `request.reply` after the
-                // partial move above) drop at end of this scope — *after*
-                // `reply` returns — so the inbound's `Finished` records
-                // after the reply's `Sent` (ADR-0080 §6 / #1758). Don't
-                // restructure to move the reply below other work
-                // (iamacoffeepot/aether#1273 drop-order discipline).
-                request.reply.reply(&result);
-                true
-            }
-        }
+    /// Push a chassis-internal render mail (a per-frame [`Frame`] request or
+    /// an [`Occluded`] forward) to the pumped `aether.render` mailbox and
+    /// drain the slot so its handler runs inline on this thread. Draining
+    /// here — rather than only on the mailbox wake — is what lets an
+    /// [`Occluded`] forward fail-fast a parked capture the moment the window
+    /// hides, and lets a [`Frame`] request record + present within the
+    /// redraw that issued it.
+    fn send_render_and_drain<K: Kind>(&mut self, mail: &K) {
+        self.push_chassis_root(self.render_mailbox, K::ID, mail.encode_into_bytes(), 1);
+        self.render_slot.drain_available();
     }
 
+    /// Set the window's occlusion state (ADR-0161 §Decision 4). Forwards the
+    /// transition to the pumped render actor as [`Occluded`] mail — its
+    /// `on_occluded` handler fail-fasts any pending capture (issue 1317,
+    /// relocated into the actor) — and parks / unparks the loop. `Wait` when
+    /// occluded is the power-save; `Poll` + a redraw poke on un-occlude
+    /// resumes rendering.
     fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
         if self.occluded == occluded {
             return;
         }
         self.occluded = occluded;
+        self.send_render_and_drain(&Occluded { occluded });
         if occluded {
             event_loop.set_control_flow(ControlFlow::Wait);
-            // iamacoffeepot/aether#1317 (race fold-in): a capture poked
-            // while the window was visible can land here before its
-            // `RedrawRequested` is delivered — and macOS suppresses that
-            // redraw once hidden. Fail any such parked capture fast on the
-            // occlusion transition, with the same disposition the
-            // wake-time path uses, so it never hangs on its settlement hold.
-            self.fail_capture_if_occluded();
         } else {
             event_loop.set_control_flow(ControlFlow::Poll);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+        }
+    }
+
+    /// Drive one full `Tick → Render → Present` lifecycle cycle (ADR-0082
+    /// §11), returning `true` when the cycle reached the `Shutdown` terminal.
+    /// Each `LifecycleAdvance` broadcasts the cap's current stage; components
+    /// emit their `DrawTriangle` / `aether.view_projection` mail into the
+    /// pumped render mailbox as descendants of that advance's chain root.
+    ///
+    /// The settlement wait is [`await_settlement_pumped`], not the pooled
+    /// `await_internal_signal` (ADR-0161 §Decision 2): the very draw mail the
+    /// chain is gated on lands on this driver's own pumped render slot, so a
+    /// wait that could not pump the slot would deadlock on the first frame.
+    /// Each advance subscribes its root through the callback-form
+    /// `subscribe_settlement_with`, which sends [`PumpWake::Settled`] into the
+    /// unified channel the slot's mailbox wake also feeds — so the wait wakes
+    /// on both a settled chain and mail arrival, draining the slot on the
+    /// latter. Reading `LifecycleAdvanceComplete.next` (not the raw
+    /// settlement) gates the next advance on the cap clearing its
+    /// pending-advance guard (iamacoffeepot/aether#999).
+    fn run_frame_advance(&mut self) -> bool {
+        // Clone the registry Arc up front so the per-advance subscription
+        // doesn't borrow `self.queue` across the `&mut self.render_slot` the
+        // pumped wait needs.
+        let registry = self.queue.settlement_registry().cloned();
+        loop {
+            let advance_root = self.push_lifecycle_advance();
+            if let Some(registry) = &registry {
+                let pump_tx = self.render_pump_tx.clone();
+                registry.subscribe_settlement_with(advance_root, move || {
+                    let _ = pump_tx.send(PumpWake::Settled);
+                });
+                // A frame chain that doesn't settle is a wedged dispatcher —
+                // the same fail-fast disposition the pooled drain barrier had
+                // (ADR-0063), with the escalating-patience bookkeeping of
+                // issue #1305 carried through the pumped wait.
+                if let WaitOutcome::Wedged(wedge) = await_settlement_pumped(
+                    &self.render_pump_rx,
+                    &mut self.render_slot,
+                    "desktop.frame_advance",
+                    frame_loop::DRAIN_BUDGET,
+                    FRAME_SETTLEMENT_CAP,
+                    TerminalDisposition::Abort,
+                ) {
+                    runtime_lifecycle::fatal_abort(&self.outbound, wedge.reason());
+                }
+            }
+            match self.recv_lifecycle_advance_next() {
+                // Terminal reached (`next == 0`): the `Shutdown` broadcast has
+                // fired and settled. Present this last frame, then exit.
+                Some(0) => return true,
+                // Back at Tick (cycle complete) — stop and present.
+                Some(next) if next == <Tick as Kind>::ID.0 => return false,
+                // Mid-cycle (Tick → Render → Present) — keep advancing.
+                Some(_) => {}
+                // Settlement fired but the reply never arrived — a wedge in
+                // the reply path; fail-fast like the settlement wait above.
+                None => runtime_lifecycle::fatal_abort(
+                    &self.outbound,
+                    "desktop.frame_advance: LifecycleAdvanceComplete reply did not arrive after settlement".to_owned(),
+                ),
+            }
+        }
+    }
+
+    /// Park the loop after a drain (ADR-0161 §Decision 4). When visible,
+    /// request the next redraw so rendering stays continuous. Then, reading
+    /// the pumped actor's pending-capture deadline through the read-only
+    /// [`PumpedSlot::read_state`] accessor, park with
+    /// `ControlFlow::WaitUntil(deadline)` when a capture is parked — the
+    /// single capture-awareness the driver retains, closing the ADR's
+    /// parked-window hole so a wedged pre-chain still reaches the deadline
+    /// check. A pending redraw (the visible path) takes precedence over the
+    /// `WaitUntil`, so continuous rendering is unaffected; the deadline only
+    /// bites once the loop would otherwise sit idle.
+    fn park_after_drain(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.occluded
+            && let Some(w) = &self.window
+        {
+            w.request_redraw();
+        }
+        if let Some(Some(deadline)) = self.render_slot.read_state(PumpedRenderCapabilityState::capture_deadline) {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
 }
@@ -416,15 +465,16 @@ impl ApplicationHandler<UserEvent> for App {
         // placement (`set_ime_cursor_area`) is deferred — its absence only
         // floats the IME popup at a default position.
         window.set_ime_allowed(true);
-        self.gpu =
-            Some(Gpu::new(Arc::clone(&window), self.render_handles.clone(), self.window_settings.wireframe.as_deref()));
         window.request_redraw();
         let initial_size = window.inner_size();
-        // ADR-0160 §Decision 3: hand the freshly-created window to the pumped
-        // `aether.window` actor through its one-shot cell. `resumed`
-        // early-returns once `self.window` is set (above), so this fills
-        // exactly once — a double-fill is a bug, so the `set` `Err` arm is
-        // unreachable here.
+        // ADR-0160 §Decision 3 / ADR-0161 §Decision 3: hand the freshly-created
+        // window to the pumped `aether.window` and `aether.render` actors
+        // through the one shared one-shot cell (both received a clone of it in
+        // their params). `resumed` early-returns once `self.window` is set
+        // (above), so this fills exactly once — a double-fill is a bug, so the
+        // `set` `Err` arm is unreachable here. The render actor boots wgpu
+        // lazily against this cell on its first `on_frame`; there is no more
+        // driver-side `Gpu::new`.
         debug_assert!(self.window_cell.get().is_none(), "window cell filled twice — resumed ran again");
         let _ = self.window_cell.set(Arc::clone(&window));
         self.window = Some(window);
@@ -433,28 +483,15 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        // Both proxy events nudge a redraw so the loop turns — but
-        // `Capture` first checks occlusion. A capture needs a rendered
-        // frame, and macOS does not deliver `RedrawRequested` to a hidden
-        // window under `ControlFlow::Wait`; so when occluded we fail the
-        // parked capture fast (`fail_capture_if_occluded`) rather than
-        // poking a redraw that never lands and leaves the call hung on its
-        // settlement hold (iamacoffeepot/aether#1317). When visible,
-        // `Capture` falls through to `request_redraw` so `RedrawRequested`
-        // pulls the queued capture. `WindowMail`
-        // (iamacoffeepot/aether#1318) always pokes a redraw so winit runs
-        // `about_to_wait` (which drains the `aether.window` inbox) even
-        // under `ControlFlow::Wait`. Neither arm does the work itself —
-        // the redraw / drain handlers do.
+        // `WindowMail` is the generic "a pumped slot took mail — turn the
+        // loop" wake (ADR-0161 generalized the ADR-0160 window rule to every
+        // pumped slot): both the `aether.window` and `aether.render` slot
+        // wakes send it, so `about_to_wait` drains both even under
+        // `ControlFlow::Wait` (iamacoffeepot/aether#1318). It pokes a redraw
+        // to wake the loop; the drain handlers do the work. `Quit`
+        // (iamacoffeepot/aether#1489) is the wake-only signal for the
+        // shutdown-flag poll.
         match event {
-            UserEvent::Capture => {
-                if self.fail_capture_if_occluded() {
-                    return;
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
             UserEvent::WindowMail => {
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -487,9 +524,11 @@ impl ApplicationHandler<UserEvent> for App {
             // to the terminal and calls `event_loop.exit()` there.
             WindowEvent::CloseRequested => self.request_quit(),
             WindowEvent::Resized(size) => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.resize(size);
-                }
+                // ADR-0161 §Decision 3: the surface + offscreen reconfigure is
+                // actor-side now (the pumped runtime reads the window's size and
+                // reconfigures on its next `on_frame`), so the driver only
+                // tracks occlusion and republishes the size for `WindowSize`
+                // subscribers (the camera's aspect tracking).
                 self.set_occluded(size.width == 0 || size.height == 0, event_loop);
                 if size.width != 0 && size.height != 0 {
                     self.publish_window_size(size.width, size.height);
@@ -499,164 +538,47 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_occluded(occluded, event_loop);
             }
             WindowEvent::RedrawRequested => {
-                let pending_capture = self.capture_queue.take();
-                // iamacoffeepot/aether#1489: a quit-driven frame must run
-                // even when occluded so the lifecycle reaches `Shutdown`;
-                // the `!self.quit_requested` clause bypasses the
-                // power-save early-return for the shutdown frame.
-                if self.occluded && pending_capture.is_none() && !self.quit_requested {
+                // iamacoffeepot/aether#1489: a quit-driven frame must run even
+                // when occluded so the lifecycle reaches `Shutdown`; the
+                // `!self.quit_requested` clause bypasses the power-save
+                // early-return for the shutdown frame. Capture no longer
+                // enters here — it is mail-driven inside the pumped render
+                // actor (ADR-0161 §Decision 4), so occlusion just power-saves.
+                if self.occluded && !self.quit_requested {
                     return;
                 }
-                // Publish the live window size once per frame so
-                // `WindowSize` subscribers (the camera's aspect tracking)
-                // read it during the Tick stage.
+                // Publish the live window size once per frame so `WindowSize`
+                // subscribers (the camera's aspect tracking) read it during
+                // the Tick stage.
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
                     if size.width != 0 && size.height != 0 {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                // ADR-0082 §11 / issues 1378 + 1489: drive one full
-                // `Tick → Render → Present` cycle. Each `LifecycleAdvance`
-                // broadcasts the cap's current stage; components emit their
-                // `DrawTriangle` / `aether.view_projection` mail into render as
-                // descendants of that advance's chain root. We wait for the
-                // broadcast root to settle (ADR-0080 §6 — the
-                // causal-completion replacement for the retired
-                // `drain_frame_bound_or_abort` poll), then read
-                // `LifecycleAdvanceComplete.next` to learn the cap's
-                // resolved next stage and loop until it returns to `Tick`
-                // (one full cycle) or reaches the `Shutdown` terminal
-                // (`next == 0`, set after a `Quit` was consumed at
-                // `Present`). Reading the reply — not the raw settlement
-                // channel — gates the next advance on the cap having
-                // cleared its pending-advance guard, so the back-to-back
-                // advances never race it (iamacoffeepot/aether#999). GPU
-                // submit + present below runs after the `Render` chain
-                // settles, so every actor's per-frame Tick compute and
-                // Render submission is integrated before readback.
-                let mut reached_terminal = false;
-                loop {
-                    let advance_root = self.push_lifecycle_advance();
-                    if let Some(registry) = self.queue.settlement_registry() {
-                        let rx = registry.subscribe_settlement(advance_root);
-                        // A frame chain that doesn't settle is a wedged
-                        // dispatcher — same fail-fast disposition the old
-                        // drain barrier had (ADR-0063). Escalating-patience
-                        // wait (issue #1305) replaces the bare wall-clock:
-                        // a starved-but-healthy chain resolves before the
-                        // cumulative cap, a genuine wedge exhausts it.
-                        if let WaitOutcome::Wedged(wedge) = await_internal_signal(
-                            &rx,
-                            "desktop.frame_advance",
-                            frame_loop::DRAIN_BUDGET,
-                            FRAME_SETTLEMENT_CAP,
-                            TerminalDisposition::Abort,
-                        ) {
-                            runtime_lifecycle::fatal_abort(&self.outbound, wedge.reason());
-                        }
-                    }
-                    match self.recv_lifecycle_advance_next() {
-                        // Terminal reached (`next == 0`): the `Shutdown`
-                        // broadcast has fired and settled. Present this
-                        // last frame, then `event_loop.exit()` below
-                        // (settle-then-exit, ADR-0082 §11).
-                        Some(0) => {
-                            reached_terminal = true;
-                            break;
-                        }
-                        // Back at Tick (cycle complete) — stop and present.
-                        Some(next) if next == <Tick as Kind>::ID.0 => break,
-                        // Mid-cycle (Tick → Render → Present) — keep advancing.
-                        Some(_) => {}
-                        // Settlement fired but the reply never arrived —
-                        // a wedge in the reply path; fail-fast like the
-                        // settlement wait above.
-                        None => runtime_lifecycle::fatal_abort(
-                            &self.outbound,
-                            "desktop.frame_advance: LifecycleAdvanceComplete reply did not \
-                             arrive after settlement"
-                                .to_owned(),
-                        ),
-                    }
-                }
-                if let Some(gpu) = self.gpu.as_mut() {
-                    match pending_capture {
-                        Some(req) => {
-                            // iamacoffeepot/aether#860: wait for each
-                            // pre-mail's causal chain to settle before
-                            // rendering, mirroring the substrate-harness fix.
-                            // The desktop driver doesn't have a
-                            // `SettlementTimeout` error to surface, so
-                            // a stuck chain replies the capture with
-                            // an `Err` and continues the frame loop
-                            // (the user can retry without crashing
-                            // the chassis).
-                            let mut pre_failed: Option<String> = None;
-                            for rx in req.pre_settlements {
-                                if let WaitOutcome::Wedged(wedge) = await_internal_signal(
-                                    &rx,
-                                    "desktop.capture_pre_mail",
-                                    frame_loop::DRAIN_BUDGET,
-                                    FRAME_SETTLEMENT_CAP,
-                                    TerminalDisposition::ReplyErr,
-                                ) {
-                                    pre_failed = Some(wedge.reason());
-                                    break;
-                                }
-                            }
-                            let result = pre_failed.map_or_else(
-                                || {
-                                    CaptureFrameResult::from(
-                                        gpu.render_and_capture(&req.checks, req.reference.as_ref()),
-                                    )
-                                },
-                                |error| CaptureFrameResult::Err { error },
-                            );
-                            for mail in req.after_mails {
-                                //noinspection DuplicatedCode
-                                self.queue.push(mail);
-                            }
-                            // Reply through the retained inbound guard
-                            // (ADR-0106 / #1758): the reply joins the
-                            // inbound's ADR-0080 causal chain, and `req`
-                            // (which still owns `req.reply` after the partial
-                            // moves above) drops at end of this scope —
-                            // *after* `reply` returns — so the inbound's
-                            // `Finished` records after the reply's `Sent`
-                            // (§6). Don't restructure to move the reply below
-                            // other work in this arm (iamacoffeepot/aether#1273).
-                            req.reply.reply(&result);
-                        }
-                        None => {
-                            gpu.render();
-                        }
-                    }
-                } else if let Some(req) = pending_capture {
-                    // No GPU yet: reply `Err` through the retained guard,
-                    // which then drops and settles the inbound chain (#1758).
-                    req.reply.reply(&CaptureFrameResult::Err {
-                        error: "capture requested before GPU initialized".to_owned(),
-                    });
-                }
+                // ADR-0161 §Decision 1: `RedrawRequested` collapses to advance
+                // loop → `aether.render.frame` mail → drain. The advance loop
+                // pumps the render slot mid-wait so draw mail on the advance
+                // chain dispatches; once it settles, one `Frame` request
+                // records the accumulated geometry and presents (and resolves
+                // any ready capture). `replay_cache_when_idle: false` — desktop
+                // always commits current producer state (issue 847's
+                // replay-cache mode is the harness path).
+                let reached_terminal = self.run_frame_advance();
+                self.send_render_and_drain(&Frame { replay_cache_when_idle: false });
                 self.frame += 1;
                 // iamacoffeepot/aether#1489: the lifecycle reached its
-                // `Shutdown` terminal and broadcast it (the advance loop
-                // gates on settlement, so every `Shutdown` subscriber's
-                // graceful-cleanup chain has drained). The final frame is
-                // now presented — exit winit. `run_app` returns and the
-                // chassis runs each passive's teardown + per-actor
-                // `unwire` in reverse boot order. Don't request another
-                // redraw on this path.
+                // `Shutdown` terminal and broadcast it (the advance loop gates
+                // on settlement, so every `Shutdown` subscriber's cleanup chain
+                // has drained). The final frame is now presented — exit winit.
+                // `run_app` returns and the chassis runs each passive's
+                // teardown + per-actor `unwire` in reverse boot order,
+                // including the render slot's. Don't park on this path.
                 if reached_terminal {
                     event_loop.exit();
                     return;
                 }
-                if !self.occluded
-                    && let Some(w) = &self.window
-                {
-                    w.request_redraw();
-                }
+                self.park_after_drain(event_loop);
             }
             WindowEvent::KeyboardInput { event: key_event, .. } => {
                 // Text path: publish the layout-resolved characters from
@@ -781,6 +703,14 @@ impl ApplicationHandler<UserEvent> for App {
     /// from a separate dispatcher thread.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.window_slot.drain_available();
+        // ADR-0161: drain the pumped render slot here too, so render mail that
+        // arrived while the loop was parked — a `capture_frame` on an occluded
+        // window (fail-fast), an `Occluded` forward — is serviced even under
+        // `ControlFlow::Wait`, where `RedrawRequested` does not fire. The
+        // render slot's mailbox wake pokes `UserEvent::WindowMail` to bring the
+        // loop here; the frame path drains it inline, so this is a no-op mid-
+        // render.
+        self.render_slot.drain_available();
         // iamacoffeepot/aether#1489: poll the SIGINT/SIGTERM flag the
         // signal-watcher flips. On first observation, run the same
         // graceful-shutdown path `CloseRequested` uses. Force
@@ -806,21 +736,29 @@ impl ApplicationHandler<UserEvent> for App {
 pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
-    pub capture_queue: CaptureQueue,
     /// Lowered window boot knobs (mode / size / title / wireframe), threaded
     /// from `DesktopEnv` as a unit and applied when `resumed` creates the
     /// window.
     pub window: aether_chassis::WindowSettings,
+    /// Resolved render tuning (the vertex-buffer cap) — ADR-0161 R3 boots the
+    /// pumped render actor with it, so the render `Config` is resolved on the
+    /// chassis's source stack and threaded here rather than through the pooled
+    /// `with_actor` path that composed `RenderCapability` before the swap.
+    pub render_config: RenderTuningConfig,
+    /// Resolved `assets` namespace root, threaded into the pumped render
+    /// actor's params so its `capture_frame` handler can read similarity
+    /// reference images off the hot path (iamacoffeepot/aether#1780).
+    pub assets_dir: PathBuf,
 }
 
 pub struct DesktopDriverRunning {
     app: App,
     event_loop: EventLoop<UserEvent>,
-    triangles_rendered: Arc<AtomicU64>,
     /// `SubstrateBoot` drops at the end of `run()`. The `chassis_builder`
-    /// `BootedPassives` (holding render/audio/io/http/log runnings)
-    /// drops just after, tearing down each passive in reverse boot
-    /// order via `RunningCapability::shutdown`.
+    /// `BootedPassives` (holding audio/io/http/log runnings) drops just
+    /// after, tearing down each passive in reverse boot order via
+    /// `RunningCapability::shutdown`. Render is no longer a passive — the
+    /// pumped render slot lives on `app` and is torn down in `run()`.
     _boot: SubstrateBoot,
 }
 
@@ -836,7 +774,13 @@ impl DriverCapability for DesktopDriverCapability {
     /// the reservation off Start is what lets `--describe` claim
     /// `aether.window` on a headless host without an event loop.
     fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
-        ctx.claim_driver_mailbox("aether.window")
+        // ADR-0161 R3: the desktop driver is the pump host for both the
+        // `aether.window` and (post-swap) `aether.render` actors, so it
+        // reserves both driver-as-actor inboxes at the Claim stage;
+        // `boot_pumped_actor` recovers each at Start. `aether.render` is no
+        // longer claimed by a pooled `RenderCapability` on desktop.
+        ctx.claim_driver_mailbox("aether.window")?;
+        ctx.claim_driver_mailbox("aether.render")
     }
 
     /// ADR-0156 §4: the window boot knobs (`AETHER_WINDOW_MODE` /
@@ -845,7 +789,14 @@ impl DriverCapability for DesktopDriverCapability {
     /// aggregate carries them only where a window composes (headless, which
     /// drives a std timer, declares no window knob).
     fn config_members() -> Vec<ConfigMemberRecord> {
-        <aether_chassis::WindowConfig as ConfigMember>::members()
+        // The window knobs plus the render tuning knob
+        // (`AETHER_RENDER_VERTEX_BUFFER_BYTES`): ADR-0161 R3 moved render off
+        // the pooled `with_actor` compose on desktop, so the driver — which
+        // now boots the render actor — declares its `Config` member for the
+        // manifest / `--print-config` / unknown-env sweep.
+        let mut members = <aether_chassis::WindowConfig as ConfigMember>::members();
+        members.extend(<RenderTuningConfig as ConfigMember>::members());
+        members
     }
 
     // One-shot boot wiring: kind-id lookups, mailbox claims, and the
@@ -853,40 +804,15 @@ impl DriverCapability for DesktopDriverCapability {
     // splitting would just pass the same dozen fields through a helper.
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { event_loop, boot, capture_queue, window } = self;
+        let Self { event_loop, boot, window, render_config, assets_dir } = self;
 
-        // Issue 629 / Phase A: render publishes its `RenderHandles`
-        // bundle on the chassis's `ExportedHandles` map during `init`.
-        // The driver retrieves the bundle via `DriverCtx::handle::<H>()`
-        // — no `Arc<RenderCapability>` ever escapes the dispatcher
-        // thread. The frame-bound pending counter is registered through
-        // the FRAME_BARRIER claim machinery and surfaces via
-        // `ctx.frame_bound_pending()`.
-        let render_handles: RenderHandles = ctx.handle::<RenderHandles>().ok_or_else(|| {
-            BootError::Other(Box::new(io::Error::other(
-                "DesktopDriverCapability::boot: RenderHandles must be published before the driver \
-                 (verify the chassis builder calls `with_actor::<RenderCapability>(config)` before `driver(...)`)",
-            )))
-        })?;
-        let triangles_rendered = Arc::clone(&render_handles.triangles_rendered);
-
-        // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
-        // `RenderConfig` field. Build it from the capture queue + an
-        // `EventLoopProxy` wake + the reply egress and install it into the
-        // published `RenderHandles`, so the render cap's `on_capture_frame`
-        // parks its request here and pokes `UserEvent::Capture` for the next
-        // `RedrawRequested` to service. The winit event loop that could not
-        // exist at claim time is present here at Start — which is exactly why
-        // this wiring is Start-stage and not config.
-        let capture_proxy = event_loop.create_proxy();
-        render_handles.install_capture_backend(CaptureBackend {
-            queue: capture_queue.clone(),
-            wake: Arc::new(move || {
-                let _ = capture_proxy.send_event(UserEvent::Capture);
-                Ok(())
-            }),
-            outbound: Arc::clone(&boot.outbound),
-        });
+        // ADR-0161 R3: the desktop driver boots the pumped `aether.render`
+        // actor itself (below) rather than fetching a pooled `RenderHandles`
+        // bundle and installing a cross-thread `CaptureBackend`. The pooled
+        // render seam — `RenderHandles`, `install_gpu`, the capture queue and
+        // its `UserEvent::Capture` wake — is gone from the desktop path; the
+        // pumped actor owns the surface, accumulators, and pending capture as
+        // plain state on this thread.
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
@@ -931,6 +857,46 @@ impl DriverCapability for DesktopDriverCapability {
         window_wake_slot.set(Arc::new(move || {
             let _ = window_mail_proxy.send_event(UserEvent::WindowMail);
         }));
+
+        // ADR-0161 §Decision 1/3: boot the pumped `aether.render` actor from
+        // the driver's Claim-stage `aether.render` reservation, sharing the one
+        // `WindowCell` the window actor received (one cell, cloned into both
+        // params, filled once by `resumed`) so the render runtime boots wgpu
+        // lazily against the same window. `RenderTuningConfig` (the vertex cap)
+        // and the `assets` root ride through here since render no longer
+        // composes on the pooled `with_actor` path.
+        let (render_slot, render_wake_slot) = ctx.boot_pumped_actor::<PumpedRenderCapability>(
+            render_config,
+            PumpedRenderParams {
+                observed_kinds: None,
+                assets_dir: Some(assets_dir),
+                window: Some(window_cell.clone()),
+                wireframe: window.wireframe.clone(),
+            },
+        )?;
+
+        // ADR-0161 §Decision 2: the unified `PumpWake` channel. The render
+        // slot's mailbox wake sends `PumpWake::Mail` so the advance-loop
+        // `await_settlement_pumped` drains on mail arrival, and *also* pokes
+        // `UserEvent::WindowMail` so a render mail landing while the loop is
+        // parked (a `capture_frame` on an occluded window) turns the loop and
+        // `about_to_wait` drains the slot — the generalized "a pumped slot's
+        // wake pokes a redraw" rule. `subscribe_settlement_with` sends
+        // `PumpWake::Settled` into the same channel per advance.
+        let (render_pump_tx, render_pump_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        let render_mail_proxy = event_loop.create_proxy();
+        let render_wake_tx = render_pump_tx.clone();
+        render_wake_slot.set(Arc::new(move || {
+            let _ = render_wake_tx.send(PumpWake::Mail);
+            let _ = render_mail_proxy.send_event(UserEvent::WindowMail);
+        }));
+
+        // Chassis route-freezing: the pumped render actor's own id (its
+        // NAMESPACE), the recipient for the per-frame `Frame` request and the
+        // `Occluded` forward. ctx-less, no sibling resolver in scope — same
+        // escape hatch the input / lifecycle mailbox ids below use.
+        #[allow(clippy::disallowed_methods)]
+        let render_mailbox = mailbox_id_from_name(<PumpedRenderCapability as Addressable>::NAMESPACE);
 
         // Chassis route-freezing: the desktop driver wires its event loop to
         // the lifecycle cap's own id (its NAMESPACE) at construction time —
@@ -979,11 +945,12 @@ impl DriverCapability for DesktopDriverCapability {
             kind_modifiers,
             last_cursor: (0.0, 0.0),
             composing: false,
-            render_handles,
-            capture_queue,
             outbound: Arc::clone(&boot.outbound),
             window: None,
-            gpu: None,
+            render_slot,
+            render_mailbox,
+            render_pump_tx,
+            render_pump_rx,
             started: None,
             frame: 0,
             occluded: false,
@@ -1000,12 +967,11 @@ impl DriverCapability for DesktopDriverCapability {
         Ok(DesktopDriverRunning {
             app,
             event_loop,
-            triangles_rendered,
             // `boot` stays alive on the running so its scheduler joins
             // workers on drop. Drop ordering on
-            // `DesktopDriverRunning::run` exit: app → event_loop →
-            // triangles_rendered → _boot, which means capabilities
-            // (held by `app`) tear down before the scheduler joins.
+            // `DesktopDriverRunning::run` exit: app → event_loop → _boot,
+            // which means capabilities (held by `app`, including the pumped
+            // render + window slots) tear down before the scheduler joins.
             _boot: boot,
         })
     }
@@ -1016,7 +982,6 @@ impl DriverRunning for DesktopDriverRunning {
         let Self {
             mut app,
             event_loop,
-            triangles_rendered,
             // Held to the end of `run()` so the scheduler joins workers on
             // drop; the `_` prefix keeps the binding alive without a use.
             _boot,
@@ -1024,15 +989,22 @@ impl DriverRunning for DesktopDriverRunning {
 
         event_loop.run_app(&mut app).map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
 
-        // ADR-0160 §Decision 3: run the pumped `aether.window` actor's
-        // Closed-path teardown (residual drain, `unwire`, cost-row drop,
-        // registry finalize + monitor fan-out) — the `unwire` the bespoke
-        // driver drain never had. The driver boots last, so this lands before
+        // Read the cumulative triangle count off the pumped render actor's
+        // plain state through the read-only accessor before `shutdown` consumes
+        // the actor (ADR-0161: the driver's shutdown FPS report keeps working
+        // off `read_state`; the render actor's `unwire` logs the same count).
+        let total = app.render_slot.read_state(PumpedRenderCapabilityState::triangles_rendered).unwrap_or(0);
+
+        // ADR-0160 §Decision 3 / ADR-0161: run each pumped actor's Closed-path
+        // teardown (residual drain, `unwire`, cost-row drop, registry finalize +
+        // monitor fan-out) — the `unwire` the bespoke driver drain never had.
+        // The render slot's `unwire` logs the triangle count; the window slot's
+        // runs the window teardown. The driver boots last, so both land before
         // the chassis tears down each passive in reverse boot order (`_boot`
         // drops at the end of this fn).
+        app.render_slot.shutdown();
         app.window_slot.shutdown();
 
-        let total = triangles_rendered.load(Ordering::Relaxed);
         let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
         // Frame count cast to f64 for FPS report — runs at shutdown,
         // bounded well below 2^53.

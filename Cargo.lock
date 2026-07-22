@@ -248,7 +248,6 @@ dependencies = [
  "aether-data",
  "aether-game",
  "aether-harness-substrate",
- "aether-harness-substrate-capture",
  "aether-http",
  "aether-input",
  "aether-kinds",
@@ -258,11 +257,11 @@ dependencies = [
  "aether-window",
  "anyhow",
  "clap",
+ "crossbeam-channel",
  "ctrlc",
  "serde_json",
  "signal-hook 0.4.4",
  "tracing",
- "wgpu",
  "winit",
 ]
 

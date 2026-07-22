@@ -76,7 +76,7 @@ pub use runtime::{
 // type (ADR-0161 slice R2), behind the `desktop` feature — the driver
 // (R3) and harness (R4) mail these to the pumped actor and mint the cell.
 #[cfg(feature = "desktop")]
-pub use pumped_runtime::{Frame, Occluded, PreSettled};
+pub use pumped_runtime::{Frame, Occluded, PreSettled, PumpedRenderCapabilityState};
 #[cfg(feature = "desktop")]
 pub use runtime::{PumpedRenderParams, WindowCell};
 
