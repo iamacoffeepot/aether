@@ -33,6 +33,7 @@ use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
+use aether_process::{ProcessCapability, ProcessConfig, ProcessParams};
 use aether_render::RenderTuningConfig;
 use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
 use aether_substrate::chassis::builder::Builder;
@@ -598,6 +599,7 @@ pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C>
         .with_config_member::<GeminiConfig>()
         .with_config_member::<ContentGenConfig>()
         .with_config_member::<AnthropicConfig>()
+        .with_config_member::<ProcessConfig>()
         .with_config_member::<AudioConfig>()
         .with_config_member::<NamespaceRoots>()
         .with_config_member::<RenderTuningConfig>()
@@ -878,6 +880,11 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
     // env). Threaded into the gemini cap via `GeminiParams`.
     let staging_root =
         boot.generated_asset_staging.gen_dir.clone().unwrap_or_else(|| boot.namespace_roots.save.clone());
+    // ADR-0157 §Security: a subprocess run is confined to the `aether.fs`
+    // `save` namespace root — the same writable sandbox the fs cap governs —
+    // so it starts inside that sandbox rather than the substrate's cwd. Cloned
+    // here because `boot.namespace_roots` is moved into the fs cap below.
+    let process_work_root = boot.namespace_roots.save.clone();
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
@@ -918,6 +925,11 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         // `GeminiConfig`.
         .with_actor::<HttpCapability>(())
         .with_actor::<TcpCapability>(())
+        // ADR-0157: the one-shot exec cap. `ProcessConfig` (deny-by-default
+        // allowlist / default timeout / concurrency bound) is builder-resolved
+        // off the source stack; the working-directory confinement root rides
+        // `Params`, resolved chassis-side from the fs `save` root above.
+        .with_actor::<ProcessCapability>(ProcessParams { work_root: process_work_root })
         // Programmatic default (byte-identical to the pre-inversion `::default()`
         // compose): no `AETHER_GAME_*` env opens a listener on the common chassis.
         .with_actor_configured::<GameGatewayCapability>(boot.game_gateway_params, GameGatewayConfig::default())
