@@ -157,17 +157,22 @@ arrives later as its own mail, which you receive like any other kind:
 #[handler::single]
 fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_>, result: FetchResult) {
     match result {
-        FetchResult::Ok { url, status, body, .. } => { /* url tells you which fetch */ }
-        FetchResult::Err { url, error } => { /* branch on error */ }
+        FetchResult::Ok { request_id, status, body, .. } => { /* request_id tells you which fetch */ }
+        FetchResult::Err { request_id, error, .. } => { /* branch on error */ }
     }
 }
 ```
 
-Because both arms echo `url`, a component with several fetches outstanding tells
-them apart by the echoed URL — match it against whatever state you were waiting
-to fill. For a request that needs custom headers, a method beyond GET/POST, a
-body on a non-POST, or a per-request timeout, send the `Fetch` kind directly:
-`ctx.actor::<HttpCapability>().send(&Fetch { url, method, headers, body, timeout_ms })`.
+Both arms echo the caller-minted `request_id` you stamped on the `Fetch`, so a
+component with several fetches outstanding tells them apart by it — match it
+against whatever state you were waiting to fill. The cap dispatches fetches
+concurrently under a per-sender bound (ADR-0158), so two requests to the same
+URL can be in flight at once; `request_id` is what disambiguates their replies,
+where the echoed `url` (still on both arms, for logs) cannot. The facade's
+`get` / `post` mint `request_id: 0`; for correlation, or for a request that
+needs custom headers, a method beyond GET/POST, a body on a non-POST, or a
+per-request timeout, send the `Fetch` kind directly:
+`ctx.actor::<HttpCapability>().send(&Fetch { request_id, url, method, headers, body, timeout_ms })`.
 The kinds live with the capability in
 `aether-http/src/kinds.rs` (ADR-0121).
 
