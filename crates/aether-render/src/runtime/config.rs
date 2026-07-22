@@ -1,5 +1,23 @@
 use std::path::PathBuf;
+#[cfg(feature = "desktop")]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "desktop")]
+use winit::window::Window;
+
+/// The late-bound winit window handle, shared between the desktop chassis's
+/// winit `resumed` handler (which fills it exactly once after
+/// `create_window`) and the pumped render runtime's state (ADR-0161 slice
+/// R2), which reads it in `on_frame` to boot wgpu lazily. Structurally the
+/// same one-shot `Arc<OnceLock<Arc<Window>>>` the `aether.window` desktop
+/// actor receives — the chassis mints one cell and clones it into both
+/// actors' params so they observe the same window (the task's local-alias
+/// option: the underlying type is identical to `aether_window`'s
+/// `WindowCell`, so a chassis can hand one cell to both without a crate
+/// edge). Behind the `desktop` feature: only a desktop chassis pulls winit.
+#[cfg(feature = "desktop")]
+pub type WindowCell = Arc<OnceLock<Arc<Window>>>;
 
 /// Boot knobs for `RenderCapability` (ADR-0090). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -48,4 +66,31 @@ pub struct RenderParams {
     /// through `PendingCapture.reference`. `None` disables
     /// similarity checks with a descriptive `Err` reply.
     pub assets_dir: Option<PathBuf>,
+}
+
+/// Composer-supplied construction params for the pumped render runtime
+/// (`PumpedRenderCapability`, ADR-0161 slice R2). A dedicated params
+/// channel rather than an extension of the pooled [`RenderParams`]: the
+/// `WindowCell` is winit-typed and desktop-only, so a separate struct
+/// (mirroring aether-window's `DesktopWindowParams`) keeps the shared
+/// pooled params — and its consumers — byte-for-byte untouched. Behind the
+/// `desktop` feature.
+#[cfg(feature = "desktop")]
+#[derive(Clone, Default)]
+pub struct PumpedRenderParams {
+    /// `SubstrateHarness` observation sink (see [`RenderParams::observed_kinds`]).
+    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    /// Resolved `"assets"` root for `capture_frame` similarity references
+    /// (see [`RenderParams::assets_dir`]).
+    pub assets_dir: Option<PathBuf>,
+    /// The shared late-bound window handle the runtime boots wgpu against
+    /// on the first `on_frame` after the chassis's `resumed` fills the
+    /// cell. The chassis mints one [`WindowCell`] and clones it into both
+    /// this and the `aether.window` desktop actor's params, so both
+    /// observe the same window. `None` in tests, which never own a surface.
+    pub window: Option<WindowCell>,
+    /// Resolved `AETHER_WIREFRAME` value (argv > env > default), threaded
+    /// so the lazy wgpu boot picks the wireframe mode the desktop `Gpu`
+    /// boot does. `None` / `"off"` is filled faces.
+    pub wireframe: Option<String>,
 }

@@ -796,10 +796,12 @@ dependencies = [
  "clap",
  "confique",
  "inventory",
+ "pollster",
  "serde",
  "serde_json",
  "tracing",
  "wgpu",
+ "winit",
 ]
 
 [[package]]

@@ -68,9 +68,17 @@ use aether_kinds::CaptureFrame;
 // GPU-bound types.
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    CaptureBackend, RenderGpu, RenderHandles, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
-    RenderTuningOverlay, WHITE_TEXTURE_ID,
+    BootedSurface, CaptureBackend, RenderGpu, RenderHandles, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
+    RenderTuningOverlay, WHITE_TEXTURE_ID, acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline,
 };
+
+// The pumped render runtime's chassis-internal kinds + shared window-cell
+// type (ADR-0161 slice R2), behind the `desktop` feature — the driver
+// (R3) and harness (R4) mail these to the pumped actor and mint the cell.
+#[cfg(feature = "desktop")]
+pub use pumped_runtime::{Frame, Occluded, PreSettled};
+#[cfg(feature = "desktop")]
+pub use runtime::{PumpedRenderParams, WindowCell};
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
 // form): it reads the cap's sibling runtime module off disk and emits the
@@ -97,6 +105,12 @@ mod runtime;
 // compiles it.
 #[cfg(feature = "runtime")]
 mod headless_runtime;
+
+// The pumped render runtime (ADR-0161 slice R2), added beside the pooled
+// `runtime` module. Gated on the `desktop` feature (winit + the surface
+// state); the pooled runtime and headless companion never build it.
+#[cfg(feature = "desktop")]
+mod pumped_runtime;
 
 /// `aether.render` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable`, the per-handler
@@ -130,6 +144,23 @@ pub struct RenderCapability;
 /// both — the chassis builder rejects double-claiming a mailbox.
 #[actor(singleton, headless_runtime)]
 pub struct HeadlessRenderCapability;
+
+/// `PumpedRenderCapability` **identity** (ADR-0161 slice R2). The pumped,
+/// driver-thread companion to [`RenderCapability`], claiming the same
+/// `aether.render` mailbox but owning its accumulators, GPU, and pending
+/// capture as plain state — dispatched on the chassis driver thread
+/// through a `PumpedSlot` (ADR-0160) rather than the worker pool. Added
+/// beside the pooled [`RenderCapability`] so desktop (R3) and the harness
+/// (R4) swap onto it independently; the pooled runtime is deleted in R5.
+///
+/// The state-bearing runtime (`PumpedRenderCapabilityState`, plus the
+/// three chassis-internal kinds) lives behind the `desktop` gate in the
+/// `pumped_runtime` module. Each chassis composes one of
+/// {this cap, [`RenderCapability`], [`HeadlessRenderCapability`]}, never
+/// more than one — the chassis builder rejects double-claiming a mailbox.
+#[cfg(feature = "desktop")]
+#[actor(singleton, pumped_runtime)]
+pub struct PumpedRenderCapability;
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
