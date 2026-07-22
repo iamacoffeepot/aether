@@ -26,7 +26,9 @@ use std::thread;
 use std::time::Duration;
 
 use aether_chassis::autoload::boot_manifest_autoload;
-use aether_chassis::boot::{CommonEnv, RuntimeConfig};
+use aether_chassis::boot::{
+    ActorRingConfig, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+};
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
 use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
@@ -90,10 +92,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
                 sources: default_sources(),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(16),
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
@@ -158,10 +160,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: default_sources(),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(16),
             autoload,

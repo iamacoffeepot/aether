@@ -12,24 +12,21 @@
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use aether_fleet::FleetServer;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::config::{
-    ConfigError, ConfigSources, KnobRecord, RingCapacities, SchedulerTuning, StageArgv, validate_env,
-};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
-    ActorRingConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs, install_frame_size,
-    load_chassis_config, with_hub_fleet_passthrough,
+    ActorRingConfig, BuilderChassisConfigMember, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    hub_residual_knobs, install_frame_size, load_chassis_config, with_hub_fleet_passthrough,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -78,7 +75,7 @@ impl BootableChassis for HubChassis {
     /// reference so [`Chassis::build`] can move the same `boot` into the
     /// driver afterward.
     fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
-        let HubEnv { sources, rpc_port, runtime: _, ring_capacities, scheduler_tuning, teardown_budget } = env;
+        let HubEnv { sources, rpc_port, runtime: _, actor_ring, scheduler_tuning, settlement } = env;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
@@ -87,15 +84,21 @@ impl BootableChassis for HubChassis {
         // one documented over-approximation in the aggregate. The engines cap
         // (`FleetConfig`) declares its own member via `with_actor` below.
         //
+        // #3930: the three non-cap members the hub genuinely composes onto builder
+        // seams — ring capacities / scheduler tuning / settlement teardown — fuse
+        // their value install with their aggregate-membership declaration through
+        // `with_chassis_config_member`, so they leave `with_hub_fleet_passthrough`
+        // (which now declares only the knobs the hub does not itself compose).
+        //
         // ADR-0156 §5: hand the builder the source stack so it resolves the
         // composed `FleetServer`'s `FleetConfig` (the liveness-heartbeat
         // tuning, issue 1339) off it. #3849: the RPC server's `Config` is now a
         // derive member resolved off the stack; the hub always binds, so it
         // composes the resolved-with-default port as an explicit override.
         with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
-            .with_ring_capacities(ring_capacities)
-            .with_scheduler_tuning(scheduler_tuning)
-            .with_teardown_budget(teardown_budget)
+            .with_chassis_config_member(&actor_ring)
+            .with_chassis_config_member(&scheduler_tuning)
+            .with_chassis_config_member(&settlement)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<FleetServer>(())
             .with_actor_configured::<RpcServerCapability>(
@@ -136,9 +139,12 @@ pub struct HubEnv {
     /// The substrate runtime knobs (#3849); [`Chassis::build`] re-applies
     /// [`RuntimeConfig::log_filter`] after the subscriber installs.
     pub runtime: RuntimeConfig,
-    pub ring_capacities: RingCapacities,
-    pub scheduler_tuning: SchedulerTuning,
-    pub teardown_budget: Duration,
+    /// #3930: the three seam-installed non-cap members ride as resolved structs;
+    /// [`HubChassis::compose`] fuses each onto its builder seam via
+    /// `with_chassis_config_member`, lowering it there.
+    pub actor_ring: ActorRingConfig,
+    pub scheduler_tuning: SchedulerTuningConfig,
+    pub settlement: SettlementConfig,
 }
 
 impl HubEnv {
@@ -188,9 +194,11 @@ impl HubEnv {
         // stage by value). No hand-maintained per-cap `set_argv` block to forget.
         let mut sources = ConfigSources::new(config_file);
         cli.clone().stage(&mut sources);
-        let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
-        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
-        let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
+        // #3930: resolve the three seam-installed non-cap members off the stack as
+        // structs; `compose` lowers each onto its builder seam via the fuse.
+        let actor_ring = sources.resolve::<ActorRingConfig>()?;
+        let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?;
+        let settlement = sources.resolve::<SettlementConfig>()?;
         let runtime = sources.resolve::<RuntimeConfig>()?;
         // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
         // here, before the RPC server binds and any framing runs — the codec
@@ -202,7 +210,7 @@ impl HubEnv {
         // `compose` re-stages the resolved value as an explicit
         // `with_actor_configured` override so the builder binds it.
         let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
-        Ok(Self { sources, rpc_port, runtime, ring_capacities, scheduler_tuning, teardown_budget })
+        Ok(Self { sources, rpc_port, runtime, actor_ring, scheduler_tuning, settlement })
     }
 }
 
@@ -315,5 +323,23 @@ mod config_manifest_tests {
         assert!(known.contains("AETHER_TICK_HZ"), "hub declares the fleet tick knob as pass-through");
         assert!(known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"), "hub claims its own composed engines-cap knob");
         assert!(known.contains("AETHER_FLEET_STORE_ROOT"), "hub folds in the store-root residual knob");
+        // #3930: the ring / scheduler / settlement members moved out of the
+        // pass-through and are now composed onto their builder seams through
+        // `with_chassis_config_member`, which declares their membership as it
+        // installs their value. Their env keys must stay in the hub's known-key
+        // set — a dropped fuse line would drop them and start warning on a knob an
+        // operator legitimately sets for the substrates the hub spawns.
+        assert!(
+            known.contains("AETHER_ACTOR_LOG_RING_SIZE"),
+            "hub keeps the ring-capacity knob via the fused ActorRingConfig member"
+        );
+        assert!(
+            known.contains("AETHER_SPIN_WINDOW_USEC"),
+            "hub keeps the scheduler-tuning knob via the fused SchedulerTuningConfig member"
+        );
+        assert!(
+            known.contains("AETHER_SETTLEMENT_CAP_SECS"),
+            "hub keeps the settlement knob via the fused SettlementConfig member"
+        );
     }
 }

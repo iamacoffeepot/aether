@@ -33,7 +33,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_chassis::autoload::AutoloadComponent;
-use aether_chassis::boot::{CommonEnv, RuntimeConfig};
+use aether_chassis::boot::{
+    ActorRingConfig, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+};
 use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
@@ -359,10 +361,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -468,10 +470,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -572,10 +574,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -681,10 +683,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -904,10 +906,10 @@ mod tests {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
                 runtime: RuntimeConfig::default(),
-                workers: None,
-                ring_capacities: aether_substrate::RingCapacities::default(),
-                scheduler_tuning: aether_substrate::SchedulerTuning::default(),
-                teardown_budget: Duration::from_millis(100),
+                chassis_boot: ChassisBootConfig::default(),
+                actor_ring: ActorRingConfig::default(),
+                scheduler_tuning: SchedulerTuningConfig::default(),
+                settlement: SettlementConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![
