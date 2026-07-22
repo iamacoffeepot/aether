@@ -72,17 +72,17 @@ pub use runtime::{
     RenderTuningOverlay, WHITE_TEXTURE_ID, acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline,
 };
 
-// The pumped render runtime's chassis-internal kinds (ADR-0161) — the
-// driver (R3) and harness (R4) mail these to the pumped actor. On the
+// The pumped render runtime's chassis-internal kinds + state (ADR-0161) —
+// the driver (R3) and harness (R4) mail these to the pumped actor. On the
 // `runtime` feature (ADR-0161 R4: the pumped runtime builds offscreen for
 // the harness without `desktop`). `PumpedRenderParams` rides `runtime` too;
 // the winit-typed `WindowCell` stays `desktop`-only.
 #[cfg(feature = "runtime")]
-pub use pumped_runtime::{Frame, Occluded, PreSettled};
+pub use pumped_runtime::{Frame, Occluded, PreSettled, PumpedRenderCapabilityState};
+#[cfg(feature = "runtime")]
+pub use runtime::PumpedRenderParams;
 #[cfg(feature = "desktop")]
 pub use runtime::WindowCell;
-#[cfg(feature = "runtime")]
-pub use runtime::{CaptureScorer, PumpedRenderParams};
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
 // form): it reads the cap's sibling runtime module off disk and emits the

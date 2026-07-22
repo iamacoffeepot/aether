@@ -23,20 +23,14 @@ use aether_harness_substrate::{
     SubstrateHarnessChassis,
 };
 use aether_render::{
-    CaptureBackend, CaptureScorer, DrawTexturedQuads, Frame, PumpedRenderCapability, PumpedRenderParams,
-    RenderCapability, RenderHandles, RenderParams, RenderTuningConfig,
+    CaptureBackend, DrawTexturedQuads, Frame, PumpedRenderCapability, PumpedRenderParams, RenderCapability,
+    RenderHandles, RenderParams, RenderTuningConfig,
 };
 use aether_substrate::PumpedSlot;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::{Mail, MailboxId};
 use aether_substrate::render::VERTEX_BUFFER_BYTES;
-
-// Partition note (ADR-0161 R4 PR): the `FrameCheck` / similarity scoring
-// symbols live in the `visual` module today; a parallel change is relocating
-// that module out of this crate. Per the R4 partition rule this import stays
-// pointed at the current home — whichever PR lands second reconciles the path.
-use crate::visual;
 
 /// Pooled [`RenderExt`] implementation for the standalone `substrate-harness`
 /// binary: chains the pooled `RenderCapability` into the builder with its
@@ -170,8 +164,8 @@ impl FrameHook for GpuFrameHook {
 /// Builder extension composing render support via the pumped runtime
 /// (ADR-0161 slice R4): [`PumpedGpuRenderExt`] (a no-op compose) plus the
 /// hook factory that boots the pumped `aether.render` slot against the booted
-/// chassis at the builder's offscreen size, injecting the offscreen GPU
-/// config + the capture scorer through `PumpedRenderParams`.
+/// chassis at the builder's offscreen size, passing the offscreen GPU config
+/// through `PumpedRenderParams`.
 pub trait RenderHarnessBuilderExt {
     #[must_use]
     fn with_render(self) -> Self;
@@ -183,16 +177,10 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
             Box::new(PumpedGpuRenderExt),
             Box::new(|passive, wiring, width, height| {
                 let RenderHookWiring { mailer, observed_kinds, assets_dir } = wiring;
-                // The capture scorer the pumped runtime injects on a ready
-                // readback (ADR-0161 R4): similarity first (borrows the RGBA),
-                // then the `FrameCheck` verdict (consumes a copy), matching
-                // the pooled `Gpu::render_and_capture` ordering.
-                let scorer: CaptureScorer = Arc::new(|rgba, w, h, checks, reference| {
-                    let (similarity_score, similarity_pass) =
-                        visual::score_similarity(rgba, w, h, reference).unwrap_or((None, None));
-                    let verdict = (!checks.is_empty()).then(|| visual::run_checks(rgba.to_vec(), w, h, checks));
-                    (verdict, similarity_score, similarity_pass)
-                });
+                // ADR-0161 R3 rehomed the `FrameCheck` / similarity scorer to
+                // `aether_substrate::render::visual` (below aether-render), so
+                // the pumped runtime scores capture verdicts + similarity
+                // directly in its ready-readback branch — no scorer injection.
                 // `..Default::default()` fills `wireframe: None` and — under a
                 // feature-unified build that enables aether-render/desktop —
                 // the desktop-only `window: None`, so this literal is robust
@@ -201,7 +189,6 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
                     observed_kinds,
                     assets_dir,
                     offscreen_size: Some((width, height)),
-                    scorer: Some(scorer),
                     ..Default::default()
                 };
                 let (slot, _wake_slot) = passive

@@ -19,7 +19,6 @@ aether-render = { path = "../aether-render" }
 aether-substrate = { path = "../aether-substrate" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 anyhow = { workspace = true }
-png = { workspace = true }
 pollster = "0.4.0"
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }

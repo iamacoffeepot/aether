@@ -55,7 +55,7 @@ pub use self::capture::CaptureBackend;
 #[cfg(feature = "desktop")]
 pub use self::config::WindowCell;
 pub use self::config::{
-    CaptureScorer, PumpedRenderParams, RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
+    PumpedRenderParams, RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
 };
 pub use self::pipeline::{RenderGpu, RenderHandles};
 pub use self::surface::{

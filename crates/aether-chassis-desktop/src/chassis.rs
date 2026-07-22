@@ -3,15 +3,15 @@
 //! [`DesktopChassis::build`] entry point that assembles the substrate
 //! + driver into a [`BuiltChassis`] for `main()` to drive.
 //!
-//! Issue 603 retired `chassis_handler` entirely: capture goes through
-//! `RenderCapability` (Phase 2), window kinds through driver-as-actor
-//! on `aether.window` (Phase 3), and `platform_info` was deleted as a
-//! kind (Phase 4) along with the closure-fallback that served it.
-//! Two proxy events wake the loop under `ControlFlow::Wait`:
-//! `UserEvent::Capture` so a queued `CaptureQueue` request gets pulled
-//! on the next redraw, and `UserEvent::WindowMail` so `about_to_wait`
-//! drains the `aether.window` inbox when window-control mail arrives at
-//! an occluded window (iamacoffeepot/aether#1318).
+//! Issue 603 retired `chassis_handler` entirely: window kinds go through
+//! driver-as-actor on `aether.window` (Phase 3), and `platform_info` was
+//! deleted as a kind (Phase 4) along with the closure-fallback that served
+//! it. ADR-0161 R3 made capture a mail-driven state machine inside the pumped
+//! `aether.render` actor (deleting `UserEvent::Capture`), so the sole proxy
+//! event is `UserEvent::WindowMail` — the generic "a pumped slot took mail,
+//! wake the loop" signal both the window and render slots poke, so
+//! `about_to_wait` drains them even under `ControlFlow::Wait`
+//! (iamacoffeepot/aether#1318).
 
 use std::io;
 use std::mem;
@@ -23,12 +23,12 @@ use aether_component::ComponentHostParams;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
-use aether_render::{RenderCapability, RenderParams};
+use aether_render::RenderTuningConfig;
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::runtime::log_install::apply_filter;
-use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{Chassis, SubstrateBoot};
 use winit::event_loop::EventLoop;
 
 use aether_chassis::{WindowConfig, WindowSettings};
@@ -42,21 +42,19 @@ use aether_substrate::runtime::lifecycle::FatalAborter;
 use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use winit::event_loop::ControlFlow;
 
-/// Event the event-loop thread consumes from the desktop chassis.
-/// Just one variant today: a wake-up so the loop picks up a queued
-/// capture on the next redraw, even under `ControlFlow::Wait` when
-/// the window is occluded.
+/// Event the event-loop thread consumes from the desktop chassis. Both
+/// variants are wake-only — they turn the loop so a handler runs, never
+/// carrying work themselves.
 #[derive(Debug, Clone)]
 pub enum UserEvent {
-    /// A capture was just enqueued on `CaptureQueue`; wake the loop
-    /// so `RedrawRequested` pulls and fulfils it.
-    Capture,
-    /// Window-control mail was enqueued on `aether.window`; wake the
-    /// loop so `about_to_wait` drains the inbox even under
-    /// `ControlFlow::Wait` (iamacoffeepot/aether#1318). Without this an
-    /// `aether.window.focus` / `set_mode` / `set_title` mail sent to an
-    /// occluded window sits undrained until an unrelated winit event
-    /// nudges the loop.
+    /// A pumped slot (`aether.window` or, since ADR-0161 R3, `aether.render`)
+    /// took mail; wake the loop so `about_to_wait` drains it even under
+    /// `ControlFlow::Wait` (iamacoffeepot/aether#1318). Without this a
+    /// window-control mail (`aether.window.focus` / `set_mode` / `set_title`)
+    /// or a `capture_frame` sent to an occluded window sits undrained until an
+    /// unrelated winit event nudges the loop. ADR-0161 generalized the
+    /// ADR-0160 window rule (and deleted the render-specific `Capture` wake) —
+    /// every pumped slot's wake pokes this.
     WindowMail,
     /// A SIGINT/SIGTERM was observed by the signal-watcher thread
     /// (iamacoffeepot/aether#1489). Carries no work itself — it only
@@ -109,28 +107,19 @@ impl BootableChassis for DesktopChassis {
     /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
     /// no part in the claim chain, so they are ignored here.
     fn compose(boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
-        let DesktopEnv { common, window: _, autoload: _ } = env;
+        let DesktopEnv { common, window: _, render: _, autoload: _ } = env;
 
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        // ADR-0155 §4: the capture backend is a Start-stage handoff, not a
-        // config field. The driver builds it from the `CaptureQueue` +
-        // `EventLoopProxy` wake + reply egress and installs it into the
-        // published `RenderHandles` in its `boot` (Start), so the cap's
-        // `on_capture_frame` reads it there. Issue 2706: the resolved
-        // vertex-buffer cap (`RenderTuningConfig`) sizes both the cap
-        // accumulator's truncation and (via `RenderHandles`) the GPU vertex
-        // buffer the driver creates; the assets-root wiring rides `RenderParams`.
-        let render_params = RenderParams {
-            // The `capture_frame` similarity check (iamacoffeepot/aether#1780)
-            // reads its reference image from the same `assets` root the fs
-            // cap serves, so the render cap loads it off the hot path.
-            assets_dir: Some(common.namespace_roots.assets.clone()),
-            ..RenderParams::default()
-        };
+        // ADR-0161 R3: render no longer composes on the pooled `with_actor`
+        // path on desktop — the driver boots the pumped `aether.render` actor
+        // itself (owning the surface + capture as plain state on the winit
+        // thread). The render `Config` (vertex-buffer cap) and the `assets`
+        // root ride `DesktopEnv` → `DesktopDriverCapability` instead of a
+        // `RenderParams` handoff here.
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -156,15 +145,14 @@ impl BootableChassis for DesktopChassis {
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         //
         // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
-        // so it resolves each composed cap's `Config` (audio / render tuning /
-        // lifecycle / http-server) off it; the caps compose with
-        // `with_actor(params)` alone. `RenderParams` (the assets root) is
-        // composer-supplied construction input derived from the resolved fs
-        // roots, so it still rides `with_actor`.
+        // so it resolves each composed cap's `Config` (audio / lifecycle /
+        // http-server) off it; the caps compose with `with_actor(params)`
+        // alone. The render tuning `Config` is resolved off the same stack in
+        // `DesktopEnv::from_env_with_argv` and threaded to the driver, which
+        // boots the pumped render actor (ADR-0161 R3).
         let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
             .with_actor::<AudioCapability>(())
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
-            .with_actor::<RenderCapability>(render_params)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
         with_rpc_server(builder).with_actor::<HttpServerCapability>(())
@@ -191,9 +179,15 @@ pub struct DesktopEnv {
     /// Lowered desktop window boot knobs (mode / size / title / wireframe),
     /// grouped into one embedded unit like the other knob groups and
     /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
-    /// `wireframe` reaches `Gpu::new` via `WireframeMode::from_config_value`,
-    /// which owns the tri-state parse.
+    /// `wireframe` reaches the pumped render actor's lazy wgpu boot through
+    /// `PumpedRenderParams::wireframe`.
     pub window: WindowSettings,
+    /// Resolved render tuning `Config` (the vertex-buffer cap). ADR-0161 R3
+    /// boots the pumped `aether.render` actor with it from the driver, so it
+    /// resolves off the same source stack as every other cap `Config` and
+    /// rides to the driver alongside the window knobs rather than through the
+    /// pooled `with_actor::<RenderCapability>` compose that the swap removed.
+    pub render: RenderTuningConfig,
     /// Components to auto-load on boot, in order. A bundled standalone build
     /// populates this so the game comes up with no hub; the normal desktop bin
     /// leaves it empty and loads components over the hub instead.
@@ -259,12 +253,18 @@ impl DesktopEnv {
         // reads off the same stack, so the interleaving order is arbitrary.
         let window = sources.resolve::<WindowConfig>()?.lower()?;
 
+        // ADR-0161 R3: the render tuning `Config` resolves off the same stack
+        // (argv > env > file), the way the pooled `with_actor::<RenderCapability>`
+        // path resolved it before the swap — an independent read, so its order
+        // relative to the window read is arbitrary.
+        let render = sources.resolve::<RenderTuningConfig>()?;
+
         // The shared block (fs roots, content-gen, runtime, pool / ring /
         // scheduler / teardown knobs) plus the boot-manifest autoload list, both
         // resolved by the single common resolver off the same stack.
         let (common, autoload) = CommonEnv::resolve(sources)?;
 
-        Ok(Self { common, window, autoload })
+        Ok(Self { common, window, render, autoload })
     }
 }
 
@@ -278,19 +278,19 @@ impl DesktopChassis {
     ///
     /// The trait method [`Chassis::build`] forwards here.
     fn build_inner(mut env: DesktopEnv) -> Result<BuiltChassis<Self>, BootError> {
-        // ADR-0155 §4: the winit `EventLoop` and the capture `CaptureQueue`
-        // are Start-stage runtime handles, not config — construct them here
-        // on the boot path (`main()` calls this on the chassis main thread,
-        // where winit's `!Send` `EventLoop` must live). `--describe` never
-        // reaches this method, so it opens no event loop. The `EventLoop`
-        // build fault (never `Send + Sync` across winit's platform impls) is
-        // stringified into `BootError::Other`, the same shape a wasmtime boot
-        // fault takes.
+        // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime handle,
+        // not config — construct it here on the boot path (`main()` calls this
+        // on the chassis main thread, where winit's `!Send` `EventLoop` must
+        // live). `--describe` never reaches this method, so it opens no event
+        // loop. The `EventLoop` build fault (never `Send + Sync` across winit's
+        // platform impls) is stringified into `BootError::Other`, the same
+        // shape a wasmtime boot fault takes. ADR-0161 R3 retired the
+        // Start-stage `CaptureQueue`: capture is plain state on the pumped
+        // render actor now, so there is no cross-thread queue to hand over.
         let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
             BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
         })?;
         event_loop.set_control_flow(ControlFlow::Poll);
-        let capture_queue = CaptureQueue::new();
 
         let boot = SubstrateBoot::build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
@@ -301,11 +301,16 @@ impl DesktopChassis {
         let mailer = Arc::clone(&boot.queue);
 
         // Driver-only / post-build fields, read out before `compose` consumes
-        // `env`: the window boot knobs ride the desktop driver, the autoload
-        // list is drained after build. `WindowSettings` is `Clone` (not `Copy`);
-        // it is tiny, so the clone is free.
+        // `env`: the window boot knobs and the render tuning `Config` ride the
+        // desktop driver (which boots the pumped render actor, ADR-0161 R3),
+        // the `assets` root threads into that actor's params for `capture_frame`
+        // similarity references, and the autoload list is drained after build.
+        // `WindowSettings` / `RenderTuningConfig` are `Clone` and tiny, so the
+        // clones are free.
         let workers = env.common.workers;
         let window = env.window.clone();
+        let render_config = env.render.clone();
+        let assets_dir = env.common.namespace_roots.assets.clone();
         let autoload = mem::take(&mut env.autoload);
 
         tracing::info!(
@@ -320,13 +325,11 @@ impl DesktopChassis {
         // residual hand records. Runs here (not in `from_env`) because the
         // per-chassis known keys come from the composed builder's manifest.
         validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
-        // Issue 552 stage 2d: render is a NativeActor. The chassis builder
-        // constructs the cap inside `init` (called from
-        // `with_actor::<RenderCapability>(config)`); `init` publishes the
-        // `RenderHandles` bundle on the exported-handle map, and the driver
-        // fetches it via `DriverCtx::handle::<RenderHandles>()`. `boot` moves
-        // into the driver here, after `compose` finished borrowing it.
-        let driver = DesktopDriverCapability { event_loop, boot, capture_queue, window };
+        // ADR-0161 R3: the driver boots the pumped `aether.render` actor from
+        // its Claim-stage `aether.render` reservation, so it carries the render
+        // tuning `Config` and the `assets` root here. `boot` moves into the
+        // driver, after `compose` finished borrowing it.
+        let driver = DesktopDriverCapability { event_loop, boot, window, render_config, assets_dir };
         let built = builder.driver(driver).build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load off

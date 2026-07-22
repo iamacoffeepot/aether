@@ -21,6 +21,11 @@ mod material;
 mod pipeline;
 mod quad;
 mod targets;
+// ADR-0161 §Decision 4: the `FrameCheck` verdict + similarity scorer, rehomed
+// here from `aether-harness-substrate-capture` so the pumped render runtime in
+// `aether-render` (which depends on this crate) can score captures without a
+// dependency cycle. `pub` so the capture harness re-exports it unchanged.
+pub mod visual;
 
 pub use capture::{CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy};
 pub use material::{

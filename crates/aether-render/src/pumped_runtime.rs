@@ -22,22 +22,25 @@
 //! pumped path without winit — the windowed boot inside is `desktop`-gated
 //! line by line. The pooled runtime and headless companion pay nothing.
 //!
-//! ## Slicing notes:
-//! - **Settlement bridge.** The ADR's callback-form `subscribe_settlement`
-//!   (R1) is not consumed here; [`on_capture_frame`](PumpedRenderCapability::on_capture_frame)
-//!   bridges each pre-mail settlement to a [`PreSettled`] mail through the
-//!   existing [`SettlementRegistry::subscribe_settlement_mail`], which
-//!   pushes a settlement-notice mail from whatever thread the settlement
-//!   fires on — the same mechanism, specialized to the mail-push case.
-//!   `PreSettled` is wire-identical to `aether.trace.settled` (a single
-//!   `MailId` field), so the pushed notice decodes as `PreSettled`.
-//! - **Capture scoring.** `FrameCheck` verdicts and similarity scoring live
-//!   in `aether-harness-substrate-capture` (and the desktop chassis's
-//!   scorer), which depend on `aether-render` — so this crate cannot name
-//!   them without a dependency cycle. ADR-0161 R4 injects the scorer through
-//!   [`PumpedRenderParams::scorer`] instead: the ready-readback branch calls
-//!   it with the raw RGBA + the request's `checks` / `reference`. With no
-//!   scorer injected the reply carries `verdict` / `similarity` `None`.
+//! ## Capture bridge notes (ADR-0161):
+//! - **Settlement bridge.** Per the R2 hand-off, the capture pre-settlement
+//!   path deliberately keeps the mail-push bridge rather than R1's
+//!   callback-form `subscribe_settlement`:
+//!   [`on_capture_frame`](PumpedRenderCapability::on_capture_frame) bridges
+//!   each pre-mail settlement to a [`PreSettled`] mail through
+//!   [`SettlementRegistry::subscribe_settlement_mail`], which pushes a
+//!   settlement-notice mail from whatever thread the settlement fires on. A
+//!   render handler must never block on a pre-mail settlement (the ADR
+//!   deadlock: pre-chains terminate back at this mailbox), so the bridge only
+//!   mails. `PreSettled` is wire-identical to `aether.trace.settled` (a single
+//!   `MailId` field), so the pushed notice decodes as `PreSettled`. The
+//!   advance-loop wait, by contrast, uses R1's `PumpWake` /
+//!   `await_settlement_pumped` on the driver side — the two are not unified.
+//! - **Capture scoring.** `FrameCheck` verdicts and similarity scoring live in
+//!   [`aether_substrate::render::visual`] (ADR-0161 R3 rehomed the scorer
+//!   below this crate), so the ready-branch readback scores the verdict and
+//!   similarity directly — `aether-harness-substrate-capture` re-exports the
+//!   same module for its own asserts.
 
 use std::io;
 use std::iter;
@@ -62,6 +65,7 @@ use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use aether_substrate::render::visual;
 use aether_substrate::render::{
     IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
 };
@@ -75,8 +79,6 @@ use crate::runtime::{
 // surfaceless via `boot_offscreen` and never touches a winit window).
 #[cfg(feature = "desktop")]
 use crate::runtime::{WindowCell, boot_surface};
-
-use crate::runtime::CaptureScorer;
 
 use super::runtime::resolve_reference;
 use super::{
@@ -141,12 +143,12 @@ pub struct Occluded {
 struct PendingCapture {
     reply: InboundMail,
     after_mails: Vec<Mail>,
-    // Resolved off the hot path in `on_capture_frame` and consumed by the
-    // ready-branch readback (ADR-0161 R4): the composer-injected
-    // `PumpedRenderParams::scorer` scores these against the de-padded RGBA.
-    // With no scorer injected (R2 / a no-config chassis) the reply carries
-    // `verdict` / `similarity` `None`.
+    /// `FrameCheck` verdict requests, scored on the read-back RGBA in
+    /// `on_frame`'s ready-branch (ADR-0161 §Decision 4). Since R3 rehomed the
+    /// scorer into `aether_substrate::render::visual`, the branch is reachable
+    /// without the `aether-harness-substrate-capture` cycle R2 documented.
     checks: Vec<FrameCheck>,
+    /// Optional similarity reference (issue 1780), scored alongside `checks`.
     reference: Option<ReferenceCapture>,
     /// Count of pre-mail settlements still awaited; `on_pre_settled`
     /// decrements it, and `on_frame` captures once it reaches zero.
@@ -194,10 +196,6 @@ pub struct PumpedRenderCapabilityState {
     offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value threaded from params.
     wireframe: Option<String>,
-    /// ADR-0161 R4: capture-scoring callback, injected by the composer so
-    /// the ready-readback branch can score `FrameCheck` verdicts +
-    /// similarity without a dependency cycle on the scorer's crate.
-    scorer: Option<CaptureScorer>,
     /// wgpu bundle, booted lazily on the first `on_frame` with a filled
     /// window cell (`get_or_insert_with`).
     gpu: Option<RenderGpu>,
@@ -233,6 +231,27 @@ pub struct PumpedRenderCapabilityState {
 }
 
 impl PumpedRenderCapabilityState {
+    /// Deadline of the pending capture, if one is parked (ADR-0161
+    /// §Decision 4). Read by the driver through
+    /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
+    /// so it can park with `ControlFlow::WaitUntil(deadline)` — the single
+    /// capture-awareness the driver retains, so a wedged pre-chain on a
+    /// parked window still reaches the deadline check.
+    #[must_use]
+    pub fn capture_deadline(&self) -> Option<Instant> {
+        self.pending_capture.as_ref().map(|pending| pending.deadline)
+    }
+
+    /// Cumulative triangle count this session, for the driver's shutdown FPS
+    /// report (ADR-0161). The pumped runtime owns `triangles_rendered` as
+    /// plain state, so the driver reads it through
+    /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
+    /// before `shutdown` consumes the actor; `unwire` logs the same count.
+    #[must_use]
+    pub fn triangles_rendered(&self) -> u64 {
+        self.triangles_rendered
+    }
+
     /// Whether a capture is currently parked (ADR-0161 R4). Read by the
     /// substrate harness's frame hook through `PumpedSlot::read_state` to
     /// decide whether to drive a frame — the pumped state's fields are
@@ -247,10 +266,12 @@ impl PumpedRenderCapabilityState {
     /// ADR-0161 R4). Reads the observation sink `record_overlay_batches`
     /// populates, so batches rejected at record time (missing texture,
     /// invalid/empty clip, past the vertex budget) are excluded and solid
-    /// submissions appear normalized over the reserved white texture — the
-    /// exact texture / space / clip / geometry / tint / painter's order the
-    /// overlay pass drew. Read by the harness's `committed_overlay_snapshot`
-    /// extension through `PumpedSlot::read_state`. Owns its data.
+    /// submissions appear normalized over the reserved white texture. Read by
+    /// the harness's `committed_overlay_snapshot` extension through
+    /// `PumpedSlot::read_state`. Owns its data.
+    ///
+    /// # Panics
+    /// Panics if the observation mutex is poisoned — fail-fast per ADR-0063.
     #[must_use]
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
         self.overlay_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
@@ -319,6 +340,41 @@ impl PumpedRenderCapabilityState {
             .build_overlay
             .then(|| build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout));
         self.gpu = Some(gpu);
+    }
+
+    /// Reconfigure the surface + offscreen targets when the window has
+    /// resized since the last frame (ADR-0161: the surface reconfigure rides
+    /// the next `on_frame` rather than a driver reach-in — the R2 pumped
+    /// shape carries no size on the frame mail). No-op until the GPU is
+    /// booted, when the size is unchanged, or on a `0×0` minimize (winit
+    /// reports `Resized(0, 0)` there, which `Targets::resize` also guards).
+    /// Desktop-only: the offscreen harness path owns no window to resize
+    /// against (ADR-0161 R4).
+    #[cfg(feature = "desktop")]
+    fn reconfigure_if_resized(&mut self) {
+        let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) else {
+            return;
+        };
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(config) = self.surface_config.as_mut() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 || (size.width == config.width && size.height == config.height) {
+            return;
+        }
+        config.width = size.width;
+        config.height = size.height;
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&gpu.device, config);
+        }
+        gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063").resize(
+            &gpu.device,
+            size.width,
+            size.height,
+        );
     }
 
     /// Record the world / material / overlay passes into `encoder` from the
@@ -430,7 +486,6 @@ impl NativeActor for PumpedRenderCapability {
             window: params.window,
             offscreen_size: params.offscreen_size,
             wireframe: params.wireframe,
-            scorer: params.scorer,
             gpu: None,
             surface: None,
             surface_config: None,
@@ -665,6 +720,9 @@ impl NativeActor for PumpedRenderCapability {
     fn on_frame(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Frame) {
         state.observe(<Frame as Kind>::NAME);
         state.ensure_gpu_booted();
+        // Desktop-only: the offscreen harness path owns no window to resize.
+        #[cfg(feature = "desktop")]
+        state.reconfigure_if_resized();
 
         // Deadline disposition first — a wedged pre-chain replies `Err`
         // even on a frame where nothing else happens.
@@ -756,29 +814,23 @@ impl NativeActor for PumpedRenderCapability {
             }
             let gpu = state.gpu.as_ref().expect("gpu present in this branch");
             // Map the readback once, then encode the PNG and score the
-            // verdict / similarity from the same de-padded RGBA so a verdict
-            // scores the exact bytes the PNG carries (issue 1777).
-            let mapped = {
+            // verdict / similarity from the same de-padded RGBA (ADR-0161
+            // §Decision 4 restores the pooled path's parity). `score_similarity`
+            // borrows the slice; `run_checks` consumes it, so the similarity
+            // check runs first (issue 1780).
+            let outcome: Result<CaptureFrameResult, String> = {
                 let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-                map_capture_rgba(&gpu.device, &targets, &meta)
-            };
-            let result = mapped.and_then(|rgba| {
-                // ADR-0161 R4: score before encoding so the scorer sees the
-                // raw RGBA; the injected scorer (harness / desktop) reaches
-                // the `FrameCheck` + similarity logic this crate cannot name.
-                let (verdict, similarity_score, similarity_pass) = match &state.scorer {
-                    Some(scorer) => scorer(&rgba, meta.width, meta.height, &pending.checks, pending.reference.as_ref()),
-                    None => (None, None, None),
-                };
-                encode_png(&rgba, meta.width, meta.height).map(|png| CaptureFrameResult::Ok {
-                    png,
-                    verdict,
-                    similarity_score,
-                    similarity_pass,
+                map_capture_rgba(&gpu.device, &targets, &meta).and_then(|rgba| {
+                    let png = encode_png(&rgba, meta.width, meta.height)?;
+                    let (similarity_score, similarity_pass) =
+                        visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
+                    let verdict = (!pending.checks.is_empty())
+                        .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
+                    Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
                 })
-            });
-            match result {
-                Ok(ok) => pending.reply.reply(&ok),
+            };
+            match outcome {
+                Ok(result) => pending.reply.reply(&result),
                 Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
             };
         }
@@ -950,7 +1002,6 @@ mod tests {
             window: None,
             offscreen_size: None,
             wireframe: None,
-            scorer: None,
             gpu: None,
             surface: None,
             surface_config: None,

@@ -3,9 +3,6 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
-use aether_kinds::{FrameCheck, FrameVerdict};
-use aether_substrate::capture::ReferenceCapture;
-
 #[cfg(feature = "desktop")]
 use winit::window::Window;
 
@@ -71,27 +68,6 @@ pub struct RenderParams {
     pub assets_dir: Option<PathBuf>,
 }
 
-/// The capture-scoring callback the pumped render runtime invokes on a
-/// ready readback (ADR-0161 slice R4). `FrameCheck` verdicts and similarity
-/// scoring live in `aether-harness-substrate-capture` (and the desktop
-/// chassis's scorer), which depend on `aether-render` — so the runtime
-/// cannot name them without a dependency cycle. The composer injects the
-/// scorer through [`PumpedRenderParams::scorer`] instead: the runtime hands
-/// it the de-padded RGBA plus the request's `checks` / `reference`, and the
-/// scorer returns the `(verdict, similarity_score, similarity_pass)` triple
-/// the reply carries. `None` replies all-`None` (the R2 behavior).
-pub type CaptureScorer = Arc<
-    dyn Fn(
-            &[u8],
-            u32,
-            u32,
-            &[FrameCheck],
-            Option<&ReferenceCapture>,
-        ) -> (Option<FrameVerdict>, Option<f32>, Option<bool>)
-        + Send
-        + Sync,
->;
-
 /// Composer-supplied construction params for the pumped render runtime
 /// (`PumpedRenderCapability`, ADR-0161 slice R2). A dedicated params
 /// channel rather than an extension of the pooled [`RenderParams`]: the
@@ -126,8 +102,4 @@ pub struct PumpedRenderParams {
     /// so the lazy wgpu boot picks the wireframe mode the desktop `Gpu`
     /// boot does. `None` / `"off"` is filled faces.
     pub wireframe: Option<String>,
-    /// ADR-0161 slice R4: capture-scoring callback, injected by the composer
-    /// so the runtime can score `FrameCheck` verdicts + similarity without a
-    /// dependency cycle on the scorer's crate. `None` replies all-`None`.
-    pub scorer: Option<CaptureScorer>,
 }
