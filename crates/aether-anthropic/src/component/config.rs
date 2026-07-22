@@ -44,9 +44,9 @@ pub struct AnthropicComponentConfig {
     /// Disable the Messages backend even when a key is present — Messages
     /// requests reply `Unauthorized`, the CLI path still routes.
     pub disabled: bool,
-    /// Per-request timeout in milliseconds for both backends. `0` selects
-    /// [`DEFAULT_TIMEOUT_MILLIS`] for the Messages fetch and the
-    /// `aether.process` cap's own default for the CLI run.
+    /// Per-request timeout in milliseconds for both backends. `0` selects the
+    /// component's built-in default (`DEFAULT_TIMEOUT_MILLIS`) for the Messages
+    /// fetch and the `aether.process` cap's own default for the CLI run.
     pub timeout_millis: u32,
     /// Logical binary name the CLI backend runs through `aether.process.run`.
     /// Resolved against the process cap's operator allowlist, never a path.
