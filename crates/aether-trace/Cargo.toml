@@ -15,7 +15,7 @@ license.workspace = true
 # `aether-kinds`, so this crate only references them.
 #
 # A leaf: no capability depends back on it. Its
-# consumers hold their own dependency — `aether-engine`'s proxy addresses
+# consumers hold their own dependency — `aether-fleet`'s proxy addresses
 # the trace cap in real code, and the `aether-rpc` / `aether-http` server
 # tests address it through a dev-dependency (no re-export facade).
 #

@@ -10,7 +10,7 @@
 //!
 //! Native-only: no wasm guest addresses this transport, so the crate carries
 //! no ADR-0122 identity/runtime marker ladder — its dependencies are flat and
-//! unconditional. It knows nothing of `aether-engine`; the hub supervisor that
+//! unconditional. It knows nothing of `aether-fleet`; the hub supervisor that
 //! forwards over this transport depends on this crate, never the reverse.
 //!
 //! See issues 750 and 763 for the full design, ADR-0124 for the layout.

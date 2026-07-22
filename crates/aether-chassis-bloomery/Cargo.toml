@@ -77,7 +77,7 @@ aether-trace = { path = "../aether-trace", optional = true }
 # The substrate kind vocabulary — `BinaryManifest` for the `--describe` probe.
 aether-kinds = { path = "../aether-kinds", optional = true }
 # Platform data-dir resolution for the artifacts store-root default (mirrors
-# the hub engines cap's `resolve_engine_store_root`).
+# the hub engines cap's `resolve_fleet_store_root`).
 dirs = { version = "6", optional = true }
 # The `aether.signing` capability parses its host-local allowlist config into
 # ed25519 verifying keys (ADR-0149 step 3, ADR-0150). The pure verifier

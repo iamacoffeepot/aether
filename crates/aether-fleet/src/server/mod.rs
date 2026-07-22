@@ -1,12 +1,12 @@
-//! `aether.engine` — engines capability (issue 763 P4).
+//! `aether.fleet` — engines capability (issue 763 P4).
 //!
 //! A singleton `NativeActor` that supervises a fleet of
-//! `EngineProxy` actors — the engine-management surface of the
+//! `FleetProxy` actors — the engine-management surface of the
 //! forward-model architecture (issue 763). Three handlers:
 //!
 //! - **`on_spawn`** ([`SpawnEngine`]) picks a free localhost port,
 //!   fork+execs the substrate binary with `AETHER_RPC_PORT` injected,
-//!   then boots an `aether.engine.proxy:<id>` child actor that dials
+//!   then boots an `aether.fleet.proxy:<id>` child actor that dials
 //!   it. The proxy owns the forked child from there — startup-dial
 //!   retry, kill-on-failed-boot, kill-on-drop. Reply:
 //!   `SpawnEngineResult`.
@@ -27,7 +27,7 @@
 //! Native-only: the cap fork+execs processes and threads the
 //! `std::process::Child` handle into the proxy, so its substrate-typed
 //! runtime half lives in the `runtime` module. The `#[actor]` macro divides
-//! the identity from that runtime (ADR-0122): the [`EngineServer`] ZST and
+//! the identity from that runtime (ADR-0122): the [`FleetServer`] ZST and
 //! its addressing markers stay always-on, while the state and handlers live
 //! behind the `runtime` seam.
 
@@ -64,24 +64,24 @@ mod config;
 #[cfg(not(target_family = "wasm"))]
 mod fleet;
 
-// `EngineConfig` (+ its derive-emitted `EngineOverlay`) ride through
+// `FleetConfig` (+ its derive-emitted `FleetOverlay`) ride through
 // file root for the hub chassis bin, which flattens the overlay into
 // `HubCli`, resolves argv-then-env, and passes the config to
-// `with_actor::<EngineServer>(cfg)` (ADR-0090). Native-only re-export —
+// `with_actor::<FleetServer>(cfg)` (ADR-0090). Native-only re-export —
 // the engines cap is native-only, so the config has no wasm consumer.
 #[cfg(not(target_family = "wasm"))]
-pub use config::{EngineConfig, EngineConfigLayer, EngineOverlay};
+pub use config::{FleetConfig, FleetConfigLayer, FleetOverlay};
 
-/// `aether.engine` engines-cap **identity** (ADR-0122 identity/runtime
+/// `aether.fleet` engines-cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable` (`NAMESPACE`,
 /// `Resolver`), the per-handler `HandlesKind` markers, and the
 /// name-inventory entry, all emitted always-on by `#[actor]`. The
-/// state-bearing runtime (`runtime::EngineServerState`, which holds the
+/// state-bearing runtime (`runtime::FleetServerState`, which holds the
 /// supervised-fleet table + the `aether_substrate`-typed mailer + the
 /// artifact store) lives in `runtime.rs`, so the identity file never names
-/// `EngineServerState`.
+/// `FleetServerState`.
 #[actor(singleton)]
-pub struct EngineServer;
+pub struct FleetServer;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
 // divides what it emits). Everything that names an `aether_substrate` type —
@@ -100,7 +100,7 @@ use aether_actor::actor;
 use runtime::*;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `EngineServerState`, the `EngineEntry` / `DeadRecord` helper types, the
+// `FleetServerState`, the `EngineEntry` / `DeadRecord` helper types, the
 // `record_death` helper) — lives in `runtime.rs`. The `#[actor] impl` above
 // reaches it through the `use runtime::*` glob.
 mod runtime;
@@ -110,7 +110,7 @@ mod runtime;
 // surface (`NativeActor` / `NativeCtx` / `NativeInitCtx` / `BootError`) and its
 // reply-kind handler signatures (`ListEnginesResult` / … — named by the
 // always-on `HandlesKind<K>` markers) resolve through the same
-// `use runtime::*` glob the `EngineServer` impl uses.
+// `use runtime::*` glob the `FleetServer` impl uses.
 
 /// Reply sink: records the latest reply of each engines-cap reply
 /// kind into shared cells so a unit test can drive a handler via
@@ -140,7 +140,7 @@ impl NativeActor for ReplySink {
     // operator config, so they ride the `Params` channel; `Config` is `()`.
     type Config = ();
     type Params = ReplyCells;
-    const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
+    const NAMESPACE: &'static str = "aether.fleet.test.reply_sink";
 
     fn init((): (), cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { cells })
@@ -167,7 +167,7 @@ mod tests {
     // Test harness resolves the server/sink actor mailboxes by their NAMESPACE
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
-    use super::{EngineConfig, EngineServer, ReplyCells, ReplySink};
+    use super::{FleetConfig, FleetServer, ReplyCells, ReplySink};
     use crate::kinds::{EngineAlive, EngineDied};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -186,7 +186,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use std::{env, process, thread};
 
-    /// Boot a passive chassis hosting `EngineServer` + the reply sink.
+    /// Boot a passive chassis hosting `FleetServer` + the reply sink.
     /// Returns the chassis (kept alive for its dispatcher threads), the
     /// mailer to push requests through, and the sink's cells.
     fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
@@ -201,9 +201,9 @@ mod tests {
         // the ADR-0090 config field so these unit tests never touch the real
         // `dirs::data_dir()` store. Heartbeat stays disabled (the `Default`);
         // only the store dir is overridden.
-        let config = EngineConfig { binary_store_dir: Some(isolated_store_dir()), ..EngineConfig::default() };
+        let config = FleetConfig { binary_store_dir: Some(isolated_store_dir()), ..FleetConfig::default() };
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor_configured::<EngineServer>((), config)
+            .with_actor_configured::<FleetServer>((), config)
             .with_actor::<ReplySink>(cells.clone())
             .build_passive()
             .expect("caps boot");
@@ -211,7 +211,7 @@ mod tests {
     }
 
     /// A unique per-call temp dir for the engines-cap unit tests' binary
-    /// store (ADR-0115), threaded onto `EngineConfig`'s `binary_store_dir`
+    /// store (ADR-0115), threaded onto `FleetConfig`'s `binary_store_dir`
     /// by [`boot`] so they never touch the real `dirs::data_dir()` store. No
     /// env side-channel — the store dir now rides the config (ADR-0090).
     fn isolated_store_dir() -> String {
@@ -219,11 +219,11 @@ mod tests {
         env::temp_dir().join(format!("aether-binstore-engcap-{}-{nanos}", process::id())).to_string_lossy().into_owned()
     }
 
-    /// Drive one request kind at `aether.engine`, reply-to the sink,
+    /// Drive one request kind at `aether.fleet`, reply-to the sink,
     /// and block until `probe` sees a recorded reply (or the deadline
     /// passes).
     fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, probe: impl Fn() -> Option<T>) -> T {
-        let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+        let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
         let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
         mailer.push(
             Mail::new(server, K::ID, request.encode_into_bytes(), 1)
@@ -245,7 +245,7 @@ mod tests {
     /// the full `ListEnginesResult` the cap reports afterward — both the
     /// live `engines` and the `recently_died` ring.
     fn push_then_list<K: Kind>(mailer: &Arc<Mailer>, cells: &ReplyCells, fire: &K) -> aether_kinds::ListEnginesResult {
-        let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+        let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
         mailer.push(Mail::new(server, K::ID, fire.encode_into_bytes(), 1));
         drive(mailer, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take())
     }

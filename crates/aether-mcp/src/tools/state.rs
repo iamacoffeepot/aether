@@ -2,8 +2,8 @@ use super::bytes::resolve_bytes_params;
 use super::components::{ResolvedComponent, StagedBootManifest};
 use super::ids::{mail_node_to_json, node_reversible_ids};
 use super::{
-    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, ENGINE_CAP, EngineId, EngineMailSpec,
-    EngineNames, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
+    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
+    FLEET_CAP, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
     MailNodeWire, MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
     ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors,
     engine_envelope, frame_size_aware_error, internal_msg, local_envelope, max_frame_size, recipient_mailbox,
@@ -39,7 +39,7 @@ impl Mcp {
 
     /// Resolve a component registry selector hub-local to its wasm bytes +
     /// `@actor` export (ADR-0116). aether-mcp issues a `ResolveComponent` to
-    /// the `aether.engine` cap (no engine route — the store is hub-level),
+    /// the `aether.fleet` cap (no engine route — the store is hub-level),
     /// which matches the selector to a single component and replies with the
     /// wasm bytes from its store; aether-mcp then forwards those bytes to
     /// the target substrate's `aether.component` mailbox. Shared by
@@ -51,7 +51,7 @@ impl Mcp {
         let reply = self
             .session
             .call_one(local_envelope(
-                ENGINE_CAP,
+                FLEET_CAP,
                 &ResolveComponent {
                     selector: ComponentSelector {
                         query: Some(selector.to_owned()),

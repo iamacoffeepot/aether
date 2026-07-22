@@ -1,11 +1,11 @@
 //! Test-support for the RPC server round-trip path: a minimal echo actor
 //! plus its request / reply kinds — the far-end receiver of an RPC `Call`
 //! that actually replies. Used by this crate's `server` round-trip tests
-//! and by `aether-engine`'s proxy test, which forwards onto this same `Call`
+//! and by `aether-fleet`'s proxy test, which forwards onto this same `Call`
 //! path through a booted `RpcServerCapability`.
 //!
 //! Lives under `server` (not the crate root) because both consumers are
-//! RPC-server round-trips — `aether-engine`'s proxy already reaches into
+//! RPC-server round-trips — `aether-fleet`'s proxy already reaches into
 //! `aether_rpc::server` for the server cap. The module is gated at its `mod`
 //! declaration on `any(test, feature = "test-support")`, so the `pub` reaches
 //! this crate's own tests and a sibling crate's dev-dependency build, never

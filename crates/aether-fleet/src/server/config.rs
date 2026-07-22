@@ -2,8 +2,8 @@
 //! tuning plus the hub binary store's layout dir, disk budget, and
 //! bootstrap list, and the per-engine spawn-dir parent. Native-only:
 //! resolved by the hub chassis and handed into
-//! [`EngineServer::init`](super::EngineServer) via
-//! `with_actor::<EngineServer>(cfg)`.
+//! [`FleetServer::init`](super::FleetServer) via
+//! `with_actor::<FleetServer>(cfg)`.
 
 use crate::proxy::HeartbeatParams;
 use crate::store::DEFAULT_DISK_BUDGET_BYTES;
@@ -26,27 +26,27 @@ const DEFAULT_PROXY_CONNECT_BUDGET_SECS: u64 = 30;
 /// disk budget, and bootstrap list (ADR-0115, #1954 — these last three
 /// moved onto the config off their pre-ADR-0090 naked `env::var`
 /// readers), plus the per-engine spawn-dir parent
-/// (`engine_store_root`, #2482 — the last of the sweep).
+/// (`fleet_store_root`, #2482 — the last of the sweep).
 ///
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
-/// `EngineConfigLayer`, the clap-shaped `EngineOverlay`, and the
+/// `FleetConfigLayer`, the clap-shaped `FleetOverlay`, and the
 /// inherent `from_env` / `from_argv_then_env` shims (argv beats env
 /// beats the literal default). The hub chassis resolves it with
-/// `EngineConfig::from_argv_then_env(cli.engine.into_layer())` and
-/// hands it to `with_actor::<EngineServer>(cfg)`; tests build it
+/// `FleetConfig::from_argv_then_env(cli.fleet.into_layer())` and
+/// hands it to `with_actor::<FleetServer>(cfg)`; tests build it
 /// directly. `env_prefix = "AETHER_HUB"` + the `heartbeat_*` /
 /// `binary_disk_budget_bytes` field names compose the
 /// `AETHER_HUB_HEARTBEAT_*` / `AETHER_HUB_BINARY_DISK_BUDGET_BYTES`
-/// env keys and `--hub-*` flags; `binary_store_dir` / `engine_store_root`
+/// env keys and `--hub-*` flags; `binary_store_dir` / `fleet_store_root`
 /// / `binary_bootstrap` pin the unprefixed `AETHER_BINARY_STORE_DIR` /
-/// `AETHER_ENGINE_STORE_ROOT` / `AETHER_BINARY_BOOTSTRAP` keys via
+/// `AETHER_FLEET_STORE_ROOT` / `AETHER_BINARY_BOOTSTRAP` keys via
 /// per-field `env` overrides. `Default` (the test constructor)
 /// resolves the heartbeat to `0/0` (disabled) and the store fields to
 /// unset / `16 GiB`; production picks up the `default = 5/3` / `16 GiB`
 /// literals and the env layers through `from_argv_then_env`.
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_HUB", cli_prefix = "hub")]
-pub struct EngineConfig {
+pub struct FleetConfig {
     /// Heartbeat ping interval in seconds; 0 disables liveness checks.
     ///
     /// `0` disables the heartbeat entirely (engines are then only evicted
@@ -85,7 +85,7 @@ pub struct EngineConfig {
     /// knob. Unset → the computed default `data_dir/aether/binaries/v1`
     /// (`ArtifactStore::default_root`). A bare `Option<String>` (not a
     /// `PathBuf`) keeps that runtime-computed default in `init`, so
-    /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
+    /// `FleetConfig` needs no `skip_from_layer`; `FleetServer::init`
     /// joins the store's layout-version dir to a set override.
     #[config(env = "AETHER_BINARY_STORE_DIR")]
     pub binary_store_dir: Option<String>,
@@ -93,13 +93,13 @@ pub struct EngineConfig {
     ///
     /// The ops escape hatch and the fleet tests' per-process isolation
     /// knob (issue 1274). Unset → `dirs::data_dir().join("aether/engines")`,
-    /// falling back to `std::env::temp_dir().join("aether-engines")` if no
+    /// falling back to `std::env::temp_dir().join("aether-fleets")` if no
     /// data dir is resolvable. A bare `Option<String>` (not a `PathBuf`)
     /// keeps that runtime-computed fallback chain in `init`, so
-    /// `EngineConfig` needs no `skip_from_layer`; `EngineServer::init`
-    /// resolves it once into `EngineServerState::engine_store_root`.
-    #[config(env = "AETHER_ENGINE_STORE_ROOT")]
-    pub engine_store_root: Option<String>,
+    /// `FleetConfig` needs no `skip_from_layer`; `FleetServer::init`
+    /// resolves it once into `FleetServerState::fleet_store_root`.
+    #[config(env = "AETHER_FLEET_STORE_ROOT")]
+    pub fleet_store_root: Option<String>,
     /// On-disk byte budget for the binary store.
     ///
     /// Default 16 GiB (`DEFAULT_DISK_BUDGET_BYTES`); LRU eviction over
@@ -117,7 +117,7 @@ pub struct EngineConfig {
     pub binary_bootstrap: HashSet<String>,
 }
 
-impl Default for EngineConfig {
+impl Default for FleetConfig {
     /// The test constructor: heartbeat disabled (`0/0`) but a real
     /// `DEFAULT_DISK_BUDGET_BYTES` budget — `0` is inert for the
     /// heartbeat (no pinging) yet destructive for the store (it would
@@ -125,7 +125,7 @@ impl Default for EngineConfig {
     /// heartbeat's zero. Store dir unset (the computed default) and an
     /// empty bootstrap. Production resolves all five through the layer
     /// (`from_argv_then_env`); this matches the prior `from_env()`
-    /// store budget every `EngineConfig::default()` consumer saw.
+    /// store budget every `FleetConfig::default()` consumer saw.
     fn default() -> Self {
         Self {
             heartbeat_interval_secs: 0,
@@ -140,14 +140,14 @@ impl Default for EngineConfig {
             // serially, so one attempt keeps the path deterministic.
             proxy_spawn_attempts: 1,
             binary_store_dir: None,
-            engine_store_root: None,
+            fleet_store_root: None,
             binary_disk_budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
             binary_bootstrap: HashSet::new(),
         }
     }
 }
 
-impl EngineConfig {
+impl FleetConfig {
     /// The `HeartbeatParams` to arm each proxy with, or `None`
     /// when the heartbeat is disabled (`0` interval or miss limit).
     #[must_use]
@@ -182,9 +182,9 @@ mod config_tests {
     /// finite `Duration`, and `0` to the wait-forever sentinel `None`.
     #[test]
     fn connect_budget_maps_zero_to_wait_forever() {
-        let finite = EngineConfig { proxy_connect_budget_secs: 12, ..EngineConfig::default() };
+        let finite = FleetConfig { proxy_connect_budget_secs: 12, ..FleetConfig::default() };
         assert_eq!(finite.connect_budget(), Some(Duration::from_secs(12)));
-        let forever = EngineConfig { proxy_connect_budget_secs: 0, ..EngineConfig::default() };
+        let forever = FleetConfig { proxy_connect_budget_secs: 0, ..FleetConfig::default() };
         assert_eq!(forever.connect_budget(), None);
     }
 
@@ -194,7 +194,7 @@ mod config_tests {
     /// dead substrate still fails the spawn rather than hanging.
     #[test]
     fn default_connect_budget_is_generous_and_finite() {
-        let budget = EngineConfig::default().connect_budget().expect("default budget is finite, not wait-forever");
+        let budget = FleetConfig::default().connect_budget().expect("default budget is finite, not wait-forever");
         assert_eq!(budget, Duration::from_secs(DEFAULT_PROXY_CONNECT_BUDGET_SECS));
         assert!(budget >= Duration::from_secs(30), "default stays generous");
     }

@@ -33,7 +33,7 @@ aether-rpc = { path = "../aether-rpc" }
 # The frame-size push (ADR-0156 §6): `install_frame_size` lowers the
 # `FrameSizeConfig` member (aether-rpc) and installs it into the codec.
 aether-codec = { path = "../aether-codec" }
-aether-engine = { path = "../aether-engine" }
+aether-fleet = { path = "../aether-fleet" }
 aether-render = { path = "../aether-render", features = ["runtime"] }
 aether-tcp = { path = "../aether-tcp" }
 aether-game = { path = "../aether-game" }

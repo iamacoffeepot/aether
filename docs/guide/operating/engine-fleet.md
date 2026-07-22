@@ -228,12 +228,12 @@ An interrupted spawn is not evidence that no child exists.
 - MCP contracts: `crates/aether-mcp/src/tools/mod.rs` and `args.rs`
 - Spawn/readiness orchestration: `crates/aether-mcp/src/tools/engine.rs`
 - Fleet table, id allocation, death ring, and termination:
-  `crates/aether-engine/src/server/runtime.rs`
+  `crates/aether-fleet/src/server/runtime.rs`
 - Child ownership and heartbeats:
-  `crates/aether-engine/src/proxy/runtime.rs`
-- Fleet configuration: `crates/aether-engine/src/server/config.rs`
+  `crates/aether-fleet/src/proxy/runtime.rs`
+- Fleet configuration: `crates/aether-fleet/src/server/config.rs`
 - Artifact persistence and eviction:
-  `crates/aether-engine/src/store/`
+  `crates/aether-fleet/src/store/`
 
 See [Recovery](recovery.md) for symptom-first branches and
 [Inspect and debug](inspect-and-debug.md) for evidence collection.

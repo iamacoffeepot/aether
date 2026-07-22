@@ -22,7 +22,7 @@ mod tests {
         // `SpawnEngineResult::Ok` until its proxy connects), so the poll just
         // absorbs any async slack under load rather than depending on a wall
         // clock. Heartbeat freshness is deliberately not asserted here:
-        // FleetHarness runs with the heartbeat disabled (`EngineConfig`
+        // FleetHarness runs with the heartbeat disabled (`FleetConfig`
         // default), so `last_heartbeat_age_millis` only measures time since
         // registration, not liveness — the pong-refresh / miss-eviction logic
         // is covered deterministically by the `engine::proxy` unit tests.

@@ -80,19 +80,18 @@ mod engine {
     use crate::KindDescriptorWire;
     use serde::{Deserialize, Serialize};
 
-    /// `aether.engine.list` — ask the engines cap (`aether.engine`) to
+    /// `aether.fleet.list` — ask the engines cap (`aether.fleet`) to
     /// enumerate every engine it currently supervises. Fieldless
     /// request; the reply is a [`ListEnginesResult`]. Issue 763 P4.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.engine.list")]
+    #[kind(name = "aether.fleet.list")]
     pub struct ListEngines {}
 
     /// One supervised engine, as reported in a [`ListEnginesResult`].
     ///
     /// `engine_id` is the plain UUID string the engines cap minted at
     /// spawn time — `EngineId` itself doesn't implement `Schema`, so
-    /// the wire carries the string form (the same convention the
-    /// `aether.process.*` kinds use). `rpc_port` is the localhost port
+    /// the wire carries the string form. `rpc_port` is the localhost port
     /// the cap assigned the substrate's `RpcServerCapability`.
     ///
     /// `last_heartbeat_age_millis` is how long ago the cap last saw a
@@ -114,7 +113,7 @@ mod engine {
     /// the cause without parsing free text; the `detail` string on the
     /// non-clean variants carries the specifics.
     ///
-    /// - `Terminated` — a deliberate `aether.engine.terminate` shut the
+    /// - `Terminated` — a deliberate `aether.fleet.terminate` shut the
     ///   engine down. The clean-shutdown case; carries no detail.
     /// - `Crashed { detail }` — the substrate closed its RPC connection
     ///   (`Bye` / eof) on its own; `detail` is the close reason the proxy
@@ -151,11 +150,11 @@ mod engine {
         pub died_age_millis: u64,
     }
 
-    /// `aether.engine.list_result` — reply to [`ListEngines`]: every
+    /// `aether.fleet.list_result` — reply to [`ListEngines`]: every
     /// engine the cap supervises right now, plus a bounded sidecar of the
     /// engines that recently left and why. Issue 763 P4.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.list_result")]
+    #[kind(name = "aether.fleet.list_result")]
     pub struct ListEnginesResult {
         pub engines: Vec<EngineDescriptor>,
         /// The recently-died ring: the last few engines that left the
@@ -193,7 +192,7 @@ mod engine {
         pub target: Option<String>,
     }
 
-    /// `aether.engine.spawn` — ask the engines cap to fork+exec a
+    /// `aether.fleet.spawn` — ask the engines cap to fork+exec a
     /// substrate binary and connect a per-engine proxy to it. Issue
     /// 763 P4.
     ///
@@ -202,7 +201,7 @@ mod engine {
     /// an executable temp file, picks a free localhost port for the
     /// substrate's `RpcServerCapability`, injects it as `AETHER_RPC_PORT`,
     /// forks the realized binary with `args` forwarded verbatim, then
-    /// boots an `aether.engine.proxy:<id>` actor that dials it. Reply:
+    /// boots an `aether.fleet.proxy:<id>` actor that dials it. Reply:
     /// [`SpawnEngineResult`] — `Err` if the selector resolves to no stored
     /// binary. The host filesystem path is gone from the spawn surface;
     /// the only path input is the one-time [`UploadBinary`].
@@ -215,7 +214,7 @@ mod engine {
     /// loading — no follow-up `load_component` round-trips. `None` boots
     /// a bare engine, the pre-existing behaviour.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.spawn")]
+    #[kind(name = "aether.fleet.spawn")]
     pub struct SpawnEngine {
         pub selector: BinarySelector,
         pub args: Vec<String>,
@@ -235,22 +234,22 @@ mod engine {
     /// entry in [`ListEnginesResult`]'s `recently_died` ring, so a caller
     /// can correlate and reap. On `Err` no child process is left running.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.spawn_result")]
+    #[kind(name = "aether.fleet.spawn_result")]
     pub enum SpawnEngineResult {
         Ok { engine_id: String, rpc_port: u16 },
         Err { engine_id: Option<String>, error: String },
     }
 
-    /// `aether.engine.terminate` — ask the engines cap to shut down a
+    /// `aether.fleet.terminate` — ask the engines cap to shut down a
     /// supervised engine. Issue 763 P4.
     ///
     /// The cap forwards this kind to the engine's
-    /// `aether.engine.proxy:<id>` actor, which SIGKILLs the child
+    /// `aether.fleet.proxy:<id>` actor, which SIGKILLs the child
     /// substrate it forked and self-shuts-down. `engine_id` is the
     /// plain UUID string from [`SpawnEngineResult`] /
     /// [`ListEnginesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.terminate")]
+    #[kind(name = "aether.fleet.terminate")]
     pub struct TerminateEngine {
         pub engine_id: String,
     }
@@ -258,7 +257,7 @@ mod engine {
     /// Reply to [`TerminateEngine`]. Issue 763 P4. `Err` is for an
     /// `engine_id` that doesn't parse or names no supervised engine.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.terminate_result")]
+    #[kind(name = "aether.fleet.terminate_result")]
     pub enum TerminateEngineResult {
         Ok,
         Err { error: String },
@@ -301,7 +300,7 @@ mod engine {
         pub manifest: BinaryManifest,
     }
 
-    /// `aether.engine.upload_binary` — ingest a binary into the hub's
+    /// `aether.fleet.upload_binary` — ingest a binary into the hub's
     /// content-addressed store (ADR-0115, issue 1953). `staged_path` is an
     /// absolute host path the hub reads itself (aether-mcp never reads the
     /// bytes — a binary is too large to ride the tool channel); the cap
@@ -310,7 +309,7 @@ mod engine {
     /// stores both. `name`, when set, points that human-readable name at
     /// the resulting hash. Reply: [`UploadBinaryResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_binary")]
+    #[kind(name = "aether.fleet.upload_binary")]
     pub struct UploadBinary {
         pub staged_path: String,
         pub name: Option<String>,
@@ -323,13 +322,13 @@ mod engine {
     /// `staged_path`, or a `--describe` that failed or didn't yield a
     /// parseable manifest.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_binary_result")]
+    #[kind(name = "aether.fleet.upload_binary_result")]
     pub enum UploadBinaryResult {
         Ok { hash: String, name: Option<String> },
         Err { error: String },
     }
 
-    /// `aether.engine.list_binaries` — enumerate the hub's stored binaries
+    /// `aether.fleet.list_binaries` — enumerate the hub's stored binaries
     /// (ADR-0115, issue 1953). The filter fields are AND-combined and each
     /// defaults to "no constraint": `chassis` keeps only entries whose
     /// `manifest.chassis` matches, `caps` keeps only entries whose
@@ -340,7 +339,7 @@ mod engine {
     /// after filtering (`None` defaults to 20; `Some(0)` returns no entries).
     /// Reply: [`ListEngineBinariesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.engine.list_binaries")]
+    #[kind(name = "aether.fleet.list_binaries")]
     pub struct ListEngineBinaries {
         pub chassis: Option<String>,
         pub caps: Vec<String>,
@@ -355,7 +354,7 @@ mod engine {
     /// manifest. `total_matched` is counted after attribute/history filtering
     /// and before the requested limit is applied.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.list_binaries_result")]
+    #[kind(name = "aether.fleet.list_binaries_result")]
     pub struct ListEngineBinariesResult {
         pub binaries: Vec<BinaryEntry>,
         pub total_matched: u32,
@@ -449,7 +448,7 @@ mod engine {
         pub handled_kind: Option<aether_data::KindId>,
     }
 
-    /// `aether.engine.upload_component` — ingest a component wasm into the
+    /// `aether.fleet.upload_component` — ingest a component wasm into the
     /// hub's content-addressed store (ADR-0116, issue 1956). `staged_path`
     /// is an absolute host path the hub reads itself (aether-mcp never reads
     /// the bytes — too large for the tool channel); the cap sha256-hashes
@@ -459,7 +458,7 @@ mod engine {
     /// `name`, when set, points that human-readable name at the resulting
     /// hash. Reply: [`UploadComponentResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_component")]
+    #[kind(name = "aether.fleet.upload_component")]
     pub struct UploadComponent {
         pub staged_path: String,
         pub name: Option<String>,
@@ -471,19 +470,19 @@ mod engine {
     /// at it, if any. `Err` carries a free-form reason — an unreadable
     /// `staged_path` or a wasm whose manifest can't be parsed.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_component_result")]
+    #[kind(name = "aether.fleet.upload_component_result")]
     pub enum UploadComponentResult {
         Ok { hash: String, name: Option<String> },
         Err { error: String },
     }
 
-    /// `aether.engine.resolve_component` — resolve a [`ComponentSelector`]
+    /// `aether.fleet.resolve_component` — resolve a [`ComponentSelector`]
     /// to a stored component's wasm bytes + manifest (ADR-0116, issue
     /// 1956). aether-mcp calls this hub-local before forwarding a
     /// `LoadComponent` to the target substrate, so the resolve hop keeps the
     /// load seam path-free. Reply: [`ResolveComponentResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.resolve_component")]
+    #[kind(name = "aether.fleet.resolve_component")]
     pub struct ResolveComponent {
         pub selector: ComponentSelector,
     }
@@ -499,7 +498,7 @@ mod engine {
     /// attribute query matching more than one (a clean ambiguity error).
     #[allow(clippy::large_enum_variant)]
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.resolve_component_result")]
+    #[kind(name = "aether.fleet.resolve_component_result")]
     pub enum ResolveComponentResult {
         Ok {
             hash: String,
@@ -519,7 +518,7 @@ mod engine {
         },
     }
 
-    /// `aether.engine.list_components` — enumerate the hub's stored
+    /// `aether.fleet.list_components` — enumerate the hub's stored
     /// components (ADR-0116, issue 1956). The filter fields are
     /// AND-combined and each defaults to "no constraint": `namespace` keeps
     /// only entries exporting that actor namespace, `handled_kind` keeps
@@ -529,7 +528,7 @@ mod engine {
     /// (`None` defaults to 20; `Some(0)` returns no entries). Reply:
     /// [`ListComponentBinariesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.engine.list_components")]
+    #[kind(name = "aether.fleet.list_components")]
     pub struct ListComponentBinaries {
         pub namespace: Option<String>,
         pub handled_kind: Option<aether_data::KindId>,
@@ -543,7 +542,7 @@ mod engine {
     /// read from the wasm. `total_matched` is counted after attribute/history
     /// filtering and before the requested limit is applied.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.list_components_result")]
+    #[kind(name = "aether.fleet.list_components_result")]
     pub struct ListComponentBinariesResult {
         pub components: Vec<ComponentEntry>,
         pub total_matched: u32,
@@ -1667,95 +1666,6 @@ mod control_plane {
     pub enum AdvanceResult {
         Ok { ticks_completed: u32 },
         Err { error: String },
-    }
-
-    /// One environment variable pair carried in [`Spawn::env`]. Pairs
-    /// rather than a `HashMap` because structured wire kinds
-    /// don't have a `Schema` impl for tuple element types and a
-    /// keyed-collection schema isn't load-bearing here — duplicate
-    /// keys aren't expected and last-write-wins matches the env
-    /// `HashMap` the hub builds anyway.
-    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct EnvVar {
-        pub key: String,
-        pub value: String,
-    }
-
-    /// `aether.process.spawn` — request the hub chassis launch a
-    /// substrate binary as a child process and return the assigned
-    /// engine id once the child completes its `Hello` handshake
-    /// (ADR-0078 Phase 1, supersedes ADR-0009 §3 for the post-actor
-    /// model spawn path). `binary_path` is the absolute filesystem
-    /// path to the substrate binary. `args` and `env` are forwarded
-    /// to the child verbatim; the hub also injects `AETHER_HUB_URL`
-    /// pointing at its engine listener so the child dials back.
-    /// `handshake_timeout_ms` caps how long the hub waits for the
-    /// child's `Hello` before declaring the spawn failed (default
-    /// 5000 ms when `None`). Reply: `SpawnResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.process.spawn")]
-    pub struct Spawn {
-        pub binary_path: String,
-        pub args: Vec<String>,
-        pub env: Vec<EnvVar>,
-        pub handshake_timeout_ms: Option<u32>,
-    }
-
-    /// Reply to `Spawn`. `Ok` carries the freshly minted engine id
-    /// in tagged-string form (`eng-...` per ADR-0064 — `EngineId`
-    /// doesn't implement `Schema`, so the wire carries the
-    /// authoritative string the substrate registry already uses
-    /// at the MCP boundary). The hub adopted the child into its
-    /// registry; lifetime is tied to the connection until `Terminate`
-    /// or external exit. `Err` carries a free-form reason — io
-    /// failure, missing pid, handshake timeout.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.process.spawn_result")]
-    pub enum SpawnResult {
-        Ok { engine_id: String, pid: u32 },
-        Err { error: String },
-    }
-
-    /// `aether.process.terminate` — request the hub chassis shut down
-    /// a previously-spawned substrate. Sends SIGTERM, waits up to
-    /// `grace_ms` (default 2000 ms when `None`), then escalates to
-    /// SIGKILL if the child is still running. `engine_id` is the
-    /// Uuid string form the hub returned from `Spawn`. Reply:
-    /// `TerminateResult`.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.process.terminate")]
-    pub struct Terminate {
-        pub engine_id: String,
-        pub grace_ms: Option<u32>,
-    }
-
-    /// Reply to `Terminate`. `Ok` reports the child's exit code (if
-    /// the kernel returned one) and whether escalation to SIGKILL
-    /// was needed. `Err` is for unknown engine ids, externally-
-    /// connected engines the hub didn't spawn, or os-level signal
-    /// failure.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.process.terminate_result")]
-    pub enum TerminateResult {
-        Ok { exit_code: Option<i32>, sigkilled: bool },
-        Err { error: String },
-    }
-
-    /// `aether.process.exited` — broadcast emitted by the hub's
-    /// reaper when a spawned child terminates (whether via
-    /// `Terminate` mail or external exit). Fire-and-forget; lands
-    /// on every attached MCP session via `egress_broadcast`. The
-    /// reaper task converts `Child::wait` completion into this kind
-    /// so any cap or operator that wants to react to "engine X
-    /// exited" subscribes to broadcast rather than threading a
-    /// callback through `EngineRegistry`. `engine_id` is the
-    /// Uuid string form the hub used while the child was alive.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.process.exited")]
-    pub struct ProcessExited {
-        pub engine_id: String,
-        pub exit_code: Option<i32>,
-        pub reason: String,
     }
 
     // ADR-0050 per-provider content-gen caps. The `aether.anthropic`

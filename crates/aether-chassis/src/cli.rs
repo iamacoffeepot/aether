@@ -68,7 +68,7 @@ use clap::{Args, Parser};
 pub use aether_anthropic::AnthropicOverlay;
 pub use aether_audio::AudioOverlay;
 pub use aether_contentgen::ContentGenOverlay;
-pub use aether_engine::EngineOverlay;
+pub use aether_fleet::FleetOverlay;
 pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_gemini::GeminiOverlay;
 pub use aether_harness_substrate::SettlementOverlay;
@@ -248,7 +248,7 @@ pub struct HubCli {
     /// (`--hub-heartbeat-interval-secs` / `--hub-heartbeat-miss-limit`,
     /// issue 1339). Flattened from the derive-emitted overlay.
     #[command(flatten)]
-    pub engine: EngineOverlay,
+    pub fleet: FleetOverlay,
 
     /// Per-actor ring-capacity knobs (issue 1990): `--actor-*`. The hub resolves
     /// `ActorRingConfig` off its own source stack for the actors its registry hosts
@@ -296,7 +296,7 @@ mod checkability_tests {
     //! (or a stale flag left in the root) fails the assertion honestly.
 
     use super::{
-        ActorRingOverlay, CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HttpOverlay, HubCli,
+        ActorRingOverlay, CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli,
         RenderTuningOverlay, RpcServerOverlay, SchedulerTuningOverlay, SettlementOverlay, TickOverlay,
     };
     use crate::window::WindowOverlay;
@@ -381,7 +381,7 @@ mod checkability_tests {
         // other flag, alongside the meta flags. Issue 3882 flattened the three
         // tuning overlays the hub resolves off its own source stack (actor ring /
         // scheduler / settlement).
-        let mut expected = overlay_flags::<EngineOverlay>();
+        let mut expected = overlay_flags::<FleetOverlay>();
         expected.extend(overlay_flags::<RpcServerOverlay>());
         expected.extend(overlay_flags::<ActorRingOverlay>());
         expected.extend(overlay_flags::<SchedulerTuningOverlay>());

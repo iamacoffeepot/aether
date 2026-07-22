@@ -1,5 +1,5 @@
-//! The `aether.engine.proxy:<id>` runtime half (ADR-0122 identity/runtime
-//! split). The [`EngineProxy`](super::EngineProxy) identity file names none of
+//! The `aether.fleet.proxy:<id>` runtime half (ADR-0122 identity/runtime
+//! split). The [`FleetProxy`](super::FleetProxy) identity file names none of
 //! these types. The substrate-typed imports are collected once by
 //! this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state, ctx types, and connect/heartbeat helpers through the single
@@ -10,7 +10,7 @@
 //! the heartbeat thread, so the RAII teardown follows the fields onto the
 //! state.
 
-use super::{EngineProxy, EngineProxyConfig};
+use super::{FleetProxy, FleetProxyConfig};
 pub use crate::kinds::{EngineAlive, EngineDied};
 use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 pub use aether_actor::Addressable;
@@ -30,7 +30,7 @@ pub use std::process::Child;
 pub use std::sync::Arc;
 
 use super::heartbeat::HeartbeatHandle;
-use crate::EngineServer;
+use crate::FleetServer;
 
 // The init-only bring-up helpers live in the native-only `connect` /
 // `heartbeat` submodules; re-export them here so the parent's `use runtime::*`
@@ -38,27 +38,27 @@ use crate::EngineServer;
 pub use super::connect::connect_proxy;
 pub use super::heartbeat::spawn_heartbeat;
 
-/// Mailbox of the engines cap (`aether.engine`) — where a proxy
+/// Mailbox of the engines cap (`aether.fleet`) — where a proxy
 /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
 /// issue 1339). A compile-time const derived from
-/// `<EngineServer as Addressable>::NAMESPACE`, so no host round-trip; matches
+/// `<FleetServer as Addressable>::NAMESPACE`, so no host round-trip; matches
 /// the `RpcServerCapability`'s own route lookup.
 // Well-known engines-cap route shared with `RpcServerCapability`'s own
 // lookup; a ctx-less free helper, so there is no sibling `ctx.actor::<_>()`
 // to resolve through.
 #[allow(clippy::disallowed_methods)]
-fn engine_cap_mailbox() -> MailboxId {
-    mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE)
+fn fleet_cap_mailbox() -> MailboxId {
+    mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE)
 }
 
-/// `aether.engine.proxy:<id>` runtime state (ADR-0122 split): one outbound
+/// `aether.fleet.proxy:<id>` runtime state (ADR-0122 split): one outbound
 /// RPC connection to one substrate, plus the in-flight reply-correlation
 /// table. The addressing identity is the distinct ZST
-/// [`EngineProxy`](super::EngineProxy); the dispatcher holds this as the
+/// [`FleetProxy`](super::FleetProxy); the dispatcher holds this as the
 /// proxy's state and routes envelopes through the macro-emitted `Dispatch`
 /// impl. Living in this private module keeps it `pub`-enough to satisfy the
 /// `NativeActor::State` interface without exposing it as crate-public API.
-pub struct EngineProxyState {
+pub struct FleetProxyState {
     pub engine_id: EngineId,
     /// This proxy's registered mailbox, retained so `wire` can issue the
     /// post-registration catch-up wake for reader frames that arrived during
@@ -78,7 +78,7 @@ pub struct EngineProxyState {
     /// `ReplyEnd` clears the entry.
     pub in_flight: HashMap<u64, Source>,
     /// The forked child substrate, when the engines cap spawned it
-    /// (see [`EngineProxyConfig::spawned`]). `Drop` SIGKILLs +
+    /// (see [`FleetProxyConfig::spawned`]). `Drop` SIGKILLs +
     /// reaps it; `None` once taken or for an adopted substrate.
     pub spawned: Option<Child>,
     /// Consecutive heartbeat pings sent without a `Pong` reply
@@ -100,7 +100,7 @@ pub struct EngineProxyState {
     _heartbeat: Option<HeartbeatHandle>,
 }
 
-impl Drop for EngineProxyState {
+impl Drop for FleetProxyState {
     /// SIGKILL + reap the child substrate this proxy forked, so a
     /// terminated proxy (or a chassis teardown) never orphans a
     /// substrate process. A no-op for an adopted substrate
@@ -114,7 +114,7 @@ impl Drop for EngineProxyState {
     }
 }
 
-impl EngineProxyState {
+impl FleetProxyState {
     /// Report a confirmed liveness signal to the engines cap so it
     /// refreshes this engine's last-heartbeat timestamp (issue
     /// 1339). Sent as a fresh root: the `Pong` that triggered it is
@@ -122,7 +122,7 @@ impl EngineProxyState {
     /// mail woke the handler.
     pub fn report_alive(&self, ctx: &NativeCtx<'_>) {
         let alive = EngineAlive { engine_id: self.engine_id.0.to_string() };
-        let _ = ctx.send_envelope_detached(engine_cap_mailbox(), <EngineAlive as Kind>::ID, &alive.encode_into_bytes());
+        let _ = ctx.send_envelope_detached(fleet_cap_mailbox(), <EngineAlive as Kind>::ID, &alive.encode_into_bytes());
     }
 
     /// Report this engine's death to the engines cap so it drops the
@@ -135,7 +135,7 @@ impl EngineProxyState {
     /// [`Self::report_alive`].
     pub fn report_died(&self, ctx: &NativeCtx<'_>, reason: DeathReason) {
         let died = EngineDied { engine_id: self.engine_id.0.to_string(), reason };
-        let _ = ctx.send_envelope_detached(engine_cap_mailbox(), <EngineDied as Kind>::ID, &died.encode_into_bytes());
+        let _ = ctx.send_envelope_detached(fleet_cap_mailbox(), <EngineDied as Kind>::ID, &died.encode_into_bytes());
     }
 
     /// Route a `ReplyEvent`'s envelope back to whoever sent the
@@ -148,7 +148,7 @@ impl EngineProxyState {
     pub fn route_reply(&mut self, cid: u64, envelope: MailEnvelope) {
         let Some(reply_to) = self.in_flight.get(&cid).copied() else {
             tracing::debug!(
-                target: "aether_substrate::engine_proxy",
+                target: "aether_substrate::fleet_proxy",
                 engine_id = ?self.engine_id,
                 cid,
                 "engine proxy: ReplyEvent with no matching in-flight forward; dropping",
@@ -178,7 +178,7 @@ impl EngineProxyState {
     pub fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
         let Some(reply_to) = self.in_flight.remove(&cid) else {
             tracing::debug!(
-                target: "aether_substrate::engine_proxy",
+                target: "aether_substrate::fleet_proxy",
                 engine_id = ?self.engine_id,
                 cid,
                 "engine proxy: ReplyEnd with no matching in-flight forward; dropping",
@@ -200,15 +200,15 @@ impl EngineProxyState {
 }
 
 #[runtime]
-impl NativeActor for EngineProxy {
+impl NativeActor for FleetProxy {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// per-engine outbound RPC connection plus the in-flight
     /// reply-correlation table.
-    type State = EngineProxyState;
-    type Config = EngineProxyConfig;
-    const NAMESPACE: &'static str = "aether.engine.proxy";
+    type State = FleetProxyState;
+    type Config = FleetProxyConfig;
+    const NAMESPACE: &'static str = "aether.fleet.proxy";
 
-    fn init(mut config: EngineProxyConfig, ctx: &mut NativeInitCtx<'_>) -> Result<EngineProxyState, BootError> {
+    fn init(mut config: FleetProxyConfig, ctx: &mut NativeInitCtx<'_>) -> Result<FleetProxyState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
@@ -241,7 +241,7 @@ impl NativeActor for EngineProxy {
         };
 
         tracing::info!(
-            target: "aether_substrate::engine_proxy",
+            target: "aether_substrate::fleet_proxy",
             engine_id = ?config.engine_id,
             addr = %config.rpc_addr,
             spawned = config.spawned.is_some(),
@@ -261,7 +261,7 @@ impl NativeActor for EngineProxy {
             _ => (None, 0),
         };
 
-        Ok(EngineProxyState {
+        Ok(FleetProxyState {
             engine_id: config.engine_id,
             self_mailbox,
             mailer,
@@ -311,7 +311,7 @@ impl NativeActor for EngineProxy {
             }
             Err(e) => {
                 tracing::warn!(
-                    target: "aether_substrate::engine_proxy",
+                    target: "aether_substrate::fleet_proxy",
                     engine_id = ?state.engine_id,
                     error = %e,
                     "engine proxy: Call write failed; dropping forward",
@@ -344,7 +344,7 @@ impl NativeActor for EngineProxy {
                 }
                 WireFrame::Bye { reason } => {
                     tracing::info!(
-                        target: "aether_substrate::engine_proxy",
+                        target: "aether_substrate::fleet_proxy",
                         engine_id = ?state.engine_id,
                         reason = %reason,
                         "engine proxy: substrate closed the connection; shutting down",
@@ -365,7 +365,7 @@ impl NativeActor for EngineProxy {
                 // line rather than warn-storming.
                 other => {
                     tracing::debug!(
-                        target: "aether_substrate::engine_proxy",
+                        target: "aether_substrate::fleet_proxy",
                         engine_id = ?state.engine_id,
                         frame = ?other,
                         "engine proxy: unexpected inbound frame; ignoring",
@@ -378,7 +378,7 @@ impl NativeActor for EngineProxy {
     /// Shut this proxy's substrate down.
     ///
     /// # Agent
-    /// Sent by the engines cap (`aether.engine`) on a terminate
+    /// Sent by the engines cap (`aether.fleet`) on a terminate
     /// request. The proxy self-shuts-down; its `Drop` SIGKILLs and
     /// reaps the child substrate it forked (if any), and the
     /// outbound RPC connection closes as the actor drops. The
@@ -387,7 +387,7 @@ impl NativeActor for EngineProxy {
     #[handler::single]
     fn on_terminate(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: TerminateEngine) {
         tracing::info!(
-            target: "aether_substrate::engine_proxy",
+            target: "aether_substrate::fleet_proxy",
             engine_id = ?state.engine_id,
             "engine proxy: terminate requested; shutting down",
         );
@@ -420,7 +420,7 @@ impl NativeActor for EngineProxy {
         // evicts; the cap side is idempotent).
         if let Err(e) = state.conn.client.ping(state.heartbeat_seq) {
             tracing::debug!(
-                target: "aether_substrate::engine_proxy",
+                target: "aether_substrate::fleet_proxy",
                 engine_id = ?state.engine_id,
                 error = %e,
                 "engine proxy: heartbeat ping write failed",
@@ -429,7 +429,7 @@ impl NativeActor for EngineProxy {
         state.missed_heartbeats += 1;
         if state.missed_heartbeats >= state.miss_limit {
             tracing::warn!(
-                target: "aether_substrate::engine_proxy",
+                target: "aether_substrate::fleet_proxy",
                 engine_id = ?state.engine_id,
                 missed = state.missed_heartbeats,
                 miss_limit = state.miss_limit,

@@ -51,7 +51,7 @@ pub struct ArtifactEntry {
 /// Resolve the store root: an explicit `--artifacts-root` / `AETHER_ARTIFACTS_ROOT`
 /// wins; otherwise the platform data dir (`data_dir/aether/bloomery-artifacts`),
 /// falling back to a temp-dir path when no data dir is resolvable. Mirrors the
-/// hub engines cap's `resolve_engine_store_root`.
+/// hub engines cap's `resolve_fleet_store_root`.
 #[must_use]
 pub fn resolve_root(configured: Option<&str>) -> PathBuf {
     if let Some(dir) = configured.filter(|d| !d.is_empty()) {

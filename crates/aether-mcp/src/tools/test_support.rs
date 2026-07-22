@@ -3,7 +3,7 @@
 use super::*;
 pub(super) use crate::args::*;
 pub(super) use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
-pub(super) use aether_engine::{EngineConfig, EngineServer};
+pub(super) use aether_fleet::{FleetConfig, FleetServer};
 pub(super) use aether_kinds::descriptors;
 pub(super) use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
 pub(super) use aether_substrate::chassis::builder::{Builder, PassiveChassis};
@@ -39,7 +39,7 @@ pub(super) struct RouteLoopbackParams {
 }
 
 /// `#[cfg(test)]` loopback engines-cap double (issue 2672). Registers at
-/// the `aether.engine` mailbox — the id the `RpcServerCapability` routes
+/// the `aether.fleet` mailbox — the id the `RpcServerCapability` routes
 /// every `engine = Some` `Call` to via a `RouteEnvelope` — and answers the
 /// harness's `aether.inventory.kinds` refresh RPC locally with a canned
 /// [`ListKindsResult`], so the
@@ -48,8 +48,8 @@ pub(super) struct RouteLoopbackParams {
 ///
 /// Lives at file root (not nested in `mod tests`) so the `#[actor]`
 /// macro's marker emission stays addressable, mirroring the engines-cap's
-/// own `ReplySink`. It stands in for the real `EngineServer` (never
-/// co-installed with it, so the shared `aether.engine` mailbox id is
+/// own `ReplySink`. It stands in for the real `FleetServer` (never
+/// co-installed with it, so the shared `aether.fleet` mailbox id is
 /// unambiguous): on a `RouteEnvelope` it pushes the reply and the
 /// `CallSettled` terminal straight back to the originating server,
 /// correlation preserved, so the forwarded wire call closes the way a
@@ -97,7 +97,7 @@ impl NativeActor for TerrainRouteSink {
     // wiring, not operator config, so they ride the `Params` channel.
     type Config = ();
     type Params = TerrainRouteLoopbackParams;
-    const NAMESPACE: &'static str = "aether.engine";
+    const NAMESPACE: &'static str = "aether.fleet";
 
     fn init((): (), params: TerrainRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { inventory: params.inventory, calls: params.calls, replies: params.replies, mailer: ctx.mailer() })
@@ -149,7 +149,7 @@ impl NativeActor for RouteInventorySink {
     // wiring, not operator config, so they ride the `Params` channel.
     type Config = ();
     type Params = RouteLoopbackParams;
-    const NAMESPACE: &'static str = "aether.engine";
+    const NAMESPACE: &'static str = "aether.fleet";
 
     fn init((): (), params: RouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
@@ -218,7 +218,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor_configured::<EngineServer>((), EngineConfig::default())
+        .with_actor_configured::<FleetServer>((), FleetConfig::default())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
             peer_kind: PeerKind::Substrate {
@@ -227,7 +227,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
                 kinds: vec![],
             },
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.engine")),
+            route_target: Some(mailbox_id_from_name("aether.fleet")),
         },
             RpcServerConfig { port: Some(0) },
         )
@@ -278,7 +278,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor_configured::<EngineServer>((), EngineConfig::default())
+        .with_actor_configured::<FleetServer>((), FleetConfig::default())
         // The inventory cap pulls `Arc::clone(ctx.mailer().registry())`
         // in `init`, so it sees the same `Registry` we just wrote
         // the extra kinds into.
@@ -291,7 +291,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
                 kinds: vec![],
             },
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.engine")),
+            route_target: Some(mailbox_id_from_name("aether.fleet")),
         },
             RpcServerConfig { port: Some(0) },
         )
@@ -301,13 +301,13 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
     (chassis, port)
 }
 
-/// Hub-shape chassis whose `aether.engine` mailbox is a
+/// Hub-shape chassis whose `aether.fleet` mailbox is a
 /// [`RouteInventorySink`] loopback (issue 2672) rather than the real
-/// `EngineServer`, so the harness's `engine = Some`
+/// `FleetServer`, so the harness's `engine = Some`
 /// `aether.inventory.kinds` refresh RPC lands locally and returns
 /// `reply`. `calls` counts the refreshes the sink fielded, so a test
 /// can assert the refresh-and-retry fired exactly once (no loop).
-/// Unlike `boot_hub_with_inventory` this installs no `EngineServer`
+/// Unlike `boot_hub_with_inventory` this installs no `FleetServer`
 /// (which would warn/settle-err an `engine = Some` for an unregistered
 /// engine) and no `InventoryCapability` (the sink answers `ListKinds`
 /// from the canned reply directly).
@@ -332,7 +332,7 @@ pub(super) fn boot_hub_with_route_loopback(
                 kinds: vec![],
             },
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.engine")),
+            route_target: Some(mailbox_id_from_name("aether.fleet")),
         },
             RpcServerConfig { port: Some(0) },
         )
@@ -366,7 +366,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
                 kinds: vec![],
             },
             #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.engine")),
+            route_target: Some(mailbox_id_from_name("aether.fleet")),
         },
             RpcServerConfig { port: Some(0) },
         )

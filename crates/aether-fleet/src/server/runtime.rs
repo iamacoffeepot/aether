@@ -1,14 +1,14 @@
-//! The `aether.engine` engines-cap runtime half (ADR-0122 identity/runtime
-//! split). The [`EngineServer`](super::EngineServer) identity file names none
+//! The `aether.fleet` engines-cap runtime half (ADR-0122 identity/runtime
+//! split). The [`FleetServer`](super::FleetServer) identity file names none
 //! of these types. The substrate-typed imports are collected once by
 //! this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state, ctx types, artifact/fleet helpers, and result kinds through the
 //! single `use runtime::*` glob in the parent.
 
-use super::{EngineConfig, EngineServer};
+use super::{FleetConfig, FleetServer};
 pub use crate::kinds::ForwardEnvelope;
 use crate::kinds::{EngineAlive, EngineDied};
-pub use crate::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
+pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
@@ -42,15 +42,15 @@ pub use std::time::{Duration, Instant};
 pub use super::artifacts::{
     bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component, resolve_selector,
 };
-pub use super::fleet::{free_local_port, resolve_engine_store_root, settle_err};
+pub use super::fleet::{free_local_port, resolve_fleet_store_root, settle_err};
 
-/// How many recently-died engines [`EngineServer`](super::EngineServer)
+/// How many recently-died engines [`FleetServer`](super::FleetServer)
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
 /// bound: the surface is "what just left and why", not an audit log —
 /// the oldest record is dropped once the ring is full.
 const RECENTLY_DIED_CAP: usize = 16;
 
-/// One recently-departed engine in [`EngineServerState`]'s recently-died
+/// One recently-departed engine in [`FleetServerState`]'s recently-died
 /// ring (issue 1906). Cap-internal — holds the wire fields plus the
 /// `Instant` the cap removed the engine, so `on_list` can compute the
 /// `died_age_millis` it reports in a [`DeadEngineDescriptor`].
@@ -61,9 +61,9 @@ pub struct DeadRecord {
     pub died_at: Instant,
 }
 
-/// One supervised engine in [`EngineServerState`]'s table.
+/// One supervised engine in [`FleetServerState`]'s table.
 pub struct EngineEntry {
-    /// Mailbox of the `aether.engine.proxy:<id>` actor — the
+    /// Mailbox of the `aether.fleet.proxy:<id>` actor — the
     /// forward target for `TerminateEngine`.
     pub proxy_mailbox: MailboxId,
     /// The localhost RPC port the cap assigned this substrate.
@@ -75,14 +75,14 @@ pub struct EngineEntry {
     pub last_alive: Instant,
 }
 
-/// `aether.engine` runtime state (ADR-0122 split): supervises a fleet of
-/// [`EngineProxy`] actors, one per spawned substrate. The addressing identity
-/// is the distinct ZST [`EngineServer`](super::EngineServer); the dispatcher
+/// `aether.fleet` runtime state (ADR-0122 split): supervises a fleet of
+/// [`FleetProxy`] actors, one per spawned substrate. The addressing identity
+/// is the distinct ZST [`FleetServer`](super::FleetServer); the dispatcher
 /// holds this as the cap's state and routes envelopes through the
 /// macro-emitted `Dispatch` impl. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing
 /// it as crate-public API.
-pub struct EngineServerState {
+pub struct FleetServerState {
     pub engines: HashMap<EngineId, EngineEntry>,
     /// Monotonic source of `EngineId`s. Engine ids only need to be
     /// unique among the engines this cap currently supervises — a
@@ -96,15 +96,15 @@ pub struct EngineServerState {
     /// must reach the originating `RpcServerCapability`, not here.
     pub mailer: Arc<Mailer>,
     /// Liveness-heartbeat tuning each spawned proxy is armed with
-    /// (issue 1339), resolved once from `EngineConfig` at init.
+    /// (issue 1339), resolved once from `FleetConfig` at init.
     /// `None` disables the heartbeat fleet-wide.
     pub heartbeat: Option<HeartbeatParams>,
     /// Startup-dial connect budget each spawned proxy is armed with
-    /// (issue 2072), resolved once from `EngineConfig` at init.
+    /// (issue 2072), resolved once from `FleetConfig` at init.
     /// `Some(d)` caps the retry; `None` is the wait-forever sentinel.
     pub connect_budget: Option<Duration>,
     /// How many times `on_spawn` re-forks a substrate on a fresh port
-    /// before giving up (issue 2422), resolved once from `EngineConfig`
+    /// before giving up (issue 2422), resolved once from `FleetConfig`
     /// at init. A freshly-forked substrate can lose its guessed RPC
     /// port to another socket in `free_local_port`'s TOCTOU window and
     /// exit on a fatal bind; a re-fork on a fresh port escapes it.
@@ -112,10 +112,10 @@ pub struct EngineServerState {
     pub spawn_attempts: u32,
     /// Parent directory under which the cap allocates per-engine
     /// spawn / handle-store dirs (issue 1274), resolved once from
-    /// `EngineConfig::engine_store_root` at init via
-    /// [`resolve_engine_store_root`]. `on_spawn` joins each freshly
+    /// `FleetConfig::fleet_store_root` at init via
+    /// [`resolve_fleet_store_root`]. `on_spawn` joins each freshly
     /// minted `engine_id` onto this to get the engine's scratch dir.
-    pub engine_store_root: PathBuf,
+    pub fleet_store_root: PathBuf,
     /// Bounded ring of the last [`RECENTLY_DIED_CAP`] engines that
     /// left the table and why (issue 1906). `on_terminate` /
     /// `on_engine_died` push a [`DeadRecord`] at the removal site;
@@ -127,14 +127,14 @@ pub struct EngineServerState {
     /// 1953) — the storage half of the artifact registry.
     /// `on_upload_binary` ingests a staged binary content-addressed;
     /// `on_list_engine_binaries` enumerates the stored entries. Built from
-    /// `EngineConfig` (the layout dir + disk budget) at init so it
+    /// `FleetConfig` (the layout dir + disk budget) at init so it
     /// persists across a `restart-hub` (the layout root outlives the
     /// hub child); the spawn cutover (#1954) reads it back through the
     /// store's `get` seam.
     pub store: ArtifactStore,
 }
 
-impl EngineServerState {
+impl FleetServerState {
     /// Push a [`DeadRecord`] onto the recently-died ring, evicting the
     /// oldest entry once the ring is full (issue 1906).
     pub fn record_death(&mut self, engine_id: String, rpc_port: u16, reason: DeathReason) {
@@ -156,15 +156,15 @@ impl EngineServerState {
 }
 
 #[runtime]
-impl NativeActor for EngineServer {
+impl NativeActor for FleetServer {
     /// The runtime state this identity boots into (ADR-0122 split): the
     /// supervised-fleet table plus the content-addressed artifact store.
-    type State = EngineServerState;
-    type Config = EngineConfig;
-    const NAMESPACE: &'static str = "aether.engine";
+    type State = FleetServerState;
+    type Config = FleetConfig;
+    const NAMESPACE: &'static str = "aether.fleet";
 
-    fn init(config: EngineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<EngineServerState, BootError> {
-        // Build the hub-scoped store from `EngineConfig` (ADR-0090): the
+    fn init(config: FleetConfig, ctx: &mut NativeInitCtx<'_>) -> Result<FleetServerState, BootError> {
+        // Build the hub-scoped store from `FleetConfig` (ADR-0090): the
         // layout-dir override + disk budget ride config fields (their
         // `AETHER_BINARY_*` env keys are the config env layer), then
         // bootstrap-ingest the chassis bins in `binary_bootstrap` so
@@ -180,14 +180,14 @@ impl NativeActor for EngineServer {
         let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes)
             .map_err(|e| BootError::Other(Box::new(e)))?;
         bootstrap_ingest(&mut store, &config.binary_bootstrap);
-        Ok(EngineServerState {
+        Ok(FleetServerState {
             engines: HashMap::new(),
             next_engine_seq: 1,
             mailer: ctx.mailer(),
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
             spawn_attempts: config.spawn_attempts(),
-            engine_store_root: resolve_engine_store_root(config.engine_store_root.as_deref()),
+            fleet_store_root: resolve_fleet_store_root(config.fleet_store_root.as_deref()),
             recently_died: VecDeque::new(),
             store,
         })
@@ -234,7 +234,7 @@ impl NativeActor for EngineServer {
     /// (ADR-0115), materializes the resolved bytes to an executable
     /// temp file, assigns a free localhost port for the substrate's
     /// RPC server, injects it as `AETHER_RPC_PORT`, forks the realized
-    /// binary, then boots an `aether.engine.proxy:<id>` actor that
+    /// binary, then boots an `aether.fleet.proxy:<id>` actor that
     /// dials it. Reply: `SpawnEngineResult::Ok { engine_id, rpc_port }`
     /// on success, or `Err { engine_id, error }` if the selector
     /// resolves to no stored binary, the fork fails, or the substrate
@@ -291,7 +291,7 @@ impl NativeActor for EngineServer {
             // hold its materialized executable.
             let engine_id = EngineId(Uuid::from_u128(state.next_engine_seq));
             state.next_engine_seq += 1;
-            let engine_store_dir = state.engine_store_root.join(engine_id.0.simple().to_string());
+            let engine_store_dir = state.fleet_store_root.join(engine_id.0.simple().to_string());
 
             // Stored bytes are content-addressed and not directly
             // fork-exec'able, so materialize the resolved entry to an
@@ -328,14 +328,14 @@ impl NativeActor for EngineServer {
             let subname = engine_id.0.simple().to_string();
             let rpc_addr = format!("127.0.0.1:{rpc_port}");
 
-            // `finish()` runs `EngineProxy::init` on this thread: it
+            // `finish()` runs `FleetProxy::init` on this thread: it
             // dials the substrate (retrying while it comes up) and, on
             // failure, kills the child it was handed — so a failed
             // spawn never leaves an orphan for the cap to clean up.
             let result = ctx
-                .spawn_child::<EngineProxy>(
+                .spawn_child::<FleetProxy>(
                     Subname::Named(&subname),
-                    EngineProxyConfig {
+                    FleetProxyConfig {
                         engine_id,
                         rpc_addr,
                         spawned: Some(child),
@@ -368,7 +368,7 @@ impl NativeActor for EngineServer {
                     // burn the budget again.
                     if is_reforkable_spawn_failure(&e) && attempt + 1 < attempts {
                         tracing::warn!(
-                            target: "aether_substrate::engine_server",
+                            target: "aether_substrate::fleet_server",
                             engine_id = %engine_id.0,
                             rpc_port,
                             attempt = attempt + 1,
@@ -437,7 +437,7 @@ impl NativeActor for EngineServer {
     /// sends this when an RPC client addresses a `Call` at
     /// `engine = Some(_)`. The cap looks the engine up in its
     /// table and re-emits a `ForwardEnvelope` at the matching
-    /// `aether.engine.proxy:<id>`, propagating the inbound
+    /// `aether.fleet.proxy:<id>`, propagating the inbound
     /// reply-to verbatim so the substrate's reply (and the proxy's
     /// terminal `CallSettled`) stream straight back to that
     /// `RpcServerCapability`. An unknown / unparseable `engine_id`
@@ -452,7 +452,7 @@ impl NativeActor for EngineServer {
             // there's nowhere to stream the reply or the
             // CallSettled — drop rather than guess.
             tracing::warn!(
-                target: "aether_substrate::engine_server",
+                target: "aether_substrate::fleet_server",
                 engine_id = %mail.engine_id,
                 "engine route: no Component reply-to; dropping",
             );
@@ -502,7 +502,7 @@ impl NativeActor for EngineServer {
     fn on_engine_died(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
         let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
             tracing::warn!(
-                target: "aether_substrate::engine_server",
+                target: "aether_substrate::fleet_server",
                 engine_id = %mail.engine_id,
                 "engine died: unparseable engine_id; ignoring",
             );
@@ -510,7 +510,7 @@ impl NativeActor for EngineServer {
         };
         if let Some(entry) = state.engines.remove(&EngineId(uuid)) {
             tracing::info!(
-                target: "aether_substrate::engine_server",
+                target: "aether_substrate::fleet_server",
                 engine_id = %mail.engine_id,
                 reason = ?mail.reason,
                 "engine evicted: proxy reported death",

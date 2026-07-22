@@ -14,14 +14,14 @@ license.workspace = true
 # ADR-0122 identity/runtime marker ladder — dependencies are flat and
 # unconditional and there is no marker build to preserve.
 #
-# Layering: this crate knows nothing of `aether-engine`. The hub supervisor
+# Layering: this crate knows nothing of `aether-fleet`. The hub supervisor
 # forwards over this transport and therefore depends on it; the edge never runs
 # back (the cycle was broken in #3734).
 
 [features]
 # The round-trip echo actor + its kinds — the far-end receiver of an RPC
 # `Call`. Compiled into this crate's own `cargo test` build unconditionally;
-# the feature exposes it to a sibling crate's tests (`aether-engine`'s proxy
+# the feature exposes it to a sibling crate's tests (`aether-fleet`'s proxy
 # suite forwards onto this same `Call` path through a booted
 # `RpcServerCapability`), which a bare `#[cfg(test)]` cannot reach across a
 # crate boundary. Off by default, so it never reaches the shipped surface.
@@ -62,10 +62,10 @@ aether-window = { path = "../aether-window" }
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The rpc fleet suites (iamacoffeepot/aether#3778): `fleetharness_mail` boots the
 # `FleetHarness` harness over the real hub → RPC → forked-headless stack, and
-# `rpc_engine_routing` boots the hub-shaped chassis by hand (`EngineServer` +
+# `rpc_engine_routing` boots the hub-shaped chassis by hand (`FleetServer` +
 # forwarding `RpcServerCapability`), resolving the forked headless chassis
 # through the harness's `dist/manifest.json` helper (`cargo xtask dist` first).
-aether-engine = { path = "../aether-engine" }
+aether-fleet = { path = "../aether-fleet" }
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 # Both suites route an `aether.fs` `List` as the reply payload under test.
 aether-fs = { path = "../aether-fs" }

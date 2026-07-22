@@ -1,4 +1,4 @@
-//! `aether.engine.*` mail kinds the engine capability owns (ADR-0121).
+//! `aether.fleet.*` mail kinds the engine capability owns (ADR-0121).
 //!
 //! The engine-internal control-plane vocabulary — proxy forwarding
 //! (`ForwardEnvelope`) and fleet liveness (`EngineHeartbeatTick` /
@@ -17,8 +17,8 @@ use aether_data::{Kind, KindId, MailboxId, Schema};
 use aether_kinds::DeathReason;
 use serde::{Deserialize, Serialize};
 
-/// `aether.engine.forward` — hand a per-engine proxy
-/// (`aether.engine.proxy:<id>`) one mail to relay to its substrate
+/// `aether.fleet.forward` — hand a per-engine proxy
+/// (`aether.fleet.proxy:<id>`) one mail to relay to its substrate
 /// over the proxy's outbound RPC connection. Issue 763 P3.
 ///
 /// Carries the *remote* target explicitly: a plain mail to the
@@ -31,14 +31,14 @@ use serde::{Deserialize, Serialize};
 /// sent this `ForwardEnvelope` — the proxy keys reply correlation
 /// off the inbound mail's `Source`.
 #[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.engine.forward")]
+#[kind(name = "aether.fleet.forward")]
 pub struct ForwardEnvelope {
     pub mailbox: MailboxId,
     pub kind: KindId,
     pub payload: Vec<u8>,
 }
 
-/// `aether.engine.heartbeat_tick` — the per-engine proxy's own
+/// `aether.fleet.heartbeat_tick` — the per-engine proxy's own
 /// liveness timer wake (issue 1339). Internal control-plane mail,
 /// not a user surface: a sidecar thread the proxy spawns at init
 /// fires this (empty-payload) at the proxy's own mailbox every
@@ -47,11 +47,11 @@ pub struct ForwardEnvelope {
 /// counts consecutive misses, evicting the engine once the miss
 /// limit is crossed.
 #[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone, Default)]
-#[kind(name = "aether.engine.heartbeat_tick")]
+#[kind(name = "aether.fleet.heartbeat_tick")]
 pub struct EngineHeartbeatTick {}
 
-/// `aether.engine.died` — a per-engine proxy telling the engines
-/// cap (`aether.engine`) that its substrate is gone, so the cap
+/// `aether.fleet.died` — a per-engine proxy telling the engines
+/// cap (`aether.fleet`) that its substrate is gone, so the cap
 /// drops it from the supervised-engine table (issue 1339). The
 /// proxy sends this when it observes the connection close (`Bye` /
 /// `eof`) or when the liveness heartbeat crosses its miss limit —
@@ -61,7 +61,7 @@ pub struct EngineHeartbeatTick {}
 /// `TerminateEngine` already dropped) is a no-op. `engine_id` is
 /// the plain UUID string, matching `TerminateEngine`.
 #[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.engine.died")]
+#[kind(name = "aether.fleet.died")]
 pub struct EngineDied {
     pub engine_id: String,
     /// Why the proxy is reporting the death, so the cap can record it
@@ -72,14 +72,14 @@ pub struct EngineDied {
     pub reason: DeathReason,
 }
 
-/// `aether.engine.alive` — a per-engine proxy reporting a confirmed
+/// `aether.fleet.alive` — a per-engine proxy reporting a confirmed
 /// liveness signal (a `Pong` answering its heartbeat `Ping`) to the
 /// engines cap (issue 1339). The cap stamps the engine's
 /// last-seen-alive time so `ListEnginesResult` can report
 /// `last_heartbeat_age_millis`. Fire-and-forget; an `alive` for an
 /// unknown engine is a no-op. `engine_id` is the plain UUID string.
 #[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.engine.alive")]
+#[kind(name = "aether.fleet.alive")]
 pub struct EngineAlive {
     pub engine_id: String,
 }

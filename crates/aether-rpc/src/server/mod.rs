@@ -51,7 +51,7 @@ mod connection;
 mod tests;
 
 // Round-trip test scaffolding (echo actor + its kinds) — the far-end
-// receiver of an RPC `Call`. `pub` so `aether-engine`'s proxy suite (which
+// receiver of an RPC `Call`. `pub` so `aether-fleet`'s proxy suite (which
 // forwards onto this same `Call` path through a booted `RpcServerCapability`)
 // can reach it; the `test-support` feature is off by default, so the `pub`
 // never reaches the shipped surface.
