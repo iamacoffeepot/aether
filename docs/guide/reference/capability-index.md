@@ -25,8 +25,6 @@ fallback or omits the runtime.
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-inventory/src` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-trace/src` | [Tracing](../systems/tracing-and-settlement.md) |
 | `aether.fleet` | hub fleet and artifact control | `aether-fleet/src` | [Engine fleet](../operating/engine-fleet.md) |
-| `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
-| `aether.gemini` | image and music generation | `aether-gemini/src` | [Content generation](../systems/content-generation.md) |
 | `aether.game.gateway` | trusted player/session-to-sim binding | `aether-game/src` | [Player sessions](../systems/player-sessions.md) |
 | `aether.substrate_harness` | deterministic test-chassis advance/control | `aether-harness-substrate/src` | [SubstrateHarness](../testing/substrateharness-and-fleetharness.md) |
 
@@ -34,6 +32,18 @@ Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
 `aether.fleet.proxy`, `aether.http.server.shard`, and guest trampolines gain
 lineage suffixes. Resolve them from results/inventory rather than constructing
 ids by hand.
+
+## Loadable provider components
+
+The content-generation providers are wasm guest components a substrate loads on
+demand rather than native chassis capabilities (ADR-0159). The default
+composition carries neither; a workload uploads and loads the one it needs, and
+the loaded component answers at `aether.component/aether.embedded:<namespace>`.
+
+| Namespace | Responsibility | Public source | Guide |
+|---|---|---|---|
+| `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
+| `aether.gemini` | image and music generation | `aether-gemini/src` | [Content generation](../systems/content-generation.md) |
 
 ## Shared/substrate kind families
 

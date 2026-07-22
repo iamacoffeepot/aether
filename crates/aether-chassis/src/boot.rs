@@ -20,14 +20,11 @@ use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
-use aether_anthropic::{AnthropicCapability, AnthropicConfig};
 use aether_audio::AudioConfig;
 use aether_codec::frame::install_max_frame_size;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
-use aether_contentgen::ContentGenConfig;
 use aether_fs::{FsCapability, NamespaceRoots};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayParams};
-use aether_gemini::{GeminiCapability, GeminiConfig, GeminiParams};
 use aether_http::{HttpCapability, HttpConfig, HttpServerConfig};
 use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
@@ -596,9 +593,6 @@ pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C>
     builder
         .with_config_member::<HttpConfig>()
         .with_config_member::<HttpServerConfig>()
-        .with_config_member::<GeminiConfig>()
-        .with_config_member::<ContentGenConfig>()
-        .with_config_member::<AnthropicConfig>()
         .with_config_member::<ProcessConfig>()
         .with_config_member::<AudioConfig>()
         .with_config_member::<NamespaceRoots>()
@@ -648,14 +642,12 @@ pub fn tick_only_lifecycle_params() -> LifecycleParams {
 /// builders to acknowledge it.
 ///
 /// ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
-/// `AnthropicConfig`, `GeminiConfig`, …) no longer ride here — the builder
-/// resolves each off the source stack the chassis handed it via
-/// `Builder::with_config_sources`. What remains is the composer-supplied
-/// construction input (`Params`, the aborter, the pool/ring/scheduler/teardown
-/// seams) plus two chassis-side-resolved members the derived staging root and
-/// the fs cap both read: `namespace_roots` (also passed programmatically so the
-/// fs cap uses the exact value the staging root was derived from) and
-/// `generated_asset_staging`.
+/// `ProcessConfig`, …) no longer ride here — the builder resolves each off the
+/// source stack the chassis handed it via `Builder::with_config_sources`. What
+/// remains is the composer-supplied construction input (`Params`, the aborter,
+/// the pool/ring/scheduler/teardown seams) plus `namespace_roots`, passed
+/// programmatically so the fs cap uses the exact roots value the chassis
+/// resolved.
 pub struct CommonBoot {
     pub aborter: Arc<dyn FatalAborter>,
     pub workers: Option<usize>,
@@ -674,15 +666,10 @@ pub struct CommonBoot {
     /// Composer-supplied wasmtime / egress handles for the component host
     /// cap (ADR-0156 §3 `Params`); the cap's `Config` is `()`.
     pub component_host_params: ComponentHostParams,
-    /// The resolved `aether.fs` roots. Resolved chassis-side (its `save` root
-    /// is the fallback for the content-gen staging root, a value derived from
-    /// two resolved members), then passed to the fs cap via the builder's
-    /// programmatic layer so the cap uses the exact same value.
+    /// The resolved `aether.fs` roots. Resolved chassis-side, then passed to the
+    /// fs cap via the builder's programmatic layer so the cap uses the exact
+    /// same value.
     pub namespace_roots: NamespaceRoots,
-    /// Content-gen staging config (ADR-0090). `with_common_caps` folds
-    /// its `gen_dir` override (else the resolved `save`-namespace root)
-    /// into the staging root threaded into the gemini cap.
-    pub generated_asset_staging: ContentGenConfig,
     /// Resolved `TurnSim` wiring for the game gateway (ADR-0156 §3 `Params`).
     /// The default has no configured `TurnSim`, so merely linking the common
     /// chassis opens no player listener.
@@ -708,18 +695,13 @@ pub struct CommonBoot {
 pub struct CommonEnv {
     /// ADR-0156 §5: the config source stack (file + per-cap argv overlays) the
     /// builder resolves each composed cap's `Config` off (http / http-server /
-    /// anthropic / gemini / audio / render tuning / lifecycle). The cap
-    /// `Config`s no longer ride as fields — a test stages programmatic overrides
-    /// here.
+    /// audio / render tuning / lifecycle). The cap `Config`s no longer ride as
+    /// fields — a test stages programmatic overrides here.
     pub sources: ConfigSources,
-    /// The resolved `aether.fs` namespace roots (save / assets / config). Its
-    /// `save` root is the fallback staging root for content-gen, so it resolves
-    /// chassis-side and is passed to the fs cap programmatically so the cap uses
-    /// the exact same value.
+    /// The resolved `aether.fs` namespace roots (save / assets / config).
+    /// Resolved chassis-side and passed to the fs cap programmatically so the
+    /// cap uses the exact same value.
     pub namespace_roots: NamespaceRoots,
-    /// Content-gen staging config (ADR-0090). Resolved chassis-side; folded
-    /// into the staging root in [`with_common_caps`].
-    pub generated_asset_staging: ContentGenConfig,
     /// The substrate runtime knobs (#3849), resolved off the source stack. Only
     /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
     /// the subscriber installs, in each chassis's `build_inner`); the field
@@ -773,7 +755,6 @@ impl CommonEnv {
         // / teardown / runtime knobs.
         let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
         let namespace_roots = sources.resolve::<NamespaceRoots>()?;
-        let generated_asset_staging = sources.resolve::<ContentGenConfig>()?;
         let ring_capacities = sources.resolve::<ActorRingConfig>()?.to_ring_capacities();
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
@@ -798,22 +779,13 @@ impl CommonEnv {
         let workers = chassis_boot.to_workers();
 
         Ok((
-            Self {
-                sources,
-                namespace_roots,
-                generated_asset_staging,
-                runtime,
-                workers,
-                ring_capacities,
-                scheduler_tuning,
-                teardown_budget,
-            },
+            Self { sources, namespace_roots, runtime, workers, ring_capacities, scheduler_tuning, teardown_budget },
             autoload,
         ))
     }
 
     /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
-    /// place, so neither chassis's `compose` hand-copies the same six env-sourced
+    /// place, so neither chassis's `compose` hand-copies the same env-sourced
     /// fields. The three composer-constructed handles (`aborter`,
     /// `component_host_params`, `game_gateway_params`) are supplied by the caller;
     /// the source stack is threaded back out for the builder's
@@ -827,16 +799,8 @@ impl CommonEnv {
         component_host_params: ComponentHostParams,
         game_gateway_params: GameGatewayParams,
     ) -> (CommonBoot, ConfigSources) {
-        let Self {
-            sources,
-            namespace_roots,
-            generated_asset_staging,
-            runtime: _,
-            workers,
-            ring_capacities,
-            scheduler_tuning,
-            teardown_budget,
-        } = self;
+        let Self { sources, namespace_roots, runtime: _, workers, ring_capacities, scheduler_tuning, teardown_budget } =
+            self;
         (
             CommonBoot {
                 aborter,
@@ -846,7 +810,6 @@ impl CommonEnv {
                 teardown_budget,
                 component_host_params,
                 namespace_roots,
-                generated_asset_staging,
                 game_gateway_params,
             },
             sources,
@@ -862,8 +825,8 @@ impl CommonEnv {
 /// builder off the source stack the chassis handed it (`with_config_sources`),
 /// so each cap composes with `with_actor::<_>(params)` alone — no per-cap
 /// config value, no chassis-side section string. The two exceptions ride the
-/// programmatic layer: the fs roots (resolved chassis-side to derive the
-/// staging root, then passed here so the cap uses the identical value) and the
+/// programmatic layer: the fs roots (resolved chassis-side, then passed here so
+/// the cap uses the identical value) and the
 /// game gateway's `Config`, which stays a hardcoded default so the common
 /// chassis opens no player listener from a stray `AETHER_GAME_*` env var
 /// (byte-identical to the pre-inversion `GameGatewayConfig::default()`).
@@ -873,13 +836,6 @@ impl CommonEnv {
 /// boot ordering is needed for logging anymore.
 #[must_use]
 pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
-    // Resolve the content-gen staging root once, here, where the resolved
-    // `NamespaceRoots.save` is in scope: the `AETHER_GEN_DIR` override wins,
-    // else staging tracks the `save`-namespace root the fs cap already owns
-    // (preserving its `AETHER_SAVE_DIR` → platform fallback without re-reading
-    // env). Threaded into the gemini cap via `GeminiParams`.
-    let staging_root =
-        boot.generated_asset_staging.gen_dir.clone().unwrap_or_else(|| boot.namespace_roots.save.clone());
     // ADR-0157 §Security: a subprocess run is confined to the `aether.fs`
     // `save` namespace root — the same writable sandbox the fs cap governs —
     // so it starts inside that sandbox rather than the substrate's cwd. Cloned
@@ -896,14 +852,10 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         // the dedicated builder seams above (`with_workers` / `with_ring_capacities`
         // / `with_scheduler_tuning` / `with_teardown_budget`) instead of a
         // `with_actor` entry, and declare their aggregate membership here.
-        // `ContentGenConfig` joins them: its `AETHER_GEN_DIR` staging knob is
-        // folded into `GeminiParams::gen_root` below rather than composed as a
-        // cap, so it too has no `with_actor` entry to ride.
         .with_config_member::<ChassisBootConfig>()
         .with_config_member::<ActorRingConfig>()
         .with_config_member::<SchedulerTuningConfig>()
         .with_config_member::<SettlementConfig>()
-        .with_config_member::<ContentGenConfig>()
         // ADR-0156 §6: the wire-frame-size knob (#3850). It configures the shared
         // codec rather than any single cap and is pushed into the codec by
         // `install_frame_size`, so it declares its aggregate membership here
@@ -916,13 +868,11 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<InputCapability>(())
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
-        // Programmatic: the fs cap uses the exact roots the staging root was
-        // derived from (resolved chassis-side, above).
+        // Programmatic: the fs cap uses the exact roots resolved chassis-side.
         .with_actor_configured::<FsCapability>((), boot.namespace_roots)
         .with_actor::<TextCapability>(())
         .with_actor::<InventoryCapability>(())
-        // Builder-resolved off the source stack: `HttpConfig`, `AnthropicConfig`,
-        // `GeminiConfig`.
+        // Builder-resolved off the source stack: `HttpConfig`.
         .with_actor::<HttpCapability>(())
         .with_actor::<TcpCapability>(())
         // ADR-0157: the one-shot exec cap. `ProcessConfig` (deny-by-default
@@ -933,8 +883,6 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         // Programmatic default (byte-identical to the pre-inversion `::default()`
         // compose): no `AETHER_GAME_*` env opens a listener on the common chassis.
         .with_actor_configured::<GameGatewayCapability>(boot.game_gateway_params, GameGatewayConfig::default())
-        .with_actor::<AnthropicCapability>(())
-        .with_actor::<GeminiCapability>(GeminiParams { gen_root: staging_root })
 }
 
 /// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,

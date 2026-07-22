@@ -73,21 +73,15 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-component",
- "aether-contentgen",
  "aether-data",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-http",
  "aether-kinds",
  "aether-process",
- "aether-substrate",
- "clap",
- "confique",
  "inventory",
  "serde",
  "serde_json",
- "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -170,16 +164,13 @@ name = "aether-chassis"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-anthropic",
  "aether-audio",
  "aether-codec",
  "aether-component",
- "aether-contentgen",
  "aether-data",
  "aether-fleet",
  "aether-fs",
  "aether-game",
- "aether-gemini",
  "aether-harness-substrate",
  "aether-http",
  "aether-input",
@@ -304,15 +295,12 @@ name = "aether-chassis-headless"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-anthropic",
  "aether-audio",
  "aether-chassis",
  "aether-clipboard",
  "aether-component",
- "aether-contentgen",
  "aether-data",
  "aether-game",
- "aether-gemini",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-http",
@@ -402,14 +390,6 @@ dependencies = [
 [[package]]
 name = "aether-contentgen"
 version = "0.3.0-alpha"
-dependencies = [
- "aether-fs",
- "aether-substrate",
- "clap",
- "confique",
- "ureq",
- "uuid",
-]
 
 [[package]]
 name = "aether-context-canary"
@@ -534,14 +514,9 @@ dependencies = [
  "aether-harness-substrate",
  "aether-http",
  "aether-kinds",
- "aether-substrate",
- "clap",
- "confique",
  "inventory",
  "serde",
  "serde_json",
- "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -618,13 +593,10 @@ name = "aether-http"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-anthropic",
  "aether-chassis",
  "aether-chassis-headless",
  "aether-component",
- "aether-contentgen",
  "aether-data",
- "aether-gemini",
  "aether-harness-substrate-capture",
  "aether-http-derive",
  "aether-kinds",

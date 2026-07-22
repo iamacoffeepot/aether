@@ -23,15 +23,15 @@ downstream crate depends directly on the cap crate it uses, never through a
 re-export facade (a facade would put every downstream back in the cap's
 reverse-dependency closure).
 
-A cap that shares infrastructure with a sibling extracts as a small cluster of
-interdependent crates rather than one grab-bag crate: a thin foundation crate
-holds the shared layer, and each cap crate depends on it. The content-gen
-providers are the standing instance — `aether-contentgen` owns the shared
-adapter traits, HTTP transport, and `gen/` output staging, and the two provider
-caps `aether-anthropic` and `aether-gemini` depend on it. The foundation crate is
-a plain dependency of the providers, not a facade over them: nothing re-exports
-the cap crates through the foundation, so a provider stays a leaf and only its
-own reverse-dependency closure reruns on a change to it.
+A provider that shares pure logic with a sibling factors that logic into a thin
+foundation crate the provider depends on rather than a grab-bag crate. The
+content-gen providers show the shape: `aether-contentgen` holds the wasm-safe
+DTO and string helpers, and the `aether.gemini` guest component depends on it.
+The foundation is a plain dependency, not a facade over the provider: nothing
+re-exports the provider crate through the foundation, so the provider stays a
+leaf and only its own reverse-dependency closure reruns on a change to it. (The
+content-gen providers are wasm guest components loaded on demand, not native
+chassis capabilities — ADR-0159.)
 
 ## Typical directory
 
@@ -212,7 +212,7 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 - Light single-file runtime: `fs/`, `input/`, `clipboard/`
 - Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
 - Multi-actor cluster: `engine/`, `http/`, `tcp/`
-- Native provider cluster: `anthropic/`, `gemini/`, `shared/contentgen/`
+- Guest provider components over a pure foundation: `anthropic/`, `gemini/`, `shared/contentgen/`
 - Split test support: `rpc/server/test_echo.rs`
 
 See [Guest/native boundaries](architecture/guest-native-boundary.md),

@@ -1,52 +1,22 @@
-//! Shared infrastructure for the per-provider content-gen caps
-//! (`aether-anthropic`, issue 1014; `aether-gemini`, issue 1015).
+//! Shared pure helpers for the content-gen provider components
+//! (`aether-anthropic`, `aether-gemini`).
 //!
-//! ADR-0050 §2 settles the dispatch model both caps embed: cap-local
-//! spawn-and-die with a per-cap concurrency bound. This crate lands
-//! that model once so neither provider cap re-derives the dispatch
-//! loop, the root-relative `gen/` staging convention, or the stub-adapter
-//! shapes:
+//! ADR-0159 moved provider logic into wasm guest components and retired the
+//! native runtime halves (issue #3893). What remains here is the I/O-free
+//! surface the surviving `aether.gemini` component still consumes:
 //!
-//! - [`TaskQueue`](aether_substrate::actor::native::TaskQueue) — the
-//!   cap-level rate-limit + queue over the substrate's ADR-0093
-//!   hold-until-resolve dispatch primitive
-//!   (`NativeCtx::dispatch_blocking`). The embedding cap calls `submit`
-//!   from its generate handlers and `on_complete` from its
-//!   `#[handler(task)]` completion handlers; the framework owns the
-//!   in-flight ledger (hold + reply target + worker spawn).
-//! - [`stage_gen_output_under`] — write generated binary bytes to a fresh
-//!   `gen/<uuid>.<ext>` below a caller-supplied root and return that relative
-//!   path in the reply (binary outputs never ride the mail wire). The
-//!   root is resolved once at chassis boot ([`ContentGenConfig`]) and
-//!   threaded into the cap.
-//! - [`adapter`] — the `AnthropicAdapter` / `GeminiAdapter` traits plus
-//!   `StubAnthropicAdapter` / `StubGeminiAdapter` no-op impls so both
-//!   caps land scaffolding + CI smokes before any network code exists.
+//! - [`adapter`] — the adapter-facing request DTO the pure body builder and the
+//!   guest actor convert their wire kinds through ([`GeminiImageRequest`]).
+//! - [`strparse`] — the I/O-free `status=<n>` prefix parser and body-snippet
+//!   truncator the gemini error taxonomy calls (ADR-0159 §2).
+//!
+//! Both are wasm-safe (no `aether_substrate` / `ureq` / disk), so the crate
+//! carries no dependencies and compiles unchanged for `wasm32-unknown-unknown`.
+//! The `ureq` transport and `gen/<uuid>` staging the native caps embedded, and
+//! the staging-root config knob chassis boot resolved, retired with those caps.
 
-// Always-on: the wasm-safe adapter traits + stub types, the
-// `ContentGenConfig` domain struct, and the I/O-free `status=<n>` /
-// body-snippet string helpers ([`strparse`], ADR-0159 §2) carry the marker
-// face — a guest provider component reuses `strparse` unchanged.
 pub mod adapter;
-pub mod config;
 pub mod strparse;
-// Runtime-only: the `gen/` staging path (names `uuid` + the `aether.fs`
-// runtime `LocalFileAdapter`) and the `ureq` agent + blocking request-run
-// block live behind the one `feature = "runtime"` gate, so a marker-only
-// build never pulls the transport / substrate stack through this crate. The
-// pure string helpers that used to sit in `transport` moved to `strparse`.
-#[cfg(feature = "runtime")]
-pub mod staging;
-#[cfg(feature = "runtime")]
-pub mod transport;
 
-pub use adapter::{
-    AdapterUsage, AnthropicAdapter, AnthropicRequest, AnthropicResponse, GeminiAdapter, GeminiArtifact,
-    GeminiImageRequest, GeminiMusicRequest, GeminiResponse, StubAnthropicAdapter, StubGeminiAdapter,
-};
-pub use config::ContentGenConfig;
-#[cfg(feature = "runtime")]
-pub use config::{ContentGenConfigLayer, ContentGenOverlay};
-#[cfg(feature = "runtime")]
-pub use staging::{GEN_PREFIX, stage_gen_output_under};
+pub use adapter::GeminiImageRequest;
 pub use strparse::{parse_status_prefix, snippet};

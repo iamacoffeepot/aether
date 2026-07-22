@@ -52,7 +52,7 @@ compares these with native capabilities.
 | `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
-| `aether-anthropic`, `aether-gemini`, `aether-contentgen` | the two content-gen provider caps and the adapter/staging/transport layer they share |
+| `aether-anthropic`, `aether-gemini`, `aether-contentgen` | the two content-gen provider components (loaded on demand, not chassis fixtures) and the shared pure DTO/string helpers they build on |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, bundle-pack format |
 | `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` | one crate per chassis binary |
 | `aether-chassis-bundle` | standalone bundle binaries with the component pack embedded at build time |

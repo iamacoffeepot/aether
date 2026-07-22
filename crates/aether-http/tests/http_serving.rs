@@ -32,13 +32,10 @@ use std::str::from_utf8;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::AutoloadComponent;
 use aether_chassis::boot::{CommonEnv, RuntimeConfig};
 use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
-use aether_contentgen::ContentGenConfig;
-use aether_gemini::GeminiConfig;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
@@ -55,8 +52,6 @@ fn base_sources(server_config: HttpServerConfig) -> ConfigSources {
     let mut sources = ConfigSources::new(None);
     sources.set_override(HttpConfig::default());
     sources.set_override(server_config);
-    sources.set_override(AnthropicConfig::default());
-    sources.set_override(GeminiConfig::default());
     sources.set_override(LifecycleConfig { advance_timeout_millis: 1_000 });
     sources
 }
@@ -363,7 +358,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),
@@ -473,7 +467,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),
@@ -578,7 +571,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),
@@ -688,7 +680,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),
@@ -912,7 +903,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: base_sources(server_config),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),

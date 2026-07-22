@@ -25,14 +25,11 @@ use std::fs;
 use std::thread;
 use std::time::Duration;
 
-use aether_anthropic::AnthropicConfig;
 use aether_chassis::autoload::boot_manifest_autoload;
 use aether_chassis::boot::{CommonEnv, RuntimeConfig};
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
 use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
-use aether_contentgen::ContentGenConfig;
-use aether_gemini::GeminiConfig;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::{HttpConfig, HttpServerConfig};
 use aether_lifecycle::LifecycleConfig;
@@ -51,8 +48,6 @@ mod tests {
         let mut sources = ConfigSources::new(None);
         sources.set_override(HttpConfig::default());
         sources.set_override(HttpServerConfig::default());
-        sources.set_override(AnthropicConfig::default());
-        sources.set_override(GeminiConfig::default());
         sources.set_override(LifecycleConfig { advance_timeout_millis: 1_000 });
         sources
     }
@@ -94,7 +89,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
                 sources: default_sources(),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),
@@ -163,7 +157,6 @@ mod tests {
             common: CommonEnv {
                 namespace_roots: test_namespace_roots(sandbox),
                 sources: default_sources(),
-                generated_asset_staging: ContentGenConfig::default(),
                 runtime: RuntimeConfig::default(),
                 workers: None,
                 ring_capacities: aether_substrate::RingCapacities::default(),

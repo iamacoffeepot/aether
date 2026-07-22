@@ -35,14 +35,6 @@ aether-http = { path = "../aether-http" }
 # The headless chassis absorbs audio mail with a typed Err reply, so it
 # names the `SetMasterGain` kind pair without the cpal runtime.
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
-# Named only by the hub-less autoload integration test (`tests/headless_autoload.rs`),
-# which stages the cap configs as programmatic overrides; the chassis lib composes
-# these caps through `aether-chassis`'s `with_common_caps`.
-aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
-# ADR-0159: `aether-gemini` defaults to the wasm guest component; the native
-# headless chassis takes the legacy native cap explicitly.
-aether-gemini = { path = "../aether-gemini", default-features = false, features = ["runtime"] }
-aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
 aether-game = { path = "../aether-game" }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
