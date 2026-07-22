@@ -1,20 +1,22 @@
-//! Desktop chassis driver capability — ADR-0071 phase 3.
+//! Desktop chassis driver capability — ADR-0071 phase 3 / ADR-0161 R3.
 //!
-//! Holds the winit `App` struct, the `ApplicationHandler` impl that
-//! drives per-frame work, the small bag of winit/wgpu mapping helpers
-//! the chassis needs to read its own state, and the
-//! `AETHER_WINDOW_MODE` parser. Wraps everything in a
-//! `DesktopDriverCapability` so `crate::chassis::DesktopChassis`
-//! composes one driver alongside its passive capabilities
-//! (`LogCapability`, `FsCapability`, `HttpCapability`, `AudioCapability`,
-//! `RenderCapability` — composed via `chassis_builder::Builder::with_actor`
-//! per ADR-0071 phase B).
+//! Holds the winit `App` struct and the `ApplicationHandler` impl that drives
+//! per-frame work. Post-ADR-0161 the driver is a pure pump host: it owns two
+//! pumped slots on the winit thread — `aether.window` (ADR-0160) and
+//! `aether.render` (this slice) — booting each via
+//! [`DriverCtx::boot_pumped_actor`] from a Claim-stage reservation, pushing
+//! them mail, and draining. There is no GPU code here: the wgpu surface,
+//! accumulators, and pending capture are plain state on the pumped render
+//! actor (`aether-render`). `DesktopDriverCapability` composes one driver
+//! alongside the passive capabilities (`LogCapability`, `FsCapability`,
+//! `HttpCapability`, `AudioCapability`, …); render no longer composes as a
+//! passive on desktop.
 //!
-//! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`
-//! and emits the shutdown telemetry the previous `DesktopChassis::run`
-//! body owned. Returning means the user closed the window or the
-//! event loop exited cleanly; the `chassis_builder` then tears down
-//! every passive in reverse boot order via `BootedPassives::Drop`.
+//! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`, runs
+//! each pumped slot's `shutdown` teardown on exit, and emits the shutdown
+//! telemetry. Returning means the user closed the window or the event loop
+//! exited cleanly; the `chassis_builder` then tears down every passive in
+//! reverse boot order via `BootedPassives::Drop`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -161,8 +163,8 @@ pub struct App {
     /// lazily (and for logging); the size is consulted only when the mode is
     /// `Windowed`. Runtime `set_window_title` mail overrides the title but
     /// doesn't update this field — the current title lives on the `Window`
-    /// itself. The wireframe value threads to `Gpu::new`, whose
-    /// `WireframeMode::from_config_value` owns the tri-state parse.
+    /// itself. The wireframe value is threaded into the pumped render actor's
+    /// [`PumpedRenderParams`], whose lazy wgpu boot owns the tri-state parse.
     window_settings: aether_chassis::WindowSettings,
     /// The `aether.window` desktop runtime, pumped on the winit thread
     /// (ADR-0160 §Decision 3). Booted from the Claim-stage `aether.window`

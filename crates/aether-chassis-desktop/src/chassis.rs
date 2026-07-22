@@ -3,15 +3,15 @@
 //! [`DesktopChassis::build`] entry point that assembles the substrate
 //! + driver into a [`BuiltChassis`] for `main()` to drive.
 //!
-//! Issue 603 retired `chassis_handler` entirely: capture goes through
-//! `RenderCapability` (Phase 2), window kinds through driver-as-actor
-//! on `aether.window` (Phase 3), and `platform_info` was deleted as a
-//! kind (Phase 4) along with the closure-fallback that served it.
-//! Two proxy events wake the loop under `ControlFlow::Wait`:
-//! `UserEvent::Capture` so a queued `CaptureQueue` request gets pulled
-//! on the next redraw, and `UserEvent::WindowMail` so `about_to_wait`
-//! drains the `aether.window` inbox when window-control mail arrives at
-//! an occluded window (iamacoffeepot/aether#1318).
+//! Issue 603 retired `chassis_handler` entirely: window kinds go through
+//! driver-as-actor on `aether.window` (Phase 3), and `platform_info` was
+//! deleted as a kind (Phase 4) along with the closure-fallback that served
+//! it. ADR-0161 R3 made capture a mail-driven state machine inside the pumped
+//! `aether.render` actor (deleting `UserEvent::Capture`), so the sole proxy
+//! event is `UserEvent::WindowMail` — the generic "a pumped slot took mail,
+//! wake the loop" signal both the window and render slots poke, so
+//! `about_to_wait` drains them even under `ControlFlow::Wait`
+//! (iamacoffeepot/aether#1318).
 
 use std::io;
 use std::mem;
