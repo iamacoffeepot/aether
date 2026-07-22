@@ -21,7 +21,7 @@
 //!
 //! Flag naming is mechanical: strip an `AETHER_` (or top-level)
 //! prefix, lowercase, hyphenate. `AETHER_HTTP_TIMEOUT_MS` →
-//! `--http-timeout-ms`, `GEMINI_API_KEY` → `--gemini-api-key`.
+//! `--http-timeout-ms`, `AETHER_PROCESS_TIMEOUT_MS` → `--process-timeout-ms`.
 //! Bool flags accept zero or one value (`--http-disable` ⇒ `true`,
 //! `--http-disable=false` ⇒ `false`, absent ⇒ `None`), matching
 //! confique's native env-side bool deserialization.
@@ -65,12 +65,9 @@ use clap::{Args, Parser};
 // (`NamespaceRootsOverlay`), not the namespace prefix (`FsOverlay`) —
 // alias the historical name so the bundle's compose code keeps
 // reading.
-pub use aether_anthropic::AnthropicOverlay;
 pub use aether_audio::AudioOverlay;
-pub use aether_contentgen::ContentGenOverlay;
 pub use aether_fleet::FleetOverlay;
 pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
-pub use aether_gemini::GeminiOverlay;
 pub use aether_harness_substrate::SettlementOverlay;
 pub use aether_http::HttpOverlay;
 pub use aether_http::HttpServerOverlay;
@@ -95,18 +92,11 @@ pub struct CommonOverlay {
     pub http_server: HttpServerOverlay,
     #[command(flatten)]
     pub fs: FsOverlay,
-    #[command(flatten)]
-    pub anthropic: AnthropicOverlay,
-    #[command(flatten)]
-    pub gemini: GeminiOverlay,
     /// One-shot exec cap knobs (ADR-0157): `--process-allowlist` /
     /// `--process-max-in-flight` / `--process-timeout-ms`, shadowing the
     /// `AETHER_PROCESS_*` env.
     #[command(flatten)]
     pub process: ProcessOverlay,
-    /// Content-gen staging root: `--gen-dir` / `AETHER_GEN_DIR`.
-    #[command(flatten)]
-    pub generated_asset_staging: ContentGenOverlay,
     /// Shared chassis boot knobs: `--workers`, `--boot-manifest`.
     #[command(flatten)]
     pub chassis_boot: ChassisBootOverlay,

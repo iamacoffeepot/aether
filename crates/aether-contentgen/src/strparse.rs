@@ -1,16 +1,12 @@
-//! Provider-agnostic, I/O-free string helpers both content-gen backends
+//! Provider-agnostic, I/O-free string helpers the content-gen components
 //! share: the `status=<n>` error-string prefix parse and the body-snippet
 //! trim.
 //!
 //! These are the pure fraction of the shared transport plumbing (ADR-0159
 //! §2 names them as guest-portable). They depend only on `alloc`/`std`
-//! string handling — no `ureq`, no substrate — so they stay always-on and
-//! compile to `wasm32` unchanged, which is what lets a guest provider
-//! component (the `aether.gemini` component, issue #3892) map a non-2xx
-//! `aether.http.fetch_result` onto its error taxonomy with the same code the
-//! native cap runs. The `ureq` agent + blocking request-run block that used
-//! to sit beside them stay in the runtime-gated [`transport`](crate::transport)
-//! module.
+//! string handling — no `ureq`, no substrate — so they compile to `wasm32`
+//! unchanged, which is what lets the `aether.gemini` guest component map a
+//! non-2xx `aether.http.fetch_result` onto its error taxonomy.
 
 /// Parse the `<status> retry_after_millis=<Debug-of-Option<u32>>` prefix a
 /// backend prepends to a non-2xx error string (after the caller strips

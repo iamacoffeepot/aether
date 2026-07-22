@@ -136,15 +136,6 @@ aether-lifecycle = { path = "../aether-lifecycle" }
 # `locate_component_wasm` / `init_save_sandbox` / `test_namespace_roots`
 # — the shared wasm-discovery + sandbox helpers the test boots with.
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-# The headless env the test assembles threads real cap configs through
-# `HeadlessEnv`, which names each config type directly. ADR-0159 made the
-# provider crate's guest component the default build, so the native config
-# types this test names ride the explicit `runtime` feature.
-aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
-aether-contentgen = { path = "../aether-contentgen" }
-# ADR-0159: `aether-gemini` defaults to the wasm guest component; this test
-# names the native `GeminiConfig` derive, so it takes the runtime half.
-aether-gemini = { path = "../aether-gemini", default-features = false, features = ["runtime"] }
 # iamacoffeepot/aether#3766: the fixture crate whose wasm the test loads
 # (the `http_handler` / streaming / websocket exports), declared so the
 # source→consumer coupling is cargo-visible — determinator re-runs this

@@ -1,6 +1,6 @@
 # ADR-0159: Guest-hosted provider capabilities
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-21
 
 Supersedes one alternative-rejection inside **ADR-0050** (the "Caps as guest components, not substrate caps" bullet). Builds on the edge capabilities landing in **ADR-0157** (`aether.process.run`, issue #3886) and **ADR-0158** (`aether.http` per-sender bounded async dispatch, issue #3887), the init-config bytes path of **ADR-0090**, the request-context reply correlation of **ADR-0139**, and the hold-until-resolve dispatch primitive of **ADR-0093**. The companion chassis refactor is issue #3893; the two component implementations are issues #3891 (anthropic) and #3892 (gemini).

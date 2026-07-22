@@ -55,8 +55,8 @@ const SAVE_NAMESPACE: &str = "save";
 /// Init-config for [`GeminiComponent`] (ADR-0090 init-config bytes; ADR-0159
 /// §5). Carries the provider secret and tuning the chassis used to resolve
 /// natively — the API key, the disable flag, the per-request timeout, and the
-/// namespace-relative staging directory the chassis-side `GeminiParams::gen_root`
-/// resolution can no longer run for a guest.
+/// namespace-relative staging directory the chassis-side gen-root resolution
+/// can no longer run for a guest.
 ///
 /// # Agent
 /// Encode one of these to the component's `Config` shape and pass it as the
@@ -411,7 +411,7 @@ impl WasmActor for GeminiComponent {
 
 impl GeminiComponent {
     /// Whether every request should short-circuit to `Unauthorized` — no key,
-    /// or explicitly disabled. Mirrors the native `DisabledGeminiAdapter`.
+    /// or explicitly disabled.
     fn is_disabled(&self) -> bool {
         self.config.disabled || self.config.api_key.is_empty()
     }
@@ -575,7 +575,7 @@ impl GeminiComponent {
 }
 
 /// The zero `Usage` the guest reports — the Gemini media APIs return no token
-/// accounting, matching the native cap's `AdapterUsage::default()`.
+/// accounting.
 fn default_usage() -> Usage {
     Usage { input_tokens: 0, output_tokens: 0, wall_clock_millis: 0, cost_micros: None }
 }

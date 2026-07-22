@@ -39,12 +39,6 @@ aether-tcp = { path = "../aether-tcp" }
 aether-game = { path = "../aether-game" }
 aether-text = { path = "../aether-text", features = ["runtime"] }
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
-aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
-aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
-# ADR-0159: `aether-gemini` now defaults to the wasm guest component; the
-# native chassis composes the legacy native cap, so it opts out of the default
-# and takes the runtime half explicitly.
-aether-gemini = { path = "../aether-gemini", default-features = false, features = ["runtime"] }
 aether-process = { path = "../aether-process", features = ["runtime"] }
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 aether-fs = { path = "../aether-fs" }

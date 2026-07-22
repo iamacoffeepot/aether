@@ -1,27 +1,18 @@
 //! Pure request-side logic for the `aether.gemini` provider (ADR-0050,
 //! ADR-0159 §2): the Generative Language API endpoint URL, the Nano Banana
 //! `generateContent` / Lyria `predict` request-body builders, the
-//! request-side base64 encoder for reference images, the wire-enum → provider
-//! `W:H` / size / thinking-level string maps, and the adapter-error → typed
-//! `GeminiError` mapping.
+//! request-side base64 encoder for reference images, and the wire-enum →
+//! provider `W:H` / size / thinking-level string maps.
 //!
-//! No I/O and no `ureq` — these compile to `wasm32` unchanged, so the guest
-//! component builds the same request bodies the native cap does. The blocking
-//! HTTP call that consumes these bodies lives in the runtime-gated
-//! [`adapter`](super::adapter) (native) or rides `aether.http.fetch` (guest).
+//! No I/O — these compile to `wasm32` unchanged, so the guest component builds
+//! the request bodies and rides `aether.http.fetch` for the call that consumes
+//! them.
 
 use serde_json::{Map, Value, json};
 
 use aether_contentgen::adapter::GeminiImageRequest;
 
 use super::{AspectRatio, ImageSize, ThinkingLevel};
-// `map_adapter_error` (and its `GeminiError` return + the `error` module) are
-// native-only: only the `ureq` backend produces the `status=<n>` sentinel it
-// parses.
-#[cfg(feature = "runtime")]
-use super::GeminiError;
-#[cfg(feature = "runtime")]
-use super::error;
 
 /// Generative Language API host.
 pub const GENLANG_HOST: &str = "https://generativelanguage.googleapis.com";
@@ -168,15 +159,6 @@ pub fn thinking_level_str(level: ThinkingLevel) -> &'static str {
         T::Minimal => "minimal",
         T::High => "high",
     }
-}
-
-/// Convert an adapter error string into the typed `GeminiError`. Only the
-/// native `ureq` backend prepends the `status=<n>` sentinel this parses; the
-/// guest reads the status off `FetchResult` directly, so this is runtime-only.
-#[cfg(feature = "runtime")]
-#[must_use]
-pub fn map_adapter_error(raw: &str) -> GeminiError {
-    error::adapter_error_to_typed(raw)
 }
 
 #[cfg(test)]
