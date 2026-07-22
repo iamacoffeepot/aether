@@ -945,7 +945,7 @@ impl ConfigSources {
 
     /// ADR-0156 §5: reject any staged programmatic override whose config type is
     /// not in `composed` — the set of `TypeId`s of every composed member's
-    /// `Config` (each `with_actor`'s `A::Config`, each `with_config_member`, and
+    /// `Config` (each `with_actor`'s `A::Config`, each `declare_config_member`, and
     /// the driver's members). A typo'd or orphaned `with_config::<T>(value)` —
     /// staged but matching no composed member — is a hard boot error naming `T`
     /// rather than a value silently left behind. Run at build / claim time,

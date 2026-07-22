@@ -76,8 +76,12 @@ impl Chassis for HeadlessChassis {
         // `env`: the tick cadence rides the timer driver, the autoload list is
         // drained after build. The `Copy` knobs also feed the boot log line.
         let tick_period = env.tick_period;
-        let workers = env.common.workers;
-        let ring_capacities = env.common.ring_capacities;
+        // #3930: the non-cap members ride as resolved structs now; lower the two
+        // the boot log line reports (the same lowered values as before). The fused
+        // `with_chassis_config_member` install re-lowers `workers` onto the builder
+        // seam during `compose`.
+        let workers = env.common.chassis_boot.to_workers();
+        let ring_capacities = env.common.actor_ring.to_ring_capacities();
         let autoload = mem::take(&mut env.autoload);
 
         // Tick rates are bounded well below `u32::MAX` Hz (typically
@@ -330,8 +334,8 @@ mod config_manifest_tests {
         // (`RpcServerConfig` composed via `with_rpc_server`, `RuntimeConfig` +
         // `FrameSizeConfig` declared in `with_common_caps`), so the composition
         // walk — not `chassis_residual_knobs` — is what now claims them. Catches a
-        // dropped `with_config_member` or a de-composed RPC server reintroducing a
-        // false unknown-key warning.
+        // dropped `declare_config_member` or a de-composed RPC server reintroducing
+        // a false unknown-key warning.
         assert!(
             known.contains("AETHER_MAX_FRAME_SIZE"),
             "headless must claim the frame-size knob via the composed FrameSizeConfig member"

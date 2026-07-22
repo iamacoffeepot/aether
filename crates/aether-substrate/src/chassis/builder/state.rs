@@ -118,7 +118,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// ADR-0156 §4: the composition-derived config aggregate accumulator.
     /// [`Self::with_actor`] pushes each composed cap's [`ConfigMember`]
     /// declaration (type-level — the config *value* is never read here) and
-    /// [`Self::with_config_member`] pushes the chassis-declared non-cap
+    /// [`Self::declare_config_member`] pushes the chassis-declared non-cap
     /// members (workers / ring capacities / scheduler tuning / teardown budget);
     /// [`Self::config_manifest`] reads it plus the driver's members.
     config_members: Vec<ConfigMemberRecord>,
@@ -132,7 +132,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// ADR-0156 §5: the `TypeId`s of every composed member's `Config` — each
     /// [`Self::with_actor`]'s `A::Config` (including `()` and the
     /// `RpcServerConfig` bridge, whose `members()` is empty) and each
-    /// [`Self::with_config_member`]. Folded with the driver's members at build /
+    /// [`Self::declare_config_member`]. Folded with the driver's members at build /
     /// claim to reject a staged override that matches no composed member (a
     /// staged-but-never-composed override is a hard boot error).
     composed_config_types: HashSet<TypeId>,
@@ -325,18 +325,20 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         self
     }
 
-    /// Declare a non-cap config member on the aggregate (ADR-0156 §4): the
-    /// chassis-wide knobs resolved outside the `with_actor` chain and threaded
-    /// through the dedicated builder seams — workers / boot manifest
-    /// (`ChassisBootConfig`), ring capacities ([`Self::with_ring_capacities`]),
-    /// scheduler tuning ([`Self::with_scheduler_tuning`]), teardown budget
-    /// ([`Self::with_teardown_budget`]) — plus the hub's declared fleet
-    /// pass-through set. These configure the shared base rather than any
-    /// single cap, so they have no `with_actor` entry to ride; this is the
-    /// smallest seam that folds their section + `META` into the same walk.
-    /// Purely type-level (`M::members()`), so no value is required.
+    /// Declare a non-cap config member on the aggregate (ADR-0156 §4) *without*
+    /// installing any value — purely type-level (`M::members()`), so the section
+    /// + `META` fold into the same walk but no builder seam is touched. After the
+    /// chassis-member fuse, a declaration with no matching value install is
+    /// legitimate only where value-free is the truth: the hub's fleet pass-through
+    /// superset (which declares cap members it never composes, hence the
+    /// unqualified [`ConfigMember`] bound) and the process-global members whose
+    /// value applies off the builder entirely — `FrameSizeConfig` (pushed into
+    /// the codec at env time) and `RuntimeConfig` (log filter applied in
+    /// `Chassis::build`). A member with a builder seam pairs its install with this
+    /// declaration through `with_chassis_config_member` instead, so the two halves
+    /// cannot drift.
     #[must_use]
-    pub fn with_config_member<M: ConfigMember + 'static>(mut self) -> Self {
+    pub fn declare_config_member<M: ConfigMember + 'static>(mut self) -> Self {
         self.config_members.extend(M::members());
         // ADR-0156 §5: a declared non-cap member is a valid `with_config`
         // override target (the chassis may override its resolved value).
@@ -345,7 +347,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     }
 
     /// ADR-0156 §5: the acceptable-override-target set — the `TypeId`s of every
-    /// composed member's `Config` (the `with_actor` / `with_config_member`
+    /// composed member's `Config` (the `with_actor` / `declare_config_member`
     /// accumulator) plus the driver type's declared members. A staged
     /// `with_config` override outside this set is an orphan.
     fn acceptable_override_targets(&self) -> HashSet<TypeId> {
@@ -449,7 +451,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// ADR-0156 §4 compose-stage terminal, sibling to [`Self::claim_namespaces`]:
     /// the composition-derived chassis config aggregate. Reads the config
     /// members accumulated off the composed `with_actor` chain plus the
-    /// chassis-declared non-cap members ([`Self::with_config_member`]) and the
+    /// chassis-declared non-cap members ([`Self::declare_config_member`]) and the
     /// driver type's value-free [`DriverCapability::config_members`] — the
     /// same three contributors [`Self::claim_namespaces`] runs, read as config
     /// declarations rather than claimed namespaces.

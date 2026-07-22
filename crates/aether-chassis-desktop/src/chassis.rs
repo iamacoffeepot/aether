@@ -114,7 +114,11 @@ impl Chassis for DesktopChassis {
         // similarity references, and the autoload list is drained after build.
         // `WindowSettings` / `RenderTuningConfig` are `Clone` and tiny, so the
         // clones are free.
-        let workers = env.common.workers;
+        // #3930: the non-cap members ride as resolved structs now; lower `workers`
+        // for the boot log line (the same lowered value as before). The fused
+        // `with_chassis_config_member` install re-lowers it onto the builder seam
+        // during `compose`.
+        let workers = env.common.chassis_boot.to_workers();
         let window = env.window.clone();
         let render_config = env.render.clone();
         let assets_dir = env.common.namespace_roots.assets.clone();
