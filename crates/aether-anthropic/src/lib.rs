@@ -32,6 +32,19 @@ mod kinds;
 pub use config::AnthropicConfig;
 pub use kinds::{AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role};
 
+// The ADR-0159 guest component: a wasm actor that keeps the wire kinds
+// byte-identical and dispatches its I/O as mail to the `aether.http` and
+// `aether.process` edge capabilities. Always-on and wasm-safe (the pure logic
+// ported from the native backend depends only on serde / the edge kinds), so
+// the default (runtime-less) build of this crate is the loadable component; the
+// `export!` FFI it emits is wasm32-only and inert in the native `runtime`
+// build, where it coexists with the native cap below (distinct types, one
+// shared `NAMESPACE`; only the native identity carries the name-inventory
+// entry, so there is no runtime collision).
+mod component;
+pub use component::{AnthropicComponent, AnthropicComponentConfig, DEFAULT_CLI_BINARY};
+aether_actor::export!(AnthropicComponent);
+
 // Runtime-only: the `Config`-derive layer/overlay + the adapter machinery (the
 // `ureq` Messages backend `api`, the `claude` subprocess backend `cli`, the
 // error taxonomy `error`, and the `AnthropicAdapter` impls below) live behind
