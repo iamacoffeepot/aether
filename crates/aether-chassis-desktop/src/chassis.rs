@@ -78,8 +78,74 @@ impl Chassis for DesktopChassis {
     type Driver = DesktopDriverCapability;
     type Env = DesktopEnv;
 
-    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        Self::build_inner(env)
+    /// Build the desktop chassis: construct the Start-stage runtime handle
+    /// (the winit event loop), stand up substrate-core internals, compose the
+    /// capability chain via [`BootableChassis::compose`], then wrap everything
+    /// in a [`DesktopDriverCapability`] and hand it to the builder. Returns a
+    /// [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the winit event
+    /// loop.
+    fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime handle,
+        // not config — construct it here on the boot path (`main()` calls this
+        // on the chassis main thread, where winit's `!Send` `EventLoop` must
+        // live). `--describe` never reaches this method, so it opens no event
+        // loop. The `EventLoop` build fault (never `Send + Sync` across winit's
+        // platform impls) is stringified into `BootError::Other`, the same
+        // shape a wasmtime boot fault takes. Capture is plain state on the
+        // pumped render actor (ADR-0161), so there is no cross-thread queue to
+        // hand over.
+        let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
+            BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
+        })?;
+        event_loop.set_control_flow(ControlFlow::Poll);
+
+        let boot = SubstrateBoot::build()?;
+        // #3849: `SubstrateBoot::build` installed the subscriber with an
+        // env-or-`info` filter (before the config file loaded); re-apply the
+        // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
+        // `info`) now so a filter set only in the config file takes effect.
+        apply_filter(&env.common.runtime.log_filter);
+        let mailer = Arc::clone(&boot.queue);
+
+        // Driver-only / post-build fields, read out before `compose` consumes
+        // `env`: the window boot knobs and the render tuning `Config` ride the
+        // desktop driver (which boots the pumped render actor, ADR-0161 R3),
+        // the `assets` root threads into that actor's params for `capture_frame`
+        // similarity references, and the autoload list is drained after build.
+        // `WindowSettings` / `RenderTuningConfig` are `Clone` and tiny, so the
+        // clones are free.
+        let workers = env.common.workers;
+        let window = env.window.clone();
+        let render_config = env.render.clone();
+        let assets_dir = env.common.namespace_roots.assets.clone();
+        let autoload = mem::take(&mut env.autoload);
+
+        tracing::info!(
+            target: "aether_substrate::boot",
+            workers_override = ?workers,
+            "componentless boot — close window to exit; load a component via aether.component.load",
+        );
+
+        let builder = Self::compose(&boot, env);
+        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
+        // var, sweeping against the composition-derived known-key set plus the
+        // residual hand records. Runs here (not in `from_env`) because the
+        // per-chassis known keys come from the composed builder's manifest.
+        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
+        // ADR-0161 R3: the driver boots the pumped `aether.render` actor from
+        // its Claim-stage `aether.render` reservation, so it carries the render
+        // tuning `Config` and the `assets` root here. `boot` moves into the
+        // driver, after `compose` finished borrowing it.
+        let driver = DesktopDriverCapability { event_loop, boot, window, render_config, assets_dir };
+        let built = builder.driver(driver).build()?;
+        // Auto-load any bundled components, in order, before the run loop
+        // starts. Fire-and-forward: the component host dispatches each load off
+        // the worker pool (already up after `build`), so the game is live
+        // shortly after `run` begins — no hub required.
+        for component in autoload {
+            mailer.push(autoload_mail(component));
+        }
+        Ok(built)
     }
 }
 
@@ -98,11 +164,11 @@ impl BootableChassis for DesktopChassis {
     /// common caps plus the audio / clipboard / render / substrate-harness /
     /// lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3).
     /// Returns the composed builder before the driver is installed:
-    /// `build_inner` adds the desktop driver and starts (the driver's
+    /// [`Chassis::build`] adds the desktop driver and starts (the driver's
     /// `aether.window` claim rides its Claim-stage hook either way), while the
     /// describe / config helpers read the claim / config terminals off it.
     ///
-    /// Takes the boot handle by reference — `build_inner` moves the same
+    /// Takes the boot handle by reference — [`Chassis::build`] moves the same
     /// `boot` into the driver afterward. The window boot knobs (mode / size /
     /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
     /// no part in the claim chain, so they are ignored here.
@@ -166,7 +232,7 @@ impl BootableChassis for DesktopChassis {
 /// ADR-0155 §4: this is config only — every field resolves through the
 /// argv/env/file path a real boot uses, so `--describe` can resolve it on
 /// a headless host. The Start-stage winit `EventLoop` that rides the boot
-/// path is not config: it is constructed in `DesktopChassis::build_inner`
+/// path is not config: it is constructed in the desktop [`Chassis::build`]
 /// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
 /// thread, so it stays local to the boot call `main()` makes).
 pub struct DesktopEnv {
@@ -201,7 +267,7 @@ impl DesktopEnv {
     ///
     /// ADR-0155 §4: env resolution produces config only — the winit
     /// `EventLoop` is a Start-stage runtime handle constructed on the boot
-    /// path in `DesktopChassis::build_inner`, not here — so the only fallible
+    /// path in the desktop [`Chassis::build`], not here — so the only fallible
     /// step is the ADR-0090 §4 config validation / parse path.
     ///
     /// # Errors
@@ -222,7 +288,7 @@ impl DesktopEnv {
     ///
     /// See [`Self::from_env`].
     pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, ConfigError> {
-        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
+        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
         // where the composed builder's `config_manifest` supplies the
         // per-chassis known-key set (desktop no longer "knows" the headless
         // tick knob).
@@ -263,80 +329,6 @@ impl DesktopEnv {
         let (common, autoload) = CommonEnv::resolve(sources)?;
 
         Ok(Self { common, window, render, autoload })
-    }
-}
-
-impl DesktopChassis {
-    /// Build the desktop chassis: construct the Start-stage runtime handles
-    /// (winit event loop + capture queue), stand up substrate-core internals,
-    /// compose the capability chain via [`Self::compose`], then wrap
-    /// everything in a [`DesktopDriverCapability`] and hand it to the builder.
-    /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the
-    /// winit event loop.
-    ///
-    /// The trait method [`Chassis::build`] forwards here.
-    fn build_inner(mut env: DesktopEnv) -> Result<BuiltChassis<Self>, BootError> {
-        // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime handle,
-        // not config — construct it here on the boot path (`main()` calls this
-        // on the chassis main thread, where winit's `!Send` `EventLoop` must
-        // live). `--describe` never reaches this method, so it opens no event
-        // loop. The `EventLoop` build fault (never `Send + Sync` across winit's
-        // platform impls) is stringified into `BootError::Other`, the same
-        // shape a wasmtime boot fault takes. Capture is plain state on the
-        // pumped render actor (ADR-0161), so there is no cross-thread queue to
-        // hand over.
-        let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
-            BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
-        })?;
-        event_loop.set_control_flow(ControlFlow::Poll);
-
-        let boot = SubstrateBoot::build()?;
-        // #3849: `SubstrateBoot::build` installed the subscriber with an
-        // env-or-`info` filter (before the config file loaded); re-apply the
-        // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
-        // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.common.runtime.log_filter);
-        let mailer = Arc::clone(&boot.queue);
-
-        // Driver-only / post-build fields, read out before `compose` consumes
-        // `env`: the window boot knobs and the render tuning `Config` ride the
-        // desktop driver (which boots the pumped render actor, ADR-0161 R3),
-        // the `assets` root threads into that actor's params for `capture_frame`
-        // similarity references, and the autoload list is drained after build.
-        // `WindowSettings` / `RenderTuningConfig` are `Clone` and tiny, so the
-        // clones are free.
-        let workers = env.common.workers;
-        let window = env.window.clone();
-        let render_config = env.render.clone();
-        let assets_dir = env.common.namespace_roots.assets.clone();
-        let autoload = mem::take(&mut env.autoload);
-
-        tracing::info!(
-            target: "aether_substrate::boot",
-            workers_override = ?workers,
-            "componentless boot — close window to exit; load a component via aether.component.load",
-        );
-
-        let builder = Self::compose(&boot, env);
-        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
-        // var, sweeping against the composition-derived known-key set plus the
-        // residual hand records. Runs here (not in `from_env`) because the
-        // per-chassis known keys come from the composed builder's manifest.
-        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
-        // ADR-0161 R3: the driver boots the pumped `aether.render` actor from
-        // its Claim-stage `aether.render` reservation, so it carries the render
-        // tuning `Config` and the `assets` root here. `boot` moves into the
-        // driver, after `compose` finished borrowing it.
-        let driver = DesktopDriverCapability { event_loop, boot, window, render_config, assets_dir };
-        let built = builder.driver(driver).build()?;
-        // Auto-load any bundled components, in order, before the run loop
-        // starts. Fire-and-forward: the component host dispatches each load off
-        // the worker pool (already up after `build`), so the game is live
-        // shortly after `run` begins — no hub required.
-        for component in autoload {
-            mailer.push(autoload_mail(component));
-        }
-        Ok(built)
     }
 }
 

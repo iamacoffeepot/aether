@@ -3,7 +3,7 @@
 //!
 //! A standalone bundle binary embeds an ordered component list and
 //! populates its chassis env's `autoload` field; each chassis's
-//! `build_inner` drains the list into `aether.component.load` mail
+//! `Chassis::build` drains the list into `aether.component.load` mail
 //! right after `.build()`, so the components come up with no hub. The
 //! mail targets the generic `aether.component` mailbox — the same
 //! address the hub's `load_component` and the substrate harness load through
@@ -43,7 +43,7 @@ impl From<PackedComponent> for AutoloadComponent {
 /// the chassis env's `autoload` field carries — the runtime twin of the
 /// compile-time pack the standalone bundle bins embed. Both paths feed
 /// the same `env.autoload` (one from a runtime manifest of file paths,
-/// one from a compile-time pack of bytes), which `build_inner` drains
+/// one from a compile-time pack of bytes), which `Chassis::build` drains
 /// into `aether.component.load`.
 ///
 /// Reached from `DesktopEnv::from_env_with_argv` / its headless twin
