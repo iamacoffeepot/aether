@@ -102,6 +102,18 @@ where
         }
     }
 
+    /// Read from the actor's `A::State` without mutating it (ADR-0161
+    /// §Decision 1). The pump-owning thread makes loop decisions off actor
+    /// state — the render driver reads its pending capture's deadline to set
+    /// `ControlFlow::WaitUntil` — and this is the only such access it gets:
+    /// `f` receives a shared `&A::State`, so no `&mut` escapes and everything
+    /// that mutates the actor still goes through a pumped handler. Returns
+    /// `None` once [`Self::shutdown`] has taken the actor out (the slot is
+    /// spent), otherwise `Some(f(&state))`.
+    pub fn read_state<R>(&self, f: impl FnOnce(&A::State) -> R) -> Option<R> {
+        self.actor.as_deref().map(f)
+    }
+
     /// Run the pooled Closed path's teardown phases on the pumping thread,
     /// in order: drain any residual inbox mail, run `A::unwire` under
     /// `with_stamped` (the hook a hand-rolled driver drain never had), drop
@@ -159,7 +171,9 @@ mod tests {
     use crate::actor::native::local::with_stamped;
     use crate::actor::registry::ActorRegistry;
     use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox};
-    use crate::chassis::settlement::SettlementRegistry;
+    use crate::chassis::settlement::{
+        PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
+    };
     use crate::config::RingCapacities;
     use crate::mail::Mail;
     use crate::mail::cost::CostCells;
@@ -330,10 +344,24 @@ mod tests {
     /// fresh inbox via `install_inbox`, `true` installs a claim-shaped
     /// `SettlingInbox` re-lineaged onto the binding's reply space (the
     /// `boot_pumped_actor` path).
-    fn boot_probe(fx: &Fixtures, self_id: MailboxId, actor: PumpProbe, settling: bool) -> PumpedSlot<PumpProbe> {
+    ///
+    /// `wake_tx`, when present, is fired with [`PumpWake::Mail`] after each
+    /// accepted inbound send — mirroring the production `MailboxWakeSlot` hook
+    /// `install_pump_wake` installs — so a slot pumped through
+    /// `await_settlement_pumped` wakes on mail arrival.
+    fn boot_probe(
+        fx: &Fixtures,
+        self_id: MailboxId,
+        actor: PumpProbe,
+        settling: bool,
+        wake_tx: Option<crossbeam_channel::Sender<PumpWake>>,
+    ) -> PumpedSlot<PumpProbe> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
+            if let Some(wake_tx) = &wake_tx {
+                let _ = wake_tx.send(PumpWake::Mail);
+            }
         });
         fx.registry
             .try_register_inbox_with_id(self_id, "test.pumped.probe", handler)
@@ -382,7 +410,7 @@ mod tests {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0001);
         let (caller, reply_rx) = caller_inbox(&fx, "test.pumped.caller.ping");
-        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false);
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
         let root = MailId::new(self_id, 1);
         let mail_id = MailId::new(self_id, 2);
@@ -416,7 +444,7 @@ mod tests {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0002);
         let (caller, reply_rx) = caller_inbox(&fx, "test.pumped.caller.logtail");
-        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false);
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
         let root = MailId::new(self_id, 1);
         let mail_id = MailId::new(self_id, 2);
@@ -445,7 +473,7 @@ mod tests {
     fn two_drains_fold_cost_samples() {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0003);
-        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false);
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
         // Two disarmed pings (NONE lineage — no reply target, no settlement
         // to balance); the run's only observable is the cost fold.
@@ -473,8 +501,13 @@ mod tests {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0004);
         let unwired = Arc::new(AtomicBool::new(false));
-        let mut slot =
-            boot_probe(&fx, self_id, PumpProbe { unwired: Some(Arc::clone(&unwired)), ..Default::default() }, false);
+        let mut slot = boot_probe(
+            &fx,
+            self_id,
+            PumpProbe { unwired: Some(Arc::clone(&unwired)), ..Default::default() },
+            false,
+            None,
+        );
 
         // An armed residual mail queued but never handed to `drain_available`
         // — `shutdown`'s residual drain must dispatch it and settle its root.
@@ -511,7 +544,8 @@ mod tests {
         let self_id = MailboxId(0x_0DED_0005);
         let (target, reply_rx) = caller_inbox(&fx, "test.pumped.caller.defer");
         let (guard_tx, guard_rx) = mpsc::channel::<InboundMail>();
-        let mut slot = boot_probe(&fx, self_id, PumpProbe { deferred_tx: Some(guard_tx), ..Default::default() }, true);
+        let mut slot =
+            boot_probe(&fx, self_id, PumpProbe { deferred_tx: Some(guard_tx), ..Default::default() }, true, None);
 
         let root = MailId::new(self_id, 1);
         let mail_id = MailId::new(self_id, 2);
@@ -574,7 +608,7 @@ mod tests {
             )
             .expect("register the peer inbox");
 
-        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false);
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
         // A disarmed EmitReq (NONE lineage) triggers the peer send.
         let bytes = EmitReq { seq: 1 }.encode_into_bytes();
@@ -588,5 +622,165 @@ mod tests {
         assert_eq!(poke.kind, Poke::ID, "the peer received the Poke kind");
         let decoded = Poke::decode_from_bytes(poke.payload.bytes()).expect("the Poke decodes");
         assert_eq!(decoded, Poke { note: 7 }, "the peer received the Poke value");
+    }
+
+    /// ADR-0161 §Decision 2: `await_settlement_pumped` returns `Settled` when
+    /// the settlement callback fires, and the mid-wait `Mail` wakes drain
+    /// every queued envelope before it returns. A producer keeps mail arriving
+    /// on the pumped mailbox while the driver blocks in the wait; the settling
+    /// Ping (the awaited chain's only inflight) is pushed last, so when the
+    /// pump dispatches it every earlier envelope is already dispatched.
+    #[test]
+    fn await_settlement_pumped_drains_every_queued_envelope_before_returning() {
+        const IDLE_PINGS: u32 = 8;
+
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0007);
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, Some(wake_tx.clone()));
+
+        // The awaited chain: one inflight, a Ping to the pumped mailbox whose
+        // dispatch settles `root` and fires the decision-2 callback.
+        let root = MailId::new(self_id, 1);
+        fx.mailer.record_sent_inflight(root);
+        let settled_tx = wake_tx;
+        fx.settlement.subscribe_settlement_with(root, move || {
+            let _ = settled_tx.send(PumpWake::Settled);
+        });
+
+        let mailer = Arc::clone(&fx.mailer);
+        let producer = thread::spawn(move || {
+            for seq in 0..IDLE_PINGS {
+                // Disarmed (NONE lineage): arrival keeps the pump busy but
+                // carries no settlement obligation.
+                let bytes = Ping { seq }.encode_into_bytes();
+                mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(MailId::NONE, MailId::NONE, None));
+                thread::sleep(Duration::from_millis(1));
+            }
+            // The settling Ping, pushed last, with real lineage on `root`.
+            let mail_id = MailId::new(self_id, 2);
+            let bytes = Ping { seq: IDLE_PINGS }.encode_into_bytes();
+            mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(mail_id, root, None));
+        });
+
+        let outcome = await_settlement_pumped(
+            &wake_rx,
+            &mut slot,
+            "test.drain.pumped",
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            TerminalDisposition::Panic,
+        );
+        producer.join().expect("producer thread joins");
+
+        assert!(matches!(outcome, WaitOutcome::Settled), "the wait returned Settled when the callback fired");
+        assert_eq!(
+            slot.read_state(|s| s.pings),
+            Some(IDLE_PINGS + 1),
+            "every queued envelope — the idle pings and the settling ping — dispatched before the wait returned",
+        );
+    }
+
+    /// ADR-0161 §Context (the deadlock shape): the awaited chain's only
+    /// inflight is a mail addressed to the pumped mailbox itself, so the root
+    /// settles only when that mail is dispatched — and it is dispatched only
+    /// because the wait pumps the slot on the `Mail` wake. The round budget is
+    /// far larger than the test's runtime, so nothing but the wake can drive
+    /// the drain; a broken wake would wedge and the `Panic` disposition would
+    /// fail the test at the gate.
+    #[test]
+    fn await_settlement_pumped_settles_deadlock_shape_only_by_pumping() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0008);
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, Some(wake_tx.clone()));
+
+        let root = MailId::new(self_id, 1);
+        let mail_id = MailId::new(self_id, 2);
+        fx.mailer.record_sent_inflight(root);
+        let settled_tx = wake_tx;
+        fx.settlement.subscribe_settlement_with(root, move || {
+            let _ = settled_tx.send(PumpWake::Settled);
+        });
+        // The mail on the awaited chain, addressed to the pumped mailbox.
+        // Pushing it fires the slot's `Mail` wake — the only thing that can
+        // drain it while the driver blocks below.
+        let bytes = Ping { seq: 3 }.encode_into_bytes();
+        fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(mail_id, root, None));
+
+        let outcome = await_settlement_pumped(
+            &wake_rx,
+            &mut slot,
+            "test.deadlock.pumped",
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            TerminalDisposition::Panic,
+        );
+
+        assert!(matches!(outcome, WaitOutcome::Settled), "the pump settled the chain gated on its own mailbox");
+        assert_eq!(slot.read_state(|s| s.pings), Some(1), "the awaited mail was dispatched by the pump, not the timer");
+    }
+
+    /// ADR-0161 §Decision 2: cap exhaustion wedges with the gate name
+    /// attributable — the pumped mirror of
+    /// `await_internal_signal_cap_exhaustion_wedges`. The pumped mailbox stays
+    /// empty and no wake ever sends, so the wait exhausts its cumulative cap
+    /// silently (the sender is held alive, so this is the silent path, not a
+    /// disconnect).
+    #[test]
+    fn await_settlement_pumped_cap_exhaustion_wedges_attributable() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0009);
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, Some(wake_tx.clone()));
+
+        let outcome = await_settlement_pumped(
+            &wake_rx,
+            &mut slot,
+            "test.cap.pumped",
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+            TerminalDisposition::ReplyErr,
+        );
+        match outcome {
+            WaitOutcome::Wedged(w) => {
+                assert!(!w.disconnected, "cap exhaustion is the silent path, not a disconnect");
+                assert_eq!(w.gate, "test.cap.pumped", "the wedge names the gate attributably");
+                assert!(w.waited >= Duration::from_millis(20), "the wedge waited out the cumulative cap");
+            }
+            WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
+        }
+        // Held to here so the channel stays connected — the wedge above is the
+        // silent-to-cap path, distinct from `Disconnected`.
+        drop(wake_tx);
+    }
+
+    /// ADR-0161 §Decision 2: a disconnected wake channel takes the same
+    /// terminal path as cap exhaustion with `disconnected` set — the pumped
+    /// mirror of `await_internal_signal_disconnect_wedges`. No wake sender is
+    /// installed on the slot, so dropping the last `Sender` disconnects.
+    #[test]
+    fn await_settlement_pumped_disconnect_wedges_attributable() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_000A);
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
+        drop(wake_tx);
+
+        let outcome = await_settlement_pumped(
+            &wake_rx,
+            &mut slot,
+            "test.disconnect.pumped",
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            TerminalDisposition::Proceed,
+        );
+        match outcome {
+            WaitOutcome::Wedged(w) => {
+                assert!(w.disconnected, "dropping every sender disconnects the wake channel");
+                assert_eq!(w.gate, "test.disconnect.pumped");
+            }
+            WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! ADR-0080 §6 settlement registry — chassis-side gate-notification
 //! map for `Settled { root }` mail.
 //!
-//! Two subscriber shapes share one pending map (keyed on root
+//! Three subscriber shapes share one pending map (keyed on root
 //! [`MailId`]):
 //!
 //! - [`SettlementRegistry::subscribe_settlement`] returns a
@@ -11,6 +11,11 @@
 //!   notification mail to a target mailbox when the root settles —
 //!   for actors whose thread is committed to its mpsc inbox and
 //!   can't block on a separate channel without per-cid helper threads.
+//! - [`SettlementRegistry::subscribe_settlement_with`] runs a one-shot
+//!   `Send + 'static` callback on the settling thread (ADR-0161
+//!   §Decision 2) — the pumped render driver bridges a settlement into
+//!   its unified [`PumpWake`] channel this way so the wait that pumps
+//!   the render slot wakes when a gated chain settles.
 //!
 //! Both fire when the [`crate::actor::native`] dispatcher routes a
 //! `Settled { root }` mail addressed to
@@ -46,6 +51,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::actor::native::NativeActor;
+use crate::actor::native::pumped_slot::PumpedSlot;
+use crate::chassis::ctx::MailboxWakeSlot;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use aether_data::{Kind, KindId, MailId, MailboxId};
@@ -137,6 +145,12 @@ enum SettlementSubscriber {
     /// Push a notification mail to `target` via `mailer` carrying a
     /// [`Settled`] with the settled root as the payload.
     Mail { target: MailboxId, kind: KindId, mailer: Arc<Mailer> },
+    /// Run a one-shot callback on the settling thread (ADR-0161
+    /// §Decision 2). The pumped render driver installs one that sends
+    /// [`PumpWake::Settled`] into its unified wake channel. Boxed
+    /// `FnOnce` — fired exactly once (the subscriber is drained from
+    /// `pending` on `fire_settled`, and a pre-fire runs it inline).
+    Callback(Box<dyn FnOnce() + Send>),
 }
 
 impl SettlementSubscriber {
@@ -152,6 +166,7 @@ impl SettlementSubscriber {
             Self::Mail { target, kind, mailer } => {
                 push_settlement_notice(&mailer, target, kind, root);
             }
+            Self::Callback(callback) => callback(),
         }
     }
 }
@@ -226,6 +241,40 @@ impl SettlementRegistry {
             push_settlement_notice(&mailer, target, kind, root);
         } else {
             cell.pending.entry(root).or_default().push(SettlementSubscriber::Mail { target, kind, mailer });
+        }
+    }
+
+    /// Subscribe a one-shot `callback` to `root`'s settlement (ADR-0161
+    /// §Decision 2). The callback runs on whatever thread
+    /// [`Self::fire_settled`] fires on — the settling worker — so it must
+    /// be `Send + 'static`; it fires exactly once. Pre-fires immediately
+    /// (runs `callback` inline on the caller's thread) if `root` has
+    /// already settled at least once.
+    ///
+    /// The additive counterpart of [`Self::subscribe_settlement`]: rather
+    /// than parking a waiter on a channel, it lets a call site bridge a
+    /// settlement into machinery of its own — the pumped render driver
+    /// forwards [`PumpWake::Settled`] into the same channel its slot's
+    /// mail wake feeds, because std `mpsc` cannot select across two
+    /// sources. Coexists with the channel and mail forms; a root can
+    /// carry any mix, and all fire on `fire_settled`.
+    ///
+    /// # Panics
+    /// Panics if the inner `Mutex` is poisoned — fail-fast per ADR-0063:
+    /// a poisoned mutex means a prior holder panicked under the guard.
+    pub fn subscribe_settlement_with<F>(&self, root: MailId, callback: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let mut cell = self.cell_for(root).lock().expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
+        if cell.settled.contains(&root) {
+            // Drop the mutex before running the callback — it may run hot
+            // (the pump bridge sends into a channel; a future subscriber
+            // could re-enter the registry).
+            drop(cell);
+            callback();
+        } else {
+            cell.pending.entry(root).or_default().push(SettlementSubscriber::Callback(Box::new(callback)));
         }
     }
 
@@ -476,6 +525,111 @@ fn wedge(gate: &str, waited: Duration, disconnected: bool, disposition: Terminal
     }
 }
 
+/// A wake on the pumped settlement driver's unified channel (ADR-0161
+/// §Decision 2). std `mpsc` cannot select across two sources, so the two
+/// producers — the pumped slot's mailbox wake and the settlement
+/// subscription — share one channel and distinguish their reason here.
+///
+/// - [`PumpWake::Mail`] — an envelope was accepted onto the pumped
+///   mailbox; [`await_settlement_pumped`] drains the slot and keeps
+///   waiting. Installed on the slot's [`MailboxWakeSlot`] by
+///   [`install_pump_wake`].
+/// - [`PumpWake::Settled`] — the awaited root settled; the wait returns.
+///   Fed by a [`SettlementRegistry::subscribe_settlement_with`] callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpWake {
+    /// The awaited root settled — the wait may return.
+    Settled,
+    /// Mail landed on the pumped mailbox — drain the slot and keep waiting.
+    Mail,
+}
+
+/// Install the [`PumpWake::Mail`] wake on a pumped mailbox's
+/// [`MailboxWakeSlot`] (ADR-0161 §Decision 2). After each accepted
+/// inbound send the slot fires this hook, nudging
+/// [`await_settlement_pumped`] to drain even while the driver thread is
+/// parked in the wait. The `tx` half is a `crossbeam_channel::Sender`
+/// (its `Send + Sync` is what lets the hook satisfy the
+/// [`crate::chassis::ctx::MailboxWakeFn`] bound; std `mpsc::Sender` is
+/// `!Sync`), so both wake producers share one channel the wait can
+/// consume.
+pub fn install_pump_wake(slot: &MailboxWakeSlot, tx: Sender<PumpWake>) {
+    slot.set(Arc::new(move || {
+        let _ = tx.send(PumpWake::Mail);
+    }));
+}
+
+/// The pumped counterpart of [`await_internal_signal`] (ADR-0161
+/// §Decision 2). A chassis driver that owns a [`PumpedSlot`] blocks here
+/// waiting for a chain to settle while remaining able to pump its own
+/// slot — the deadlock the ADR's Context names: draw / capture mail
+/// addressed to the pumped mailbox is on the very chain being awaited, so
+/// a slot pumped only at its normal pump point can never settle it.
+///
+/// Reads the unified [`PumpWake`] channel both producers feed:
+///
+/// - [`PumpWake::Mail`] → [`PumpedSlot::drain_available`] and keep
+///   waiting. This wake is the *mechanism*: the drain is driven by mail
+///   arrival, not by the round timer.
+/// - [`PumpWake::Settled`] → [`WaitOutcome::Settled`].
+///
+/// The escalating-patience bookkeeping is identical to
+/// [`await_internal_signal`]: `round_budget` is the warn-checkpoint
+/// cadence (clamped off zero so the loop can't spin), `cumulative_cap`
+/// the total patience before a wedge, a `Disconnected` channel is an
+/// attributable wedge with [`GateWedge::disconnected`] set, and the
+/// terminal `disposition` is dispensed the same way (`Panic` diverges via
+/// `panic!`; the rest ride back in [`WaitOutcome::Wedged`]).
+///
+/// Per ADR-0161 the round budget is strictly a *log cadence*, not a pump
+/// cadence — per-round pumping is rejected because settlement is gated on
+/// the very mail that would sit waiting out the round, so the timeout arm
+/// only logs and re-arms; it never drains. The wake is the sole drain
+/// mechanism, and the parked-driver hole the ADR names is closed at the
+/// driver (a `ControlFlow::WaitUntil(capture_deadline)` read), not here.
+pub fn await_settlement_pumped<A>(
+    wake_rx: &Receiver<PumpWake>,
+    slot: &mut PumpedSlot<A>,
+    gate: &str,
+    round_budget: Duration,
+    cumulative_cap: Duration,
+    disposition: TerminalDisposition,
+) -> WaitOutcome
+where
+    A: NativeActor,
+{
+    let round = round_budget.max(Duration::from_millis(1));
+    let start = Instant::now();
+    loop {
+        match wake_rx.recv_timeout(round) {
+            Ok(PumpWake::Settled) => return WaitOutcome::Settled,
+            Ok(PumpWake::Mail) => {
+                // The load-bearing arm: mail arrived on the pumped mailbox
+                // while the driver blocked here, so drain it — a chain gated
+                // on one of this slot's handlers advances only because this
+                // pump runs.
+                slot.drain_available();
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let waited = start.elapsed();
+                if waited >= cumulative_cap {
+                    return wedge(gate, waited, false, disposition);
+                }
+                tracing::warn!(
+                    target: "aether_substrate::settlement",
+                    gate,
+                    waited_millis = waited.as_millis(),
+                    cap_millis = cumulative_cap.as_millis(),
+                    "gate {gate} slow: waited {waited:?}, extending",
+                );
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return wedge(gate, start.elapsed(), true, disposition);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 // Settlement tests hold per-test `Mutex` guards across the assertion
 // sequence so the captured state stays consistent against the
@@ -492,6 +646,7 @@ mod tests {
     use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     fn root(sender: u64, cid: u64) -> MailId {
@@ -857,5 +1012,54 @@ mod tests {
         // so a late subscriber still pre-fires.
         let rx = reg.subscribe_settlement(root(7, (total - 1) as u64));
         assert!(rx.try_recv().is_ok(), "recent root should pre-fire a late subscriber");
+    }
+
+    /// ADR-0161 §Decision 2: `subscribe_settlement_with` runs its callback
+    /// exactly once per settlement. `fire_settled` drains the subscriber, so a
+    /// second fire — the idempotent duplicate-settle case — does not re-run it.
+    #[test]
+    fn subscribe_with_callback_fires_exactly_once() {
+        let reg = SettlementRegistry::new();
+        let r = root(8, 64);
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_for_cb = Arc::clone(&count);
+        reg.subscribe_settlement_with(r, move || {
+            count_for_cb.fetch_add(1, Ordering::SeqCst);
+        });
+        reg.fire_settled(r);
+        // A duplicate settle (ADR-0080 §6 hint semantics) must not re-fire.
+        reg.fire_settled(r);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "the callback fired exactly once");
+    }
+
+    /// ADR-0161 §Decision 2: subscribing to an already-settled root pre-fires
+    /// the callback synchronously (once), mirroring the channel form's
+    /// pre-fire.
+    #[test]
+    fn subscribe_with_callback_pre_fires_when_already_settled() {
+        let reg = SettlementRegistry::new();
+        let r = root(9, 81);
+        reg.fire_settled(r);
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_for_cb = Arc::clone(&count);
+        reg.subscribe_settlement_with(r, move || {
+            count_for_cb.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(count.load(Ordering::SeqCst), 1, "the pre-fire ran the callback once");
+    }
+
+    /// ADR-0161 §Decision 2: `install_pump_wake` installs a hook on the
+    /// [`MailboxWakeSlot`] that sends [`PumpWake::Mail`] each time it fires —
+    /// the plumbing a pumped slot's mailbox uses to nudge the pumped wait.
+    #[test]
+    fn install_pump_wake_sends_mail_on_each_fire() {
+        let slot = MailboxWakeSlot::default();
+        let (tx, rx) = crossbeam_channel::unbounded::<PumpWake>();
+        install_pump_wake(&slot, tx);
+        let hook = slot.get().expect("the pump wake hook is installed");
+        hook();
+        hook();
+        assert_eq!(rx.recv().expect("first wake"), PumpWake::Mail);
+        assert_eq!(rx.recv().expect("second wake"), PumpWake::Mail);
     }
 }
