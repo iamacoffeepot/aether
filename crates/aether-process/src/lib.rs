@@ -10,7 +10,7 @@
 //! concurrency bound): the spawn-and-capture loop runs off the dispatcher
 //! on a worker thread, the caller's settlement chain stays held across
 //! the whole run, and a `#[handler(task)]` completion re-replies the
-//! result. The loop itself ([`runner`]) is the single reviewed
+//! result. The loop itself (the `runner` module) is the single reviewed
 //! implementation of the deadline / drain / group-reap discipline the
 //! workspace previously hand-rolled per consumer.
 //!

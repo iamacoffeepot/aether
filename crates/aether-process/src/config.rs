@@ -25,7 +25,7 @@ use super::{DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MILLIS};
 /// logical *name* resolved against these, so a caller never supplies a
 /// filesystem path and cannot reach an arbitrary executable (ADR-0157).
 /// The tokens ride a `csv_set` `HashSet<String>` (the derive's only
-/// collection shape); [`super::runtime`] splits each into
+/// collection shape); the runtime half splits each into
 /// `(name, absolute path)` at `init`.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]

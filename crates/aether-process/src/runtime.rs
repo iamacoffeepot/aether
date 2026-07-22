@@ -8,7 +8,7 @@
 //! ADR-0093's hold-until-resolve primitive (via the cap-level
 //! [`TaskQueue`] concurrency bound, exactly as the content-gen caps drive
 //! their provider calls): the closure owns the resolved command and runs
-//! the deadline / drain / reap loop ([`crate::runner`]) off the
+//! the deadline / drain / reap loop (the `runner` module) off the
 //! dispatcher on a worker thread, and a `#[handler(task)]` completion
 //! re-replies the `run_result` through the caller's held reply target.
 //! The caller's settlement chain stays held across the whole run, so

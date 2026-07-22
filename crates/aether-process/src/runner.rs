@@ -37,7 +37,7 @@ const GROUP_TERM_GRACE_STEPS: u32 = 50;
 
 /// The structured result of running a [`Command`] to completion, timeout,
 /// or failure. The runtime half maps this onto the wire
-/// [`RunResult`](crate::kinds::RunResult): `Completed` → `Ok`, `TimedOut`
+/// [`RunResult`](crate::RunResult): `Completed` → `Ok`, `TimedOut`
 /// → `TimedOut`, and the two error arms → `ProcessError` variants.
 #[derive(Debug)]
 pub enum RunOutcome {
@@ -284,7 +284,7 @@ mod tests {
             run_to_completion(Command::new("/nonexistent/aether-xyzzy-binary"), Vec::new(), Duration::from_secs(10));
         match outcome {
             RunOutcome::SpawnFailed { not_found, .. } => {
-                assert!(not_found, "a missing path is the NotFound spawn path")
+                assert!(not_found, "a missing path is the NotFound spawn path");
             }
             other => panic!("expected SpawnFailed not_found, got {other:?}"),
         }
