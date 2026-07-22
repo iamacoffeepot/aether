@@ -6,11 +6,12 @@
 //! as [`EgressEvent`]s so the test thread can correlate them to its
 //! requests by `correlation_id`.
 //!
-//! The chassis-control handler is the same one the binary uses —
-//! it pushes `Advance` / `CaptureRequested` events onto the events
-//! channel. `SubstrateHarness::advance` drains the queue (which lets the
-//! handler run), pumps any pending events through `run_frame`
-//! synchronously, then drains the loopback for the matching reply.
+//! The chassis-control handler is the same one the binary uses — it pushes
+//! `Advance` events onto the events channel. `SubstrateHarness::advance`
+//! drains the queue (which lets the handler run), pumps any pending events
+//! through `run_frame` synchronously, then drains the loopback for the
+//! matching reply. Capture is mail-driven inside the pumped render actor;
+//! the pump loop drives it.
 //!
 //! Reply correlation: every API call gets a fresh `correlation_id`.
 //! The substrate echoes it on the reply per ADR-0042, so multiple
@@ -47,13 +48,12 @@ use aether_substrate::config::ConfigMember;
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
     Source, SourceAddr, SubstrateBoot,
-    capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
 
 use super::chassis::{
-    ComposeFn, FrameHook, RenderExt, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis,
-    SubstrateHarnessEnv, WORKERS,
+    ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
+    WORKERS,
 };
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
@@ -259,7 +259,7 @@ pub struct SubstrateHarnessBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
-    render_ext: Option<(Box<dyn RenderExt>, HookFactory)>,
+    render_hook: Option<HookFactory>,
     component_host: bool,
     compose: Vec<ComposeFn>,
 }
@@ -275,7 +275,7 @@ impl Default for SubstrateHarnessBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
-            render_ext: None,
+            render_hook: None,
             component_host: false,
             compose: Vec::new(),
         }
@@ -399,16 +399,16 @@ impl SubstrateHarnessBuilder {
         self
     }
 
-    /// Register the render seam (issue #3765): `ext` chains the render
-    /// cap into the chassis builder from the boot wiring, and
-    /// `hook_factory` builds the frame-pump [`FrameHook`] against the
-    /// booted chassis and the builder's offscreen size. The capture
-    /// crate's `RenderHarnessBuilderExt::with_render` is the intended
-    /// caller; without a registration, captures reply `Err` and the
-    /// advance path skips the per-frame draw.
+    /// Register the render seam (ADR-0161 R5): `hook_factory` boots the
+    /// pumped `aether.render` slot against the booted chassis (via
+    /// `PassiveChassis::boot_pumped_actor`) at the builder's offscreen size
+    /// and builds the frame-pump [`FrameHook`] that drains it. The capture
+    /// crate's `RenderHarnessBuilderExt::with_render` is the intended caller;
+    /// without a registration, captures reply `Err` and the advance path
+    /// skips the per-frame draw.
     #[must_use]
-    pub fn render_ext(mut self, ext: Box<dyn RenderExt>, hook_factory: HookFactory) -> Self {
-        self.render_ext = Some((ext, hook_factory));
+    pub fn render_hook(mut self, hook_factory: HookFactory) -> Self {
+        self.render_hook = Some(hook_factory);
         self
     }
 
@@ -462,14 +462,11 @@ impl SubstrateHarness {
             trace_ring_capacity,
             trace_ring_max_capacity,
             settlement_cap,
-            render_ext,
+            render_hook,
             component_host,
             compose,
         } = builder;
-        let (render_ext, hook_factory) = match render_ext {
-            Some((ext, factory)) => (Some(ext), Some(factory)),
-            None => (None, None),
-        };
+        let hook_factory = render_hook;
 
         // Lower the per-field `Option` overrides onto the `Copy`
         // `RingCapacities`, defaulting each unset field to the
@@ -489,7 +486,6 @@ impl SubstrateHarness {
         };
         let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
 
-        let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -514,9 +510,7 @@ impl SubstrateHarness {
             scheduler_tuning: SchedulerTuning::default(),
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
-            capture_queue,
             namespace_roots,
-            render_ext,
             component_host,
             compose,
             // Issue #2509: the teardown gate honors the same resolved cap
@@ -1277,9 +1271,14 @@ impl SubstrateHarness {
                 }
                 self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
             }
-            ChassisEvent::CaptureRequested => {
-                self.frame += 1;
-                self.run_frame(/* dispatch_tick */ false)?;
+            ChassisEvent::RenderMail => {
+                // In-process the pump loop in `pump_until_event` drains the
+                // slot every iteration, so this wake variant is never sent to
+                // the in-process harness (only the standalone binary installs
+                // the render wake). Draining here is harmless and honest.
+                if let Some(hook) = self.hook.as_mut() {
+                    hook.pump();
+                }
             }
         }
         Ok(())

@@ -165,9 +165,8 @@ impl BootableChassis for DesktopChassis {
 ///
 /// ADR-0155 §4: this is config only — every field resolves through the
 /// argv/env/file path a real boot uses, so `--describe` can resolve it on
-/// a headless host. The Start-stage runtime handles that used to ride here
-/// — the winit `EventLoop` and the capture-handoff `CaptureQueue` — are not
-/// config: they are constructed on the boot path in `DesktopChassis::build_inner`
+/// a headless host. The Start-stage winit `EventLoop` that rides the boot
+/// path is not config: it is constructed in `DesktopChassis::build_inner`
 /// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
 /// thread, so it stays local to the boot call `main()` makes).
 pub struct DesktopEnv {
@@ -180,7 +179,7 @@ pub struct DesktopEnv {
     /// grouped into one embedded unit like the other knob groups and
     /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
     /// `wireframe` reaches the pumped render actor's lazy wgpu boot through
-    /// `PumpedRenderParams::wireframe`.
+    /// `RenderParams::wireframe`.
     pub window: WindowSettings,
     /// Resolved render tuning `Config` (the vertex-buffer cap). ADR-0161 R3
     /// boots the pumped `aether.render` actor with it from the driver, so it
@@ -201,10 +200,9 @@ impl DesktopEnv {
     /// directly.
     ///
     /// ADR-0155 §4: env resolution produces config only — the winit
-    /// `EventLoop` and the capture `CaptureQueue` are Start-stage runtime
-    /// handles constructed on the boot path in
-    /// `DesktopChassis::build_inner`, not here — so the only fallible step
-    /// is the ADR-0090 §4 config validation / parse path.
+    /// `EventLoop` is a Start-stage runtime handle constructed on the boot
+    /// path in `DesktopChassis::build_inner`, not here — so the only fallible
+    /// step is the ADR-0090 §4 config validation / parse path.
     ///
     /// # Errors
     ///
@@ -284,9 +282,9 @@ impl DesktopChassis {
         // live). `--describe` never reaches this method, so it opens no event
         // loop. The `EventLoop` build fault (never `Send + Sync` across winit's
         // platform impls) is stringified into `BootError::Other`, the same
-        // shape a wasmtime boot fault takes. ADR-0161 R3 retired the
-        // Start-stage `CaptureQueue`: capture is plain state on the pumped
-        // render actor now, so there is no cross-thread queue to hand over.
+        // shape a wasmtime boot fault takes. Capture is plain state on the
+        // pumped render actor (ADR-0161), so there is no cross-thread queue to
+        // hand over.
         let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| {
             BootError::Other(Box::new(io::Error::other(format!("desktop event loop build failed: {e}"))))
         })?;

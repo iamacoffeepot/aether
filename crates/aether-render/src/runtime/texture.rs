@@ -1,8 +1,8 @@
 //! Session-scoped texture registry for the `aether.render` cap
-//! (ADR-0105). Staged CPU pixels are the source of truth; the
-//! wgpu texture + bind group are realized lazily at record time on the
-//! driver thread. `create_texture` / `update_texture` run on the cap
-//! dispatcher thread and only touch the staging side.
+//! (ADR-0105). Staged CPU pixels are the source of truth; the wgpu texture
+//! and bind group are realized lazily at record time. `create_texture` /
+//! `update_texture` only touch the staging side — the pumped runtime
+//! records against the realized side on the driver thread.
 
 use std::collections::HashMap;
 
@@ -12,12 +12,10 @@ use crate::TextureFormat;
 
 /// A texture registered via `create_texture`: the staged pixels (the CPU
 /// source of truth), plus the lazily-realized GPU texture + bind group.
-/// `create_texture` / `update_texture` run on the cap dispatcher thread
-/// and only touch the staging side; the wgpu resources are realized at
-/// record time on the driver thread (the `RenderGpu` `OnceLock` isn't
-/// filled until the chassis driver boots the GPU). `dirty` flags staging
-/// that the GPU copy hasn't caught up to yet — the next record re-uploads
-/// the whole texture.
+/// `create_texture` / `update_texture` only touch the staging side; the
+/// wgpu resources are realized at record time (the `RenderGpu` boots lazily
+/// on the first frame). `dirty` flags staging that the GPU copy hasn't
+/// caught up to yet — the next record re-uploads the whole texture.
 pub struct StagedTexture {
     pub width: u32,
     pub height: u32,

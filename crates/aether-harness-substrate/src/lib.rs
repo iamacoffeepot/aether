@@ -15,9 +15,10 @@
 //! The harness boots basics only — trace dispatch, the harness cap,
 //! lifecycle, the fail-fast headless window, the observer mailbox — and
 //! each test composes the caps its scenario needs on the builder (issue
-//! #3764). GPU capture support plugs in through the [`FrameHook`] /
-//! [`RenderExt`] seam from `aether-harness-substrate-capture`, so this
-//! crate never depends on aether-render or wgpu.
+//! #3764). GPU capture support plugs in through the [`FrameHook`] hook
+//! factory (ADR-0161) from `aether-harness-substrate-capture`, which boots
+//! the pumped `aether.render` slot, so this crate never depends on
+//! aether-render or wgpu.
 
 pub mod cap;
 pub mod chassis;
@@ -33,8 +34,8 @@ pub mod unsupported_cap;
 
 pub use cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 pub use chassis::{
-    BenchWiring, CaptureOutcome, ComposeFn, FrameHook, RenderExt, RenderHookWiring, SubstrateHarnessBuild,
-    SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
+    CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis,
+    SubstrateHarnessEnv, WORKERS,
 };
 pub use execute::{ExecutionError, ExecutionResult, HarnessOp, HarnessOutput};
 pub use harness::{

@@ -12,10 +12,54 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
+use aether_data::MailId;
 use aether_kinds::{ClipRect, QuadSpace};
 use aether_math::{Rgb, Rgba};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
+
+/// Chassis-internal frame-request kind (ADR-0161 §Decision 1). A pumping
+/// driver mails one each frame after the advance chain settles;
+/// `RenderCapability::on_frame` records the frame and resolves any pending
+/// capture. `replay_cache_when_idle` carries the issue 847 semantic —
+/// harness captures replay the last committed accumulators when the producer
+/// was idle; desktop always commits current. Not addressed by wasm guests —
+/// the pumping chassis driver is its sole sender.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.render.frame")]
+pub struct Frame {
+    pub replay_cache_when_idle: bool,
+}
+
+/// Chassis-internal pre-mail-settlement notice (ADR-0161 §Decision 4). One
+/// arrives per capture pre-mail whose causal chain has settled;
+/// `RenderCapability::on_pre_settled` decrements the pending capture's
+/// `pre_remaining`. Wire-identical to `aether.trace.settled` (a single
+/// `MailId` field) so the settlement registry's notice-mail bridge
+/// (`subscribe_settlement_mail`) delivers it directly. Chassis-internal —
+/// the settlement bridge is its sole sender.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.render.pre_settled")]
+pub struct PreSettled {
+    pub mail_id: MailId,
+}
+
+/// Chassis-internal window-occlusion signal (ADR-0161 §Decision 4). A
+/// pumping driver forwards `WindowEvent::Occluded`;
+/// `RenderCapability::on_occluded` fail-fasts a pending capture when the
+/// window becomes occluded (relocating `fail_capture_if_occluded` into the
+/// actor, issue 1317). Chassis-internal — the driver is its sole sender.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.render.occluded")]
+pub struct Occluded {
+    pub occluded: bool,
+}
 
 /// A single world-space vertex with per-vertex color. Matches the
 /// substrate's `VertexBufferLayout`: `(pos: vec3<f32>, color: vec3<f32>)`,

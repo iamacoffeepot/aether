@@ -25,7 +25,6 @@ runtime = []
 aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 # The caps the harness bin composes beyond the harness basics.
 aether-render = { path = "../aether-render", features = ["runtime"] }
 aether-lifecycle = { path = "../aether-lifecycle" }
@@ -39,6 +38,7 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 anyhow = { workspace = true }
+crossbeam-channel = "0.5"
 tracing = { workspace = true, features = ["std", "attributes"] }
 
 [lints]

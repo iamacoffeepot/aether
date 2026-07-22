@@ -147,8 +147,8 @@ impl DriverRunning for NeverDriverRunning {
 /// passive [`ChassisCtx`] surface; pre-PR-E3 it also exposed typed
 /// access to passive runnings via `expect` / `try_get`, but the
 /// typed-runnings map retired alongside `Capability` so drivers
-/// wanting cap state get it through pre-build accessors (today only
-/// render via `RenderHandles`).
+/// wanting cap state get it through pre-build accessors (a cap-published
+/// handle bundle like `HttpServerHandle`).
 ///
 /// Issue 629 / Phase A: borrows the chassis's [`ExportedHandles`]
 /// map. Drivers retrieve cap-published handle bundles via
@@ -195,7 +195,7 @@ impl<'a> DriverCtx<'a> {
     /// Issue 629 / Phase A: retrieve a clone of a cap-published handle
     /// bundle of type `H`. `None` if no cap published one (typically
     /// because the cap that owns the handle wasn't booted on this
-    /// chassis). Drivers use this to pull `RenderHandles` and similar
+    /// chassis). Drivers use this to pull `HttpServerHandle` and similar
     /// driver-facing sub-handle bundles without reaching for the cap
     /// itself.
     #[must_use]

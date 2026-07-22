@@ -1,219 +1,498 @@
-//! The `aether.render` runtime half (ADR-0122 identity/runtime split).
-//! Compiled only under `feature = "render-runtime"` (the `mod runtime;`
-//! declaration in the parent carries the gate), so a
-//! marker-only `render` build of the [`RenderCapability`]
-//! identity never names these types nor pulls the wgpu-bound substrate
-//! runtime through this cap. The substrate-typed imports + GPU-bound
-//! helpers are gated once by this module rather than line-by-line; the
-//! `#[actor] impl` reaches the state, ctx, and accumulator helpers through
-//! the single `use runtime::*` glob in the parent.
+//! The pumped `aether.render` runtime half (ADR-0122 identity/runtime
+//! split, ADR-0161). Compiled only under `feature = "render-runtime"` (the
+//! `mod runtime;` declaration in the parent carries the gate), so a
+//! marker-only `render` build of the [`RenderCapability`] identity never
+//! names these types nor pulls the wgpu-bound substrate runtime through this
+//! cap.
+//!
+//! [`RenderCapability`] is a *pumped* actor (ADR-0160), dispatched on the
+//! chassis driver thread, so it owns every accumulator as a plain field and
+//! the GPU + pending capture outright: frame recording, capture readback,
+//! and present all run on the one thread that owns the surface. The three
+//! chassis-internal kinds ([`Frame`], [`PreSettled`], [`Occluded`], defined
+//! in [`crate::kinds`]) turn frame invocation, pre-mail settlement, and
+//! window occlusion into mail — so every capture transition is a handler
+//! with trace brackets and a cost row, and the capture state machine is
+//! testable headlessly with a toy pump.
+//!
+//! Gated on `runtime`: the substrate harness builds the **offscreen**
+//! (surfaceless) path without winit — the windowed boot inside is
+//! `desktop`-gated line by line.
+//!
+//! ## Capture bridge notes (ADR-0161):
+//! - **Settlement bridge.** [`on_capture_frame`](RenderCapability::on_capture_frame)
+//!   bridges each pre-mail settlement to a [`PreSettled`] mail through
+//!   [`SettlementRegistry::subscribe_settlement_mail`], which pushes a
+//!   settlement-notice mail from whatever thread the settlement fires on. A
+//!   render handler must never block on a pre-mail settlement (the ADR
+//!   deadlock: pre-chains terminate back at this mailbox), so the bridge only
+//!   mails. `PreSettled` is wire-identical to `aether.trace.settled` (a single
+//!   `MailId` field), so the pushed notice decodes as `PreSettled`.
+//! - **Capture scoring.** `FrameCheck` verdicts and similarity scoring live in
+//!   [`aether_substrate::render::visual`], so the ready-branch readback scores
+//!   the verdict and similarity directly.
 
-// `Arc` is named here only by the state struct's field types; the parent
-// `#[actor] impl` gets its own `Arc` from the shared `any(render-runtime,
-// runtime)` import in `mod.rs`, so this stays a private import to avoid a
-// redundant re-export. The substrate ctx types (`NativeActor` / `NativeCtx`
-// / `NativeInitCtx` / `BootError` / `Manual` / `CaptureFrameResult`) the
-// `#[actor] impl` names come from that same shared seam, not from here.
-use std::sync::Arc;
+use std::io;
+use std::iter;
+use std::mem;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-pub use std::sync::atomic::{AtomicU64, Ordering};
-pub use std::sync::{Mutex, OnceLock};
-
+use aether_actor::runtime;
 pub use aether_data::Kind;
-pub use aether_substrate::capture::PendingCapture;
-pub use aether_substrate::mail::helpers::resolve_bundle;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::registry::Registry;
-pub use aether_substrate::render::IDENTITY_VIEW_PROJ;
 
-// The native impl seams, now nested under this `runtime` directory so the one
+use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameCheck};
+
+use aether_substrate::Manual;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::capture::ReferenceCapture;
+use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::inbox::InboundMail;
+use aether_substrate::mail::Mail;
+use aether_substrate::mail::helpers::resolve_bundle;
+use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::mail::outbound::HubOutbound;
+use aether_substrate::mail::registry::Registry;
+use aether_substrate::render::visual;
+use aether_substrate::render::{
+    IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
+};
+
+// The native impl seams, nested under this `runtime` directory so the one
 // `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):
-// `pipeline` (GPU bundle + accumulator handles), `texture` (the texture
+// `pipeline` (GPU bundle + shared record helpers), `texture` (the texture
 // registry), `quad` (the quad-batch accumulator), `material` (the
-// material-batch accumulator), `capture` (the cross-thread readback
-// machinery), and `config` (the `RenderTuningConfig` knobs + `RenderParams`).
+// material-batch accumulator), `capture` (the similarity-reference resolver),
+// and `config` (the `RenderTuningConfig` knobs + `RenderParams`).
 mod capture;
 mod config;
 mod material;
 mod pipeline;
 mod quad;
 // Shared desktop-surface GPU helpers (ADR-0161): the wireframe overlay
-// pipeline builder + swapchain acquisition, called by both the desktop
-// chassis's `Gpu` body and the pumped render runtime.
+// pipeline builder, swapchain acquisition, and the surface / offscreen
+// device boot, called by the pumped render runtime.
 mod surface;
 mod texture;
 
-// The cap-root re-exports source these names through `runtime`: `pub use
-// runtime::{CaptureBackend, RenderParams, RenderGpu, RenderHandles, …};`.
-// The `RenderTuning*` trio is the derive-Config surface (ADR-0090) the
-// chassis resolves the render boot knobs through.
-pub use self::capture::CaptureBackend;
-// ADR-0161 slice R4: `PumpedRenderParams` rides the `runtime` feature (its
-// winit-typed `window` field is gated `desktop` inside the struct), so the
-// substrate harness's offscreen pumped runtime can name it without pulling
-// winit. `WindowCell` is winit-typed and stays `desktop`-only.
+// The cap-root re-exports source these names through `runtime`. The
+// `RenderTuning*` trio is the derive-Config surface (ADR-0090) the chassis
+// resolves the render boot knobs through; `RenderParams` is the composer
+// wiring channel. `WindowCell` is winit-typed and stays `desktop`-only.
 #[cfg(feature = "desktop")]
 pub use self::config::WindowCell;
-pub use self::config::{
-    PumpedRenderParams, RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
-};
-pub use self::pipeline::{RenderGpu, RenderHandles};
-pub use self::surface::{
-    BootedSurface, acquire_surface_texture, boot_offscreen, boot_surface, build_wireframe_overlay_pipeline,
-};
+pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
+pub use self::pipeline::RenderGpu;
 
-// The pumped render runtime (ADR-0161 slice R2) records world/material/overlay
-// passes on owned-field accumulators rather than the pooled `RenderHandles`
-// mutexes, so it reaches the ADR-0105/ADR-0140 realize-then-expand logic
-// through these shared free functions instead of re-implementing them —
-// keeping the expansion in one place across the two runtimes. Gated on
-// `runtime` (ADR-0161 R4: the pumped runtime now builds without `desktop` for
-// the harness's offscreen path): the pooled `RenderHandles` methods call the
-// free functions in-module, so the re-export is only used when the pumped
-// runtime is built.
-#[allow(clippy::redundant_pub_crate, reason = "re-exported for the pumped runtime in a sibling module")]
-pub(crate) use self::pipeline::{record_material_batches, record_overlay_batches};
+use self::pipeline::{record_material_batches, record_overlay_batches};
+#[cfg(feature = "desktop")]
+use self::surface::boot_surface;
+use self::surface::{acquire_surface_texture, boot_offscreen, build_wireframe_overlay_pipeline};
 
-// The moved `#[runtime] impl NativeActor for RenderCapability` body names the
-// `#[runtime]` attribute, the cap kinds (the drawing kinds via the parent's
-// `kinds` re-export, `CaptureFrame` / `CaptureFrameResult` from `aether_kinds`),
-// and the substrate ctx types it previously reached through the parent's shared
-// `any(render-runtime, runtime)` seam — now sourced here beside the body.
-use aether_actor::runtime;
-
-use aether_kinds::{CaptureFrame, CaptureFrameResult};
-
-use aether_substrate::Manual;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::chassis::error::BootError;
-
-use super::{
-    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
-    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat,
-    TexturedQuad, UpdateTexture, ViewProjection,
-};
-
-// These seam items are `pub` (visible in `render`) in their
-// now-nested child modules, so the re-export up to runtime level keeps that
-// exact visibility — the `use runtime::*` glob in `mod.rs` reaches them from
-// `render`, the scope the co-located test module names them in. `pub use`
-// would try to widen them to `pub` and fail (E0364/E0365).
+// These seam items are `pub` (visible in `render`) in their now-nested child
+// modules, so the re-export up to runtime level keeps that exact visibility.
 pub use self::capture::resolve_reference;
 pub use self::material::MaterialBatch;
 pub use self::quad::QuadBatch;
 pub use self::texture::{StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes};
 
-/// `aether.render` runtime state (ADR-0066). Holds [`RenderHandles`] (the
-/// driver-facing accumulator state plus GPU bundle) and the composer-supplied
-/// [`RenderParams`], plus the substrate registry + mailer captured at init
-/// for the `capture_frame` resolve-bundle / push-pre-mails path. The
-/// dispatcher holds this as the cap's state and routes envelopes through
-/// the macro-emitted `Dispatch` impl; the addressing identity is the
-/// distinct ZST [`super::RenderCapability`]. Driver glue fetches the
-/// handle bundle via `DriverCtx::handle::<RenderHandles>()` (published in
-/// `init`), not through this state. Living in this private module keeps it
-/// `pub`-enough to satisfy the `NativeActor::State` interface without
-/// exposing it as crate-public API.
+use super::{
+    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
+    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled,
+    RenderCapability, SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, ViewProjection,
+};
+
+/// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
+/// pre-mail chain has not settled within this window the next frame past
+/// the deadline replies `Err`, reproducing the `FRAME_SETTLEMENT_CAP`
+/// disposition event-driven. Matches the desktop driver's 30s
+/// advance-settlement bound.
+const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
+
+/// A parked capture, as plain owned state (ADR-0161 §Decision 4) — no
+/// `Arc`, no atomic, no cross-thread queue. The retained [`InboundMail`]
+/// guard defers the reply a frame (or more) past `on_capture_frame`; its
+/// un-fired `record_finished` keeps the inbound's chain open until the
+/// reply lands (ADR-0080 §6, ADR-0106).
+struct PendingCapture {
+    reply: InboundMail,
+    after_mails: Vec<Mail>,
+    /// `FrameCheck` verdict requests, scored on the read-back RGBA in
+    /// `on_frame`'s ready-branch (ADR-0161 §Decision 4). The scorer lives in
+    /// `aether_substrate::render::visual`, so the branch is reachable without
+    /// a downstream cycle.
+    checks: Vec<FrameCheck>,
+    /// Optional similarity reference (issue 1780), scored alongside `checks`.
+    reference: Option<ReferenceCapture>,
+    /// Count of pre-mail settlements still awaited; `on_pre_settled`
+    /// decrements it, and `on_frame` captures once it reaches zero.
+    pre_remaining: usize,
+    /// Wall-clock instant past which the capture wedges to `Err`.
+    deadline: Instant,
+}
+
+impl PendingCapture {
+    /// Ready to read back — every pre-mail chain has settled.
+    fn is_ready(&self) -> bool {
+        self.pre_remaining == 0
+    }
+
+    /// Past its wedge deadline (`FRAME_SETTLEMENT_CAP` since parking).
+    fn is_expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+}
+
+/// Pumped `aether.render` runtime state (ADR-0161). Owns the accumulators,
+/// the GPU + surface, and the pending capture as plain fields. The
+/// addressing identity is the distinct ZST [`super::RenderCapability`].
 pub struct RenderCapabilityState {
-    pub handles: RenderHandles,
-    pub params: RenderParams,
-    /// Substrate registry and mailer captured at init for the
-    /// `capture_frame` resolve-bundle / push-pre-mails path. Both are
-    /// Arc-shared with every other cap and the chassis loop.
-    pub registry: Arc<Registry>,
-    pub mailer: Arc<Mailer>,
+    frame_vertices: Vec<u8>,
+    last_submitted: Vec<u8>,
+    triangles_rendered: u64,
+    camera_state: [f32; 16],
+    quad_frame: Vec<QuadBatch>,
+    quad_last_submitted: Vec<QuadBatch>,
+    material_frame: Vec<MaterialBatch>,
+    material_last_submitted: Vec<MaterialBatch>,
+    textures: TextureRegistry,
+    vertex_buffer_bytes: usize,
+
+    /// Shared late-bound window handle; the first `on_frame` after the
+    /// chassis fills it boots wgpu. `None` until params provide it.
+    /// Desktop-only: the offscreen harness path (`offscreen_size`) owns no
+    /// window (ADR-0161 R4).
+    #[cfg(feature = "desktop")]
+    window: Option<WindowCell>,
+    /// ADR-0161 R4: offscreen boot dimensions. `Some((w, h))` makes the
+    /// first `on_frame` (with no window cell filled) boot a surfaceless GPU
+    /// at these dimensions — the substrate harness's path.
+    offscreen_size: Option<(u32, u32)>,
+    /// Resolved `AETHER_WIREFRAME` value threaded from params.
+    wireframe: Option<String>,
+    /// wgpu bundle, booted lazily on the first `on_frame` with a filled
+    /// window cell (or `offscreen_size`).
+    gpu: Option<RenderGpu>,
+    surface: Option<wgpu::Surface<'static>>,
+    surface_config: Option<wgpu::SurfaceConfiguration>,
+    wire_pipeline: Option<wgpu::RenderPipeline>,
+    /// Prior frame's submission index, drained at the top of the next
+    /// frame to bound the present loop to one frame in flight (issue 1312).
+    last_submission: Option<wgpu::SubmissionIndex>,
+    /// Whether the window is currently occluded (issue 1317).
+    occluded: bool,
+
+    /// ADR-0161 R4: committed-overlay observation sink for the substrate
+    /// harness's `committed_overlay_snapshot`. `record_overlay_batches`
+    /// populates it with the batches that *survived* record-time rejection
+    /// (missing texture / invalid clip / past budget), so the snapshot
+    /// reflects what was drawn — not the raw accumulator. `Mutex` only
+    /// because `record_overlay_batches` takes `&Mutex<_>` (the harness sink's
+    /// shape); the pumped state is single-threaded, so it never contends.
+    overlay_observation: Mutex<Vec<DrawTexturedQuads>>,
+
+    pending_capture: Option<PendingCapture>,
+
+    registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
+    /// Reply edge for `on_capture_frame`'s inline-failure paths (occluded,
+    /// already-pending, bundle / reference resolution error) — those reply
+    /// synchronously and let the dispatcher settle the inbound, so they
+    /// never take the deferred guard.
+    outbound: Arc<HubOutbound>,
+    assets_dir: Option<PathBuf>,
+    observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+}
+
+impl RenderCapabilityState {
+    /// Deadline of the pending capture, if one is parked (ADR-0161
+    /// §Decision 4). Read by the driver through
+    /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
+    /// so it can park with `ControlFlow::WaitUntil(deadline)` — the single
+    /// capture-awareness the driver retains, so a wedged pre-chain on a
+    /// parked window still reaches the deadline check.
+    #[must_use]
+    pub fn capture_deadline(&self) -> Option<Instant> {
+        self.pending_capture.as_ref().map(|pending| pending.deadline)
+    }
+
+    /// Cumulative triangle count this session, for the driver's shutdown FPS
+    /// report (ADR-0161). The pumped runtime owns `triangles_rendered` as
+    /// plain state, so the driver reads it through
+    /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
+    /// before `shutdown` consumes the actor; `unwire` logs the same count.
+    #[must_use]
+    pub fn triangles_rendered(&self) -> u64 {
+        self.triangles_rendered
+    }
+
+    /// Whether a parked capture is **ready to read back** — every pre-mail
+    /// chain has settled (`pre_remaining == 0`), so the draws those chains
+    /// terminate at have already dispatched onto the owned accumulators
+    /// (ADR-0161 R4). Read by the substrate harness's frame hook through
+    /// `PumpedSlot::read_state` to decide when to drive the capture frame:
+    /// the harness sends `aether.render.frame` only once this is `true`, so
+    /// the record never runs against an accumulator a still-in-flight pre-mail
+    /// chain has yet to fill. The pumped state's fields are private, so this
+    /// is the read surface the pump-owning thread uses.
+    #[must_use]
+    pub fn capture_ready(&self) -> bool {
+        self.pending_capture.as_ref().is_some_and(PendingCapture::is_ready)
+    }
+
+    /// Snapshot the ordered overlay batches from the most recently committed
+    /// frame as their public [`DrawTexturedQuads`] shape (ADR-0105 /
+    /// ADR-0161 R4). Reads the observation sink `record_overlay_batches`
+    /// populates, so batches rejected at record time (missing texture,
+    /// invalid/empty clip, past the vertex budget) are excluded and solid
+    /// submissions appear normalized over the reserved white texture. Read by
+    /// the harness's `committed_overlay_snapshot` extension through
+    /// `PumpedSlot::read_state`. Owns its data.
+    ///
+    /// # Panics
+    /// Panics if the observation mutex is poisoned — fail-fast per ADR-0063.
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.overlay_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
+    }
+
+    /// Push a dispatched kind name into the `SubstrateHarness` observation
+    /// sink, when one is installed. Production chassis leave it `None`.
+    fn observe(&self, name: &str) {
+        if let Some(obs) = &self.observed_kinds {
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(name.into());
+        }
+    }
+
+    /// Boot wgpu against the shared window cell if it is now filled and the
+    /// GPU is not yet booted. Idempotent — the one-time boot lands visibly
+    /// in the first frame's cost sample (ADR-0161). No-op until the chassis
+    /// `resumed` handler fills the cell.
+    fn ensure_gpu_booted(&mut self) {
+        if self.gpu.is_some() {
+            return;
+        }
+        // Windowed path (desktop): boot against the shared window cell once
+        // the chassis's `resumed` fills it, standing up a surface + swapchain.
+        #[cfg(feature = "desktop")]
+        if let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) {
+            let size = window.inner_size();
+            let booted = boot_surface(window, (size.width, size.height), self.wireframe.as_deref());
+            let gpu = RenderGpu::new(
+                Arc::clone(&booted.device),
+                Arc::clone(&booted.queue),
+                booted.format,
+                booted.config.width,
+                booted.config.height,
+                booted.polygon_mode,
+                self.vertex_buffer_bytes,
+            );
+            // Built post-`RenderGpu::new` so it can borrow the main pipeline's
+            // layout (same camera bind group). The overlay draws into the
+            // offscreen color target, so it uses `RenderGpu`'s color format.
+            self.wire_pipeline = booted.build_overlay.then(|| {
+                build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout)
+            });
+            self.surface = Some(booted.surface);
+            self.surface_config = Some(booted.config);
+            self.gpu = Some(gpu);
+            return;
+        }
+        // Offscreen path (ADR-0161 R4, the substrate harness): boot a
+        // surfaceless GPU at the configured dimensions. No surface / swapchain
+        // — capture reads back from the offscreen targets directly, and the
+        // best-effort present in `on_frame` no-ops with `surface: None`.
+        let Some((width, height)) = self.offscreen_size else {
+            return;
+        };
+        let booted = boot_offscreen(self.wireframe.as_deref());
+        let gpu = RenderGpu::new(
+            Arc::clone(&booted.device),
+            Arc::clone(&booted.queue),
+            booted.format,
+            width,
+            height,
+            booted.polygon_mode,
+            self.vertex_buffer_bytes,
+        );
+        self.wire_pipeline = booted
+            .build_overlay
+            .then(|| build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout));
+        self.gpu = Some(gpu);
+    }
+
+    /// Reconfigure the surface + offscreen targets when the window has
+    /// resized since the last frame (ADR-0161: the surface reconfigure rides
+    /// the next `on_frame` rather than a driver reach-in — the frame mail
+    /// carries no size). No-op until the GPU is booted, when the size is
+    /// unchanged, or on a `0×0` minimize (winit reports `Resized(0, 0)`
+    /// there, which `Targets::resize` also guards). Desktop-only: the
+    /// offscreen harness path owns no window to resize against (ADR-0161 R4).
+    #[cfg(feature = "desktop")]
+    fn reconfigure_if_resized(&mut self) {
+        let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) else {
+            return;
+        };
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(config) = self.surface_config.as_mut() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 || (size.width == config.width && size.height == config.height) {
+            return;
+        }
+        config.width = size.width;
+        config.height = size.height;
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&gpu.device, config);
+        }
+        gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063").resize(
+            &gpu.device,
+            size.width,
+            size.height,
+        );
+    }
+
+    /// Record the world / material / overlay passes into `encoder` from the
+    /// owned accumulators, committing each per the issue 847 cache
+    /// semantic. Returns `Err` if the vertex buffer overflowed (the frame
+    /// is dropped). The GPU must be booted.
+    fn record_passes(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        replay_cache_when_idle: bool,
+    ) -> Result<(), RenderError> {
+        // Commit every accumulator first (mutating owned fields) so the
+        // shared GPU borrow taken for recording never overlaps a `&mut`
+        // on a sibling field.
+        commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
+        commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
+        commit_or_replay(&mut self.quad_frame, &mut self.quad_last_submitted, replay_cache_when_idle);
+
+        let gpu = self.gpu.as_ref().expect("record_passes requires a booted GPU");
+        let extras_storage: [&wgpu::RenderPipeline; 1];
+        let extras: &[&wgpu::RenderPipeline] = match self.wire_pipeline.as_ref() {
+            Some(pipeline) => {
+                extras_storage = [pipeline];
+                &extras_storage
+            }
+            None => &[],
+        };
+        // World pass — writes the camera uniform the material pass reads.
+        {
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            record_main_pass(
+                &gpu.queue,
+                encoder,
+                &gpu.pipeline,
+                &targets,
+                &self.last_submitted,
+                &self.camera_state,
+                extras,
+            )?;
+        }
+        // Material pass (depth-tested world-space rects), then the screen /
+        // world overlay pass.
+        {
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            record_material_batches(gpu, encoder, &targets, &mut self.textures, &self.material_last_submitted);
+        }
+        {
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            record_overlay_batches(
+                gpu,
+                encoder,
+                &targets,
+                &mut self.textures,
+                &self.quad_last_submitted,
+                self.camera_state,
+                Some(&self.overlay_observation),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Owned-field commit-or-replay (ADR-0161 §Scope: "a bare `mem::swap`").
+/// - `live` non-empty → swap it into `last` and clear `live` for next frame.
+/// - `live` empty, `!replay_cache_when_idle` → clear `last` (commit-current).
+/// - `live` empty, `replay_cache_when_idle` → leave `last` (replay-cache).
+fn commit_or_replay<T>(live: &mut Vec<T>, last: &mut Vec<T>, replay_cache_when_idle: bool) {
+    if !live.is_empty() {
+        mem::swap(live, last);
+        live.clear();
+    } else if !replay_cache_when_idle {
+        last.clear();
+    }
 }
 
 #[runtime]
 impl NativeActor for RenderCapability {
-    /// The runtime state this identity boots into (ADR-0122 split): the
-    /// driver-facing accumulator handles + config + substrate handles.
     type State = RenderCapabilityState;
-
     type Config = RenderTuningConfig;
     type Params = RenderParams;
 
-    /// Components mail `aether.draw_triangle` and `aether.view_projection`
-    /// (kind ids) to this mailbox; the GPU recorder pulls from here.
-    /// The `aether.<name>` form is the post-ADR-0074 Phase 5
-    /// convention for chassis-owned mailboxes; ADR-0074 §Decision 7
-    /// folded the camera mailbox into render under this name.
     const NAMESPACE: &'static str = "aether.render";
 
-    /// Allocate the accumulator state up front. Idempotent on the
-    /// driver-facing side: every chassis main passes a fresh
-    /// `RenderTuningConfig` + `RenderParams`; init only sets up the in-process buffers and
-    /// the wgpu `OnceLock` (the driver fills it in `resumed` /
-    /// post-`build_passive`).
-    ///
-    /// `last_submitted` mirrors `frame_vertices`'s capacity so the
-    /// swap inside `record_frame` (iamacoffeepot/aether#847) lands
-    /// a full-capacity buffer back into the live slot — without the
-    /// pre-allocation, the first frame's swap would leave the live
-    /// accumulator at `last_submitted`'s starting capacity (zero)
-    /// and the next tick's `on_draw_triangle` would reallocate
-    /// from scratch.
     fn init(
         config: RenderTuningConfig,
         params: RenderParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RenderCapabilityState, BootError> {
-        let handles = RenderHandles {
-            frame_vertices: Arc::new(Mutex::new(Vec::<u8>::with_capacity(config.vertex_buffer_bytes))),
-            last_submitted: Arc::new(Mutex::new(Vec::<u8>::with_capacity(config.vertex_buffer_bytes))),
-            triangles_rendered: Arc::new(AtomicU64::new(0)),
-            camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
-            quad_frame: Arc::new(Mutex::new(Vec::new())),
-            quad_last_submitted: Arc::new(Mutex::new(Vec::new())),
-            quad_observation: Arc::new(OnceLock::new()),
-            material_frame: Arc::new(Mutex::new(Vec::new())),
-            material_last_submitted: Arc::new(Mutex::new(Vec::new())),
-            textures: Arc::new(Mutex::new(TextureRegistry::new())),
-            gpu: Arc::new(OnceLock::new()),
-            vertex_buffer_bytes: config.vertex_buffer_bytes,
-            // ADR-0155 §4: the driver installs the capture backend into this
-            // shared slot at Start (via the published `RenderHandles`); the
-            // cap boots it empty so env-resolved config carries no runtime
-            // handle.
-            capture_backend: Arc::new(OnceLock::new()),
-        };
         let mailer = ctx.mailer();
         let registry = Arc::clone(mailer.registry());
-        // Issue 629 / Phase A: publish the driver-facing handle
-        // bundle on the chassis's `ExportedHandles` map so the
-        // desktop driver retrieves it via `DriverCtx::handle::<RenderHandles>()`.
-        ctx.publish_handle(handles.clone());
-        Ok(RenderCapabilityState { handles, params, registry, mailer })
+        let outbound = mailer.outbound().cloned().ok_or_else(|| {
+            BootError::Other(Box::new(io::Error::other(
+                "HubOutbound must be wired on Mailer before RenderCapability::init",
+            )))
+        })?;
+        Ok(RenderCapabilityState {
+            frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
+            last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
+            triangles_rendered: 0,
+            camera_state: IDENTITY_VIEW_PROJ,
+            quad_frame: Vec::new(),
+            quad_last_submitted: Vec::new(),
+            material_frame: Vec::new(),
+            material_last_submitted: Vec::new(),
+            textures: TextureRegistry::new(),
+            vertex_buffer_bytes: config.vertex_buffer_bytes,
+            #[cfg(feature = "desktop")]
+            window: params.window,
+            offscreen_size: params.offscreen_size,
+            wireframe: params.wireframe,
+            gpu: None,
+            surface: None,
+            surface_config: None,
+            wire_pipeline: None,
+            last_submission: None,
+            occluded: false,
+            overlay_observation: Mutex::new(Vec::new()),
+            pending_capture: None,
+            registry,
+            mailer,
+            outbound,
+            assets_dir: params.assets_dir,
+            observed_kinds: params.observed_kinds,
+        })
     }
 
-    /// `DrawTriangle` handler. Slice-typed because `Mailbox::send_many`
-    /// (ADR-0019) packs `count` triangles into one envelope — the
-    /// macro decodes the whole payload as `&[DrawTriangle]` so a
-    /// batched mesh reaches the cap intact. Truncates at the cap
-    /// boundary so a single oversized mesh degrades gracefully
-    /// instead of collapsing the whole frame downstream; rounds to
-    /// whole triangles so the GPU vertex buffer never sees a half-
-    /// triangle.
-    ///
-    /// # Agent
-    /// Components mail one or more `DrawTriangle`s (cast-shape,
-    /// `DRAW_TRIANGLE_BYTES` per triangle, batched via `send_many`)
-    /// per tick. Fire-and-forget; the cap accumulates into
-    /// `frame_vertices` until the chassis driver records the frame.
+    /// `DrawTriangle` accumulator, on the owned `frame_vertices` buffer.
+    /// Truncates at the cap boundary, rounding to whole triangles.
     #[handler::single]
     fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DrawTriangle as Kind>::NAME.into());
-        }
+        state.observe(<DrawTriangle as Kind>::NAME);
         let bytes: &[u8] = bytemuck::cast_slice(mails);
-        let cap_bytes = state.handles.vertex_buffer_bytes;
-        let mut verts = state.handles.frame_vertices.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-        let available = cap_bytes.saturating_sub(verts.len());
+        let cap_bytes = state.vertex_buffer_bytes;
+        let available = cap_bytes.saturating_sub(state.frame_vertices.len());
         let write_len = bytes.len().min(available);
         let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
         if write_len > 0 {
-            verts.extend_from_slice(&bytes[..write_len]);
-            state.handles.triangles_rendered.fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
+            state.frame_vertices.extend_from_slice(&bytes[..write_len]);
+            state.triangles_rendered += (write_len / DRAW_TRIANGLE_BYTES) as u64;
         }
         if write_len < bytes.len() {
             tracing::warn!(
@@ -226,179 +505,22 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `ViewProjection` handler. Latest-value-wins semantics: each successful
-    /// mail overwrites; the prior value is replaced wholesale.
-    /// Initialised in `init` to [`IDENTITY_VIEW_PROJ`] so the first
-    /// frame draws unchanged until a camera component starts
-    /// publishing.
-    ///
-    /// # Agent
-    /// Camera components mail `aether.view_projection { view_proj: [f32; 16] }`
-    /// to this mailbox. Fire-and-forget; latest value wins.
+    /// `ViewProjection` latest-value-wins, on the owned `camera_state`.
     #[handler::single]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<ViewProjection as Kind>::NAME.into());
-        }
-        *state.handles.camera_state.lock().expect("mutex poisoned; fail-fast per ADR-0063") = mail.view_proj;
+        state.observe(<ViewProjection as Kind>::NAME);
+        state.camera_state = mail.view_proj;
     }
 
-    /// `CaptureFrame` handler. The cap dispatcher thread doesn't
-    /// own the wgpu `Device` — that lives on the chassis main
-    /// thread — so capture is a two-phase handoff: this handler
-    /// resolves the request and parks it on `CaptureBackend.queue`,
-    /// the chassis main loop takes from there on the next redraw,
-    /// performs the GPU readback, dispatches the `after_mails`
-    /// bundle, and replies to the original sender.
-    ///
-    /// Abort-on-first-failure: if either bundle has an unknown
-    /// kind / mailbox the whole request errors before any pre-mail
-    /// is pushed. Decode failure, queue full, and a dead wake
-    /// target also reply inline; only the readback path replies
-    /// from the render thread.
-    ///
-    /// # Agent
-    /// Mail `aether.render.capture_frame { mails, after_mails }`
-    /// for an atomic "set X, capture, restore X" call. Reply is
-    /// `aether.render.capture_frame_result` carrying the PNG on
-    /// success or a free-form reason on failure.
-    #[handler::manual]
-    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<CaptureFrame as Kind>::NAME.into());
-        }
-
-        let sender = ctx.reply_target();
-        // ADR-0155 §4: the capture backend is a Start-stage handoff the driver
-        // installs into the published `RenderHandles`, not a `RenderConfig`
-        // field. Absent until installed — a chassis with no render thread
-        // (the in-crate tests) never installs one and replies `Err`.
-        let Some(backend) = state.handles.capture_backend() else {
-            tracing::warn!(
-                target: "aether_render",
-                "RenderCapability received capture_frame without capture_backend; replying Err",
-            );
-            return;
-        };
-
-        let pre = match resolve_bundle(&state.registry, &mail.mails, "capture bundle") {
-            Ok(v) => v,
-            Err(error) => {
-                backend.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-        let after = match resolve_bundle(&state.registry, &mail.after_mails, "capture after bundle") {
-            Ok(v) => v,
-            Err(error) => {
-                backend.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-
-        // iamacoffeepot/aether#860: dispatch each pre-mail as a
-        // fresh chassis-rooted chain via `send_envelope_detached`
-        // and subscribe to its settlement, so the driver can wait
-        // for the full causal chain (component handler → emitted
-        // DrawTriangle → render cap accumulator) to land before
-        // `render_and_capture` runs. Without this gate the cross-
-        // thread chain races the wake-and-render path and an
-        // empty `frame_vertices` falls back to the (empty) cache
-        // → solid-background frame. Same primitive RpcServer uses
-        // for wire-borne Calls (a pre-mail is causally external
-        // from the cap's perspective — triggered by a wire-borne
-        // CaptureFrame, not forwarded from in-flight context).
-        //
-        // If the chassis didn't install a settlement registry
-        // (some test fixtures), the loop still dispatches the
-        // mails but `pre_settlements` stays empty so the driver
-        // renders immediately — preserving the pre-fix behaviour
-        // on those fixtures.
-        let settlement_registry = state.mailer.settlement_registry().cloned();
-        let mut pre_settlements = Vec::with_capacity(pre.len());
-        for envelope in pre {
-            let mail_id = ctx.send_envelope_detached(envelope.recipient, envelope.kind, envelope.payload.bytes());
-            if let Some(reg) = settlement_registry.as_deref() {
-                pre_settlements.push(reg.subscribe_settlement(mail_id));
-            }
-        }
-
-        // ADR-0106 / iamacoffeepot/aether#1758: capture is a deferred
-        // reply — the render thread sends the reply a frame later, off
-        // this handler's dispatch window. Retain the dispatched
-        // `CaptureFrame` envelope as an `InboundMail` guard via
-        // `take_inbound`: the dispatcher's settlement tail then sees
-        // `None` and does not discharge, so the guard's un-fired
-        // `record_finished` keeps the inbound's chain open until the
-        // render thread replies through `reply.reply(&result)` and
-        // drops it (recording the reply's `Sent` before the inbound's
-        // `Finished`, ADR-0080 §6). This retires the hand-rolled
-        // `SettlementHold` + reply-id mint (#1273 / #1719). The
-        // early-return branches above reply synchronously inside this
-        // handler's own dispatch window, so they leave the inbound for
-        // the dispatcher's tail to settle and don't take the guard.
-
-        // iamacoffeepot/aether#1780: read the reference PNG synchronously
-        // on the cap dispatcher thread (not the render thread) so all
-        // filesystem I/O stays off the render hot path. The render thread
-        // only runs the CPU-side MAE comparison against the pre-fetched
-        // bytes.
-        let reference = match resolve_reference(state.params.assets_dir.as_deref(), mail.similarity.as_ref()) {
-            Ok(reference) => reference,
-            Err(error) => {
-                backend.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-
-        let inbound = ctx.take_inbound();
-        let pending =
-            PendingCapture { reply: inbound, after_mails: after, pre_settlements, checks: mail.checks, reference };
-        // A rejected request (`Err`) is handed back so its retained
-        // guard can carry the synchronous `Err` reply before it drops
-        // — settling after the reply, ADR-0080 §6.
-        if let Err(rejected) = backend.queue.request(pending) {
-            rejected.reply.reply(&CaptureFrameResult::Err {
-                error: "capture already pending; try again once the in-flight \
-                        request completes"
-                    .to_owned(),
-            });
-            return;
-        }
-
-        if let Err(reason) = (backend.wake)()
-            && let Some(rejected) = backend.queue.take()
-        {
-            // The wake never reached the render thread, so the request
-            // is still parked: take it back and reply `Err` through its
-            // retained guard, which then drops and settles the chain.
-            rejected.reply.reply(&CaptureFrameResult::Err { error: reason.to_owned() });
-        }
-    }
-
-    /// `CreateTexture` handler (ADR-0105). Validates the dimensions
-    /// and pixel length, stages the pixels CPU-side under the
-    /// next session-scoped `texture_id`, and replies immediately —
-    /// the wgpu texture is realized lazily at the next frame record
-    /// (the GPU bundle isn't installed until the chassis driver
-    /// boots). A zero dimension or a `pixels` length that doesn't
-    /// match the texture format replies `Err` without registering.
-    ///
-    /// # Agent
-    /// Mail `aether.render.create_texture { width, height, format, pixels }`;
-    /// the reply `aether.render.create_texture_result` carries the
-    /// `texture_id` to thread into `draw_textured_quads`.
+    /// `CreateTexture` (ADR-0105), on the owned texture registry.
     #[handler::single]
     fn on_create_texture(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         mail: CreateTexture,
     ) -> CreateTextureResult {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<CreateTexture as Kind>::NAME.into());
-        }
-        let expected = expected_pixel_bytes(mail.width, mail.height, mail.format);
-        let Some(expected) = expected else {
+        state.observe(<CreateTexture as Kind>::NAME);
+        let Some(expected) = expected_pixel_bytes(mail.width, mail.height, mail.format) else {
             return CreateTextureResult::Err {
                 error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
             };
@@ -414,10 +536,9 @@ impl NativeActor for RenderCapability {
                 ),
             };
         }
-        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-        let texture_id = registry.next_id;
-        registry.next_id += 1;
-        registry.entries.insert(
+        let texture_id = state.textures.next_id;
+        state.textures.next_id += 1;
+        state.textures.entries.insert(
             texture_id,
             StagedTexture {
                 width: mail.width,
@@ -428,26 +549,13 @@ impl NativeActor for RenderCapability {
                 dirty: true,
             },
         );
-        drop(registry);
         CreateTextureResult::Ok { texture_id }
     }
 
-    /// `UpdateTexture` handler (ADR-0105). Overwrites a sub-rectangle
-    /// of a staged texture's pixels and dirties it so the next record
-    /// re-uploads. Fire-and-forget: an unknown `texture_id`, an
-    /// out-of-bounds rect, or a `pixels` length that doesn't match the
-    /// sub-rect logs and drops without touching the staging buffer. The
-    /// reserved white texture used to normalize solid draws is not
-    /// caller-owned and cannot be updated.
-    ///
-    /// # Agent
-    /// Mail `aether.render.update_texture { texture_id, x, y, width,
-    /// height, pixels }` to grow an atlas; no reply.
+    /// `UpdateTexture` (ADR-0105), on the owned texture registry.
     #[handler::single]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<UpdateTexture as Kind>::NAME.into());
-        }
+        state.observe(<UpdateTexture as Kind>::NAME);
         if mail.texture_id == WHITE_TEXTURE_ID {
             tracing::warn!(
                 target: "aether_render",
@@ -456,8 +564,7 @@ impl NativeActor for RenderCapability {
             );
             return;
         }
-        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-        let Some(entry) = registry.entries.get_mut(&mail.texture_id) else {
+        let Some(entry) = state.textures.entries.get_mut(&mail.texture_id) else {
             tracing::warn!(
                 target: "aether_render",
                 texture_id = mail.texture_id,
@@ -475,20 +582,10 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `DestroyTexture` handler. Removes a texture from the session
-    /// registry, dropping staged CPU pixels and any realized GPU handles.
-    /// Fire-and-forget: an unknown `texture_id` logs and drops. The
-    /// reserved internal white texture is not caller-owned and cannot be
-    /// destroyed through this public kind.
-    ///
-    /// # Agent
-    /// Mail `aether.render.destroy_texture { texture_id }` when a
-    /// registered texture is no longer used; no reply.
+    /// `DestroyTexture`, on the owned texture registry.
     #[handler::single]
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DestroyTexture as Kind>::NAME.into());
-        }
+        state.observe(<DestroyTexture as Kind>::NAME);
         if mail.texture_id == WHITE_TEXTURE_ID {
             tracing::warn!(
                 target: "aether_render",
@@ -497,8 +594,7 @@ impl NativeActor for RenderCapability {
             );
             return;
         }
-        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-        if registry.entries.remove(&mail.texture_id).is_none() {
+        if state.textures.entries.remove(&mail.texture_id).is_none() {
             tracing::warn!(
                 target: "aether_render",
                 texture_id = mail.texture_id,
@@ -507,22 +603,11 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `DrawTexturedQuads` handler (ADR-0105). Accumulates the batch
-    /// into the per-frame quad accumulator with the same immediate-
-    /// mode contract as `on_draw_triangle`: the driver consumes it at
-    /// record time. An unknown `texture_id` or a `World` space is
-    /// warn-dropped at encode, not here, so the accumulate path stays
-    /// a cheap push.
-    ///
-    /// # Agent
-    /// Mail `aether.render.draw_textured_quads { texture_id, space,
-    /// quads }` every frame the quads should appear; no reply.
+    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `quad_frame`.
     #[handler::single]
     fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DrawTexturedQuads as Kind>::NAME.into());
-        }
-        state.handles.quad_frame.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(QuadBatch {
+        state.observe(<DrawTexturedQuads as Kind>::NAME);
+        state.quad_frame.push(QuadBatch {
             texture_id: mail.texture_id,
             space: mail.space,
             clip: mail.clip,
@@ -530,24 +615,12 @@ impl NativeActor for RenderCapability {
         });
     }
 
-    /// `DrawSolidQuads` handler (ADR-0107 §4). Expands each `SolidQuad`
-    /// into a `TexturedQuad` covering the full uv of a reserved internal
-    /// 1×1 white texture, tinted by `color` — so the white texel ×
-    /// tint produces the flat fill color with no new GPU pipeline.
-    /// Lazily inserts the white texture into the registry on first call.
-    /// Accumulates into the same `quad_frame` accumulator as
-    /// `on_draw_textured_quads`; immediate-mode contract is identical.
-    ///
-    /// # Agent
-    /// Mail `aether.render.draw_solid_quads { space, quads }` every
-    /// frame the rects should appear; no reply.
+    /// `DrawSolidQuads` (ADR-0107 §4), on the owned `quad_frame` — expand to
+    /// the reserved white texture tinted by `color`.
     #[handler::single]
     fn on_draw_solid_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DrawSolidQuads as Kind>::NAME.into());
-        }
-        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-        registry.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
+        state.observe(<DrawSolidQuads as Kind>::NAME);
+        state.textures.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
             width: 1,
             height: 1,
             format: TextureFormat::Rgba8,
@@ -555,7 +628,6 @@ impl NativeActor for RenderCapability {
             realized: None,
             dirty: true,
         });
-        drop(registry);
         let quads: Vec<TexturedQuad> = mail
             .quads
             .into_iter()
@@ -571,57 +643,575 @@ impl NativeActor for RenderCapability {
                 tint: color,
             })
             .collect();
-        state.handles.quad_frame.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(QuadBatch {
-            texture_id: WHITE_TEXTURE_ID,
-            space: mail.space,
-            clip: mail.clip,
-            quads,
+        state.quad_frame.push(QuadBatch { texture_id: WHITE_TEXTURE_ID, space: mail.space, clip: mail.clip, quads });
+    }
+
+    /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
+    #[handler::single]
+    fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
+        state.observe(<DrawMaterialTextured as Kind>::NAME);
+        state.material_frame.push(MaterialBatch::Textured { texture_id: mail.texture_id, rects: mail.rects });
+    }
+
+    /// `DrawMaterialCoverage` (ADR-0140), on the owned material stream.
+    #[handler::single]
+    fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
+        state.observe(<DrawMaterialCoverage as Kind>::NAME);
+        state.material_frame.push(MaterialBatch::Coverage { texture_id: mail.texture_id, rects: mail.rects });
+    }
+
+    /// `PreSettled` (ADR-0161) — decrement the pending capture's
+    /// `pre_remaining`. A stray notice with no pending capture is ignored.
+    #[handler::single]
+    fn on_pre_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: PreSettled) {
+        state.observe(<PreSettled as Kind>::NAME);
+        if let Some(pending) = &mut state.pending_capture {
+            pending.pre_remaining = pending.pre_remaining.saturating_sub(1);
+        }
+    }
+
+    /// `Occluded` (ADR-0161) — track window occlusion and fail-fast a
+    /// pending capture the moment the window becomes occluded (issue 1317
+    /// `fail_capture_if_occluded`, relocated into the actor). The reply
+    /// rides the retained guard, so the inbound's chain settles after it.
+    #[handler::single]
+    fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
+        state.observe(<Occluded as Kind>::NAME);
+        state.occluded = mail.occluded;
+        if mail.occluded
+            && let Some(pending) = state.pending_capture.take()
+        {
+            pending.reply.reply(&CaptureFrameResult::Err {
+                error: "capture_frame failed: the window became occluded before the frame could be captured".to_owned(),
+            });
+        }
+    }
+
+    /// `Frame` (ADR-0161 §Decision 1) — the per-frame record + capture
+    /// decision. Boots wgpu lazily on the first frame with a filled window
+    /// cell, records the world / material / overlay passes, and resolves a
+    /// pending capture: past its deadline → reply `Err`; ready
+    /// (`pre_remaining == 0`) → read back + reply through the retained
+    /// guard; otherwise the capture rides a later frame.
+    #[handler::single]
+    fn on_frame(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Frame) {
+        state.observe(<Frame as Kind>::NAME);
+        state.ensure_gpu_booted();
+        // Desktop-only: the offscreen harness path owns no window to resize.
+        #[cfg(feature = "desktop")]
+        state.reconfigure_if_resized();
+
+        // Deadline disposition first — a wedged pre-chain replies `Err`
+        // even on a frame where nothing else happens.
+        let now = Instant::now();
+        if state.pending_capture.as_ref().is_some_and(|pending| pending.is_expired(now)) {
+            let pending = state.pending_capture.take().expect("just checked Some");
+            pending.reply.reply(&CaptureFrameResult::Err {
+                error: "capture_frame failed: pre-mail settlement did not complete within the frame settlement cap"
+                    .to_owned(),
+            });
+        }
+
+        let capture_this_frame = state.pending_capture.as_ref().is_some_and(PendingCapture::is_ready);
+
+        let Some(gpu) = state.gpu.as_ref() else {
+            // No surface yet (window cell unfilled / boot skipped). A ready
+            // capture cannot read back without a GPU — fail it fast rather
+            // than park it forever.
+            if capture_this_frame && let Some(pending) = state.pending_capture.take() {
+                pending.reply.reply(&CaptureFrameResult::Err {
+                    error: "capture_frame failed: the render GPU is not booted on this chassis".to_owned(),
+                });
+            }
+            return;
+        };
+        let device = Arc::clone(&gpu.device);
+        let queue = Arc::clone(&gpu.queue);
+
+        // One-frame-in-flight: drain the prior submission before recording
+        // the next (issue 1312).
+        if let Some(index) = state.last_submission.take()
+            && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
+        {
+            tracing::warn!(target: "aether_substrate::render", ?error, "device.poll for previous frame failed; continuing");
+        }
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame encoder") });
+        match state.record_passes(&mut encoder, mail.replay_cache_when_idle) {
+            Ok(()) => {}
+            Err(RenderError::VertexBufferOverflow { .. }) => return,
+        }
+
+        // Capture copy against the offscreen — independent of surface
+        // availability.
+        let capture_meta = capture_this_frame.then(|| {
+            let gpu = state.gpu.as_ref().expect("gpu present in this branch");
+            let mut targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            prepare_capture_copy(&gpu.device, &mut targets, &mut encoder)
+        });
+
+        // Best-effort blit to the swapchain + present.
+        let surface_tex = state
+            .surface
+            .as_ref()
+            .zip(state.surface_config.as_ref())
+            .and_then(|(surface, config)| acquire_surface_texture(surface, &device, config));
+        if let Some(tex) = surface_tex.as_ref() {
+            let gpu = state.gpu.as_ref().expect("gpu present in this branch");
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            let (width, height) = (targets.width(), targets.height());
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: targets.color_texture(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+        }
+
+        state.last_submission = Some(queue.submit(iter::once(encoder.finish())));
+        if let Some(tex) = surface_tex {
+            tex.present();
+        }
+
+        // Capture readback + deferred reply through the retained guard.
+        if let Some(meta) = capture_meta {
+            let pending = state.pending_capture.take().expect("capture_this_frame => pending is Some");
+            for mail in pending.after_mails {
+                state.mailer.push(mail);
+            }
+            let gpu = state.gpu.as_ref().expect("gpu present in this branch");
+            // Map the readback once, then encode the PNG and score the
+            // verdict / similarity from the same de-padded RGBA (ADR-0161
+            // §Decision 4). `score_similarity` borrows the slice; `run_checks`
+            // consumes it, so the similarity check runs first (issue 1780).
+            let outcome: Result<CaptureFrameResult, String> = {
+                let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+                map_capture_rgba(&gpu.device, &targets, &meta).and_then(|rgba| {
+                    let png = encode_png(&rgba, meta.width, meta.height)?;
+                    let (similarity_score, similarity_pass) =
+                        visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
+                    let verdict = (!pending.checks.is_empty())
+                        .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
+                    Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
+                })
+            };
+            match outcome {
+                Ok(result) => pending.reply.reply(&result),
+                Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
+            };
+        }
+    }
+
+    /// `CaptureFrame` (ADR-0161 §Decision 4) — the mail-driven capture
+    /// entry. Fails fast when the window is occluded or a capture is
+    /// already pending (issue 1317 semantics preserved at the source),
+    /// then resolves the pre / after bundles, dispatches each pre-mail on a
+    /// fresh chassis-rooted chain, bridges its settlement to a `PreSettled`
+    /// mail, parks the [`PendingCapture`], and retains the inbound guard so
+    /// the reply defers to `on_frame`.
+    ///
+    /// A render handler must **never** block on a pre-mail settlement (the
+    /// ADR Context deadlock: pre-chains terminate back at this mailbox), so
+    /// the settlement bridge only mails — it never waits.
+    #[handler::manual]
+    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
+        state.observe(<CaptureFrame as Kind>::NAME);
+        let sender = ctx.reply_target();
+
+        if state.occluded {
+            state.outbound.send_reply(
+                sender,
+                &CaptureFrameResult::Err { error: "capture_frame failed: the window is occluded".to_owned() },
+            );
+            return;
+        }
+        if state.pending_capture.is_some() {
+            state.outbound.send_reply(
+                sender,
+                &CaptureFrameResult::Err {
+                    error: "capture already pending; try again once the in-flight request completes".to_owned(),
+                },
+            );
+            return;
+        }
+
+        let pre = match resolve_bundle(&state.registry, &mail.mails, "capture bundle") {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                return;
+            }
+        };
+        let after = match resolve_bundle(&state.registry, &mail.after_mails, "capture after bundle") {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                return;
+            }
+        };
+        let reference = match resolve_reference(state.assets_dir.as_deref(), mail.similarity.as_ref()) {
+            Ok(reference) => reference,
+            Err(error) => {
+                state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                return;
+            }
+        };
+
+        // Dispatch each pre-mail on a fresh chassis-rooted chain (issue
+        // 860) and bridge its settlement to a `PreSettled` mail addressed
+        // to this render mailbox — pushed from whatever thread the
+        // settlement fires on. With no settlement registry (some fixtures)
+        // `pre_remaining` stays the number dispatched but nothing decrements
+        // it, so such a fixture never gates a capture on settlement.
+        let settlement_registry = state.mailer.settlement_registry().cloned();
+        let self_id = ctx.self_id();
+        let mut pre_remaining = 0usize;
+        for envelope in pre {
+            let mail_id = ctx.send_envelope_detached(envelope.recipient, envelope.kind, envelope.payload.bytes());
+            pre_remaining += 1;
+            if let Some(registry) = settlement_registry.as_deref() {
+                registry.subscribe_settlement_mail(
+                    mail_id,
+                    self_id,
+                    <PreSettled as Kind>::ID,
+                    Arc::clone(&state.mailer),
+                );
+            }
+        }
+
+        let reply = ctx.take_inbound();
+        state.pending_capture = Some(PendingCapture {
+            reply,
+            after_mails: after,
+            checks: mail.checks,
+            reference,
+            pre_remaining,
+            deadline: Instant::now() + FRAME_SETTLEMENT_CAP,
         });
     }
 
-    /// `DrawMaterialTextured` handler (ADR-0140). Accumulates a typed
-    /// textured material batch into the ordered material stream. Texture
-    /// existence is checked at record time so the handler stays a cheap
-    /// immediate-mode push.
-    ///
-    /// # Agent
-    /// Mail `aether.render.material.textured { texture_id, rects }`
-    /// every frame the world-space material rects should appear; no reply.
-    #[handler::single]
-    fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<DrawMaterialTextured as Kind>::NAME.into());
-        }
-        state
-            .handles
-            .material_frame
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063")
-            .push(MaterialBatch::Textured { texture_id: mail.texture_id, rects: mail.rects });
+    /// Log the session's cumulative triangle count on teardown — the
+    /// pumped runtime owns `triangles_rendered` as plain state, so its
+    /// natural reader is this actor's `unwire`.
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        tracing::info!(
+            target: "aether_substrate::render",
+            triangles_rendered = state.triangles_rendered,
+            "pumped render runtime shutting down",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
+    use aether_data::{SessionToken, Uuid};
+    use aether_kinds::QuadSpace;
+    use aether_kinds::trace::Nanos;
+    use aether_math::Rgba;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::actor::native::envelope::Envelope;
+    use aether_substrate::chassis::inbox::SettlingInbox;
+    use aether_substrate::mail::registry::OwnedDispatch;
+    use aether_substrate::mail::{EgressEvent, MailRef};
+    use aether_substrate::testing::{decode_reply, test_mailer_and_rx};
+    use std::sync::mpsc;
+
+    fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
+        StagedTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels, realized: None, dirty: true }
     }
 
-    /// `DrawMaterialCoverage` handler (ADR-0140). Accumulates a typed
-    /// coverage material batch into the ordered material stream. The R8
-    /// format requirement is checked at record time when the texture
-    /// registry is available to the encoder path.
-    ///
-    /// # Agent
-    /// Mail `aether.render.material.coverage { texture_id, rects }`
-    /// every frame the coverage material should appear; no reply.
-    #[handler::single]
-    fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
-        if let Some(obs) = &state.params.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<DrawMaterialCoverage as Kind>::NAME.into());
+    /// Build a `PendingCapture` whose retained guard replies to a Session
+    /// source so the toy pump can observe the deferred reply through the
+    /// egress channel. The inbound is queued straight onto a
+    /// `SettlingInbox` (no route), then drained to the guard.
+    fn parked_capture(mailer: &Arc<Mailer>, pre_remaining: usize, deadline: Instant) -> PendingCapture {
+        let id = MailboxId(0x0CA8);
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        tx.send(OwnedDispatch::disarmed(
+            KindId(0),
+            "test.capture.pending".to_owned(),
+            None,
+            // A Session sender routes the guard's reply to the egress rx.
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
+            MailRef::from(Vec::new()),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            id,
+        ))
+        .expect("queue the inbound");
+        let inbox = SettlingInbox::new(id, rx, Arc::clone(mailer));
+        let reply = inbox.try_next().expect("one queued");
+        PendingCapture { reply, after_mails: Vec::new(), checks: Vec::new(), reference: None, pre_remaining, deadline }
+    }
+
+    /// A minimal headless state for the capture state-machine tests — no
+    /// window, no GPU (`gpu` stays `None`, so the ready branch fails fast
+    /// rather than touching an absent adapter).
+    fn headless_state(mailer: &Arc<Mailer>) -> RenderCapabilityState {
+        let outbound = mailer.outbound().cloned().expect("test_mailer_and_rx wires a loopback outbound");
+        RenderCapabilityState {
+            frame_vertices: Vec::new(),
+            last_submitted: Vec::new(),
+            triangles_rendered: 0,
+            camera_state: IDENTITY_VIEW_PROJ,
+            quad_frame: Vec::new(),
+            quad_last_submitted: Vec::new(),
+            material_frame: Vec::new(),
+            material_last_submitted: Vec::new(),
+            textures: TextureRegistry::new(),
+            vertex_buffer_bytes: 1024,
+            #[cfg(feature = "desktop")]
+            window: None,
+            offscreen_size: None,
+            wireframe: None,
+            gpu: None,
+            surface: None,
+            surface_config: None,
+            wire_pipeline: None,
+            last_submission: None,
+            occluded: false,
+            overlay_observation: Mutex::new(Vec::new()),
+            pending_capture: None,
+            registry: Arc::clone(mailer.registry()),
+            mailer: Arc::clone(mailer),
+            outbound,
+            assets_dir: None,
+            observed_kinds: None,
         }
-        state
-            .handles
-            .material_frame
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063")
-            .push(MaterialBatch::Coverage { texture_id: mail.texture_id, rects: mail.rects });
+    }
+
+    fn ctx_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
+        Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), MailboxId(0)))
+    }
+
+    fn capture_err(rx: &mpsc::Receiver<EgressEvent>) -> String {
+        match decode_reply::<CaptureFrameResult>(rx) {
+            CaptureFrameResult::Err { error } => error,
+            CaptureFrameResult::Ok { .. } => panic!("expected an Err capture reply"),
+        }
+    }
+
+    /// Park a capture awaiting two pre-mails; two `pre_settled` mails count
+    /// it down to ready, and the next `on_frame` (no GPU) resolves it —
+    /// exercising park → `pre_settled`×N → ready-on-frame. Without an
+    /// adapter the ready branch fails fast, but the state-machine
+    /// transition (countdown then act on the next frame) is what this owns.
+    #[test]
+    fn park_then_pre_settled_countdown_readies_on_frame() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.pending_capture = Some(parked_capture(&mailer, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
+        let binding = ctx_binding(&mailer);
+
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: MailId::NONE });
+        assert_eq!(state.pending_capture.as_ref().expect("still pending").pre_remaining, 1);
+        RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: MailId::NONE });
+        assert!(state.pending_capture.as_ref().expect("still pending").is_ready());
+
+        // A frame past readiness acts on the capture (consumes it).
+        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false });
+        assert!(state.pending_capture.is_none(), "a ready capture is resolved on the next frame");
+        assert!(capture_err(&rx).contains("GPU"), "no adapter in unit tests => the ready branch fails fast");
+    }
+
+    /// A capture past its deadline replies `Err` through the retained guard
+    /// on the next frame — the `FRAME_SETTLEMENT_CAP` wedge, event-driven.
+    #[test]
+    fn expired_capture_replies_err_on_frame() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        // A deadline in the past, with pre-mails still outstanding.
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock is past the epoch");
+        state.pending_capture = Some(parked_capture(&mailer, 3, past));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false });
+
+        assert!(state.pending_capture.is_none(), "an expired capture is cleared");
+        assert!(capture_err(&rx).contains("settlement cap"), "the wedge disposition replies Err");
+    }
+
+    /// The window becoming occluded while a capture is pending fail-fasts it
+    /// through the guard (issue 1317, relocated into the actor).
+    #[test]
+    fn occlusion_while_pending_replies_err() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.pending_capture = Some(parked_capture(&mailer, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        RenderCapability::on_occluded(&mut state, &mut ctx, Occluded { occluded: true });
+
+        assert!(state.pending_capture.is_none(), "occlusion clears the pending capture");
+        assert!(state.occluded, "occlusion state is tracked");
+        assert!(capture_err(&rx).contains("occluded"), "occlusion fail-fasts the capture");
+    }
+
+    /// A second `capture_frame` while one is pending replies `Err`
+    /// immediately, without disturbing the in-flight capture.
+    #[test]
+    fn capture_while_pending_replies_err_immediately() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.pending_capture = Some(parked_capture(&mailer, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new_dispatching(
+            &binding,
+            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
+            MailId::NONE,
+            MailId::NONE,
+        );
+
+        RenderCapability::on_capture_frame(
+            &mut state,
+            &mut ctx,
+            CaptureFrame { mails: Vec::new(), after_mails: Vec::new(), checks: Vec::new(), similarity: None },
+        );
+
+        assert!(state.pending_capture.is_some(), "the in-flight capture is untouched");
+        assert!(capture_err(&rx).contains("already pending"), "a second capture is rejected");
+    }
+
+    /// Issue #2831: `destroy_texture` removes a user-owned registry entry,
+    /// dropping its staged pixels and recording the dispatched kind.
+    #[test]
+    fn destroy_texture_removes_registry_entry() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut state = headless_state(&mailer);
+        state.observed_kinds = Some(Arc::clone(&observed));
+        let texture_id = 7;
+        state.textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
+
+        assert!(
+            !state.textures.entries.contains_key(&texture_id),
+            "destroy_texture should remove the staged registry entry",
+        );
+        let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
+        assert!(
+            seen.contains(&DestroyTexture::NAME.to_owned()),
+            "destroy_texture handler should push its kind name; observed: {seen:?}",
+        );
+    }
+
+    /// Issue #2831: unknown ids and the reserved internal white texture id
+    /// warn-drop and leave the registry untouched.
+    #[test]
+    fn destroy_texture_unknown_and_reserved_ids_leave_registry_untouched() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        let user_texture_id = 3;
+        state.textures.entries.insert(user_texture_id, test_staged_texture(vec![1; 16]));
+        state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        for texture_id in [99, WHITE_TEXTURE_ID] {
+            RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
+        }
+
+        assert_eq!(
+            state.textures.entries.len(),
+            2,
+            "unknown and reserved destroy requests must not remove registry entries",
+        );
+        assert!(state.textures.entries.contains_key(&user_texture_id));
+        assert!(state.textures.entries.contains_key(&WHITE_TEXTURE_ID));
+    }
+
+    /// The diagnostic white texture id is visible to `SubstrateHarness` callers but
+    /// remains engine-owned: `UpdateTexture` must not recolor later solid
+    /// draws through the shared sentinel texel.
+    #[test]
+    fn update_texture_reserved_id_leaves_white_pixels_untouched() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        RenderCapability::on_update_texture(
+            &mut state,
+            &mut ctx,
+            UpdateTexture { texture_id: WHITE_TEXTURE_ID, x: 0, y: 0, width: 1, height: 1, pixels: vec![0, 0, 0, 255] },
+        );
+
+        assert_eq!(
+            state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture remains registered").pixels,
+            vec![255; 16],
+        );
+    }
+
+    /// ADR-0107 §4: `draw_solid_quads` accumulates into `quad_frame` under
+    /// the reserved `WHITE_TEXTURE_ID` and records its kind name in
+    /// `observed_kinds`. Verifies the expand-to-TexturedQuad path and the
+    /// lazy white-texture insertion without a GPU.
+    #[test]
+    fn draw_solid_quads_accumulates_and_observed() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut state = headless_state(&mailer);
+        state.observed_kinds = Some(Arc::clone(&observed));
+        let binding = ctx_binding(&mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        RenderCapability::on_draw_solid_quads(
+            &mut state,
+            &mut ctx,
+            DrawSolidQuads {
+                space: QuadSpace::Screen,
+                clip: None,
+                quads: vec![SolidQuad {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 30.0,
+                    height: 40.0,
+                    color: Rgba::new(1.0, 0.0, 0.5, 0.8),
+                }],
+            },
+        );
+
+        let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
+        assert!(
+            seen.contains(&DrawSolidQuads::NAME.to_owned()),
+            "draw_solid_quads handler should push its kind name; observed: {seen:?}",
+        );
+
+        assert_eq!(state.quad_frame.len(), 1, "one QuadBatch should be in the accumulator");
+        assert_eq!(state.quad_frame[0].texture_id, WHITE_TEXTURE_ID, "batch must use the reserved white texture id");
+        assert_eq!(state.quad_frame[0].quads.len(), 1, "batch must contain the one expanded quad");
+        assert_eq!(
+            state.quad_frame[0].quads[0].tint,
+            Rgba::new(1.0, 0.0, 0.5, 0.8),
+            "expanded quad tint must match the SolidQuad color",
+        );
+        assert_eq!(state.quad_frame[0].quads[0].width, 30.0);
+
+        let white =
+            state.textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
+        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
     }
 }

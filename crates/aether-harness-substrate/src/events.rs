@@ -1,38 +1,37 @@
-//! Cross-thread channel from the chassis-control handler to the
-//! tick loop (ADR-0067). The handler runs on a scheduler worker;
-//! the tick loop runs on the main thread. Both `aether.substrate_harness.advance`
-//! and `aether.render.capture_frame` need to wake the tick loop —
-//! this channel carries the wake.
+//! Cross-thread channel from the chassis-control handler and the pumped
+//! render slot's wake to the standalone binary's event loop (ADR-0067,
+//! ADR-0161). The `aether.substrate_harness.advance` handler runs on a
+//! scheduler worker; the loop runs on the main thread — this channel carries
+//! the wake.
 //!
-//! `Advance` carries the reply target so the loop can reply once
-//! all ticks complete. `CaptureRequested` is a wake signal only;
-//! the actual `PendingCapture` rides separately in `CaptureQueue`
-//! (the queue stays the source of truth so multiple back-to-back
-//! advances don't lose a stale wake event).
+//! `Advance` carries the reply target so the loop can reply once all ticks
+//! complete. `RenderMail` is the pumped render slot's wake — "mail landed on
+//! the render slot, drain it" — installed on the slot's `MailboxWakeSlot`
+//! (mirroring desktop's `UserEvent::WindowMail`); the in-process harness never
+//! installs that wake, so the variant is the binary's alone.
 
 use std::sync::mpsc;
+use std::time::Duration;
 
 use aether_substrate::Source;
 
-/// Events the tick loop consumes. Single-producer / single-consumer
-/// in practice — the chassis-control handler is the only producer,
-/// the tick loop is the only consumer — but the underlying channel
-/// is mpsc which would tolerate multiple producers if a future
-/// chassis variant grew them.
+/// Events the event loop consumes. Single-consumer (the loop); the producers
+/// are the `aether.substrate_harness.advance` handler (`Advance`) and the
+/// pumped render slot's mailbox wake (`RenderMail`), so the underlying mpsc
+/// channel tolerates the two.
 pub enum ChassisEvent {
-    /// `aether.substrate_harness.advance { ticks }`. The tick loop runs
-    /// `ticks` full cycles (Tick fanout → drain → render or capture)
-    /// then replies with `AdvanceResult::Ok { ticks_completed }`.
+    /// `aether.substrate_harness.advance { ticks }`. The event loop runs
+    /// `ticks` full cycles (advance → frame mail → drain) then replies with
+    /// `AdvanceResult::Ok { ticks_completed }`.
     Advance { reply_to: Source, ticks: u32 },
-    /// `aether.render.capture_frame`. The `PendingCapture` itself
-    /// was pushed into `CaptureQueue` by the chassis-control
-    /// handler; this event just wakes the loop so the next idle
-    /// cycle picks it up. The loop runs one drain → render-with-
-    /// capture cycle without dispatching `Tick` (capture observes,
-    /// it doesn't advance the world). If the queue is empty when
-    /// the loop wakes — possible if an in-flight `Advance` already
-    /// drained the capture — the wake is silently absorbed.
-    CaptureRequested,
+    /// The pumped `aether.render` slot took mail — drain it (ADR-0161). A
+    /// wake-only signal, mirroring desktop's `UserEvent::WindowMail`: the
+    /// slot's wake sends it so a render mail landing while the loop is parked
+    /// (a `capture_frame` on an occluded chassis, a `pre_settled` notice) is
+    /// serviced. Sent only by the standalone binary's render wake — the
+    /// in-process harness drains the slot every pump iteration and installs
+    /// no wake.
+    RenderMail,
 }
 
 #[derive(Clone)]
@@ -53,6 +52,14 @@ impl EventReceiver {
     /// Block until the next event arrives or the sender is dropped.
     pub fn recv(&self) -> Result<ChassisEvent, mpsc::RecvError> {
         self.0.recv()
+    }
+
+    /// Block until the next event arrives, the sender is dropped, or
+    /// `timeout` elapses. The standalone binary parks on this while a
+    /// capture deadline is pending (ADR-0161), so a wedged pre-mail chain on
+    /// an otherwise-idle chassis still reaches the actor's deadline check.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<ChassisEvent, mpsc::RecvTimeoutError> {
+        self.0.recv_timeout(timeout)
     }
 
     /// Non-blocking peek. Returns `Empty` immediately when no event

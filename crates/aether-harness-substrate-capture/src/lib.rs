@@ -1,11 +1,10 @@
-//! Render/GPU capture support for `aether-harness-substrate` (issue
-//! #3765): the offscreen wgpu pipeline ([`Gpu`]), the seam
-//! implementations that plug it into the core harness
-//! ([`GpuRenderExt`] / [`GpuFrameHook`]), the image-compare and
-//! `FrameCheck` scoring in [`visual`], and the failure-only
-//! [`ArtifactGuard`]. Split from the core so only visual consumers
-//! carry the aether-render + wgpu edge in their `cargo xtask affected`
-//! closure.
+//! Render/GPU capture support for `aether-harness-substrate` (issue #3765,
+//! ADR-0161): the [`GpuFrameHook`] that owns the pumped `aether.render`
+//! slot and the builder / harness extensions that boot and read it, the
+//! image-compare and `FrameCheck` scoring in [`visual`], and the
+//! failure-only [`ArtifactGuard`]. Split from the core so only visual
+//! consumers carry the aether-render + wgpu edge in their `cargo xtask
+//! affected` closure.
 //!
 //! A visual test composes render with the builder extension and reads
 //! overlay state with the harness extension:
@@ -21,10 +20,8 @@
 
 pub mod artifacts;
 mod ext;
-mod gpu;
 pub mod test_helpers;
 pub mod visual;
 
 pub use artifacts::ArtifactGuard;
-pub use ext::{GpuFrameHook, GpuRenderExt, PumpedGpuRenderExt, RenderHarnessBuilderExt, RenderHarnessExt};
-pub use gpu::Gpu;
+pub use ext::{GpuFrameHook, RenderHarnessBuilderExt, RenderHarnessExt};
