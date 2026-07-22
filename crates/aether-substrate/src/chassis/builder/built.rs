@@ -138,7 +138,7 @@ impl<C: Chassis> PassiveChassis<C> {
     ///
     /// Claims `A::NAMESPACE` fresh (a no-driver chassis reserved no
     /// Claim-stage driver mailbox), registers a relay inbox under it, and
-    /// runs the shared [`assemble_pumped_slot`] boot (binding + inbox
+    /// runs the shared `assemble_pumped_slot` boot (binding + inbox
     /// install + seed + `init` / `wire`), returning the slot plus its
     /// [`MailboxWakeSlot`] so the embedder installs whatever wake nudges its
     /// pump cadence (or none — the harness busy-polls its drain).
