@@ -1,6 +1,6 @@
 # ADR-0160: Pumped Dispatch Home and the Desktop Window Actor
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-22
 
 ## Context
