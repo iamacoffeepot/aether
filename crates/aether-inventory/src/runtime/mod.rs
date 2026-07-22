@@ -33,6 +33,7 @@ pub use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, Temp
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::registry::Registry;
+use std::collections::HashSet;
 pub use std::sync::Arc;
 
 /// `aether.inventory` runtime state (ADR-0091 §2). Holds the substrate's
@@ -177,9 +178,21 @@ impl NativeActor for InventoryCapability {
     /// `In -> Out` handler list.
     // The manifest is read from the process-global link-time
     // inventory, so this arm takes `_state`.
+    //
+    // Field-identical rows are deduped (ADR-0160 §Decision 2): two
+    // `#[actor]` blocks can legitimately share one `NAMESPACE` — the
+    // desktop `DesktopWindowCapability` and the headless companion both
+    // claim `aether.window` and, linked into one desktop binary, each
+    // submit the same `(namespace, id, name, reply)` handler rows into the
+    // link-time-global inventory. The rows carry no per-instance state, so
+    // equality-dedup is lossless and keeps `describe_handlers` from
+    // double-reporting each window handler. `HashSet::insert` keeps the
+    // first occurrence, preserving inventory order for the survivors.
     #[handler::single]
     fn on_handlers(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
+        let mut seen = HashSet::new();
         let handlers = handler_entries()
+            .filter(|entry| seen.insert((entry.namespace, entry.id, entry.name, entry.reply)))
             .map(|entry| HandlerEntryWire {
                 namespace: entry.namespace.into(),
                 id: entry.id,
@@ -195,6 +208,7 @@ impl NativeActor for InventoryCapability {
 mod tests {
     use super::*;
     use aether_actor::actor;
+    use aether_data::name_inventory::HandlerEntry;
     use aether_data::tagged_id;
     use aether_data::{MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name};
     use aether_kinds::ParamKindWire;
@@ -356,5 +370,47 @@ mod tests {
         fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
             ProbeReply {}
         }
+    }
+
+    // Two field-identical link-time `HandlerEntry` rows submitted directly
+    // into the process-global inventory — the shape a desktop binary linking
+    // both `aether.window` runtimes produces (ADR-0160 §Decision 2): the
+    // desktop `DesktopWindowCapability` and the headless companion share
+    // `NAMESPACE = "aether.window"` and each emit the same
+    // `(namespace, id, name, reply)` rows. `HandlerEntry` holds only
+    // `'static` data, so a bare `inventory::submit!` reproduces the duplicate
+    // without standing up either cap.
+    inventory::submit! {
+        HandlerEntry {
+            namespace: "aether.test.window_dedup",
+            id: KindId(0x0D1D_0000_0000_0001),
+            name: "aether.test.window_dedup.set_mode",
+            reply: Some(KindId(0x0D1D_0000_0000_0002)),
+        }
+    }
+    inventory::submit! {
+        HandlerEntry {
+            namespace: "aether.test.window_dedup",
+            id: KindId(0x0D1D_0000_0000_0001),
+            name: "aether.test.window_dedup.set_mode",
+            reply: Some(KindId(0x0D1D_0000_0000_0002)),
+        }
+    }
+
+    /// Two field-identical link-time `HandlerEntry` rows fold to a single
+    /// served row. Guards the ADR-0160 §Decision 2 dedup: a desktop binary
+    /// links both `aether.window` runtimes (the desktop cap + the headless
+    /// companion), which submit identical `(namespace, id, name, reply)`
+    /// rows into the link-time-global inventory; without the dedup
+    /// `describe_handlers` double-reports every window handler.
+    #[test]
+    fn on_handlers_folds_field_identical_rows() {
+        let mut fix = fixture();
+        let mut ctx = session_ctx(&fix.transport);
+        let result = InventoryCapability::on_handlers(&mut fix.state, &mut ctx, ListHandlers {});
+        drop(ctx);
+
+        let served = result.handlers.iter().filter(|h| h.namespace == "aether.test.window_dedup").count();
+        assert_eq!(served, 1, "two field-identical HandlerEntry rows must fold to one served row; got {served}");
     }
 }

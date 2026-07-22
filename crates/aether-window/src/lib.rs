@@ -1,12 +1,13 @@
 //! `aether.window` cap surface (issue 603 Phase 3).
 //!
-//! On desktop the chassis driver claims `aether.window` directly and
-//! drains the inbox between frames — window mutations require the
-//! chassis main thread (winit / macOS), and the driver is already
-//! there. The driver-as-actor path lives in the desktop chassis
-//! driver; this crate hosts the chassis-without-window
-//! companion that headless and substrate-harness compose to fail-fast with
-//! `Err`-replies on `set_mode` / `set_title`.
+//! One crate owns every runtime of the `aether.window` mailbox (ADR-0121/
+//! ADR-0122): the [`HeadlessWindowCapability`] companion that headless and
+//! substrate-harness compose to fail-fast with `Err`-replies on
+//! `set_mode` / `set_title` / `focus`, and — behind the `desktop` feature —
+//! the [`DesktopWindowCapability`] runtime (ADR-0160 §Decision 2) that
+//! mutates a real winit window on the desktop chassis. Window mutations
+//! require the chassis main thread (winit / macOS); the desktop cap is
+//! pumped on that thread by the chassis driver.
 
 // Handler-signature kinds must be importable at module root because
 // `#[actor]` emits `impl HandlesKind<K> for X {}` markers always-on,
@@ -51,3 +52,16 @@ use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult}
 // is no `use runtime::*` glob (matching `fs/mod.rs`).
 #[cfg(feature = "runtime")]
 mod runtime;
+
+// The desktop runtime (ADR-0160 §Decision 2) — the state-bearing
+// `DesktopWindowCapability` that drives a real winit window — lives in
+// `desktop.rs` behind the `desktop` feature (`runtime` + winit). It carries
+// its own identity ZST + state struct (an impl-hosted ADR-0122 split, since
+// the always-runtime desktop build has no marker-only half to protect), so
+// the re-export is the crate's window-driving surface: the identity the
+// chassis pumps, the `WindowCell` it fills, the `Params` it constructs, and
+// the `resolve_fullscreen` its boot-time window creation shares with the cap.
+#[cfg(feature = "desktop")]
+mod desktop;
+#[cfg(feature = "desktop")]
+pub use desktop::{DesktopWindowCapability, DesktopWindowParams, WindowCell, resolve_fullscreen};

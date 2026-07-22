@@ -41,6 +41,7 @@ use aether_substrate::{
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
+use aether_window::resolve_fullscreen;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -51,7 +52,6 @@ use super::chassis::UserEvent;
 use super::render::Gpu;
 use aether_substrate::capture::CaptureQueue;
 use capture::{OccludedCaptureDisposition, occluded_capture_disposition};
-use config::resolve_fullscreen;
 use input::{TextSource, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
 use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply, try_framework_dispatch};
 use shutdown::install_shutdown_handler;
@@ -59,7 +59,6 @@ use std::io;
 use winit::dpi::PhysicalSize;
 
 mod capture;
-mod config;
 mod input;
 mod lifecycle;
 mod shutdown;
