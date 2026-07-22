@@ -13,6 +13,7 @@
 
 // Parent-level items this module names. `HttpCapability` is the impl's `Self`
 // type and `HttpConfig` is named by `init`'s signature.
+use super::egress::{PerSenderEgress, sender_mailbox_id};
 use super::{HttpCapability, HttpConfig};
 use aether_actor::runtime;
 
@@ -23,7 +24,9 @@ use std::time::Duration;
 use ureq::http::Method;
 use ureq::http::Request;
 
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_actor::Manual;
+pub use aether_data::MailboxId;
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
@@ -67,27 +70,46 @@ impl HttpAdapter for DisabledHttpAdapter {
     }
 }
 
-/// `aether.http` runtime state (ADR-0043). Owns the resolved adapter
-/// and the default per-request timeout applied when `Fetch.timeout_ms`
-/// is `None`. The dispatcher holds this as the cap's state and routes
-/// envelopes through the macro-emitted `Dispatch` impl; replies return
-/// directly from the `#[handler]` method (ADR-0112). The addressing
-/// identity is the distinct ZST `HttpCapability`. Living in this private
-/// module keeps it `pub`-enough to satisfy the `NativeActor::State`
+/// `aether.http` runtime state (ADR-0043 / ADR-0158). Owns the resolved
+/// adapter, the default per-request timeout applied when `Fetch.timeout_ms`
+/// is `None`, and the per-sender bounded async egress dispatcher. The
+/// dispatcher holds this as the cap's state and routes envelopes through the
+/// macro-emitted `Dispatch` impl; a fetch dispatches off-thread and its reply
+/// lands from the `#[handler(task)]` completion (ADR-0093 / ADR-0112). The
+/// addressing identity is the distinct ZST `HttpCapability`. Living in this
+/// private module keeps it `pub`-enough to satisfy the `NativeActor::State`
 /// interface without exposing it as crate-public API.
 pub struct HttpCapabilityState {
     pub adapter: Arc<dyn HttpAdapter>,
     pub default_timeout: Duration,
+    egress: PerSenderEgress,
 }
 
 #[cfg(test)]
 impl HttpCapabilityState {
-    /// Test-only direct constructor. Production boots through
-    /// `Builder::with_actor::<HttpCapability>(config)` which calls the
-    /// generated `Lifecycle::init`; tests that drive the handler with a
-    /// stub adapter hand it in directly.
+    /// Test-only direct constructor with the default egress budgets.
+    /// Production boots through `Builder::with_actor::<HttpCapability>(config)`
+    /// which calls the generated `Lifecycle::init`; tests that drive the
+    /// handler with a stub adapter hand it in directly.
     pub fn from_adapter(adapter: Arc<dyn HttpAdapter>, default_timeout: Duration) -> Self {
-        Self { adapter, default_timeout }
+        use crate::client::{DEFAULT_MAX_IN_FLIGHT_PER_SENDER, DEFAULT_MAX_IN_FLIGHT_TOTAL};
+        Self::from_adapter_bounded(
+            adapter,
+            default_timeout,
+            DEFAULT_MAX_IN_FLIGHT_PER_SENDER,
+            DEFAULT_MAX_IN_FLIGHT_TOTAL,
+        )
+    }
+
+    /// Test-only constructor with explicit egress budgets, for the tests that
+    /// exercise the per-sender / global bounds directly.
+    pub fn from_adapter_bounded(
+        adapter: Arc<dyn HttpAdapter>,
+        default_timeout: Duration,
+        per_sender_max: usize,
+        global_max: usize,
+    ) -> Self {
+        Self { adapter, default_timeout, egress: PerSenderEgress::new(per_sender_max, global_max) }
     }
 }
 
@@ -102,31 +124,52 @@ impl NativeActor for HttpCapability {
     /// ADR-0043 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.http";
 
-    /// Build the HTTP adapter from the resolved config. The adapter is
-    /// built immediately so configuration errors surface at chassis-
-    /// builder time, not at first fetch.
+    /// Build the HTTP adapter and the per-sender egress dispatcher from the
+    /// resolved config. The adapter is built immediately so configuration
+    /// errors surface at chassis-builder time, not at first fetch.
     fn init(config: HttpConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<HttpCapabilityState, BootError> {
         let default_timeout = config.default_timeout;
-        Ok(HttpCapabilityState { adapter: build_http_adapter(config), default_timeout })
+        let egress = PerSenderEgress::new(config.max_in_flight_per_sender, config.max_in_flight_total);
+        Ok(HttpCapabilityState { adapter: build_http_adapter(config), default_timeout, egress })
     }
 
-    /// Run a fetch request and reply with the response.
+    /// Accept a fetch request and dispatch it off the dispatcher thread
+    /// (ADR-0158). The `ureq` call runs on a worker; the reply lands from
+    /// [`Self::on_fetch_done`] when it returns.
     ///
     /// # Agent
-    /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
-    /// long-running fetches block other HTTP mail until they finish.
-    #[handler::single]
-    fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Fetch) -> FetchResult {
+    /// Reply: `FetchResult`, echoing the caller-minted `request_id`.
+    /// Dispatched under a per-sender concurrency budget plus a global
+    /// ceiling — a slow remote occupies one worker slot for its own sender
+    /// instead of stalling the cap's dispatch thread. Over budget, the fetch
+    /// queues (holding its chain) and dispatches when a slot frees.
+    #[handler::manual]
+    fn on_fetch(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: Fetch) {
         let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| Duration::from_millis(u64::from(ms)));
+        let request_id = mail.request_id;
+        let sender = sender_mailbox_id(ctx.reply_target());
 
         let url = mail.url.clone();
+        let adapter = Arc::clone(&state.adapter);
         let adapter_req =
             FetchRequest { url: mail.url, method: mail.method, headers: mail.headers, body: mail.body, timeout };
 
-        match state.adapter.fetch(adapter_req) {
-            Ok(r) => FetchResult::Ok { url, status: r.status, headers: r.headers, body: r.body },
-            Err(error) => FetchResult::Err { url, error },
-        }
+        state.egress.submit(ctx, sender, move || match adapter.fetch(adapter_req) {
+            Ok(r) => FetchResult::Ok { request_id, url, status: r.status, headers: r.headers, body: r.body },
+            Err(error) => FetchResult::Err { request_id, url, error },
+        });
+    }
+
+    /// ADR-0093 completion for a finished fetch: re-reply the worker's
+    /// `FetchResult` to the original caller (dropping the hold), then free the
+    /// sender's slot — which drains that sender's (or a peer's) next queued
+    /// fetch. The completing sender's `MailboxId` rides through as the
+    /// `TaskDone` context.
+    #[handler(task)]
+    fn on_fetch_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<FetchResult, MailboxId>) {
+        let sender = *done.context();
+        done.resolve(ctx);
+        state.egress.on_complete(ctx, sender);
     }
 }
 
@@ -487,7 +530,7 @@ mod tests {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
     }
 
-    use aether_substrate::testing::test_mailer_and_rx;
+    use aether_substrate::testing::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
 
     #[test]
     fn allowlist_empty_rejects_every_host() {
@@ -561,8 +604,8 @@ mod tests {
     }
 
     #[test]
-    fn cap_fetch_ok_replies_with_response() {
-        let (mailer, _) = test_mailer_and_rx();
+    fn cap_fetch_ok_replies_with_response_and_echoes_request_id() {
+        let (mailer, rx) = test_mailer_and_rx();
         let stub = StubAdapter::with(Ok(FetchResponse {
             status: 200,
             headers: vec![HttpHeader { name: "content-type".to_string(), value: "application/json".to_string() }],
@@ -571,20 +614,30 @@ mod tests {
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx =
-            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
-        match HttpCapability::on_fetch(
+        let mut ctx = NativeCtx::new_dispatching(
+            &transport,
+            session_sender(),
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
+        HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
             Fetch {
+                request_id: 42,
                 url: "https://api.example.com/v1".to_string(),
                 method: HttpMethod::Get,
                 headers: vec![],
                 body: vec![],
                 timeout_ms: Some(5000),
             },
-        ) {
-            FetchResult::Ok { url, status, headers, body } => {
+        );
+        // The worker runs the stub fetch off-thread and pushes the completion
+        // wake; route it through the cap's `#[handler(task)]` arm.
+        drive_task_completion::<HttpCapability>(&mut state, &transport, &rx);
+        match decode_session_reply::<FetchResult>(&rx) {
+            FetchResult::Ok { request_id, url, status, headers, body } => {
+                assert_eq!(request_id, 42, "the Ok arm echoes the caller-minted request_id");
                 assert_eq!(url, "https://api.example.com/v1");
                 assert_eq!(status, 200);
                 assert_eq!(headers.len(), 1);
@@ -595,27 +648,35 @@ mod tests {
     }
 
     #[test]
-    fn cap_fetch_err_echoes_url_and_error() {
-        let (mailer, _) = test_mailer_and_rx();
+    fn cap_fetch_err_echoes_request_id_and_url() {
+        let (mailer, rx) = test_mailer_and_rx();
         let mut state = HttpCapabilityState::from_adapter(
             StubAdapter::with(Err(HttpError::Timeout)) as Arc<dyn HttpAdapter>,
             HttpConfig::default().default_timeout,
         );
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx =
-            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
-        match HttpCapability::on_fetch(
+        let mut ctx = NativeCtx::new_dispatching(
+            &transport,
+            session_sender(),
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
+        HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
             Fetch {
+                request_id: 7,
                 url: "https://slow.example.com/".to_string(),
                 method: HttpMethod::Get,
                 headers: vec![],
                 body: vec![],
                 timeout_ms: None,
             },
-        ) {
-            FetchResult::Err { url, error } => {
+        );
+        drive_task_completion::<HttpCapability>(&mut state, &transport, &rx);
+        match decode_session_reply::<FetchResult>(&rx) {
+            FetchResult::Err { request_id, url, error } => {
+                assert_eq!(request_id, 7, "the Err arm echoes the caller-minted request_id");
                 assert_eq!(url, "https://slow.example.com/");
                 assert_eq!(error, HttpError::Timeout);
             }
@@ -625,18 +686,23 @@ mod tests {
 
     #[test]
     fn cap_uses_default_timeout_when_none_provided() {
-        let (mailer, _rx) = test_mailer_and_rx();
+        let (mailer, rx) = test_mailer_and_rx();
         let stub = StubAdapter::with(Ok(FetchResponse { status: 200, headers: vec![], body: vec![] }));
         let stub_clone = Arc::clone(&stub);
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx =
-            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
-        let _ = HttpCapability::on_fetch(
+        let mut ctx = NativeCtx::new_dispatching(
+            &transport,
+            session_sender(),
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
+        HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
             Fetch {
+                request_id: 0,
                 url: "https://api.example.com/".to_string(),
                 method: HttpMethod::Get,
                 headers: vec![],
@@ -644,6 +710,9 @@ mod tests {
                 timeout_ms: None,
             },
         );
+        // Drain the completion so the off-thread worker has run before we read
+        // the recorded request.
+        drive_task_completion::<HttpCapability>(&mut state, &transport, &rx);
         let observed = stub_clone
             .last_request
             .lock()

@@ -4,8 +4,9 @@
 //! [`HttpConfig`] (typically via [`HttpConfig::from_env`]) and pass it
 //! to `with_actor::<HttpCapability>(config)`.
 //!
-//! v1 semantics (ADR-0043):
-//! - Blocking on the dispatcher thread (one request at a time).
+//! Semantics (ADR-0043, dispatch model per ADR-0158):
+//! - Fetches dispatch off-thread under a per-sender concurrency budget plus
+//!   a global ceiling; a slow remote no longer blocks the dispatcher thread.
 //! - Buffered request + response bodies; streaming is deferred.
 //! - Deny-by-default host allowlist via `AETHER_HTTP_ALLOWLIST`, enforced on
 //!   every redirect hop (bounded by a fixed redirect budget), not just the
@@ -32,13 +33,6 @@ use aether_actor::WasmActorMailbox;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
-// The wire reply kind. Named by the always-on (non-wasm) handler-inventory
-// submission `#[actor]` emits for `on_fetch`'s reply type, so it gates on
-// `not(wasm32)` rather than `runtime`; the runtime-gated handler in
-// `runtime.rs` names it through the kinds path directly.
-#[cfg(not(target_family = "wasm"))]
-use crate::kinds::FetchResult;
-
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -47,6 +41,17 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// and the fetch itself supplies no `timeout_ms`. 30s matches
 /// ADR-0043 §4.
 pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
+
+/// Default per-sender concurrent-fetch budget when
+/// `AETHER_HTTP_MAX_IN_FLIGHT_PER_SENDER` is unset (ADR-0158 §4). 4
+/// matches `TaskQueue::DEFAULT_MAX_IN_FLIGHT` and the "small depth
+/// (2–4 threads)" ADR-0043 forecast.
+pub const DEFAULT_MAX_IN_FLIGHT_PER_SENDER: usize = 4;
+
+/// Default global concurrent-fetch ceiling across all senders when
+/// `AETHER_HTTP_MAX_IN_FLIGHT_TOTAL` is unset (ADR-0158 §4). 32 is
+/// eight senders at full per-sender budget before the ceiling engages.
+pub const DEFAULT_MAX_IN_FLIGHT_TOTAL: usize = 32;
 
 /// Sender-side facade for actors addressed via
 /// `ctx.actor::<HttpCapability>()`.
@@ -57,8 +62,11 @@ pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
 /// request. Same shape and rationale as `aether_fs::FsMailboxExt`.
 ///
 /// All methods are fire-and-forget. Replies arrive as
-/// `aether.http.fetch_result`, correlated by the echoed `url`
-/// (ADR-0043).
+/// `aether.http.fetch_result`. The facade mints `request_id: 0` (its
+/// no-options callers don't distinguish concurrent same-URL replies);
+/// a caller that needs the ADR-0158 §6 correlation stamps its own
+/// `request_id` through the generic `send(&Fetch { .. })` escape hatch
+/// below.
 ///
 /// For requests that need custom headers, body, method, or a
 /// per-request timeout, the generic escape hatch is unchanged:
@@ -75,11 +83,11 @@ pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
 /// - [`NativeActorMailbox<'_, HttpCapability>`] — native cap-to-cap
 ///   sends, gated on `#[cfg(not(target_family = "wasm"))]`.
 pub trait HttpMailboxExt {
-    /// Mail `aether.http.fetch { url, method: Get, headers: [], body: [], timeout_ms: None }`
+    /// Mail `aether.http.fetch { request_id: 0, url, method: Get, headers: [], body: [], timeout_ms: None }`
     /// to the cap. Uses the chassis default timeout.
     fn get(&self, url: &str);
 
-    /// Mail `aether.http.fetch { url, method: Post, headers: [], body, timeout_ms: None }`
+    /// Mail `aether.http.fetch { request_id: 0, url, method: Post, headers: [], body, timeout_ms: None }`
     /// to the cap. Uses the chassis default timeout.
     fn post(&self, url: &str, body: &[u8]);
 }
@@ -88,6 +96,7 @@ impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn get(&self, url: &str) {
         self.send(&Fetch {
+            request_id: 0,
             url: url.into(),
             method: HttpMethod::Get,
             headers: Vec::new(),
@@ -98,6 +107,7 @@ impl HttpMailboxExt for WasmActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn post(&self, url: &str, body: &[u8]) {
         self.send(&Fetch {
+            request_id: 0,
             url: url.into(),
             method: HttpMethod::Post,
             headers: Vec::new(),
@@ -112,6 +122,7 @@ impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn get(&self, url: &str) {
         self.send(&Fetch {
+            request_id: 0,
             url: url.into(),
             method: HttpMethod::Get,
             headers: Vec::new(),
@@ -122,6 +133,7 @@ impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
     //noinspection DuplicatedCode
     fn post(&self, url: &str, body: &[u8]) {
         self.send(&Fetch {
+            request_id: 0,
             url: url.into(),
             method: HttpMethod::Post,
             headers: Vec::new(),
@@ -158,3 +170,10 @@ use aether_actor::actor;
 // private to that module), matching the `gemini` / `ui` split caps.
 #[cfg(feature = "runtime")]
 mod runtime;
+
+// The per-sender bounded async dispatch machinery (ADR-0158) — a
+// `NativeCtx`-typed helper over the ADR-0093 hold-until-resolve
+// primitives, so it rides the same `runtime` gate as `runtime.rs`, which
+// is its only consumer.
+#[cfg(feature = "runtime")]
+mod egress;

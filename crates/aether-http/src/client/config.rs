@@ -5,7 +5,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use super::{DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT_MILLIS};
+use super::{
+    DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_IN_FLIGHT_PER_SENDER, DEFAULT_MAX_IN_FLIGHT_TOTAL, DEFAULT_TIMEOUT_MILLIS,
+};
 
 /// Resolved configuration for the substrate's HTTP adapter. Chassis
 /// mains read env vars (`AETHER_HTTP_DISABLE`, `AETHER_HTTP_ALLOWLIST`,
@@ -64,6 +66,27 @@ pub struct HttpConfig {
     /// `--http-timeout-ms`).
     #[cfg_attr(feature = "runtime", config(default = 30_000, ms_duration, layer_field = "timeout_ms"))]
     pub default_timeout: Duration,
+    /// Maximum concurrent fetches one sender may have in flight (ADR-0158 §4).
+    ///
+    /// The per-sender fairness bound: one noisy sender cannot spend more
+    /// than this share of the egress workers, so it cannot starve its
+    /// peers. Defaults to [`DEFAULT_MAX_IN_FLIGHT_PER_SENDER`] (4), matching
+    /// `TaskQueue::DEFAULT_MAX_IN_FLIGHT`. A resolved `0` clamps to 1 in the
+    /// dispatcher (following `TaskQueue::new`'s clamp), never wedging a
+    /// sender's queue.
+    #[cfg_attr(feature = "runtime", config(default = 4))]
+    pub max_in_flight_per_sender: usize,
+    /// Maximum concurrent fetches across all senders (ADR-0158 §4).
+    ///
+    /// The host-protection ceiling: `N` senders each at their per-sender
+    /// budget is otherwise an unbounded native worker-thread and socket
+    /// count, so a fan-out of distinct senders cannot exhaust the host. A
+    /// fetch dispatches only when it clears both this ceiling and its
+    /// sender's budget. Defaults to [`DEFAULT_MAX_IN_FLIGHT_TOTAL`] (32) —
+    /// eight senders at full per-sender budget before it engages. A
+    /// resolved `0` clamps to 1 in the dispatcher.
+    #[cfg_attr(feature = "runtime", config(default = 32))]
+    pub max_in_flight_total: usize,
 }
 
 impl Default for HttpConfig {
@@ -74,6 +97,8 @@ impl Default for HttpConfig {
             require_https: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
+            max_in_flight_per_sender: DEFAULT_MAX_IN_FLIGHT_PER_SENDER,
+            max_in_flight_total: DEFAULT_MAX_IN_FLIGHT_TOTAL,
         }
     }
 }

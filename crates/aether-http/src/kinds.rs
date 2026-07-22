@@ -14,15 +14,17 @@ use std::fmt;
 // `HttpHeader`, and `HttpError` shapes. All structured
 // (Strings, Vecs, Option<u32>).
 //
-// Reply correlation follows the ADR-0041 pattern: the reply
-// echoes the originating `url` so callers match reply-to-request
-// without threading a pending-op queue. Request `body` is not
-// echoed — correlation needs the identity of the request, not
-// its contents, and a multi-MB upload should not round-trip its
-// bytes. Components needing strict per-op correlation (same URL
-// fired back-to-back, non-idempotent POST) lean on ADR-0042's
-// per-Source correlation ids via `prev_correlation_p32` rather
-// than a per-kind field.
+// Reply correlation is the caller-minted `request_id` echoed on
+// both `FetchResult` arms (ADR-0158 §6). The substrate dispatches
+// fetches per-sender-bounded and concurrently, so two requests to
+// the same `url` — a retry, a non-idempotent `POST` — would reply
+// indistinguishably under the older `url`-echo correlation; the
+// caller stamps a distinct `request_id` per request and matches the
+// reply by it. The `url` stays on both arms as an informational echo
+// (log / MCP-caller readability), demoted from correlation key.
+// Request `body` is not echoed — correlation needs the identity of
+// the request, not its contents, and a multi-MB upload should not
+// round-trip its bytes.
 
 /// HTTP method carried on `Fetch`. Enumerating at the schema
 /// layer keeps `"get"` / `"GET"` / `"Get"` from disagreeing
@@ -97,12 +99,21 @@ pub enum HttpError {
 /// request and reply with the response. Mailed to the
 /// `"aether.http"` sink; reply lands via `reply_mail` as
 /// `FetchResult`.
+///
+/// `request_id` is a caller-minted correlation id echoed on both
+/// `FetchResult` arms (ADR-0158 §6). The cap dispatches fetches
+/// concurrently under a per-sender bound, so a caller firing two
+/// requests to the same `url` matches each reply by its own
+/// `request_id` rather than by the ambiguous echoed `url`. Mirrors
+/// `MessagesSend.request_id` in `aether-anthropic`.
+///
 /// `timeout_ms` overrides the chassis default
 /// (`AETHER_HTTP_TIMEOUT_MS`, default 30000) when set; `None`
 /// uses the default.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.fetch")]
 pub struct Fetch {
+    pub request_id: u64,
     pub url: String,
     pub method: HttpMethod,
     pub headers: Vec<HttpHeader>,
@@ -110,21 +121,21 @@ pub struct Fetch {
     pub timeout_ms: Option<u32>,
 }
 
-/// Reply to `Fetch`. Both arms echo the originating `url` so the
-/// caller correlates reply-to-request without threading a
-/// pending-op queue — operation identity comes from the reply
-/// kind itself (`aether.http.fetch_result`). Request `body` is
-/// deliberately not echoed: correlation needs the identity of
-/// the request, not its contents, and a multi-MB upload should
-/// not round-trip. `Ok` carries the HTTP status, response
-/// headers, and response body (bounded by
-/// `AETHER_HTTP_MAX_BODY_BYTES`, default 16MB); `Err` carries an
-/// `HttpError` variant.
+/// Reply to `Fetch`. Both arms echo the caller-minted `request_id`
+/// (ADR-0158 §6) — the correlator a caller matches reply-to-request
+/// by, unambiguous even for two concurrent requests to the same
+/// `url` — plus the originating `url` as an informational echo (log
+/// / MCP-caller readability), demoted from correlation key. Request
+/// `body` is deliberately not echoed: correlation needs the identity
+/// of the request, not its contents, and a multi-MB upload should
+/// not round-trip. `Ok` carries the HTTP status, response headers,
+/// and response body (bounded by `AETHER_HTTP_MAX_BODY_BYTES`,
+/// default 16MB); `Err` carries an `HttpError` variant.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.fetch_result")]
 pub enum FetchResult {
-    Ok { url: String, status: u16, headers: Vec<HttpHeader>, body: Vec<u8> },
-    Err { url: String, error: HttpError },
+    Ok { request_id: u64, url: String, status: u16, headers: Vec<HttpHeader>, body: Vec<u8> },
+    Err { request_id: u64, url: String, error: HttpError },
 }
 
 // ADR-0108 HTTP server kinds. Two public kinds shared by the server
