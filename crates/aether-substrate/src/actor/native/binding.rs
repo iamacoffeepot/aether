@@ -322,6 +322,27 @@ impl NativeBinding {
         self.inbox.set(Mutex::new(settling)).unwrap_or_else(|_| panic!("NativeBinding::install_inbox called twice"));
     }
 
+    /// Install an already-built [`SettlingInbox`] as this binding's inbox,
+    /// beside [`Self::install_inbox`] (which builds one from a raw
+    /// receiver). Additive (ADR-0160 §1): the pumped boot recovers a
+    /// driver's Claim-stage [`MailboxClaim`](crate::chassis::ctx::MailboxClaim),
+    /// re-lineages its inbox onto this binding's disjoint reply-id space
+    /// (via [`SettlingInbox::relineage`]), and installs it here — so the
+    /// binding drains the very inbox the claim reserved rather than a fresh
+    /// channel. The caller is responsible for re-lineaging first, exactly
+    /// as [`Self::install_inbox`] does implicitly through
+    /// `SettlingInbox::new_with_lineage`.
+    ///
+    /// # Panics
+    /// Panics if called after another `install_inbox` /
+    /// `install_settling_inbox` — the inbox slot is single-claim (ADR-0063
+    /// fail-fast).
+    pub(crate) fn install_settling_inbox(&self, inbox: SettlingInbox) {
+        self.inbox
+            .set(Mutex::new(inbox))
+            .unwrap_or_else(|_| panic!("NativeBinding::install_settling_inbox called after the inbox was installed"));
+    }
+
     /// The mailbox id the substrate routes inbound mail through to
     /// reach this actor. Exposed for capabilities that need to
     /// publish their address to peers without going through the

@@ -145,6 +145,25 @@ impl SettlingInbox {
         self.id
     }
 
+    /// Re-home this inbox's reply-id minting onto `reply_lineage`,
+    /// replacing the fresh counter [`Self::new`] gave it. Additive
+    /// (ADR-0160 §1): a driver-as-actor mailbox is reserved at the Claim
+    /// stage (ADR-0155 §4) through `claim_mailbox`, which builds the
+    /// [`SettlingInbox`] with its own fresh [`ReplyLineage`]; when the
+    /// pumped boot recovers that claim and installs the inbox on a
+    /// [`NativeBinding`], the two must draw reply ids from one coherent
+    /// disjoint space — otherwise the inbox's counter and the binding's
+    /// both start at [`ReplyLineage::BASE`] and collide (the issue 1695
+    /// invariant). This mirrors what the standard
+    /// [`NativeBinding::install_inbox`](crate::actor::native::NativeBinding::install_inbox)
+    /// path gets for free by building its inbox through
+    /// [`Self::new_with_lineage`].
+    #[must_use]
+    pub(crate) fn relineage(mut self, reply_lineage: ReplyLineage) -> Self {
+        self.reply_counter = reply_lineage;
+        self
+    }
+
     fn wrap(&self, env: Envelope) -> InboundMail {
         InboundMail {
             env,

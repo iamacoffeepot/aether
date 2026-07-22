@@ -75,6 +75,7 @@ pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 // iamacoffeepot/aether#2311 (composed): the identity actor trait plus the
 // native per-kind dispatch trait parameterised by the runtime state. The boot
 // lifecycle is the shared `aether_actor::Lifecycle<S>` (no native re-export).
+pub use actor::native::pumped_slot::PumpedSlot;
 pub use actor::native::{Dispatch, NativeActor};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 #[cfg(feature = "wasm")]
@@ -89,7 +90,7 @@ pub use chassis::builder::{
     NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use chassis::ctx::{
-    ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, SharedActorSlots,
+    ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, MailboxWakeSlot, SharedActorSlots,
 };
 pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};
