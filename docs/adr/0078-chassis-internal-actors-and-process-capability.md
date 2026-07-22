@@ -1,6 +1,7 @@
 # ADR-0078: Chassis-internal actors, with `ProcessCapability` as the first
 
-- **Status:** Accepted (Phase 1 shipped; Phase 2 — ServerSocketCapability/framing — deferred)
+- **Status:** Accepted (Phase 1 shipped, then retired; Phase 2 — ServerSocketCapability/framing — deferred)
+- **Superseded (ProcessCapability surface):** the `ProcessCapability` cap and its `aether.process.{spawn,terminate,exited}` mail retired with P5e/P5f when hub supervision moved to `aether-engine`'s `EngineServer` and its `SpawnEngine`/`TerminateEngine` kinds (retirement recorded at `aether-chassis-hub/src/chassis.rs`). The `aether.process.*` kind family was subsequently removed from `aether-kinds`, freeing the name for the exec-shaped contract ADR-0157 defines. The chassis-internal-actor pattern this ADR records otherwise stands.
 - **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Date:** 2026-05-06
 
