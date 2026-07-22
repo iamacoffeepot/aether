@@ -1,28 +1,28 @@
-//! `aether.anthropic` cap (ADR-0050). One chassis-owned mailbox
-//! exposing two sibling text-completion request kinds —
-//! `aether.anthropic.messages.send` (HTTPS to the official Messages
-//! API) and `aether.anthropic.cli.send` (the local `claude` subprocess
-//! against the user's subscription) — with identical input/output
-//! schemas, the routing chosen by the kind name.
+//! `aether.anthropic` — the anthropic provider vocabulary and its two
+//! implementations. Two sibling text-completion request kinds —
+//! `aether.anthropic.messages.send` (the official Messages API over HTTPS)
+//! and `aether.anthropic.cli.send` (the local `claude` subprocess against
+//! the user's subscription) — share identical input/output schemas, with
+//! the routing chosen by the kind name.
 //!
-//! Long-tail calls (a multi-second Messages request, a `claude`
-//! subprocess) ride the ADR-0093 hold-until-resolve dispatch: the
-//! generate handler submits the blocking call to a
-//! [`TaskQueue`](aether_substrate::actor::native::TaskQueue), which hands it to
-//! `ctx.dispatch_blocking` — the substrate spawns an ephemeral worker,
-//! holds the chain open in its in-flight ledger, and routes the
-//! completion to the cap's `#[handler(task)]` as a `TaskDone`. The cap
-//! holds only the queue's slot count + pending queue (the per-cap
-//! concurrency bound) in its lock-free actor state — no `Semaphore`, no
-//! `Mutex`.
+//! Two implementations of those kinds live here (ADR-0159):
 //!
-//! The kind is the caller-stable contract; the `AnthropicAdapter` is
-//! the vendor-compat layer (ADR-0050 §4). Production wires
-//! [`CombinedAnthropicAdapter`] (the `ureq` Messages backend +
-//! `claude` subprocess backend); a key-absent boot wires
-//! [`DisabledAnthropicAdapter`] so the mailbox still loads and replies
-//! `Err { Unauthorized }` rather than warn-dropping. CI smokes wire the
-//! `StubAnthropicAdapter` from issue 1013.
+//! - The **guest component** ([`AnthropicComponent`]) is the default,
+//!   runtime-less build: a wasm actor that ports the pure request/response
+//!   logic and dispatches its I/O as mail — the Messages backend to
+//!   `aether.http` (ADR-0158), the `claude` CLI backend to `aether.process`
+//!   (ADR-0157). This is what `load_component` instantiates.
+//! - The **native cap** ([`AnthropicCapability`], behind `feature =
+//!   "runtime"`) is the chassis-owned mailbox retained until the component
+//!   reaches parity. Long-tail calls ride the ADR-0093 hold-until-resolve
+//!   dispatch: the generate handler submits the blocking call to a
+//!   `TaskQueue` (`aether_substrate::actor::native::TaskQueue`), the
+//!   substrate spawns an ephemeral worker and holds the chain open, and the
+//!   completion routes to the cap's `#[handler(task)]`. Production wires the
+//!   `CombinedAnthropicAdapter` (the `ureq` Messages backend + `claude`
+//!   subprocess backend); a key-absent boot wires the
+//!   `DisabledAnthropicAdapter` so Messages requests reply `Unauthorized`
+//!   while the CLI path still routes.
 
 // Always-on: the mail kinds + the `AnthropicConfig` domain struct carry the
 // marker face. The handler-signature kinds resolve at file root because
@@ -31,6 +31,19 @@ mod config;
 mod kinds;
 pub use config::AnthropicConfig;
 pub use kinds::{AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role};
+
+// The ADR-0159 guest component: a wasm actor that keeps the wire kinds
+// byte-identical and dispatches its I/O as mail to the `aether.http` and
+// `aether.process` edge capabilities. Always-on and wasm-safe (the pure logic
+// ported from the native backend depends only on serde / the edge kinds), so
+// the default (runtime-less) build of this crate is the loadable component; the
+// `export!` FFI it emits is wasm32-only and inert in the native `runtime`
+// build, where it coexists with the native cap below (distinct types, one
+// shared `NAMESPACE`; only the native identity carries the name-inventory
+// entry, so there is no runtime collision).
+mod component;
+pub use component::{AnthropicComponent, AnthropicComponentConfig, DEFAULT_CLI_BINARY};
+aether_actor::export!(AnthropicComponent);
 
 // Runtime-only: the `Config`-derive layer/overlay + the adapter machinery (the
 // `ureq` Messages backend `api`, the `claude` subprocess backend `cli`, the

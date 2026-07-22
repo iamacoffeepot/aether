@@ -72,9 +72,14 @@ name = "aether-anthropic"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-contentgen",
  "aether-data",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-http",
  "aether-kinds",
+ "aether-process",
  "aether-substrate",
  "clap",
  "confique",

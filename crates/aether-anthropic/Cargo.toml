@@ -25,13 +25,23 @@ license.workspace = true
 # can address `ctx.actor::<AnthropicCapability>()` without dragging the transport
 # / substrate stack through.
 
+# ADR-0159: the crate is both the loadable guest component (its lib cdylib, the
+# default build) and — behind `runtime` — the retained native cap. The `export!`
+# FFI is wasm32-only and inert in a host rlib, so the same artifact links into
+# both the wasm component build and the host integration test (the kit pattern).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
-default = ["runtime"]
+# Default is the guest component (runtime-less): the wasm component build
+# (`cargo build --target wasm32-unknown-unknown -p aether-anthropic`) resolves
+# default features, so it must not pull the native `aether-substrate` / `ureq`
+# stack. Native consumers (the chassis crates) name `runtime` explicitly.
+default = []
 runtime = [
     "dep:aether-substrate",
     "aether-contentgen/runtime",
     "dep:ureq",
-    "dep:serde_json",
     "dep:clap",
     "dep:confique",
     "dep:tracing",
@@ -52,12 +62,21 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 # build from dragging the transport runtime; the `runtime` feature above
 # forwards `aether-contentgen/runtime`.
 aether-contentgen = { path = "../aether-contentgen", default-features = false }
+# ADR-0159 guest edges — marker face only (the component addresses these caps by
+# mail, so it takes the wasm-safe identity + wire kinds, never the native
+# runtime). `aether.http.fetch` carries the Messages request; `aether.process.run`
+# carries the `claude` CLI backend. The integration test re-enables their
+# `runtime` face as a dev-dependency to boot them in the harness.
+aether-http = { path = "../aether-http", default-features = false }
+aether-process = { path = "../aether-process", default-features = false }
+# JSON request-body building + response parsing — always-on now, shared by the
+# guest component (over the http reply bytes) and the native Messages backend.
+serde_json = { workspace = true }
 # Native-only runtime half — gated so marker builds skip the substrate runtime
 # + the `ureq` Messages backend / `claude` subprocess backend / task queue.
 aether-substrate = { path = "../aether-substrate", optional = true }
 # ADR-0050 §1: the Messages API request runs through `ureq`; the body is JSON.
 ureq = { version = "3", optional = true, features = ["rustls"] }
-serde_json = { workspace = true, optional = true }
 # The `Config` derive emits the `AnthropicConfigLayer`
 # (`#[derive(confique::Config)]`) + `AnthropicOverlay` (`#[derive(clap::Args)]`)
 # structs; both ride the `runtime` feature so marker builds skip them.
@@ -77,6 +96,16 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `aether_substrate::testing` fixture, enabled by the substrate `test-support`
 # feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The ADR-0159 SubstrateHarness end-to-end test loads the built component wasm
+# and boots the `aether.http` / `aether.process` edge caps (their `runtime`
+# face) with empty allowlists to drive the deterministic refusal paths.
+aether-http = { path = "../aether-http", features = ["runtime"] }
+aether-process = { path = "../aether-process", features = ["runtime"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+# The loaded component registers at `aether.component/aether.embedded:NAME`; the
+# test builds that address from `WasmTrampoline::NAMESPACE`.
+aether-component = { path = "../aether-component" }
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so it cannot see that `clap` and `confique` are used only through
