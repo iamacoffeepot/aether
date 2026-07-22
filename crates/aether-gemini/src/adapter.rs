@@ -1,18 +1,20 @@
-//! Adapter-facing request DTO shared by the `aether.gemini` component's pure
-//! body builder and its request handler (ADR-0050 §4, ADR-0159).
+//! Adapter-facing request DTO the `aether.gemini` component's pure body
+//! builder and its request handler share (ADR-0050 §4, ADR-0159).
 //!
-//! The kind is the caller-stable contract; this request is the vendor-compat
-//! shape the component converts its capability-owned wire kind into before it
-//! builds the provider request body. It is adapter-facing, not a wire kind.
+//! The wire kind is the caller-stable contract; this request is the
+//! vendor-compat shape the component converts its capability-owned wire kind
+//! into before it builds the provider request body. It is adapter-facing, not a
+//! wire kind.
 
 /// Adapter-facing Nano Banana image request. The gemini component reads
 /// reference-image bytes from the supplied paths and runs per-model validation
 /// before constructing this; the pure body builder turns it into the provider
 /// request body. `aspect_ratio` rides as the provider's `W:H` string;
-/// `reference_images` are the already-read reference bytes.
+/// `reference_images` are the already-read reference bytes. The model rides in
+/// the provider URL path (`genlang_url`), not the body, so it is not carried
+/// here.
 #[derive(Clone, Debug, Default)]
 pub struct GeminiImageRequest {
-    pub model: String,
     pub prompt: String,
     /// Provider `W:H` aspect-ratio string (e.g. `"16:9"`).
     pub aspect_ratio: String,

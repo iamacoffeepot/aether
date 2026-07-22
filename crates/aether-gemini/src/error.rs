@@ -6,7 +6,23 @@
 
 use super::GeminiError;
 
-use aether_contentgen::snippet;
+/// Trim a response body to a short diagnostic snippet so an adapter error
+/// message stays log-sized even when the provider returns a multi-kilobyte
+/// error page. Truncates on a char boundary. I/O-free, so it compiles to
+/// `wasm32` unchanged.
+#[must_use]
+fn snippet(body: &str) -> String {
+    const MAX: usize = 256;
+    if body.len() <= MAX {
+        body.to_string()
+    } else {
+        let mut end = MAX;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &body[..end])
+    }
+}
 
 /// Map an HTTP status code from a Gemini API onto a [`GeminiError`].
 /// `retry_after_millis` is parsed from the `retry-after` header by the
@@ -27,8 +43,17 @@ pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str)
 
 #[cfg(test)]
 mod tests {
-    use super::status_to_error;
+    use super::{snippet, status_to_error};
     use crate::GeminiError;
+
+    #[test]
+    fn snippet_truncates_on_char_boundary() {
+        let long = "x".repeat(1000);
+        let s = snippet(&long);
+        assert!(s.len() <= 260);
+        assert!(s.ends_with('…'));
+        assert_eq!(snippet("short"), "short");
+    }
 
     #[test]
     fn unauthorized_statuses_map_to_unauthorized() {

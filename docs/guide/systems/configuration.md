@@ -101,7 +101,7 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   `--config path/to/chassis.toml` on the chassis command line, or set
   `AETHER_CONFIG_FILE` as a fallback for the file path. The file is sectioned by
   subsystem, for example `[http]`, `[http-server]`, `[fs]`, `[anthropic]`,
-  `[gemini]`, `[contentgen]`, `[actor]`, `[scheduler]`, `[settlement]`,
+  `[gemini]`, `[actor]`, `[scheduler]`, `[settlement]`,
   `[chassis]`, plus chassis-specific sections such as `[window]`, `[tick]`, and
   hub `[engine]`. Environment variables still override file values.
 - **Per-spawn arguments** are the per-engine override. `spawn_substrate` forwards

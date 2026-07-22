@@ -9,9 +9,8 @@
 //! re-reply — so neither `spawn_inherit` (hold dies with the worker) nor
 //! `spawn_detached` (no hold) fits.
 //!
-//! This generalises the content-gen `InFlightDispatch` prototype
-//! (`aether_contentgen`'s dispatch prototype) into a first-class
-//! ctx primitive. The pieces:
+//! This generalises the content-gen `InFlightDispatch` prototype into a
+//! first-class ctx primitive. The pieces:
 //!
 //! - [`DispatchId`] — a `Copy` correlation token minted per dispatch.
 //! - [`TaskDone`] — a move-only completion that carries the worker's

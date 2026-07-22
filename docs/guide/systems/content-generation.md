@@ -151,7 +151,6 @@ allowlists to drive the deterministic refusal paths. Useful boundaries include:
 
 - Anthropic kinds + guest component: `crates/aether-anthropic/src/`
 - Gemini kinds + guest component + pure provider logic: `crates/aether-gemini/src/`
-- Shared pure DTO/string helpers: `crates/aether-contentgen/src/`
 - Edge capabilities the components mail: `crates/aether-http/`, `crates/aether-process/`, `crates/aether-fs/`
 - Decision: ADR-0159 (guest-hosted providers), ADR-0050 (kind vocabulary), ADR-0139 (reply correlation), ADR-0158 (egress bound)
 - Configuration: [Configuration](configuration.md)

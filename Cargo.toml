@@ -44,7 +44,6 @@ members = [
     "crates/aether-trace",
     "crates/aether-render",
     "crates/aether-text",
-    "crates/aether-contentgen",
     "crates/aether-anthropic",
     "crates/aether-gemini",
     "crates/aether-process",
