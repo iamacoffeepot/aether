@@ -259,7 +259,6 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "pollster",
  "serde_json",
  "signal-hook 0.4.4",
  "tracing",
@@ -796,10 +795,12 @@ dependencies = [
  "clap",
  "confique",
  "inventory",
+ "pollster",
  "serde",
  "serde_json",
  "tracing",
  "wgpu",
+ "winit",
 ]
 
 [[package]]

@@ -37,6 +37,10 @@ mod config;
 mod material;
 mod pipeline;
 mod quad;
+// Shared desktop-surface GPU helpers (ADR-0161): the wireframe overlay
+// pipeline builder + swapchain acquisition, called by both the desktop
+// chassis's `Gpu` body and the pumped render runtime.
+mod surface;
 mod texture;
 
 // The cap-root re-exports source these names through `runtime`: `pub use
@@ -44,8 +48,26 @@ mod texture;
 // The `RenderTuning*` trio is the derive-Config surface (ADR-0090) the
 // chassis resolves the render boot knobs through.
 pub use self::capture::CaptureBackend;
+#[cfg(feature = "desktop")]
+pub use self::config::{PumpedRenderParams, WindowCell};
 pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
 pub use self::pipeline::{RenderGpu, RenderHandles};
+pub use self::surface::{BootedSurface, acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline};
+
+// The pumped render runtime (ADR-0161 slice R2, behind the `desktop`
+// feature) records world/material/overlay passes on owned-field
+// accumulators rather than the pooled `RenderHandles` mutexes, so it
+// reaches the ADR-0105/ADR-0140 realize-then-expand logic through these
+// shared free functions instead of re-implementing them — keeping the
+// expansion in one place across the two runtimes. Gated on `desktop`: the
+// pooled `RenderHandles` methods call the free functions in-module, so the
+// re-export is only used when the pumped runtime is built.
+#[cfg(feature = "desktop")]
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "re-exported for the pumped runtime in a sibling desktop-gated module"
+)]
+pub(crate) use self::pipeline::{record_material_batches, record_overlay_batches};
 
 // The moved `#[runtime] impl NativeActor for RenderCapability` body names the
 // `#[runtime]` attribute, the cap kinds (the drawing kinds via the parent's

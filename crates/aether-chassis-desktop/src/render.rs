@@ -15,9 +15,11 @@
 use std::sync::Arc;
 
 use aether_kinds::{FrameCheck, FrameVerdict};
-use aether_render::{RenderGpu, RenderHandles};
+use aether_render::{
+    RenderGpu, RenderHandles, acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline,
+};
 use aether_substrate::capture::ReferenceCapture;
-use aether_substrate::render::{self, RenderError, encode_png, vertex_buffer_layout};
+use aether_substrate::render::{self, RenderError, encode_png};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -25,7 +27,6 @@ use aether_harness_substrate_capture::visual;
 
 pub use render::VERTEX_BUFFER_BYTES;
 use std::iter;
-use std::slice;
 
 /// PNG bytes, optional [`FrameVerdict`], optional similarity score, and
 /// optional similarity pass that `render_and_capture` produces
@@ -33,34 +34,6 @@ use std::slice;
 /// request carried `checks`; `similarity_score` / `similarity_pass` are
 /// `Some` iff the request carried `similarity`.
 type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
-
-/// Wireframe-overlay shader: same vertex layout as the main shader so
-/// the pipeline shares the existing vertex buffer. The fragment stage
-/// emits a flat dark color so wires read against any filled-color
-/// underneath.
-const WIREFRAME_WGSL: &str = r"
-struct Camera {
-    view_proj: mat4x4<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> camera: Camera;
-
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec3<f32>,
-}
-
-@vertex
-fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
-    return camera.view_proj * vec4<f32>(in.position, 1.0);
-}
-
-@fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.05, 0.07, 0.12, 1.0);
-}
-";
 
 pub struct Gpu {
     pub surface: wgpu::Surface<'static>,
@@ -94,193 +67,53 @@ pub struct Gpu {
     last_submission: Option<wgpu::SubmissionIndex>,
 }
 
-/// Wireframe rendering mode, set at boot via `AETHER_WIREFRAME`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WireframeMode {
-    /// Filled faces only (default).
-    Off,
-    /// Lines only — the main pipeline runs in `PolygonMode::Line`.
-    /// Useful when you want to see triangulation without face shading.
-    Line,
-    /// Filled faces with a wireframe overlay drawn on top.
-    Overlay,
-}
-
-impl WireframeMode {
-    /// `value` is the resolved `AETHER_WIREFRAME` config value (argv >
-    /// env > default via `WindowConfig::wireframe`), threaded in by the
-    /// caller — this no longer reads the env var itself.
-    fn from_config_value(value: Option<&str>) -> Self {
-        match value {
-            None | Some("" | "0" | "off") => Self::Off,
-            Some("line") => Self::Line,
-            Some(_) => Self::Overlay, // "1", "overlay", etc.
-        }
-    }
-
-    fn needs_polygon_mode_line(self) -> bool {
-        !matches!(self, Self::Off)
-    }
-}
-
 impl Gpu {
-    /// Construct the desktop chassis's wgpu state: instance, surface,
-    /// adapter, device, queue, pipeline, and the shared `RenderHandles`
-    /// install. Called once during desktop boot from inside winit's
-    /// `resumed` handler.
+    /// Construct the desktop chassis's wgpu state and install the shared
+    /// `RenderGpu` into `render_handles`. Called once during desktop boot
+    /// from inside winit's `resumed` handler. The instance / surface /
+    /// adapter / device / swapchain boot is the shared [`boot_surface`];
+    /// this owns the desktop surface + the optional wireframe overlay
+    /// pipeline on top.
     ///
     /// # Panics
     /// Panics if surface creation, adapter selection, or device
     /// acquisition fail — fail-fast per ADR-0063: the desktop chassis
     /// can't proceed without a usable GPU pipeline.
-    // One-shot GPU pipeline setup: instance, surface, adapter, device,
-    // shader, pipeline, depth, uniform — all tied together in a single
-    // boot path. Splitting into helpers would force passing 6+
-    // intermediate `wgpu` handles around without saving readability.
     //
-    // `window` is owned because the boot path is a one-shot handoff:
-    // the driver builds the `Arc<Window>` once and the GPU pipeline
-    // takes a clone via `Arc::clone(&window)` for the surface; the
-    // owning form mirrors the `RenderHandles` argument.
-    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+    // `window` is owned because the boot path is a one-shot handoff: the
+    // driver builds the `Arc<Window>` once and `boot_surface` takes a clone
+    // for the surface; the owning form mirrors the `RenderHandles` argument.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(window: Arc<Window>, render_handles: RenderHandles, wireframe: Option<&str>) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let surface = instance.create_surface(Arc::clone(&window)).expect("create_surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("no compatible wgpu adapter");
-        let adapter_info = adapter.get_info();
-        let limits = wgpu::Limits::default();
-
-        // Wireframe rendering is opt-in via `AETHER_WIREFRAME`:
-        //   unset / "0" / "off" → filled (default)
-        //   "line"              → wireframe only
-        //   "1" / "overlay"     → filled + wireframe overlay
-        // The line modes need the adapter's `POLYGON_MODE_LINE`
-        // feature (Metal supports it on modern macOS; some GLES-only
-        // adapters don't). If unsupported we fall back to filled with
-        // a warning rather than failing device creation.
-        let mut wireframe_mode = WireframeMode::from_config_value(wireframe);
-        if wireframe_mode.needs_polygon_mode_line() && !adapter.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
-            tracing::warn!(
-                adapter = %adapter_info.name,
-                "AETHER_WIREFRAME requested but adapter lacks POLYGON_MODE_LINE; falling back to filled"
-            );
-            wireframe_mode = WireframeMode::Off;
-        }
-        let required_features = if wireframe_mode.needs_polygon_mode_line() {
-            wgpu::Features::POLYGON_MODE_LINE
-        } else {
-            wgpu::Features::empty()
-        };
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("aether-substrate device"),
-            required_features,
-            required_limits: limits.clone(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::default(),
-        }))
-        .expect("request_device");
-
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
         let size = window.inner_size();
-        let caps = surface.get_capabilities(&adapter);
-        // Prefer sRGB so the clear color matches intuition.
-        let format = caps.formats.iter().copied().find(wgpu::TextureFormat::is_srgb).unwrap_or(caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            // COPY_DST: the swapchain receives a texture-to-texture
-            // copy from the offscreen each frame. No draw pass
-            // writes to it directly anymore.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
-        let polygon_mode = if wireframe_mode == WireframeMode::Line {
-            wgpu::PolygonMode::Line
-        } else {
-            wgpu::PolygonMode::Fill
-        };
+        let booted = boot_surface(Arc::clone(&window), (size.width, size.height), wireframe);
         render_handles.install_gpu(RenderGpu::new(
-            Arc::clone(&device),
-            Arc::clone(&queue),
-            format,
-            config.width,
-            config.height,
-            polygon_mode,
+            Arc::clone(&booted.device),
+            Arc::clone(&booted.queue),
+            booted.format,
+            booted.config.width,
+            booted.config.height,
+            booted.polygon_mode,
             render_handles.vertex_buffer_bytes,
         ));
 
-        // Wireframe overlay pipeline: same vertex/uniform layout, but
-        // `PolygonMode::Line` and a flat dark fragment color so the
-        // wires read against any filled color underneath. Built post-
-        // install so it can borrow the bind group + pipeline layouts
-        // from the installed RenderGpu's pipeline.
-        let wire_pipeline = if wireframe_mode == WireframeMode::Overlay {
+        // Wireframe overlay pipeline, built post-install so it can borrow
+        // the installed pipeline's layout (same camera bind group).
+        let wire_pipeline = booted.build_overlay.then(|| {
             let installed = render_handles.gpu().expect("install_gpu just succeeded");
-            let pipeline_layout = &installed.pipeline.pipeline_layout;
-            let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("wireframe shader"),
-                source: wgpu::ShaderSource::Wgsl(WIREFRAME_WGSL.into()),
-            });
-            let vertex_layout = vertex_buffer_layout();
-            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("wireframe overlay pipeline"),
-                layout: Some(pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &wire_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: slice::from_ref(&vertex_layout),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &wire_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Line,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: render::DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState { constant: -1, slope_scale: -1.0, clamp: 0.0 },
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            }))
-        } else {
-            None
-        };
+            build_wireframe_overlay_pipeline(&booted.device, booted.config.format, &installed.pipeline.pipeline_layout)
+        });
 
-        Self { surface, config, adapter_info, limits, wire_pipeline, render_handles, last_submission: None }
+        Self {
+            surface: booted.surface,
+            config: booted.config,
+            adapter_info: booted.adapter_info,
+            limits: booted.limits,
+            wire_pipeline,
+            render_handles,
+            last_submission: None,
+        }
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -388,7 +221,7 @@ impl Gpu {
         // surface is occluded/lost/outdated we just skip the blit +
         // present step — the offscreen is already fresh and captures
         // still resolve.
-        let surface_tex = self.acquire_surface_texture();
+        let surface_tex = acquire_surface_texture(&self.surface, &self.render_handles.device(), &self.config);
         if let Some(tex) = surface_tex.as_ref() {
             let (w, h) = self.render_handles.color_size();
             self.render_handles.with_color_texture(|src| {
@@ -439,47 +272,5 @@ impl Gpu {
             let verdict = (!checks.is_empty()).then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
             Ok((png, verdict, similarity_score, similarity_pass))
         })
-    }
-
-    /// Try to get the current swapchain texture. Reconfigures the
-    /// surface on `Suboptimal`/`Lost`/`Outdated` so the next frame
-    /// recovers; on anything else returns `None` and the caller skips
-    /// the present step for this frame.
-    fn acquire_surface_texture(&mut self) -> Option<wgpu::SurfaceTexture> {
-        match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
-            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                self.surface.configure(&self.render_handles.device(), &self.config);
-                Some(t)
-            }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.render_handles.device(), &self.config);
-                None
-            }
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,
-            other @ wgpu::CurrentSurfaceTexture::Validation => {
-                tracing::warn!(
-                    target: "aether_substrate::render",
-                    status = ?other,
-                    "surface.get_current_texture returned unexpected status",
-                );
-                None
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::WireframeMode;
-
-    // Tripwire: pins the soft-parse mapping `WireframeMode::from_config_value`
-    // owns (`AETHER_WIREFRAME`'s tri-state semantics threaded from
-    // `WindowConfig::wireframe`) — drifts if an arm changes.
-    #[test]
-    fn from_config_value_maps_the_tri_state() {
-        assert!(WireframeMode::from_config_value(None) == WireframeMode::Off);
-        assert!(WireframeMode::from_config_value(Some("line")) == WireframeMode::Line);
-        assert!(WireframeMode::from_config_value(Some("garbage")) == WireframeMode::Overlay);
     }
 }
