@@ -12,14 +12,12 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::local;
 use crate::actor::native::pumped_slot::PumpedSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
-use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim, MailboxWakeSlot};
 use crate::chassis::error::BootError;
-use crate::chassis::inbox::SettlingInbox;
 use crate::config::ConfigMemberRecord;
 use crate::mail::cost::CostCells;
 use crate::mail::mailer::Mailer;
-use crate::mail::{MailId, MailboxId, Source};
+use crate::mail::{MailId, Source};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -257,103 +255,55 @@ impl<'a> DriverCtx<'a> {
         };
         let MailboxClaim { id: mailbox_id, inbox, wake_slot, .. } = claim;
 
-        // ADR-0160 §1 / ADR-0161 R4: the binding + inbox install + seed +
-        // init/wire + slot assembly is shared with the passive pumped boot
-        // ([`crate::chassis::builder::PassiveChassis::boot_pumped_actor`]).
-        // The `Spawner` carries the chassis mailer / aborter / actor-registry
-        // / ring capacities the assembly needs — the same handles
-        // `mail_send_handle` / `fatal_aborter` would source.
-        let slot = match assemble_pumped_slot::<A>(mailbox_id, inbox, self.inner.spawner_arc(), config, params) {
-            Ok(slot) => slot,
+        // Per-cap transport; install the claim's inbox re-lineaged onto the
+        // binding's disjoint reply-id space (ADR-0160 §1 / issue 1695).
+        let transport = Arc::new(NativeBinding::from_ctx(&self.inner, mailbox_id));
+        transport.install_settling_inbox(inbox.relineage(transport.reply_lineage()));
+
+        // Fresh per-actor slots, rings seeded at the chassis-wide capacities
+        // — the exact `NativeActorBoot::claim` block.
+        let slots = Box::new(ActorSlots::new());
+        let ring_capacities = self.inner.spawner_arc().ring_capacities();
+        slots.seed(ActorLogRing::with_capacity(ring_capacities.log));
+        slots.seed(ActorTraceRing::with_growth(ring_capacities.trace, ring_capacities.trace_max));
+
+        // `init` under `with_stamped`. A driver-as-actor does not publish a
+        // cross-thread handle bundle (the window actor's cell rides its
+        // `Params`), so a local `ExportedHandles` suffices here.
+        let mut handles = ExportedHandles::new();
+        let init_result = {
+            let mut init_ctx = NativeInitCtx::new(&transport, &mut handles, self.inner.mail_send_handle());
+            local::with_stamped(&slots, || A::init(config, params, &mut init_ctx))
+        };
+        let mut actor = match init_result {
+            Ok(a) => Box::new(a),
             Err(e) => {
                 self.inner.unclaim_mailbox(mailbox_id);
                 self.inner.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 return Err(e);
             }
         };
+
+        // Register capabilities + seed the cost table + stamp the per-actor
+        // `CostCells` — the exact `NativeActorBoot::init` block, so
+        // `describe` / `actor_cost` behave identically.
+        let capabilities = A::capabilities();
+        self.inner.mail_send_handle().capability_registry().register(mailbox_id, &capabilities);
+        let handler_kinds: Vec<aether_data::KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
+        let seeded = self.inner.mail_send_handle().cost_table().seed(mailbox_id, &handler_kinds);
+        local::with_stamped(&slots, || {
+            use aether_actor::Local as _;
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+        });
+
+        // `wire` under `with_stamped` — mail-allowed, so subscriptions land.
+        local::with_stamped(&slots, || {
+            let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            A::wire(actor.as_mut(), &mut wire_ctx);
+        });
+
+        let actor_registry = Arc::clone(self.inner.spawner_arc().actor_registry());
+        let slot = PumpedSlot::new(actor, transport, slots, actor_registry, mailbox_id);
         Ok((slot, wake_slot))
     }
-}
-
-/// Assemble a [`PumpedSlot<A>`] from an already-claimed mailbox + inbox
-/// (ADR-0160 §1 / ADR-0161 R4). Builds the per-cap [`NativeBinding`],
-/// installs the claim's inbox re-lineaged onto the binding's disjoint
-/// reply-id space (issue 1695), seeds the per-actor rings + cost cache at
-/// the chassis-wide capacities, and runs `init` / `wire` under
-/// `with_stamped` — the exact sequence `NativeActorBoot` runs for a pooled
-/// actor, so `describe` and `actor_cost` behave identically. Shared by
-/// [`DriverCtx::boot_pumped_actor`] (which recovers a driver's Claim-stage
-/// reservation) and [`crate::chassis::builder::PassiveChassis::boot_pumped_actor`]
-/// (which claims a fresh mailbox post-boot on a no-driver chassis).
-///
-/// The namespace claim + its release-on-error are the caller's: this
-/// function only reports `init` failure back through its `Err` so the caller
-/// can unwind whatever registry / namespace state it reserved. Every other
-/// chassis handle (mailer, aborter, actor registry, ring capacities) is
-/// sourced from the `spawner`, keeping the arg list to the per-actor inputs.
-#[allow(
-    clippy::redundant_pub_crate,
-    reason = "crate-internal boot helper shared across the private driver / built modules"
-)]
-pub(crate) fn assemble_pumped_slot<A>(
-    mailbox_id: MailboxId,
-    inbox: SettlingInbox,
-    spawner: &Arc<crate::Spawner>,
-    config: A::Config,
-    params: A::Params,
-) -> Result<PumpedSlot<A>, BootError>
-where
-    A: NativeActor,
-{
-    let mailer = spawner.mailer();
-    let ring_capacities = spawner.ring_capacities();
-    // Per-cap transport; install the claim's inbox re-lineaged onto the
-    // binding's disjoint reply-id space (ADR-0160 §1 / issue 1695). A
-    // root-pinned chassis capability (depth-1), so its lineage carry is its
-    // own `ActorId.0` == `mailbox_id.0`.
-    let transport = Arc::new(NativeBinding::new(
-        Arc::clone(mailer),
-        mailbox_id,
-        mailbox_id.0,
-        Arc::clone(spawner.aborter()),
-        Some(Arc::clone(spawner)),
-    ));
-    transport.install_settling_inbox(inbox.relineage(transport.reply_lineage()));
-
-    // Fresh per-actor slots, rings seeded at the chassis-wide capacities —
-    // the exact `NativeActorBoot::claim` block.
-    let slots = Box::new(ActorSlots::new());
-    slots.seed(ActorLogRing::with_capacity(ring_capacities.log));
-    slots.seed(ActorTraceRing::with_growth(ring_capacities.trace, ring_capacities.trace_max));
-
-    // `init` under `with_stamped`. A driver-as-actor does not publish a
-    // cross-thread handle bundle (the window actor's cell rides its
-    // `Params`), so a local `ExportedHandles` suffices here.
-    let mut handles = ExportedHandles::new();
-    let init_result = {
-        let mut init_ctx = NativeInitCtx::new(&transport, &mut handles, Arc::clone(mailer));
-        local::with_stamped(&slots, || A::init(config, params, &mut init_ctx))
-    };
-    let mut actor = Box::new(init_result?);
-
-    // Register capabilities + seed the cost table + stamp the per-actor
-    // `CostCells` — the exact `NativeActorBoot::init` block, so `describe` /
-    // `actor_cost` behave identically.
-    let capabilities = A::capabilities();
-    mailer.capability_registry().register(mailbox_id, &capabilities);
-    let handler_kinds: Vec<aether_data::KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
-    let seeded = mailer.cost_table().seed(mailbox_id, &handler_kinds);
-    local::with_stamped(&slots, || {
-        use aether_actor::Local as _;
-        CostCells::try_with_mut(|cells| cells.seed(seeded));
-    });
-
-    // `wire` under `with_stamped` — mail-allowed, so subscriptions land.
-    local::with_stamped(&slots, || {
-        let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
-        A::wire(actor.as_mut(), &mut wire_ctx);
-    });
-
-    let actor_registry: Arc<ActorRegistry> = Arc::clone(spawner.actor_registry());
-    Ok(PumpedSlot::new(actor, transport, slots, actor_registry, mailbox_id))
 }

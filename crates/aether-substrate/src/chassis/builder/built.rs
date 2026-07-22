@@ -1,17 +1,12 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::fmt;
-use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::boot_passives::BootedPassives;
-use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
+use super::driver::{DriverRunning, RunError};
 use crate::actor::native::NativeActor;
-use crate::actor::native::pumped_slot::PumpedSlot;
 use crate::chassis::Chassis;
-use crate::chassis::ctx::{MailboxWakeSlot, register_relay_inbox};
-use crate::chassis::error::BootError;
-use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
 
@@ -126,56 +121,6 @@ impl<C: Chassis> PassiveChassis<C> {
     #[must_use]
     pub fn settlement_registry(&self) -> &Arc<SettlementRegistry> {
         self.booted.settlement_registry()
-    }
-
-    /// ADR-0161 slice R4: boot a [`PumpedSlot`] for an externally-pumped
-    /// actor `A` on this no-driver chassis, the passive counterpart of
-    /// [`DriverCtx::boot_pumped_actor`](super::DriverCtx::boot_pumped_actor).
-    /// The substrate harness is the embedder-as-driver: it owns the pumped
-    /// render slot and drains it at its step / capture pump points, so it
-    /// claims the slot here after `build_passive` rather than through a
-    /// driver's Start-stage `boot`.
-    ///
-    /// Claims `A::NAMESPACE` fresh (a no-driver chassis reserved no
-    /// Claim-stage driver mailbox), registers a relay inbox under it, and
-    /// runs the shared `assemble_pumped_slot` boot (binding + inbox
-    /// install + seed + `init` / `wire`), returning the slot plus its
-    /// [`MailboxWakeSlot`] so the embedder installs whatever wake nudges its
-    /// pump cadence (or none — the harness busy-polls its drain).
-    ///
-    /// Errors if `A::NAMESPACE` is already owned by a different actor type,
-    /// if the relay-inbox registration fails, or if `A::init` returns `Err`;
-    /// in each failure the namespace claim is released before returning.
-    pub fn boot_pumped_actor<A>(
-        &self,
-        config: A::Config,
-        params: A::Params,
-    ) -> Result<(PumpedSlot<A>, Arc<MailboxWakeSlot>), BootError>
-    where
-        A: NativeActor,
-    {
-        let spawner = &self.booted.spawner;
-        let actor_registry = spawner.actor_registry();
-        if actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()).is_err() {
-            return Err(BootError::Other(Box::new(io::Error::other(format!(
-                "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
-                A::NAMESPACE
-            )))));
-        }
-
-        let mailer = spawner.mailer();
-        let boot = register_relay_inbox(mailer.registry(), A::NAMESPACE).and_then(|(mailbox_id, rx, wake_slot)| {
-            let inbox = SettlingInbox::new(mailbox_id, rx, Arc::clone(mailer));
-            let slot = assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params)?;
-            Ok((slot, wake_slot))
-        });
-        match boot {
-            Ok(pair) => Ok(pair),
-            Err(e) => {
-                actor_registry.release_namespace(A::NAMESPACE, TypeId::of::<A>());
-                Err(e)
-            }
-        }
     }
 
     chassis_accessors!();

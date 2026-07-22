@@ -41,34 +41,6 @@ pub struct BootedSurface {
     pub limits: wgpu::Limits,
 }
 
-/// Resolved surfaceless wgpu device the offscreen pumped render runtime
-/// stands up (ADR-0161 slice R4). The substrate harness owns no window, so
-/// its pumped runtime boots the GPU with no surface — the offscreen color +
-/// depth targets [`crate::runtime::RenderGpu::new`] allocates are the only
-/// render targets, and capture reads back from them directly. The pooled
-/// harness `Gpu` shim did this inline; the pumped runtime shares this
-/// winit-free boot so its lazy [`crate::PumpedRenderCapability`] offscreen
-/// path matches the windowed one minus the swapchain.
-pub struct BootedOffscreen {
-    pub device: Arc<wgpu::Device>,
-    pub queue: Arc<wgpu::Queue>,
-    /// Fixed offscreen color format (sRGB RGBA); with no surface to query
-    /// the runtime commits to it, keeping the readback path swizzle-free.
-    pub format: wgpu::TextureFormat,
-    /// `Line` when `AETHER_WIREFRAME=line` and the adapter supports
-    /// `POLYGON_MODE_LINE`; `Fill` otherwise.
-    pub polygon_mode: wgpu::PolygonMode,
-    /// `true` when `AETHER_WIREFRAME=overlay` and the adapter supports
-    /// `POLYGON_MODE_LINE` — the caller builds the wireframe overlay
-    /// pipeline against the offscreen color format.
-    pub build_overlay: bool,
-}
-
-/// Offscreen color format (sRGB RGBA). Mirrors the pooled harness `Gpu`
-/// shim's `COLOR_FORMAT`: with no surface to query the runtime commits to
-/// RGBA at boot so the capture readback stays swizzle-free.
-const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-
 /// Map the resolved `AETHER_WIREFRAME` value to `(wants_line, wants_overlay)`:
 ///   unset / `"" | "0" | "off"` → filled (default), neither flag
 ///   `"line"` → the main pipeline draws in `PolygonMode::Line`
@@ -78,81 +50,6 @@ fn wireframe_flags(wireframe: Option<&str>) -> (bool, bool) {
         None | Some("" | "0" | "off") => (false, false),
         Some("line") => (true, false),
         Some(_) => (false, true),
-    }
-}
-
-/// Resolve the wireframe polygon mode + overlay flag + required device
-/// features against an adapter's `POLYGON_MODE_LINE` support, warning and
-/// falling back to filled when the mode is requested but unsupported.
-/// Shared by [`boot_surface`] and [`boot_offscreen`] so the tri-state
-/// resolution lives once.
-fn resolve_wireframe(
-    adapter: &wgpu::Adapter,
-    adapter_name: &str,
-    wireframe: Option<&str>,
-) -> (wgpu::PolygonMode, bool, wgpu::Features) {
-    let (wants_line, wants_overlay) = wireframe_flags(wireframe);
-    let supports_line = adapter.features().contains(wgpu::Features::POLYGON_MODE_LINE);
-    if (wants_line || wants_overlay) && !supports_line {
-        tracing::warn!(
-            adapter = %adapter_name,
-            "AETHER_WIREFRAME requested but adapter lacks POLYGON_MODE_LINE; falling back to filled"
-        );
-        return (wgpu::PolygonMode::Fill, false, wgpu::Features::empty());
-    }
-    let polygon_mode = if wants_line {
-        wgpu::PolygonMode::Line
-    } else {
-        wgpu::PolygonMode::Fill
-    };
-    let required_features = if wants_line || wants_overlay {
-        wgpu::Features::POLYGON_MODE_LINE
-    } else {
-        wgpu::Features::empty()
-    };
-    (polygon_mode, wants_overlay, required_features)
-}
-
-/// Boot a surfaceless wgpu device for the offscreen pumped render runtime
-/// (ADR-0161 slice R4). No surface, no swapchain — the substrate harness
-/// owns no window, so the runtime records into the offscreen targets
-/// [`crate::runtime::RenderGpu::new`] allocates and reads back from them.
-/// `size` is retained by the caller for `RenderGpu::new`; `wireframe` is
-/// the resolved `AETHER_WIREFRAME` value, honored the same way
-/// [`boot_surface`] honors it.
-///
-/// # Panics
-/// Panics if adapter selection or device acquisition fail — fail-fast per
-/// ADR-0063: the harness can't proceed without a usable offscreen pipeline,
-/// and driverless dev boxes are expected to skip the scenario upstream.
-#[must_use]
-pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .expect("no compatible wgpu adapter");
-    let adapter_info = adapter.get_info();
-    let (polygon_mode, build_overlay, required_features) = resolve_wireframe(&adapter, &adapter_info.name, wireframe);
-
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("aether-render offscreen device"),
-        required_features,
-        required_limits: wgpu::Limits::default(),
-        experimental_features: wgpu::ExperimentalFeatures::default(),
-        memory_hints: wgpu::MemoryHints::default(),
-        trace: wgpu::Trace::default(),
-    }))
-    .expect("request_device");
-
-    BootedOffscreen {
-        device: Arc::new(device),
-        queue: Arc::new(queue),
-        format: OFFSCREEN_COLOR_FORMAT,
-        polygon_mode,
-        build_overlay,
     }
 }
 
@@ -188,7 +85,27 @@ pub fn boot_surface(
     // Wireframe rendering is opt-in via `AETHER_WIREFRAME`; the line modes
     // need the adapter's `POLYGON_MODE_LINE` feature, so if unsupported we
     // fall back to filled with a warning rather than failing device creation.
-    let (polygon_mode, build_overlay, required_features) = resolve_wireframe(&adapter, &adapter_info.name, wireframe);
+    let (wants_line, wants_overlay) = wireframe_flags(wireframe);
+    let mut polygon_mode = if wants_line {
+        wgpu::PolygonMode::Line
+    } else {
+        wgpu::PolygonMode::Fill
+    };
+    let mut build_overlay = wants_overlay;
+    let supports_line = adapter.features().contains(wgpu::Features::POLYGON_MODE_LINE);
+    if (wants_line || wants_overlay) && !supports_line {
+        tracing::warn!(
+            adapter = %adapter_info.name,
+            "AETHER_WIREFRAME requested but adapter lacks POLYGON_MODE_LINE; falling back to filled"
+        );
+        polygon_mode = wgpu::PolygonMode::Fill;
+        build_overlay = false;
+    }
+    let required_features = if (wants_line || wants_overlay) && supports_line {
+        wgpu::Features::POLYGON_MODE_LINE
+    } else {
+        wgpu::Features::empty()
+    };
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-substrate device"),

@@ -26,5 +26,5 @@ pub mod test_helpers;
 pub mod visual;
 
 pub use artifacts::ArtifactGuard;
-pub use ext::{GpuFrameHook, GpuRenderExt, PumpedGpuRenderExt, RenderHarnessBuilderExt, RenderHarnessExt};
+pub use ext::{GpuFrameHook, GpuRenderExt, RenderHarnessBuilderExt, RenderHarnessExt};
 pub use gpu::Gpu;
