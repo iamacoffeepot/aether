@@ -34,14 +34,11 @@ use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
 use aether_render::RenderTuningConfig;
-use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerParams};
+use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, Chassis, config_manifest, describe_caps};
-use aether_substrate::config::{
-    ConfigError, ConfigMember, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning,
-    render_env_only_help,
-};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning};
 use aether_substrate::runtime::lifecycle::FatalAborter;
 
 use aether_tcp::TcpCapability;
@@ -524,50 +521,61 @@ pub fn chassis_residual_knobs() -> Vec<KnobRecord> {
 #[must_use]
 pub fn hub_residual_knobs() -> Vec<KnobRecord> {
     let mut records = chassis_residual_knobs();
-    records.push(ENGINE_STORE_ROOT_KNOB);
+    records.push(KnobRecord {
+        env_key: "AETHER_ENGINE_STORE_ROOT",
+        doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
+              hatch (unset falls back to the platform data dir, then the system temp dir).",
+        default: None,
+        kind: KnobKind::HandRegistered,
+    });
     records
 }
 
-/// The engines cap's `AETHER_ENGINE_STORE_ROOT` ops escape hatch — a
-/// hand-registered [`KnobRecord`] (no confique `Meta`, so it rides the residual
-/// list rather than an aggregate member). Hub-only: it feeds both
-/// [`hub_residual_knobs`] and the hub's env-only `--help` section
-/// ([`hub_env_only_after_help`]).
-const ENGINE_STORE_ROOT_KNOB: KnobRecord = KnobRecord {
-    env_key: "AETHER_ENGINE_STORE_ROOT",
-    doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
-          hatch (unset falls back to the platform data dir, then the system temp dir).",
-    default: None,
-    kind: KnobKind::HandRegistered,
-};
-
-/// The confique `Meta`s of the env-only derive-`Config` members every full-stack
-/// and hub chassis resolves but exposes no flag for: [`RuntimeConfig`] (the
-/// `AETHER_LOG_FILTER` directive plus the three panic-hook knobs, read by the
-/// process-level panic hook directly, below the config layer) and
-/// [`FrameSizeConfig`] (`AETHER_MAX_FRAME_SIZE`, pushed into the codec by
-/// [`install_frame_size`]). Their overlays are deliberately not flattened into
-/// the CLI roots (issue 3882); this drives the `--help` after-help section
-/// instead, from the same registry `--print-config` walks.
-fn env_only_metas() -> Vec<&'static confique::meta::Meta> {
-    RuntimeConfig::members().into_iter().chain(FrameSizeConfig::members()).map(|record| record.meta).collect()
-}
-
-/// The desktop / headless clap `after_help`: the environment-only knobs that
-/// carry no flag ([`RuntimeConfig`] + [`FrameSizeConfig`]). Rendered from the
-/// registry ([`render_env_only_help`]) so it can never drift from the members
-/// `--print-config` dumps. Referenced from the CLI roots' `#[command(after_help
-/// = …)]` (issue 3882).
+/// The clap `after_help` block every chassis root carries (issue 3882): the
+/// "environment-only knobs" — the knobs a chassis resolves but exposes no flag
+/// for. [`RuntimeConfig`] (the `AETHER_LOG_FILTER` directive plus the three
+/// panic-hook knobs, read by the process-level panic hook directly, below the
+/// config layer) and [`FrameSizeConfig`] (`AETHER_MAX_FRAME_SIZE`, pushed into
+/// the codec by [`install_frame_size`]) both ride derive-`Config` members whose
+/// overlays are deliberately not flattened into the CLI roots. Every other knob
+/// a chassis resolves — including the engines cap's `AETHER_ENGINE_STORE_ROOT`
+/// (`--hub-engine-store-root`) — has a flag, so it stays out of this section (the
+/// issue's no-duplication rule); the residue is the same on all three chassis.
+///
+/// The per-knob line is harvested from the derive-emitted overlay's clap help,
+/// which `aether-derive` builds as `"<summary> [env: KEY] [default: X]"` — the
+/// same registry declaration `--print-config` reads, so the section carries the
+/// knob's own doc + env + default and can never be a hand-maintained list that
+/// drifts. Sorted by env key. Referenced from the CLI roots' `#[command(after_help
+/// = …)]`.
 #[must_use]
 pub fn env_only_after_help() -> String {
-    render_env_only_help(&env_only_metas(), &[])
-}
+    use clap::Args as _;
+    use std::fmt::Write as _;
 
-/// The hub clap `after_help`: the shared env-only knobs ([`env_only_after_help`])
-/// plus the hub-only [`ENGINE_STORE_ROOT_KNOB`] residual, which also has no flag.
-#[must_use]
-pub fn hub_env_only_after_help() -> String {
-    render_env_only_help(&env_only_metas(), &[ENGINE_STORE_ROOT_KNOB])
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for command in [
+        RuntimeOverlay::augment_args(clap::Command::new("env-only")),
+        FrameSizeOverlay::augment_args(clap::Command::new("env-only")),
+    ] {
+        for arg in command.get_arguments() {
+            let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+            // The env key the derive stamped into the help text (`[env: KEY]`) —
+            // the stable sort key, since the leading summary is free prose.
+            let env_key = help.split("[env: ").nth(1).and_then(|rest| rest.split(']').next()).unwrap_or_default();
+            entries.push((env_key.to_owned(), help));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = String::from(
+        "Environment-only knobs (no flag — set via environment, or the matching [section] in \
+         --config; --print-config shows their source-resolved values):\n",
+    );
+    for (_, line) in &entries {
+        let _ = writeln!(out, "  {line}");
+    }
+    out
 }
 
 /// Declare the hub's fleet pass-through config members (ADR-0156 §4) — the

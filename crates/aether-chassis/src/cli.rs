@@ -44,9 +44,9 @@
 //! `RenderTuningConfig`). The knobs that legitimately stay env-only — the
 //! `RuntimeConfig` log/panic-hook directives (the panic hook reads env directly,
 //! below the config layer) and the `FrameSizeConfig` wire cap — are rendered into
-//! each root's `after_help` from the same registry `--print-config` walks
-//! (`crate::boot::env_only_after_help` / `hub_env_only_after_help`), so help
-//! cannot drift from the registry.
+//! each root's `after_help` (`crate::boot::env_only_after_help`) by harvesting the
+//! derive-emitted overlays' own clap help, so the section carries each knob's doc
+//! + env + default and cannot drift from the registry.
 //!
 //! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
 //! structs now ride the `#[derive(aether_substrate::Config)]` next to
@@ -78,9 +78,7 @@ pub use aether_lifecycle::LifecycleOverlay;
 pub use aether_render::RenderTuningOverlay;
 pub use aether_rpc::RpcServerOverlay;
 
-pub use crate::boot::{
-    ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, env_only_after_help, hub_env_only_after_help,
-};
+pub use crate::boot::{ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, env_only_after_help};
 pub use crate::tick::TickOverlay;
 pub use crate::window::WindowOverlay;
 
@@ -232,7 +230,7 @@ pub struct HeadlessCli {
         Each flag below carries its resolved env key and default in brackets; unset flags fall \
         through to env then the default. For the full source-resolved value of every knob use \
         --print-config, and for this binary's linked caps and build provenance use --describe.",
-    after_help = hub_env_only_after_help()
+    after_help = env_only_after_help()
 )]
 pub struct HubCli {
     /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
