@@ -579,7 +579,6 @@ dependencies = [
  "aether-render",
  "aether-substrate",
  "anyhow",
- "png",
  "pollster",
  "serde",
  "serde_json",

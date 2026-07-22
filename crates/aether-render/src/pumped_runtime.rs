@@ -60,6 +60,7 @@ use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use aether_substrate::render::visual;
 use aether_substrate::render::{
     IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
 };
@@ -133,15 +134,12 @@ pub struct Occluded {
 struct PendingCapture {
     reply: InboundMail,
     after_mails: Vec<Mail>,
-    // Carried per the ADR-0161 plain-state shape and resolved off the hot
-    // path in `on_capture_frame`, but not yet consumed: `FrameCheck` /
-    // similarity scoring lives in `aether-harness-substrate-capture`, which
-    // depends on this crate, so R2 cannot score them without a cycle. The
-    // ready-branch readback replies `verdict` / `similarity` `None`; the
-    // driver swap (R3/R4) wires the reachable scorer against these fields.
-    #[allow(dead_code, reason = "consumed by the R3/R4 scoring path; see the field comment")]
+    /// `FrameCheck` verdict requests, scored on the read-back RGBA in
+    /// `on_frame`'s ready-branch (ADR-0161 §Decision 4). Since R3 rehomed the
+    /// scorer into `aether_substrate::render::visual`, the branch is reachable
+    /// without the `aether-harness-substrate-capture` cycle R2 documented.
     checks: Vec<FrameCheck>,
-    #[allow(dead_code, reason = "consumed by the R3/R4 scoring path; see the field comment")]
+    /// Optional similarity reference (issue 1780), scored alongside `checks`.
     reference: Option<ReferenceCapture>,
     /// Count of pre-mail settlements still awaited; `on_pre_settled`
     /// decrements it, and `on_frame` captures once it reaches zero.
@@ -208,6 +206,27 @@ pub struct PumpedRenderCapabilityState {
 }
 
 impl PumpedRenderCapabilityState {
+    /// Deadline of the pending capture, if one is parked (ADR-0161
+    /// §Decision 4). Read by the driver through
+    /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
+    /// so it can park with `ControlFlow::WaitUntil(deadline)` — the single
+    /// capture-awareness the driver retains, so a wedged pre-chain on a
+    /// parked window still reaches the deadline check.
+    #[must_use]
+    pub fn capture_deadline(&self) -> Option<Instant> {
+        self.pending_capture.as_ref().map(|pending| pending.deadline)
+    }
+
+    /// Cumulative triangle count this session, for the driver's shutdown FPS
+    /// report (ADR-0161). The pumped runtime owns `triangles_rendered` as
+    /// plain state, so the driver reads it through
+    /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
+    /// before `shutdown` consumes the actor; `unwire` logs the same count.
+    #[must_use]
+    pub fn triangles_rendered(&self) -> u64 {
+        self.triangles_rendered
+    }
+
     /// Push a dispatched kind name into the `SubstrateHarness` observation
     /// sink, when one is installed. Production chassis leave it `None`.
     fn observe(&self, name: &str) {
@@ -679,21 +698,24 @@ impl NativeActor for PumpedRenderCapability {
                 state.mailer.push(mail);
             }
             let gpu = state.gpu.as_ref().expect("gpu present in this branch");
-            let result = {
+            // Map the readback once, then encode the PNG and score the
+            // verdict / similarity from the same de-padded RGBA (ADR-0161
+            // §Decision 4 restores the pooled path's parity). `score_similarity`
+            // borrows the slice; `run_checks` consumes it, so the similarity
+            // check runs first (issue 1780).
+            let outcome: Result<CaptureFrameResult, String> = {
                 let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-                map_capture_rgba(&gpu.device, &targets, &meta)
-                    .and_then(|rgba| encode_png(&rgba, meta.width, meta.height))
+                map_capture_rgba(&gpu.device, &targets, &meta).and_then(|rgba| {
+                    let png = encode_png(&rgba, meta.width, meta.height)?;
+                    let (similarity_score, similarity_pass) =
+                        visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
+                    let verdict = (!pending.checks.is_empty())
+                        .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
+                    Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
+                })
             };
-            match result {
-                // Full `FrameCheck` / similarity scoring lands with the
-                // driver swap (R3/R4), where the scorer is reachable
-                // without the aether-harness-substrate-capture cycle.
-                Ok(png) => pending.reply.reply(&CaptureFrameResult::Ok {
-                    png,
-                    verdict: None,
-                    similarity_score: None,
-                    similarity_pass: None,
-                }),
+            match outcome {
+                Ok(result) => pending.reply.reply(&result),
                 Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
             };
         }
