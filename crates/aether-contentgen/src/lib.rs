@@ -23,14 +23,18 @@
 //!   `StubAnthropicAdapter` / `StubGeminiAdapter` no-op impls so both
 //!   caps land scaffolding + CI smokes before any network code exists.
 
-// Always-on: the wasm-safe adapter traits + stub types and the
-// `ContentGenConfig` domain struct carry the marker face.
+// Always-on: the wasm-safe adapter traits + stub types, the
+// `ContentGenConfig` domain struct, and the I/O-free `status=<n>` /
+// body-snippet string helpers ([`strparse`], ADR-0159 §2) carry the marker
+// face — a guest provider component reuses `strparse` unchanged.
 pub mod adapter;
 pub mod config;
+pub mod strparse;
 // Runtime-only: the `gen/` staging path (names `uuid` + the `aether.fs`
-// runtime `LocalFileAdapter`) and the shared `ureq` transport plumbing live
-// behind the one `feature = "runtime"` gate, so a marker-only build never
-// pulls the transport / substrate stack through this crate.
+// runtime `LocalFileAdapter`) and the `ureq` agent + blocking request-run
+// block live behind the one `feature = "runtime"` gate, so a marker-only
+// build never pulls the transport / substrate stack through this crate. The
+// pure string helpers that used to sit in `transport` moved to `strparse`.
 #[cfg(feature = "runtime")]
 pub mod staging;
 #[cfg(feature = "runtime")]
@@ -45,3 +49,4 @@ pub use config::ContentGenConfig;
 pub use config::{ContentGenConfigLayer, ContentGenOverlay};
 #[cfg(feature = "runtime")]
 pub use staging::{GEN_PREFIX, stage_gen_output_under};
+pub use strparse::{parse_status_prefix, snippet};
