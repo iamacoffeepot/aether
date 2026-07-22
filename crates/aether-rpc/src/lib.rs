@@ -25,8 +25,11 @@ pub mod kinds;
 pub mod server;
 pub mod wire;
 
+// `FrameSizeOverlay` rides along so the chassis can harvest the wire-frame
+// knob's help for its env-only `--help` section (issue 3882); the flag itself
+// is deliberately not flattened (the codec knob is pushed set-once at boot).
 #[cfg(not(target_family = "wasm"))]
-pub use frame_size::FrameSizeConfig;
+pub use frame_size::{FrameSizeConfig, FrameSizeOverlay};
 
 // The cap's own mail vocabulary (`RpcInboundReady`) lives in `kinds`
 // (ADR-0121); re-export at the module root so

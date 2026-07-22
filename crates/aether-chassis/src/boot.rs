@@ -34,7 +34,7 @@ use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
 use aether_render::RenderTuningConfig;
-use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerParams};
+use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, Chassis, config_manifest, describe_caps};
@@ -529,6 +529,53 @@ pub fn hub_residual_knobs() -> Vec<KnobRecord> {
         kind: KnobKind::HandRegistered,
     });
     records
+}
+
+/// The clap `after_help` block every chassis root carries (issue 3882): the
+/// "environment-only knobs" — the knobs a chassis resolves but exposes no flag
+/// for. [`RuntimeConfig`] (the `AETHER_LOG_FILTER` directive plus the three
+/// panic-hook knobs, read by the process-level panic hook directly, below the
+/// config layer) and [`FrameSizeConfig`] (`AETHER_MAX_FRAME_SIZE`, pushed into
+/// the codec by [`install_frame_size`]) both ride derive-`Config` members whose
+/// overlays are deliberately not flattened into the CLI roots. Every other knob
+/// a chassis resolves — including the engines cap's `AETHER_ENGINE_STORE_ROOT`
+/// (`--hub-engine-store-root`) — has a flag, so it stays out of this section (the
+/// issue's no-duplication rule); the residue is the same on all three chassis.
+///
+/// The per-knob line is harvested from the derive-emitted overlay's clap help,
+/// which `aether-derive` builds as `"<summary> [env: KEY] [default: X]"` — the
+/// same registry declaration `--print-config` reads, so the section carries the
+/// knob's own doc + env + default and can never be a hand-maintained list that
+/// drifts. Sorted by env key. Referenced from the CLI roots' `#[command(after_help
+/// = …)]`.
+#[must_use]
+pub fn env_only_after_help() -> String {
+    use clap::Args as _;
+    use std::fmt::Write as _;
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for command in [
+        RuntimeOverlay::augment_args(clap::Command::new("env-only")),
+        FrameSizeOverlay::augment_args(clap::Command::new("env-only")),
+    ] {
+        for arg in command.get_arguments() {
+            let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+            // The env key the derive stamped into the help text (`[env: KEY]`) —
+            // the stable sort key, since the leading summary is free prose.
+            let env_key = help.split("[env: ").nth(1).and_then(|rest| rest.split(']').next()).unwrap_or_default();
+            entries.push((env_key.to_owned(), help));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = String::from(
+        "Environment-only knobs (no flag — set via environment, or the matching [section] in \
+         --config; --print-config shows their source-resolved values):\n",
+    );
+    for (_, line) in &entries {
+        let _ = writeln!(out, "  {line}");
+    }
+    out
 }
 
 /// Declare the hub's fleet pass-through config members (ADR-0156 §4) — the

@@ -42,6 +42,7 @@ pub use harness::{
 };
 // The derive-emitted `SettlementConfigLayer` rides along for the chassis
 // config-dump registry (`chassis_known_keys`), which enumerates every
-// knob's `META`.
-pub use settlement_config::{SettlementConfig, SettlementConfigLayer};
+// knob's `META`; the `SettlementOverlay` rides along so the chassis CLI roots
+// can flatten `--settlement-cap-secs` into `--help` (issue 3882).
+pub use settlement_config::{SettlementConfig, SettlementConfigLayer, SettlementOverlay};
 pub use unsupported_cap::UnsupportedSubstrateHarnessCapability;
