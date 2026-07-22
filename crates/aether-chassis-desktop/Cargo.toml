@@ -23,7 +23,7 @@ aether-substrate = { path = "../aether-substrate", features = ["render"] }
 # The desktop cap set: the real render/window/audio/clipboard caps plus
 # the common-cap configs the env threads through `with_common_caps`.
 aether-render = { path = "../aether-render", features = ["runtime"] }
-aether-window = { path = "../aether-window", features = ["runtime"] }
+aether-window = { path = "../aether-window", features = ["desktop"] }
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }

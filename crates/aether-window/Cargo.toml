@@ -35,6 +35,11 @@ ignored = ["aether-data"]
 [features]
 default = ["runtime"]
 runtime = ["dep:aether-substrate"]
+# The desktop runtime (ADR-0160 §Decision 2): the state-bearing
+# `DesktopWindowCapability` that drives a real winit window. Pulls the
+# substrate runtime (via `runtime`) plus winit; default features stay
+# `runtime`-only, so headless / harness / wasm consumers never build winit.
+desktop = ["runtime", "dep:winit"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -43,6 +48,9 @@ aether-kinds = { path = "../aether-kinds" }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime.
 aether-substrate = { path = "../aether-substrate", optional = true }
+# The winit window handle the desktop runtime mutates. Gated behind the
+# `desktop` feature so only a desktop chassis build pulls it.
+winit = { version = "0.30", optional = true }
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` HandlerEntry per handler, so native builds need
