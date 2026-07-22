@@ -1,13 +1,13 @@
 // End-to-end test for the engines cap (issue 763 P4).
 //
-// Boots a passive chassis hosting `EngineServer`, mails it a
+// Boots a passive chassis hosting `FleetServer`, mails it a
 // `SpawnEngine` pointed at the real `aether-substrate-headless`
 // binary, and asserts the full lifecycle: the substrate forks and
 // binds its RPC port, the per-engine proxy bridges the startup gap
 // and connects, `ListEngines` reflects the live engine, and
 // `TerminateEngine` shuts it down. This is the only test exercising
 // the fork+exec + startup-race-retry + real-process path — the
-// `EngineServer` unit tests cover the error arms in-process.
+// `FleetServer` unit tests cover the error arms in-process.
 
 // Integration test resolves the server/sink actor mailboxes by their NAMESPACE
 // for fixture wiring — reference id derivation, not sibling-cap addressing.
@@ -15,7 +15,7 @@
 
 use aether_actor::Addressable;
 use aether_data::{Kind, mailbox_id_from_name};
-use aether_engine::{EngineConfig, EngineServer};
+use aether_fleet::{FleetConfig, FleetServer};
 use aether_kinds::descriptors;
 use aether_kinds::{
     BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
@@ -47,7 +47,7 @@ pub struct ReplyCells {
     pub terminate: Arc<Mutex<Option<TerminateEngineResult>>>,
 }
 
-/// Test-only reply sink registered at `aether.engine.test.reply_sink`,
+/// Test-only reply sink registered at `aether.fleet.test.reply_sink`,
 /// recording the latest reply of each engines-cap reply kind into the
 /// shared [`ReplyCells`]. A field-bearing test actor, so it stays the
 /// un-split `type State = Self` shape (ADR-0122), matching the cap's own
@@ -66,7 +66,7 @@ impl NativeActor for ReplySink {
     // operator config, so they ride the `Params` channel; `Config` is `()`.
     type Config = ();
     type Params = ReplyCells;
-    const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
+    const NAMESPACE: &'static str = "aether.fleet.test.reply_sink";
 
     fn init((): (), cells: ReplyCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { cells })
@@ -88,7 +88,7 @@ impl NativeActor for ReplySink {
     }
 }
 
-fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
+fn boot(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -97,7 +97,7 @@ fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let cells = ReplyCells::default();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor_configured::<EngineServer>((), engine_config)
+        .with_actor_configured::<FleetServer>((), engine_config)
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");
@@ -108,20 +108,20 @@ fn boot(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer
 /// (ADR-0115) under `store_dir` and bootstraps it with the `headless` bin,
 /// so the cap resolves a `default` selector to that binary (issue 1954),
 /// and isolates the per-engine spawn-dir parent (issue 1274) under
-/// `engine_root`. Both dirs ride `EngineConfig` (ADR-0090) instead of an
+/// `engine_root`. Both dirs ride `FleetConfig` (ADR-0090) instead of an
 /// env side-channel; the heartbeat stays disabled (the `Default`).
-/// `EngineServer::init` forks `<headless> --describe` to ingest the
+/// `FleetServer::init` forks `<headless> --describe` to ingest the
 /// binary store and resolves `engine_root` into
-/// `EngineServerState::engine_store_root` — a per-run dir instead of the
+/// `FleetServerState::fleet_store_root` — a per-run dir instead of the
 /// shared default (`~/.local/share/aether/engines`), which would collide
 /// with any sibling test, leaked orphan, or live MCP engine on id
 /// `0…01`.
-fn bootstrap_store_config(store_dir: &Path, engine_root: &Path, headless: &str) -> EngineConfig {
-    EngineConfig {
+fn bootstrap_store_config(store_dir: &Path, engine_root: &Path, headless: &str) -> FleetConfig {
+    FleetConfig {
         binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
-        engine_store_root: Some(engine_root.to_string_lossy().into_owned()),
+        fleet_store_root: Some(engine_root.to_string_lossy().into_owned()),
         binary_bootstrap: HashSet::from([headless.to_owned()]),
-        ..EngineConfig::default()
+        ..FleetConfig::default()
     }
 }
 
@@ -131,10 +131,10 @@ fn default_selector() -> BinarySelector {
     BinarySelector { query: None, chassis: None, caps: vec![], target: None }
 }
 
-/// Drive one request kind at `aether.engine`, reply-to the sink, and
+/// Drive one request kind at `aether.fleet`, reply-to the sink, and
 /// block until `probe` returns a recorded reply (or `deadline` passes).
 fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
-    let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+    let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
     let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
     mailer.push(
         Mail::new(server, K::ID, request.encode_into_bytes(), 1)
@@ -172,7 +172,7 @@ impl Drop for EngineReaper {
         let Some(engine_id) = self.engine_id.take() else {
             return;
         };
-        let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
+        let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
         let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
         self.mailer.push(
             Mail::new(server, TerminateEngine::ID, TerminateEngine { engine_id }.encode_into_bytes(), 1)
@@ -199,7 +199,7 @@ mod tests {
         // The forked headless chassis resolves through `dist/manifest.json`
         // (`cargo xtask dist` first) — `CARGO_BIN_EXE_*` only resolves inside
         // the package that defines the binary, and this suite lives in
-        // `aether-engine`, not the bundle.
+        // `aether-fleet`, not the bundle.
         let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
         // Bootstrap the binary store with the headless bin so the cap
         // resolves a `default` selector to it (ADR-0115, #1954). Before
@@ -307,16 +307,16 @@ mod tests {
         let root = dir.join("engines");
 
         // A short connect budget so the doomed dial fails quickly rather
-        // than burning the default 30 s. `engine_store_root` isolates this
+        // than burning the default 30 s. `fleet_store_root` isolates this
         // run's per-engine spawn-dir parent (issue 1274) from the shared
         // default, which would collide with any sibling test, leaked
         // orphan, or live MCP engine on id `0…01`.
-        let config = EngineConfig {
+        let config = FleetConfig {
             binary_store_dir: Some(store_dir.to_string_lossy().into_owned()),
-            engine_store_root: Some(root.to_string_lossy().into_owned()),
+            fleet_store_root: Some(root.to_string_lossy().into_owned()),
             binary_bootstrap: HashSet::from([stand_in.to_string_lossy().into_owned()]),
             proxy_connect_budget_secs: 2,
-            ..EngineConfig::default()
+            ..FleetConfig::default()
         };
         let (_chassis, mailer, cells) = boot(config);
 

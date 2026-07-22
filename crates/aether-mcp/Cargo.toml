@@ -9,7 +9,7 @@ license.workspace = true
 # tool surface, and reaches engines purely as an RPC *client* — it dials
 # the hub's `RpcServerCapability` and relays tool calls as wire `Call`s.
 # The wire surface comes from `aether-rpc` and the engines-cap config from
-# `aether-engine` (iamacoffeepot/aether#3735); the trace walk from
+# `aether-fleet` (iamacoffeepot/aether#3735); the trace walk from
 # `aether-trace`. Both native-only crates carry the substrate-side runtime, so
 # the "no `aether-substrate` / wasmtime / wgpu in the production graph"
 # invariant stays suspended (issue 2534).
@@ -33,8 +33,8 @@ path = "src/bin/aether-tunnel.rs"
 # `RpcClient`, `WireFrame`, …) — the coordinator's entire production surface.
 aether-rpc = { path = "../aether-rpc" }
 # The engines-cap config + server the test-support chassis boots
-# (`EngineConfig` / `EngineServer`).
-aether-engine = { path = "../aether-engine" }
+# (`FleetConfig` / `FleetServer`).
+aether-fleet = { path = "../aether-fleet" }
 # The `aether.trace` cap (extracted from capabilities, #3719): the
 # always-on `walk::TreeWalk` stitch (`tools/mail.rs`) plus the runtime
 # `TraceDispatchCapability` the test-support chassis mounts.
@@ -82,7 +82,7 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 # The `#[actor]` attribute macro for the `tools.rs` test module's
 # `RouteInventorySink` loopback fixture (issue 2672) — a `#[cfg(test)]`
-# native actor at the `aether.engine` mailbox that answers the harness's
+# native actor at the `aether.fleet` mailbox that answers the harness's
 # `engine = Some` `aether.inventory.kinds` refresh RPC locally, so the
 # field-mismatch refresh-and-retry path is exercised end-to-end without a
 # forked substrate. Test builds only; out of the production graph.

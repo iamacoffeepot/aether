@@ -26,7 +26,7 @@ aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate" }
 # The hub's cap set: the engines cap (fleet fork/track), the RPC server
 # aether-mcp dials, and trace dispatch for `aether.trace` roots.
-aether-engine = { path = "../aether-engine" }
+aether-fleet = { path = "../aether-fleet" }
 aether-rpc = { path = "../aether-rpc" }
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # Fully-qualified `aether_data::mailbox_id_from_name` resolves the

@@ -40,20 +40,20 @@ pub fn free_local_port() -> io::Result<u16> {
 /// Parent directory under which the cap allocates per-engine
 /// handle-store dirs (issue 1274). Priority:
 ///
-/// 1. `override_dir`, an explicit override (`EngineConfig::engine_store_root`,
-///    resolved from `AETHER_ENGINE_STORE_ROOT` / `--hub-engine-store-root`
-///    at `EngineServer::init` — the ops escape hatch).
+/// 1. `override_dir`, an explicit override (`FleetConfig::fleet_store_root`,
+///    resolved from `AETHER_FLEET_STORE_ROOT` / `--hub-engine-store-root`
+///    at `FleetServer::init` — the ops escape hatch).
 /// 2. `dirs::data_dir().join("aether/engines")` (cross-platform
 ///    default — `~/Library/Application Support/aether/engines` on
 ///    macOS, `$XDG_DATA_HOME/aether/engines` on Linux, etc.).
-/// 3. `std::env::temp_dir().join("aether-engines")` if no data
+/// 3. `std::env::temp_dir().join("aether-fleets")` if no data
 ///    dir is resolvable.
-pub fn resolve_engine_store_root(override_dir: Option<&str>) -> PathBuf {
+pub fn resolve_fleet_store_root(override_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = override_dir.filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
     if let Some(data) = dirs::data_dir() {
         return data.join("aether").join("engines");
     }
-    env::temp_dir().join("aether-engines")
+    env::temp_dir().join("aether-fleets")
 }

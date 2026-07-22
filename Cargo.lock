@@ -171,7 +171,7 @@ dependencies = [
  "aether-component",
  "aether-contentgen",
  "aether-data",
- "aether-engine",
+ "aether-fleet",
  "aether-fs",
  "aether-game",
  "aether-gemini",
@@ -329,7 +329,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-chassis",
  "aether-data",
- "aether-engine",
+ "aether-fleet",
  "aether-harness-fleet",
  "aether-kinds",
  "aether-rpc",
@@ -458,7 +458,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-engine"
+name = "aether-fleet"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
@@ -540,7 +540,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-codec",
  "aether-data",
- "aether-engine",
+ "aether-fleet",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
@@ -745,7 +745,7 @@ dependencies = [
  "aether-actor",
  "aether-codec",
  "aether-data",
- "aether-engine",
+ "aether-fleet",
  "aether-fs",
  "aether-inventory",
  "aether-kinds",
@@ -812,7 +812,7 @@ dependencies = [
  "aether-actor",
  "aether-codec",
  "aether-data",
- "aether-engine",
+ "aether-fleet",
  "aether-fs",
  "aether-harness-fleet",
  "aether-kinds",

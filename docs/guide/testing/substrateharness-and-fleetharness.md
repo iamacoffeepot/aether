@@ -152,6 +152,6 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 - Public SubstrateHarness API: `crates/aether-harness-substrate/src/`
 - Scenario examples: the per-cap scenario suites (e.g. `crates/aether-render/tests/`, `crates/aether-text/tests/`)
 - FleetHarness harness: `crates/aether-harness-fleet/src/lib.rs`
-- Fleet scenarios: the per-cap `fleetharness_*.rs` suites (e.g. `crates/aether-component/tests/`, `crates/aether-engine/tests/`)
+- Fleet scenarios: the per-cap `fleetharness_*.rs` suites (e.g. `crates/aether-component/tests/`, `crates/aether-fleet/tests/`)
 - Fixtures: `crates/aether-test-fixtures/`
 - Decisions: ADR-0067 and the subsystem ADR for the behavior under test

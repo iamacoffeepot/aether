@@ -2,7 +2,7 @@
 //! pinning, and the eviction-policy parameter. These exercise the storage
 //! primitive over a trivial metadata type `M` — the hub's binary /
 //! component projections are tested against the real manifests in
-//! `aether-engine`.
+//! `aether-fleet`.
 
 use super::{ContentStore, EvictionPolicy, Selector, hash_hex, now_nanos};
 use serde::{Deserialize, Serialize};
@@ -145,7 +145,7 @@ fn entries_iteration_exposes_hash_metadata_and_sequence() {
 /// Tripwire: the on-disk sidecar flattens the metadata's own fields at the
 /// object's top level next to `uploaded_seq` — no wrapper key. The hub's
 /// `{ kind, manifest, uploaded_seq }` layout (its bit-for-bit regression
-/// gate lives in `aether-engine`) depends on this shape; if the
+/// gate lives in `aether-fleet`) depends on this shape; if the
 /// flatten were dropped the sidecar would gain a `metadata` wrapper and
 /// this decode would read the wrong keys.
 #[test]

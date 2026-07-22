@@ -1,9 +1,9 @@
-//! `aether.engine` — engine-management capability cluster (issue 763).
+//! `aether.fleet` — engine-management capability cluster (issue 763).
 //!
-//! - [`EngineProxy`] (P3) — the per-engine proxy actor that
+//! - [`FleetProxy`] (P3) — the per-engine proxy actor that
 //!   wraps one outbound RPC connection to a substrate; the bridge core
 //!   of the forward-model architecture.
-//! - [`EngineServer`] (P4) — the engines cap (`list` / `spawn`
+//! - [`FleetServer`] (P4) — the engines cap (`list` / `spawn`
 //!   / `terminate`) that supervises a fleet of proxies, fork+execing
 //!   substrates and connecting a proxy to each.
 //!
@@ -19,9 +19,9 @@ mod proxy;
 mod server;
 mod store;
 
-pub use proxy::EngineProxy;
+pub use proxy::FleetProxy;
 #[cfg(not(target_family = "wasm"))]
-pub use proxy::EngineProxyConfig;
-pub use server::EngineServer;
+pub use proxy::FleetProxyConfig;
+pub use server::FleetServer;
 #[cfg(not(target_family = "wasm"))]
-pub use server::{EngineConfig, EngineConfigLayer, EngineOverlay};
+pub use server::{FleetConfig, FleetConfigLayer, FleetOverlay};

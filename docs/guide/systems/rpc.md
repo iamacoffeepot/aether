@@ -26,13 +26,13 @@ remain part of the stream boundary.
 An RPC mail envelope carries an optional engine selection plus mailbox/kind
 identity and correlation metadata. `engine = None` means the current RPC
 server's local actor registry, not specifically the engine-control capability;
-a hub fleet operation uses that form with the `aether.engine` mailbox.
+a hub fleet operation uses that form with the `aether.fleet` mailbox.
 Per-engine operations use `Some(id)` and route through the hub's matching
-`EngineProxy`.
+`FleetProxy`.
 
 ```text
 engine = none     → supplied mailbox in this RPC server's local registry
-engine = some(id) → hub EngineServer → proxy for that child → child registry
+engine = some(id) → hub FleetServer → proxy for that child → child registry
 ```
 
 Using `Some(id)` prevents a child mailbox from accidentally resolving in the
@@ -80,7 +80,7 @@ Wire changes need:
 
 - Frames and addresses: `crates/aether-rpc/src/wire.rs`
 - Native server/session: `crates/aether-rpc/src/server/`
-- Engine proxy/server: `crates/aether-engine/src/`
+- Engine proxy/server: `crates/aether-fleet/src/`
 - MCP client/session: `crates/aether-mcp/src/{rpc.rs,tools/}`
 - Stream framing: `crates/aether-codec/src/frame.rs`
 - Decisions: ADR-0072 (amended), ADR-0074, ADR-0089, ADR-0118

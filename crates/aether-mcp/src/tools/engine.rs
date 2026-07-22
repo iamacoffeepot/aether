@@ -18,7 +18,7 @@ use super::envelope::{engine_envelope, local_envelope};
 use super::ids::parse_engine_id;
 use super::mail::settle_mail_item;
 use super::render::{death_reason_parts, internal, internal_msg, json};
-use super::{ENGINE_CAP, Mcp};
+use super::{FLEET_CAP, Mcp};
 
 pub(super) async fn list_engines(mcp: &Mcp, args: ListEnginesArgs) -> Result<String, McpError> {
     // Decide which lists to render before the wire round-trip so a bad
@@ -34,7 +34,7 @@ pub(super) async fn list_engines(mcp: &Mcp, args: ListEnginesArgs) -> Result<Str
             return Err(McpError::invalid_params(format!("unknown show {other:?}; expected alive|dead|all"), None));
         }
     };
-    let reply = mcp.session.call_one(local_envelope(ENGINE_CAP, &ListEngines {})).await.map_err(internal)?;
+    let reply = mcp.session.call_one(local_envelope(FLEET_CAP, &ListEngines {})).await.map_err(internal)?;
     let result = ListEnginesResult::decode_from_bytes(&reply.payload)
         .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
     let engines: Option<Vec<EngineInfo>> = want_alive.then(|| {
@@ -85,7 +85,7 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
     let reply = mcp
         .session
         .call_one(local_envelope(
-            ENGINE_CAP,
+            FLEET_CAP,
             &SpawnEngine {
                 selector: BinarySelector {
                     query: args.selector,
@@ -166,7 +166,7 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
 pub(super) async fn terminate_substrate(mcp: &Mcp, args: TerminateSubstrateArgs) -> Result<String, McpError> {
     let reply = mcp
         .session
-        .call_one(local_envelope(ENGINE_CAP, &TerminateEngine { engine_id: args.engine_id }))
+        .call_one(local_envelope(FLEET_CAP, &TerminateEngine { engine_id: args.engine_id }))
         .await
         .map_err(internal)?;
     match TerminateEngineResult::decode_from_bytes(&reply.payload) {

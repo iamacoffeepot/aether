@@ -53,7 +53,7 @@ engine.
 
 ## What the hub owns
 
-The hub's `EngineServer` is the fleet control plane. It owns:
+The hub's `FleetServer` is the fleet control plane. It owns:
 
 - spawn and termination requests;
 - the live proxy set and heartbeat state;
@@ -62,7 +62,7 @@ The hub's `EngineServer` is the fleet control plane. It owns:
 - selector resolution, materialization, persistence, and eviction policy;
 - routing a per-engine RPC call to the right proxy.
 
-An `EngineProxy` represents one connected child. It is not the child's actor
+An `FleetProxy` represents one connected child. It is not the child's actor
 registry mirrored in full. Mail, replies, inventory queries, and lifecycle
 events still cross the RPC boundary.
 
@@ -130,7 +130,7 @@ autoload or packaging behavior.
 
 - Shared chassis traits and frame loop: `crates/aether-substrate/src/chassis/`
 - Process composition: `crates/aether-chassis/src/` + the per-chassis crates
-- Fleet, proxy, and stores: `crates/aether-engine/src/`
+- Fleet, proxy, and stores: `crates/aether-fleet/src/`
 - Framed RPC: `crates/aether-rpc/src/`
 - MCP translation: `crates/aether-mcp/src/`
 - ADR-0034 and ADR-0073: chassis and bundle structure

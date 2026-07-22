@@ -146,7 +146,7 @@ effect was already visible at that instant.
 - Tunnel supervisor and admin routes:
   `crates/aether-mcp/src/bin/aether-tunnel.rs`
 - Fleet table and logical termination:
-  `crates/aether-engine/src/server/runtime.rs`
+  `crates/aether-fleet/src/server/runtime.rs`
 - Proxy child ownership and forceful teardown:
-  `crates/aether-engine/src/proxy/runtime.rs`
+  `crates/aether-fleet/src/proxy/runtime.rs`
 - MCP fleet orchestration: `crates/aether-mcp/src/tools/engine.rs`

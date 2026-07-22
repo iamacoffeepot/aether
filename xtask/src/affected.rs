@@ -35,7 +35,7 @@ use crate::inventory::{discover_behaviors, discover_components};
 /// The real-process fleet harness (issue #3767): any package that
 /// dev-deps it forks the dist-resolved headless chassis binary at test
 /// time, so its tests need the `cargo xtask dist` pre-build even when
-/// they load no wasm at all (the aether-engine fleet tests are the
+/// they load no wasm at all (the aether-fleet fleet tests are the
 /// canonical case).
 const HARNESS_FLEET_PACKAGE: &str = "aether-harness-fleet";
 
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn harness_fleet_dependents_are_dist_consumers() {
-        // Issue #3766: a fleet-test host (aether-engine is the canonical
+        // Issue #3766: a fleet-test host (aether-fleet is the canonical
         // case) loads no wasm, but its tests fork the dist-resolved
         // headless chassis binary through aether-harness-fleet — the
         // consumer predicate must catch the harness dep on its own,

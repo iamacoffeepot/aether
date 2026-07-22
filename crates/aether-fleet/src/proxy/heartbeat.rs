@@ -50,7 +50,7 @@ pub fn spawn_heartbeat(mailer: Arc<Mailer>, self_mailbox: MailboxId, interval: D
     // so `spawn_detached` (Singleton-only) doesn't apply.
     #[allow(clippy::disallowed_methods)]
     let thread = thread::Builder::new()
-        .name("aether-engine-heartbeat".into())
+        .name("aether-fleet-heartbeat".into())
         .spawn(move || {
             // `recv_timeout` returns `Timeout` each interval (fire a
             // tick); a stop signal or a disconnected channel (the
@@ -60,6 +60,6 @@ pub fn spawn_heartbeat(mailer: Arc<Mailer>, self_mailbox: MailboxId, interval: D
                 mailer.push(Mail::new(self_mailbox, tick_kind, EngineHeartbeatTick::default().encode_into_bytes(), 1));
             }
         })
-        .expect("spawn aether-engine-heartbeat thread");
+        .expect("spawn aether-fleet-heartbeat thread");
     HeartbeatHandle { stop: Some(stop_tx), thread: Some(thread) }
 }

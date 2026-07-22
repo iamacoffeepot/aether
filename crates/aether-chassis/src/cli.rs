@@ -55,7 +55,7 @@ use clap::{Args, Parser};
 pub use aether_anthropic::AnthropicOverlay;
 pub use aether_audio::AudioOverlay;
 pub use aether_contentgen::ContentGenOverlay;
-pub use aether_engine::EngineOverlay;
+pub use aether_fleet::FleetOverlay;
 pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_gemini::GeminiOverlay;
 pub use aether_http::HttpOverlay;
@@ -200,7 +200,7 @@ pub struct HubCli {
     /// (`--hub-heartbeat-interval-secs` / `--hub-heartbeat-miss-limit`,
     /// issue 1339). Flattened from the derive-emitted overlay.
     #[command(flatten)]
-    pub engine: EngineOverlay,
+    pub fleet: FleetOverlay,
 
     /// Sectioned TOML chassis config file. Values from this file sit
     /// below env and argv in the source stack.
@@ -234,7 +234,7 @@ mod checkability_tests {
     //! (or a stale flag left in the root) fails the assertion honestly.
 
     use super::{
-        CommonOverlay, DesktopCli, EngineOverlay, HeadlessCli, HttpOverlay, HubCli, RpcServerOverlay, TickOverlay,
+        CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli, RpcServerOverlay, TickOverlay,
     };
     use crate::window::WindowOverlay;
     use aether_audio::AudioOverlay;
@@ -313,7 +313,7 @@ mod checkability_tests {
         // The hub composes the engines cap plus the RPC server; `--rpc-port`
         // now rides the derive-emitted `RpcServerOverlay` (#3849) like every
         // other flag, alongside the meta flags.
-        let mut expected = overlay_flags::<EngineOverlay>();
+        let mut expected = overlay_flags::<FleetOverlay>();
         expected.extend(overlay_flags::<RpcServerOverlay>());
         expected.extend(meta_flags());
         assert_eq!(long_flags(&HubCli::command()), expected);

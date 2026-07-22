@@ -4,7 +4,7 @@
 //! over a loopback channel, `FleetHarness`
 //! drives the *actual* hub → RPC → forked-headless-substrate stack: it
 //! boots a hub-shaped passive chassis (`RpcServerCapability` +
-//! `EngineServer` + `TraceDispatchCapability`), connects a raw-frame
+//! `FleetServer` + `TraceDispatchCapability`), connects a raw-frame
 //! `TcpStream` client, and forks real `aether-substrate-headless`
 //! processes through the engines cap. That exercises ADR-0099 lineage
 //! addressing, schema-encode, fork+exec + env injection, and component
@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
-use aether_engine::{EngineConfig, EngineServer};
+use aether_fleet::{FleetConfig, FleetServer};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
@@ -199,7 +199,7 @@ pub fn is_rearm_timeout(err: &FrameError) -> bool {
 pub struct CallRecord {
     /// Monotonic wire correlation id assigned to this call.
     pub cid: u64,
-    /// `None` for a hub-local call (`aether.engine`), `Some` for a call
+    /// `None` for a hub-local call (`aether.fleet`), `Some` for a call
     /// routed to a forked substrate.
     pub engine: Option<EngineId>,
     /// The mailbox path the call addressed.
@@ -337,7 +337,7 @@ impl FleetHarness {
         // backstop, not the steady-state reply cap (issue 2064).
         let replies = self.call_with_budget(
             None,
-            "aether.engine",
+            "aether.fleet",
             &SpawnEngine {
                 selector: BinarySelector { query: Some(hash), chassis: None, caps: vec![], target: None },
                 args: vec![],
@@ -358,10 +358,10 @@ impl FleetHarness {
     }
 
     /// Enumerate the engines the hub currently supervises (the engines
-    /// cap's `ListEngines`). Hub-local — addressed at `aether.engine`
+    /// cap's `ListEngines`). Hub-local — addressed at `aether.fleet`
     /// with no engine route.
     pub fn list_engines(&mut self) -> Vec<EngineDescriptor> {
-        let replies = self.call(None, "aether.engine", &ListEngines {});
+        let replies = self.call(None, "aether.fleet", &ListEngines {});
         let payload = single_reply(&replies, "ListEngines");
         match ListEnginesResult::decode_from_bytes(&payload) {
             Some(result) => result.engines,
@@ -374,7 +374,7 @@ impl FleetHarness {
     /// Same `ListEngines` round-trip as [`list_engines`](Self::list_engines),
     /// reading the reply's `recently_died` sidecar instead of the live set.
     pub fn recently_died(&mut self) -> Vec<DeadEngineDescriptor> {
-        let replies = self.call(None, "aether.engine", &ListEngines {});
+        let replies = self.call(None, "aether.fleet", &ListEngines {});
         let payload = single_reply(&replies, "ListEngines");
         match ListEnginesResult::decode_from_bytes(&payload) {
             Some(result) => result.recently_died,
@@ -384,13 +384,13 @@ impl FleetHarness {
 
     /// Upload a binary into the hub's content-addressed store (ADR-0115,
     /// issue 1953) by absolute host path, optionally naming it. Hub-local —
-    /// addressed at `aether.engine` with no engine route. The hub reads the
+    /// addressed at `aether.fleet` with no engine route. The hub reads the
     /// path, sha256s it, forks `<path> --describe`, and stores both; this
     /// returns the decoded [`UploadBinaryResult`].
     pub fn upload_binary(&mut self, staged_path: &str, name: Option<&str>) -> UploadBinaryResult {
         let replies = self.call(
             None,
-            "aether.engine",
+            "aether.fleet",
             &UploadBinary { staged_path: staged_path.to_owned(), name: name.map(str::to_owned) },
         );
         let payload = single_reply(&replies, "UploadBinary");
@@ -398,23 +398,23 @@ impl FleetHarness {
     }
 
     /// Enumerate the hub's stored engine binaries (ADR-0115, issue 1953)
-    /// under the given filter. Hub-local — addressed at `aether.engine` with
+    /// under the given filter. Hub-local — addressed at `aether.fleet` with
     /// no engine route.
     pub fn list_engine_binaries(&mut self, filter: &ListEngineBinaries) -> ListEngineBinariesResult {
-        let replies = self.call(None, "aether.engine", filter);
+        let replies = self.call(None, "aether.fleet", filter);
         let payload = single_reply(&replies, "ListEngineBinaries");
         ListEngineBinariesResult::decode_from_bytes(&payload).expect("undecodable ListEngineBinariesResult")
     }
 
     /// Upload a component wasm into the hub's content-addressed store
     /// (ADR-0116, issue 1956) by absolute host path, optionally naming it.
-    /// Hub-local — addressed at `aether.engine` with no engine route. The
+    /// Hub-local — addressed at `aether.fleet` with no engine route. The
     /// hub reads the path, sha256s it, parses its manifest from the wasm,
     /// and stores both; returns the decoded [`UploadComponentResult`].
     pub fn upload_component(&mut self, staged_path: &str, name: Option<&str>) -> UploadComponentResult {
         let replies = self.call(
             None,
-            "aether.engine",
+            "aether.fleet",
             &UploadComponent { staged_path: staged_path.to_owned(), name: name.map(str::to_owned) },
         );
         let payload = single_reply(&replies, "UploadComponent");
@@ -422,10 +422,10 @@ impl FleetHarness {
     }
 
     /// Enumerate the hub's stored component binaries (ADR-0116, issue 1956)
-    /// under the given filter. Hub-local — addressed at `aether.engine` with
+    /// under the given filter. Hub-local — addressed at `aether.fleet` with
     /// no engine route.
     pub fn list_component_binaries(&mut self, filter: &ListComponentBinaries) -> ListComponentBinariesResult {
-        let replies = self.call(None, "aether.engine", filter);
+        let replies = self.call(None, "aether.fleet", filter);
         let payload = single_reply(&replies, "ListComponentBinaries");
         ListComponentBinariesResult::decode_from_bytes(&payload).expect("undecodable ListComponentBinariesResult")
     }
@@ -448,10 +448,10 @@ impl FleetHarness {
     /// Resolve a component selector hub-local against the registry
     /// (ADR-0116, issue 1956) — the `ResolveComponent` hop aether-mcp does
     /// before forwarding a `LoadComponent` to a substrate. Hub-local —
-    /// addressed at `aether.engine` with no engine route. Returns the
+    /// addressed at `aether.fleet` with no engine route. Returns the
     /// decoded [`ResolveComponentResult`].
     pub fn resolve_component(&mut self, selector: ComponentSelector) -> ResolveComponentResult {
-        let replies = self.call(None, "aether.engine", &ResolveComponent { selector });
+        let replies = self.call(None, "aether.fleet", &ResolveComponent { selector });
         let payload = single_reply(&replies, "ResolveComponent");
         ResolveComponentResult::decode_from_bytes(&payload).expect("undecodable ResolveComponentResult")
     }
@@ -597,7 +597,7 @@ impl FleetHarness {
     /// eviction with no heartbeat-eviction wait. Drops `engine` from the
     /// teardown set so `Drop` doesn't double-terminate it.
     pub fn terminate(&mut self, engine: EngineId) {
-        let replies = self.call(None, "aether.engine", &TerminateEngine { engine_id: engine.0.to_string() });
+        let replies = self.call(None, "aether.fleet", &TerminateEngine { engine_id: engine.0.to_string() });
         let payload = single_reply(&replies, "TerminateEngine");
         match TerminateEngineResult::decode_from_bytes(&payload) {
             Some(TerminateEngineResult::Ok) => {}
@@ -835,7 +835,7 @@ impl FleetHarness {
         let cid = self.next_cid;
         self.next_cid += 1;
         let payload = TerminateEngine { engine_id: engine.0.to_string() }.encode_into_bytes();
-        if self.write_call(cid, None, "aether.engine", TerminateEngine::ID, payload).is_err() {
+        if self.write_call(cid, None, "aether.fleet", TerminateEngine::ID, payload).is_err() {
             return;
         }
         // Drain to this call's ReplyEnd so the next Drop iteration reads
@@ -953,8 +953,8 @@ impl Drop for FleetHarness {
 /// root for their per-engine executable materialization (ADR-0115), so a
 /// concurrent fork+exec test on the shared default
 /// `dirs::data_dir()/aether/engines` root can't collide. Threaded into
-/// `boot_hub` as `EngineConfig::engine_store_root` (ADR-0090) — not an
-/// env var — so the cap resolves it at `EngineServer::init`.
+/// `boot_hub` as `FleetConfig::fleet_store_root` (ADR-0090) — not an
+/// env var — so the cap resolves it at `FleetServer::init`.
 fn isolate_store_root() -> PathBuf {
     let temp_dir = env::temp_dir();
     loop {
@@ -966,7 +966,7 @@ fn isolate_store_root() -> PathBuf {
         //
         // The hub's binary store (ADR-0115) is isolated under
         // `root/binaries` too, but that dir rides
-        // `EngineConfig::binary_store_dir` (ADR-0090).
+        // `FleetConfig::binary_store_dir` (ADR-0090).
         let root = temp_dir.join(format!("aether-fleetharness-{}-{nonce}", process::id()));
         match fs::create_dir(&root) {
             Ok(()) => return root,
@@ -983,15 +983,15 @@ pub fn allocate_store_root_for_test() -> PathBuf {
 }
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
-/// (engine-addressed Calls route through `aether.engine`), the engines
+/// (engine-addressed Calls route through `aether.fleet`), the engines
 /// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// settle and close. Returns the chassis and the port the RPC server
 /// bound. Mirrors the seed's `boot_hub`. `binary_store_dir` isolates the
 /// hub's content-addressed store (ADR-0115) per-harness, and
-/// `engine_store_root` isolates the per-engine spawn-dir parent (issue
-/// 1274) per-harness — both via `EngineConfig` (ADR-0090); the heartbeat
+/// `fleet_store_root` isolates the per-engine spawn-dir parent (issue
+/// 1274) per-harness — both via `FleetConfig` (ADR-0090); the heartbeat
 /// stays disabled (the `Default`).
-fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassis<TestChassis>, u16) {
+fn boot_hub(binary_store_dir: &Path, fleet_store_root: &Path) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -1000,12 +1000,12 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor_configured::<EngineServer>(
+        .with_actor_configured::<FleetServer>(
             (),
-            EngineConfig {
+            FleetConfig {
                 binary_store_dir: Some(binary_store_dir.to_string_lossy().into_owned()),
-                engine_store_root: Some(engine_store_root.to_string_lossy().into_owned()),
-                ..EngineConfig::default()
+                fleet_store_root: Some(fleet_store_root.to_string_lossy().into_owned()),
+                ..FleetConfig::default()
             },
         )
         .with_actor_configured::<RpcServerCapability>(
@@ -1015,7 +1015,7 @@ fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassi
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
+                route_target: Some(aether_data::mailbox_id_from_name("aether.fleet")),
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -1273,7 +1273,7 @@ pub fn component_wasm_path(stem: &str) -> PathBuf {
 /// manifest classification / skip-or-panic guard. The wire round-trip
 /// and the cold-start/reply backstops themselves are exercised by the
 /// booted `FleetHarness` scenarios (`fleetharness_spawn`, `fleetharness_mail`,
-/// … in the per-cap crates: `aether-engine`, `aether-rpc`, …).
+/// … in the per-cap crates: `aether-fleet`, `aether-rpc`, …).
 #[cfg(test)]
 mod tests {
     use std::io::{Error as IoError, ErrorKind};

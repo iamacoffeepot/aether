@@ -95,7 +95,7 @@ echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)...
 # resolves to the headless binary even in a fresh or `restart-hub`'d hub —
 # the spawn surface no longer takes a host path, so the host-path knowledge
 # lives here in the build flow. The forked hub resolves this comma-separated
-# list through `EngineConfig`'s `binary_bootstrap` field (its
+# list through `FleetConfig`'s `binary_bootstrap` field (its
 # `AETHER_BINARY_BOOTSTRAP` env layer, ADR-0090) and ingests each (idempotent
 # via content dedup). Exported so the detached tunnel — and the hub it forks —
 # inherit it; only bins that actually built are listed.

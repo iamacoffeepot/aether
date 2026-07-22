@@ -15,7 +15,7 @@ use crate::args::{
 use super::envelope::{engine_envelope, local_envelope, recipient_mailbox};
 use super::ids::{parse_engine_id, parse_mailbox_id, static_kind_name};
 use super::render::{internal, internal_msg, json, project_capabilities, render_shape};
-use super::{COMPONENT_CAP, ENGINE_CAP, INVENTORY_CAP, Mcp};
+use super::{COMPONENT_CAP, FLEET_CAP, INVENTORY_CAP, Mcp};
 
 pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result<String, McpError> {
     // Resolve the target engine: explicit engine_id wins; when absent,
@@ -25,7 +25,7 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
     let engine = if let Some(id) = &args.engine_id {
         Some(parse_engine_id(id)?)
     } else {
-        let reply = mcp.session.call_one(local_envelope(ENGINE_CAP, &ListEngines {})).await.map_err(internal)?;
+        let reply = mcp.session.call_one(local_envelope(FLEET_CAP, &ListEngines {})).await.map_err(internal)?;
         let result = ListEnginesResult::decode_from_bytes(&reply.payload)
             .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
         // Auto-resolve only when exactly one engine is supervised;

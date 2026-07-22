@@ -60,7 +60,7 @@ pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>
 /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
 /// each by its file stem so a `default` / `name` selector resolves in a
 /// fresh or `restart-hub`'d hub (ADR-0115, issue 1954). The list rides
-/// `EngineConfig`'s `binary_bootstrap` field (its `AETHER_BINARY_BOOTSTRAP`
+/// `FleetConfig`'s `binary_bootstrap` field (its `AETHER_BINARY_BOOTSTRAP`
 /// env layer, ADR-0090). A path that can't be read or `--describe`d is
 /// logged and skipped — a bad bootstrap entry must not fail hub boot.
 /// Idempotent via content dedup.
@@ -69,13 +69,13 @@ pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
         let name = Path::new(path).file_stem().and_then(|stem| stem.to_str()).map(str::to_owned);
         match ingest_binary(store, path, name) {
             Ok(hash) => tracing::info!(
-                target: "aether_substrate::engine_server",
+                target: "aether_substrate::fleet_server",
                 path = path.as_str(),
                 hash = %hash,
                 "binary bootstrap: ingested a chassis bin",
             ),
             Err(error) => tracing::warn!(
-                target: "aether_substrate::engine_server",
+                target: "aether_substrate::fleet_server",
                 path = path.as_str(),
                 error = %error,
                 "binary bootstrap: skipping a bin that failed to ingest",

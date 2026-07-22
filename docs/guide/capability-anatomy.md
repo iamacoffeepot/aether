@@ -46,7 +46,7 @@ aether-example/src/
   tests.rs               only when tests would overwhelm the subject file
 ```
 
-Clusters such as `aether-engine`, `aether-http`, and `aether-tcp` keep the root
+Clusters such as `aether-fleet`, `aether-http`, and `aether-tcp` keep the root
 thin and put independent actors under `server/`, `proxy/`, `listener/`,
 `session/`, or shard submodules. Organize by state/lifetime ownership, not an arbitrary line limit.
 
