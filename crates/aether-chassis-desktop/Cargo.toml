@@ -20,17 +20,16 @@ runtime = []
 [dependencies]
 aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
-# The desktop cap set: the real render/window/audio/clipboard caps plus
-# the common-cap configs the env threads through `with_common_caps`.
-aether-render = { path = "../aether-render", features = ["runtime"] }
+# The desktop cap set: the pumped render actor (ADR-0161 R3 — the driver
+# boots it and owns the surface on the winit thread), plus the
+# window/audio/clipboard caps and the common-cap configs the env threads
+# through `with_common_caps`. `aether-render/desktop` pulls the pumped
+# runtime (`PumpedRenderCapability` + winit-typed `WindowCell`).
+aether-render = { path = "../aether-render", features = ["desktop"] }
 aether-window = { path = "../aether-window", features = ["desktop"] }
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-# Pre-existing seam carried from the bundle: `render.rs` composes the
-# capture crate's `visual` helpers for readback encoding. A
-# production→harness edge worth revisiting at the consolidation pass.
-aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
@@ -44,9 +43,13 @@ anyhow = { workspace = true }
 # `--describe` prints the BinaryManifest as JSON (ADR-0115).
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
-# The winit event loop + wgpu surface stack.
+# The winit event loop. The wgpu surface stack now lives in the pumped
+# render actor (`aether-render/desktop`, ADR-0161 R3), so the chassis holds
+# no direct wgpu edge.
 winit = "0.30.13"
-wgpu = { workspace = true }
+# The unified `PumpWake` channel the driver's `await_settlement_pumped`
+# selects across (ADR-0161 §Decision 2).
+crossbeam-channel = "0.5"
 
 # The desktop signal-watcher thread mirrors the headless shutdown flag:
 # signal-hook on Unix, the `ctrlc` Ctrl-C fallback on Windows.
