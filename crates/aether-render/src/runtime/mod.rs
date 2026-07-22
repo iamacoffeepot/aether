@@ -48,25 +48,30 @@ mod texture;
 // The `RenderTuning*` trio is the derive-Config surface (ADR-0090) the
 // chassis resolves the render boot knobs through.
 pub use self::capture::CaptureBackend;
+// ADR-0161 slice R4: `PumpedRenderParams` rides the `runtime` feature (its
+// winit-typed `window` field is gated `desktop` inside the struct), so the
+// substrate harness's offscreen pumped runtime can name it without pulling
+// winit. `WindowCell` is winit-typed and stays `desktop`-only.
 #[cfg(feature = "desktop")]
-pub use self::config::{PumpedRenderParams, WindowCell};
-pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
+pub use self::config::WindowCell;
+pub use self::config::{
+    PumpedRenderParams, RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
+};
 pub use self::pipeline::{RenderGpu, RenderHandles};
-pub use self::surface::{BootedSurface, acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline};
+pub use self::surface::{
+    BootedSurface, acquire_surface_texture, boot_offscreen, boot_surface, build_wireframe_overlay_pipeline,
+};
 
-// The pumped render runtime (ADR-0161 slice R2, behind the `desktop`
-// feature) records world/material/overlay passes on owned-field
-// accumulators rather than the pooled `RenderHandles` mutexes, so it
-// reaches the ADR-0105/ADR-0140 realize-then-expand logic through these
-// shared free functions instead of re-implementing them — keeping the
-// expansion in one place across the two runtimes. Gated on `desktop`: the
-// pooled `RenderHandles` methods call the free functions in-module, so the
-// re-export is only used when the pumped runtime is built.
-#[cfg(feature = "desktop")]
-#[allow(
-    clippy::redundant_pub_crate,
-    reason = "re-exported for the pumped runtime in a sibling desktop-gated module"
-)]
+// The pumped render runtime (ADR-0161 slice R2) records world/material/overlay
+// passes on owned-field accumulators rather than the pooled `RenderHandles`
+// mutexes, so it reaches the ADR-0105/ADR-0140 realize-then-expand logic
+// through these shared free functions instead of re-implementing them —
+// keeping the expansion in one place across the two runtimes. Gated on
+// `runtime` (ADR-0161 R4: the pumped runtime now builds without `desktop` for
+// the harness's offscreen path): the pooled `RenderHandles` methods call the
+// free functions in-module, so the re-export is only used when the pumped
+// runtime is built.
+#[allow(clippy::redundant_pub_crate, reason = "re-exported for the pumped runtime in a sibling module")]
 pub(crate) use self::pipeline::{record_material_batches, record_overlay_batches};
 
 // The moved `#[runtime] impl NativeActor for RenderCapability` body names the

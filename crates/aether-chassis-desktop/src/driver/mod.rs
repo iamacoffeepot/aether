@@ -873,6 +873,8 @@ impl DriverCapability for DesktopDriverCapability {
                 observed_kinds: None,
                 assets_dir: Some(assets_dir),
                 window: Some(window_cell.clone()),
+                // ADR-0161 R4: the desktop chassis boots windowed, not offscreen.
+                offscreen_size: None,
                 wireframe: window.wireframe.clone(),
             },
         )?;
