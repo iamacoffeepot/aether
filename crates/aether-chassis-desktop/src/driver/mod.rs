@@ -31,9 +31,7 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, TextInput,
     Tick, WindowMode, WindowSize,
 };
-use aether_render::{
-    Frame, Occluded, PumpedRenderCapability, PumpedRenderCapabilityState, PumpedRenderParams, RenderTuningConfig,
-};
+use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
@@ -140,7 +138,7 @@ pub struct App {
     /// and the pending capture outright; the driver only pushes it
     /// [`Frame`] / [`Occluded`] mail and drains. Booted from the driver's
     /// Claim-stage `aether.render` reservation via [`DriverCtx::boot_pumped_actor`].
-    render_slot: PumpedSlot<PumpedRenderCapability>,
+    render_slot: PumpedSlot<RenderCapability>,
     /// `aether.render` mailbox id, cached at boot — the recipient for the
     /// per-frame [`Frame`] request and the [`Occluded`] forward.
     render_mailbox: MailboxId,
@@ -164,7 +162,7 @@ pub struct App {
     /// `Windowed`. Runtime `set_window_title` mail overrides the title but
     /// doesn't update this field — the current title lives on the `Window`
     /// itself. The wireframe value is threaded into the pumped render actor's
-    /// [`PumpedRenderParams`], whose lazy wgpu boot owns the tri-state parse.
+    /// [`RenderParams`], whose lazy wgpu boot owns the tri-state parse.
     window_settings: aether_chassis::WindowSettings,
     /// The `aether.window` desktop runtime, pumped on the winit thread
     /// (ADR-0160 §Decision 3). Booted from the Claim-stage `aether.window`
@@ -434,7 +432,7 @@ impl App {
         {
             w.request_redraw();
         }
-        if let Some(Some(deadline)) = self.render_slot.read_state(PumpedRenderCapabilityState::capture_deadline) {
+        if let Some(Some(deadline)) = self.render_slot.read_state(RenderCapabilityState::capture_deadline) {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
@@ -808,13 +806,10 @@ impl DriverCapability for DesktopDriverCapability {
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self { event_loop, boot, window, render_config, assets_dir } = self;
 
-        // ADR-0161 R3: the desktop driver boots the pumped `aether.render`
-        // actor itself (below) rather than fetching a pooled `RenderHandles`
-        // bundle and installing a cross-thread `CaptureBackend`. The pooled
-        // render seam — `RenderHandles`, `install_gpu`, the capture queue and
-        // its `UserEvent::Capture` wake — is gone from the desktop path; the
-        // pumped actor owns the surface, accumulators, and pending capture as
-        // plain state on this thread.
+        // ADR-0161: the desktop driver boots the pumped `aether.render` actor
+        // itself (below). There is no cross-thread render seam — the pumped
+        // actor owns the surface, accumulators, and pending capture as plain
+        // state on this thread.
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
@@ -867,9 +862,9 @@ impl DriverCapability for DesktopDriverCapability {
         // lazily against the same window. `RenderTuningConfig` (the vertex cap)
         // and the `assets` root ride through here since render no longer
         // composes on the pooled `with_actor` path.
-        let (render_slot, render_wake_slot) = ctx.boot_pumped_actor::<PumpedRenderCapability>(
+        let (render_slot, render_wake_slot) = ctx.boot_pumped_actor::<RenderCapability>(
             render_config,
-            PumpedRenderParams {
+            RenderParams {
                 observed_kinds: None,
                 assets_dir: Some(assets_dir),
                 window: Some(window_cell.clone()),
@@ -900,7 +895,7 @@ impl DriverCapability for DesktopDriverCapability {
         // `Occluded` forward. ctx-less, no sibling resolver in scope — same
         // escape hatch the input / lifecycle mailbox ids below use.
         #[allow(clippy::disallowed_methods)]
-        let render_mailbox = mailbox_id_from_name(<PumpedRenderCapability as Addressable>::NAMESPACE);
+        let render_mailbox = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
 
         // Chassis route-freezing: the desktop driver wires its event loop to
         // the lifecycle cap's own id (its NAMESPACE) at construction time —
@@ -997,7 +992,7 @@ impl DriverRunning for DesktopDriverRunning {
         // plain state through the read-only accessor before `shutdown` consumes
         // the actor (ADR-0161: the driver's shutdown FPS report keeps working
         // off `read_state`; the render actor's `unwire` logs the same count).
-        let total = app.render_slot.read_state(PumpedRenderCapabilityState::triangles_rendered).unwrap_or(0);
+        let total = app.render_slot.read_state(RenderCapabilityState::triangles_rendered).unwrap_or(0);
 
         // ADR-0160 §Decision 3 / ADR-0161: run each pumped actor's Closed-path
         // teardown (residual drain, `unwire`, cost-row drop, registry finalize +

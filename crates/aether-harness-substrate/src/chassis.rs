@@ -23,12 +23,12 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, Pas
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigSources;
 use aether_substrate::mail::MailboxId;
-use aether_substrate::{Chassis, Mailer, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{Chassis, Mailer, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
 use super::cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
-use super::events::{ChassisEvent, EventSender};
+use super::events::EventSender;
 use aether_lifecycle::{LifecycleConfig, frame_lifecycle_params};
 use aether_substrate::mail::registry::MailDispatch;
 use std::io;
@@ -153,59 +153,20 @@ pub trait FrameHook {
 }
 
 /// The render wiring the [`HookFactory`](crate::HookFactory) needs to boot
-/// the pumped render slot after `build_passive` (ADR-0161 slice R4). The
-/// pumped path composes no build-time render cap — the hook claims the
-/// `aether.render` slot post-boot via
+/// the pumped render slot after `build_passive` (ADR-0161). The pumped path
+/// composes no build-time render cap — the hook claims the `aether.render`
+/// slot post-boot via
 /// [`PassiveChassis::boot_pumped_actor`](aether_substrate::chassis::builder::PassiveChassis::boot_pumped_actor)
-/// — so the non-knob wiring that rode `RenderParams` through
-/// [`RenderExt::compose`] on the pooled path is handed straight to the hook
-/// factory instead.
+/// — so the non-knob render wiring is handed straight to the hook factory,
+/// which threads it into the pumped actor's `RenderParams`.
 pub struct RenderHookWiring {
     /// The chassis mailer, so the hook can mail `frame` to the pumped slot.
     pub mailer: Arc<Mailer>,
-    /// `SubstrateHarness` observation sink threaded into `PumpedRenderParams`.
+    /// `SubstrateHarness` observation sink threaded into the render actor's
+    /// `RenderParams`.
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Resolved `"assets"` root for `capture_frame` similarity references.
     pub assets_dir: Option<PathBuf>,
-}
-
-/// Boot-internal wiring handed to a [`RenderExt`] so it can construct
-/// the render cap's config without the core naming render types: the
-/// capture handoff queue, the embedder-loop wake, the shared
-/// observation log, the capture-similarity assets root, and the reply
-/// egress.
-pub struct BenchWiring {
-    pub capture_queue: CaptureQueue,
-    /// Wakes the embedder loop with `ChassisEvent::CaptureRequested`;
-    /// errors only when the chassis is shutting down.
-    pub capture_wake: Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>,
-    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
-    pub assets_dir: Option<PathBuf>,
-    pub outbound: Arc<aether_substrate::HubOutbound>,
-}
-
-/// Chassis-composition half of the render seam (issue #3765): given the
-/// boot wiring, chain the render cap onto the [`Builder`]. Implemented
-/// by `aether-harness-substrate-capture`'s `GpuRenderExt`; the core calls
-/// it in the render slot of the cap chain.
-pub trait RenderExt: Send {
-    fn compose(
-        &self,
-        wiring: &BenchWiring,
-        builder: Builder<SubstrateHarnessChassis>,
-    ) -> Builder<SubstrateHarnessChassis>;
-
-    /// ADR-0155 §4: install the driver-side capture backend into the booted
-    /// chassis's published `RenderHandles` — the Start-stage handoff that
-    /// replaces the retired `RenderConfig.capture_backend`. Called after
-    /// `build_passive`, once the render cap has published its handles: the
-    /// impl builds the `CaptureBackend` from `wiring` (capture queue +
-    /// embedder-loop wake + reply egress) and installs it, so the cap's
-    /// `capture_frame` handler reaches it the same way the desktop driver's
-    /// Start-stage install does. The core stays render-free by naming only
-    /// [`BenchWiring`] and [`PassiveChassis`]; the render types live in the
-    /// impl.
-    fn install_capture_backend(&self, wiring: &BenchWiring, passive: &PassiveChassis<SubstrateHarnessChassis>);
 }
 
 /// Bag of resolved configs the substrate-harness chassis takes at build
@@ -241,13 +202,9 @@ pub struct SubstrateHarnessEnv {
     /// binary passes `None` for zero overhead.
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Sender side of the chassis event channel. Cloned into the
-    /// `SubstrateHarnessCapability` config + render's capture-wake closure;
-    /// the matching receiver rides on [`SubstrateHarnessBuild`].
+    /// `SubstrateHarnessCapability` config; the matching receiver rides on
+    /// [`SubstrateHarnessBuild`].
     pub events_tx: EventSender,
-    /// Capture-handoff slot the render cap writes into; the
-    /// embedder's frame loop drains it on each `RedrawRequested`-
-    /// equivalent step.
-    pub capture_queue: CaptureQueue,
     /// Optional `aether.fs` roots. When `Some`, the chassis
     /// pre-validates the roots via [`NamespaceRoots::ensure_dirs`]
     /// and chains `with_actor::<FsCapability>(roots)` into the
@@ -257,11 +214,6 @@ pub struct SubstrateHarnessEnv {
     /// pre-issue-673 silent-skip semantics. When `None`, fs is not
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
-    /// Render-cap composition seam. `Some` chains the render cap (with
-    /// its capture backend built from the boot wiring) into the cap
-    /// chain; `None` boots no render cap — mail to `aether.render`
-    /// warn-drops and captures are unavailable.
-    pub render_ext: Option<Box<dyn RenderExt>>,
     /// Compose the component host. Off, `aether.component.load` /
     /// `replace` / `drop` have no recipient — benches that never touch
     /// wasm skip the cap entirely.
@@ -327,9 +279,7 @@ impl SubstrateHarnessChassis {
             scheduler_tuning,
             observed_kinds,
             events_tx,
-            capture_queue,
             namespace_roots,
-            render_ext,
             component_host,
             compose,
             teardown_budget,
@@ -339,33 +289,6 @@ impl SubstrateHarnessChassis {
         let _ = workers;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-
-        // Mirrors the desktop chassis's wiring: the `capture_frame`
-        // similarity check (iamacoffeepot/aether#1780) reads its reference
-        // image from the same `assets` root the fs cap serves. Cloned out
-        // ahead of the `io_roots` pre-validation match below, which moves
-        // `namespace_roots` — capture similarity needs only the configured
-        // assets root, independent of whether fs cap boot itself succeeds.
-        let assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
-
-        // Capture handoff lives on the render cap post-issue-603 Phase 2:
-        // its dispatcher parks the request on `capture_queue` and wakes
-        // the embedder loop, which routes through the frame hook's
-        // readback. The wiring is built unconditionally (cheap Arc
-        // clones); it only reaches a render cap when `render_ext` is
-        // `Some` (issue #3765).
-        let events_for_render = events_tx.clone();
-        let wiring = BenchWiring {
-            capture_queue,
-            capture_wake: Arc::new(move || {
-                events_for_render
-                    .send(ChassisEvent::CaptureRequested)
-                    .map_err(|_| "substrate-harness chassis shutting down — capture aborted")
-            }),
-            observed_kinds: observed_kinds.clone(),
-            assets_dir,
-            outbound: Arc::clone(&boot.outbound),
-        };
 
         // Phase 4: advance lands on `SubstrateHarnessCapability` claiming
         // `aether.substrate_harness`. The cap pushes `ChassisEvent::Advance`
@@ -467,9 +390,9 @@ impl SubstrateHarnessChassis {
                 hub_outbound: Arc::clone(&boot.outbound),
             });
         }
-        if let Some(ext) = &render_ext {
-            builder = ext.compose(&wiring, builder);
-        }
+        // ADR-0161 R4/R5: the pumped render path composes no build-time
+        // render cap — the frame hook claims the `aether.render` slot
+        // post-`build_passive` via `PassiveChassis::boot_pumped_actor`.
         for apply in compose {
             builder = apply(builder);
         }
@@ -482,14 +405,6 @@ impl SubstrateHarnessChassis {
             builder = builder.with_actor_configured::<FsCapability>((), roots);
         }
         let passive = builder.build_passive()?;
-
-        // ADR-0155 §4: with the render cap booted and its `RenderHandles`
-        // published, install the capture backend from the boot wiring — the
-        // Start-stage handoff that replaces `RenderConfig.capture_backend`.
-        // Mirrors the desktop driver installing its backend in `boot`.
-        if let Some(ext) = &render_ext {
-            ext.install_capture_backend(&wiring, &passive);
-        }
 
         // The cap config already cloned `events_tx`; dropping the
         // local copy lets the receiver hang up cleanly once every

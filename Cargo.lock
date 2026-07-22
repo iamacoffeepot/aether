@@ -276,7 +276,6 @@ dependencies = [
  "aether-fs",
  "aether-game",
  "aether-harness-substrate",
- "aether-harness-substrate-capture",
  "aether-input",
  "aether-kinds",
  "aether-lifecycle",
@@ -285,6 +284,7 @@ dependencies = [
  "aether-tcp",
  "aether-text",
  "anyhow",
+ "crossbeam-channel",
  "tracing",
 ]
 

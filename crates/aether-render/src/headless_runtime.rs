@@ -93,16 +93,19 @@ impl NativeActor for HeadlessRenderCapability {
         );
     }
 
-    /// `CreateTexture` replies `Err` inline so an agent that creates a
-    /// texture against a headless chassis fails fast instead of
-    /// waiting on a reply that never comes — same fail-fast shape as
-    /// `on_capture_frame` (ADR-0105).
-    #[handler::manual]
-    fn on_create_texture(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CreateTexture) {
-        state.outbound.send_reply(
-            ctx.reply_target(),
-            &CreateTextureResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() },
-        );
+    /// `CreateTexture` replies `Err` so an agent that creates a texture
+    /// against a headless chassis fails fast instead of waiting on a reply
+    /// that never comes (ADR-0105). Declared `#[handler::single]` with a
+    /// returned reply — matching the pumped [`RenderCapability`]'s
+    /// `create_texture` declaration so live `describe_handlers` reports a
+    /// single deduped row set for `aether.render`.
+    #[handler::single]
+    fn on_create_texture(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: CreateTexture,
+    ) -> CreateTextureResult {
+        CreateTextureResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() }
     }
 
     /// `UpdateTexture` lands here as a no-op so desktop-designed
@@ -142,33 +145,31 @@ impl NativeActor for HeadlessRenderCapability {
 mod headless_tests {
     use super::*;
     use crate::TextureFormat;
-    use aether_data::{MailboxId, Source, SourceAddr};
-    use aether_data::{SessionToken, Uuid};
+    use aether_data::MailboxId;
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::testing::{decode_reply, test_mailer_and_rx};
+    use aether_substrate::testing::test_mailer_and_rx;
 
     /// ADR-0105: `create_texture` against a headless chassis replies
     /// `Err` (fail-fast, no GPU) rather than hanging on a reply that
-    /// never comes — mirrors `capture_frame`'s headless shape.
+    /// never comes — mirrors `capture_frame`'s headless shape. The handler
+    /// is `#[handler::single]` with a returned reply (aligning the declared
+    /// `create_texture` row with the pumped runtime), so the test asserts on
+    /// the returned value directly.
     #[test]
     fn headless_create_texture_replies_err() {
-        let (mailer, rx) = test_mailer_and_rx();
+        let (mailer, _rx) = test_mailer_and_rx();
         let outbound = mailer.outbound().cloned().expect("test_mailer_and_rx wires a loopback outbound");
         let mut state = HeadlessRenderCapabilityState { outbound };
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
-        HeadlessRenderCapability::on_create_texture(
+        let mut ctx =
+            NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let result = HeadlessRenderCapability::on_create_texture(
             &mut state,
             &mut ctx,
             CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![0u8; 16] },
         );
-        match decode_reply::<CreateTextureResult>(&rx) {
+        match result {
             CreateTextureResult::Err { error } => {
                 assert!(
                     error.contains("headless"),

@@ -983,8 +983,7 @@ impl<'a> NativeInitCtx<'a> {
     ///
     /// `H: Any + Send + Sync` so the chassis-side map can hand the
     /// stored bundle back across thread boundaries; typically `H` is
-    /// a `Clone` struct of `Arc`-wrapped fields (e.g. `RenderHandles`
-    /// from ADR-0078).
+    /// a small `Clone` handle struct (e.g. `HttpServerHandle`).
     pub fn publish_handle<H: Any + Send + Sync + 'static>(&mut self, handle: H) {
         self.handles.by_type.insert(TypeId::of::<H>(), Box::new(handle));
     }
@@ -1172,7 +1171,7 @@ impl<K: Kind> Emit<K> for NativeCtx<'_, Multi<K>> {
 /// Replaces the pre-629 `Actors` struct that stored `Arc<dyn Any +
 /// Send + Sync>` per booted cap — the cross-thread `Arc<A>` share was
 /// the worker-pool-era legacy ADR-0038 made obsolete. Handles are
-/// keyed by *handle* `TypeId` (e.g. `RenderHandles`), not by *actor*
+/// keyed by *handle* `TypeId` (e.g. `HttpServerHandle`), not by *actor*
 /// `TypeId`, since the actor itself never escapes its dispatcher
 /// thread.
 pub struct ExportedHandles {

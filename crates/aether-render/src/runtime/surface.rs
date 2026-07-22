@@ -1,25 +1,21 @@
-//! Shared desktop-surface GPU helpers for chassis / runtimes that own a
-//! wgpu `Surface` (ADR-0161). The wireframe-overlay pipeline builder and
-//! the swapchain-texture acquisition were duplicated between the desktop
-//! chassis's `Gpu` body and the pumped render runtime's owned-field body;
-//! extracting them keeps that overlap in one place (both the desktop
-//! chassis and the pumped runtime call these). wgpu-only — no winit — so
-//! they ride the `runtime` feature and a headless consumer that never owns
-//! a surface simply never calls them.
+//! Desktop-surface GPU helpers for the pumped render runtime when it owns a
+//! wgpu `Surface` (ADR-0161): the wireframe-overlay pipeline builder, the
+//! swapchain-texture acquisition, and the surface / offscreen device boot.
+//! wgpu-only — no winit — so they ride the `runtime` feature, and a headless
+//! consumer that never owns a surface simply never calls them.
 
 use std::slice;
 use std::sync::Arc;
 
 use aether_substrate::render::{DEPTH_FORMAT, vertex_buffer_layout};
 
-/// Resolved wgpu surface + device the desktop chassis `Gpu` boot and the
-/// pumped render runtime both stand up from a window (ADR-0161). Extracted
-/// so the instance → surface → adapter → device → swapchain-config boot
-/// lives once; the two callers differ only in what they build on top (the
-/// pooled runtime installs a `RenderGpu` into `RenderHandles`; the pumped
-/// runtime owns the `RenderGpu` outright). winit-free — the caller passes
-/// the surface target and its pixel size — so it rides the `runtime`
-/// feature.
+/// Resolved wgpu surface + device the pumped render runtime stands up from
+/// a window (ADR-0161). Extracted so the instance → surface → adapter →
+/// device → swapchain-config boot lives once; the runtime owns the
+/// resulting `RenderGpu` outright. winit-free — the caller passes the
+/// surface target and its pixel size — but only the windowed (`desktop`)
+/// path boots a surface, so it rides that feature.
+#[cfg(feature = "desktop")]
 pub struct BootedSurface {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
@@ -35,20 +31,15 @@ pub struct BootedSurface {
     /// supports `POLYGON_MODE_LINE` — the caller builds the wireframe
     /// overlay pipeline via [`build_wireframe_overlay_pipeline`].
     pub build_overlay: bool,
-    /// Adapter identity chosen at boot, retained for `platform_info`.
-    pub adapter_info: wgpu::AdapterInfo,
-    /// Resolved device limits.
-    pub limits: wgpu::Limits,
 }
 
 /// Resolved surfaceless wgpu device the offscreen pumped render runtime
 /// stands up (ADR-0161 slice R4). The substrate harness owns no window, so
 /// its pumped runtime boots the GPU with no surface — the offscreen color +
 /// depth targets [`crate::runtime::RenderGpu::new`] allocates are the only
-/// render targets, and capture reads back from them directly. The pooled
-/// harness `Gpu` shim did this inline; the pumped runtime shares this
-/// winit-free boot so its lazy [`crate::PumpedRenderCapability`] offscreen
-/// path matches the windowed one minus the swapchain.
+/// render targets, and capture reads back from them directly. This winit-free
+/// boot lets the lazy [`crate::RenderCapability`] offscreen path match the
+/// windowed one minus the swapchain.
 pub struct BootedOffscreen {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
@@ -64,9 +55,8 @@ pub struct BootedOffscreen {
     pub build_overlay: bool,
 }
 
-/// Offscreen color format (sRGB RGBA). Mirrors the pooled harness `Gpu`
-/// shim's `COLOR_FORMAT`: with no surface to query the runtime commits to
-/// RGBA at boot so the capture readback stays swizzle-free.
+/// Offscreen color format (sRGB RGBA): with no surface to query the runtime
+/// commits to RGBA at boot so the capture readback stays swizzle-free.
 const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Map the resolved `AETHER_WIREFRAME` value to `(wants_line, wants_overlay)`:
@@ -168,6 +158,7 @@ pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
 /// Panics if surface creation, adapter selection, or device acquisition
 /// fail — fail-fast per ADR-0063: a windowed chassis can't proceed without
 /// a usable GPU pipeline.
+#[cfg(feature = "desktop")]
 #[must_use]
 pub fn boot_surface(
     target: impl Into<wgpu::SurfaceTarget<'static>>,
@@ -193,7 +184,7 @@ pub fn boot_surface(
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-substrate device"),
         required_features,
-        required_limits: limits.clone(),
+        required_limits: limits,
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::default(),
@@ -220,7 +211,7 @@ pub fn boot_surface(
     };
     surface.configure(&device, &config);
 
-    BootedSurface { device, queue, surface, config, format, polygon_mode, build_overlay, adapter_info, limits }
+    BootedSurface { device, queue, surface, config, format, polygon_mode, build_overlay }
 }
 
 /// Wireframe-overlay shader: same vertex layout as the main shader so the

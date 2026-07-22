@@ -45,45 +45,29 @@ pub struct RenderTuningConfig {
 /// (ADR-0156 §3): the non-knob wiring the chassis computes at boot, kept
 /// off the operator-resolvable [`RenderTuningConfig`] `Config`.
 ///
+/// The `WindowCell` is winit-typed and desktop-only, so its `window` field
+/// is gated inside the struct (mirroring aether-window's
+/// `DesktopWindowParams`); ADR-0161 slice R4 keeps the struct itself off the
+/// `desktop` gate so the substrate harness's offscreen pumped runtime can
+/// construct it without pulling winit.
+///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`
 /// methods — used by the in-process substrate-harness to assert what kinds
 /// the cap has seen. Production chassis leave it `None` (zero
 /// overhead). Decode failures and unknown kinds don't push (the
 /// macro miss path warn-logs at the chassis-side dispatcher and
-/// short-circuits before any handler runs); pre-PR-E2 the legacy
-/// path pushed the raw `kind_name` regardless of dispatch outcome,
-/// but tests only use the list as a diagnostic in failure messages
-/// so the narrower semantic is fine.
+/// short-circuits before any handler runs).
 #[derive(Clone, Default)]
 pub struct RenderParams {
+    /// `SubstrateHarness` observation sink.
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Resolved path for the `"assets"` namespace, used by the
-    /// `capture_frame` handler to read reference images for
-    /// similarity checks (iamacoffeepot/aether#1780). The handler
-    /// reads the reference PNG synchronously (on the cap dispatcher
-    /// thread, not the render thread) and passes the raw bytes
-    /// through `PendingCapture.reference`. `None` disables
-    /// similarity checks with a descriptive `Err` reply.
-    pub assets_dir: Option<PathBuf>,
-}
-
-/// Composer-supplied construction params for the pumped render runtime
-/// (`PumpedRenderCapability`, ADR-0161 slice R2). A dedicated params
-/// channel rather than an extension of the pooled [`RenderParams`]: the
-/// `WindowCell` is winit-typed and desktop-only, so a separate struct
-/// (mirroring aether-window's `DesktopWindowParams`) keeps the shared
-/// pooled params — and its consumers — byte-for-byte untouched.
-///
-/// ADR-0161 slice R4 lifts the struct off the `desktop` gate (its winit
-/// `window` field stays gated inside) so the substrate harness's offscreen
-/// pumped runtime can construct it without pulling winit.
-#[derive(Clone, Default)]
-pub struct PumpedRenderParams {
-    /// `SubstrateHarness` observation sink (see [`RenderParams::observed_kinds`]).
-    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
-    /// Resolved `"assets"` root for `capture_frame` similarity references
-    /// (see [`RenderParams::assets_dir`]).
+    /// `capture_frame` handler to read reference images for similarity
+    /// checks (iamacoffeepot/aether#1780). The handler resolves the
+    /// reference PNG synchronously and passes the raw bytes through the
+    /// pending capture. `None` disables similarity checks with a
+    /// descriptive `Err` reply.
     pub assets_dir: Option<PathBuf>,
     /// The shared late-bound window handle the runtime boots wgpu against
     /// on the first `on_frame` after the chassis's `resumed` fills the
@@ -99,7 +83,7 @@ pub struct PumpedRenderParams {
     /// never booted, in a no-GPU test).
     pub offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value (argv > env > default), threaded
-    /// so the lazy wgpu boot picks the wireframe mode the desktop `Gpu`
-    /// boot does. `None` / `"off"` is filled faces.
+    /// so the lazy wgpu boot picks the wireframe mode. `None` / `"off"` is
+    /// filled faces.
     pub wireframe: Option<String>,
 }

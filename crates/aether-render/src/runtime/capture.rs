@@ -1,39 +1,14 @@
-//! Cross-thread capture machinery for the `aether.render` cap
-//! (iamacoffeepot/aether#1758 / #1780). The cap dispatcher thread
-//! doesn't own the wgpu `Device` — it parks a resolved request on the
-//! [`CaptureBackend`] queue for the chassis main loop to read back, and
-//! reads the optional reference PNG synchronously off the render hot
-//! path via [`resolve_reference`].
+//! Similarity-reference resolution for the `aether.render` cap's
+//! `capture_frame` handler (iamacoffeepot/aether#1780). The pumped runtime
+//! reads the optional reference PNG synchronously off the render hot path
+//! via [`resolve_reference`]; the resolved [`ReferenceCapture`] rides the
+//! pending capture until `on_frame` scores it against the readback RGBA.
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use aether_kinds::SimilarityCheck;
-use aether_substrate::capture::{CaptureQueue, ReferenceCapture};
-use aether_substrate::mail::outbound::HubOutbound;
-
-/// Per-chassis plumbing the [`super::super::RenderCapability`] capture handler
-/// needs to defer the readback to the chassis main thread. The
-/// cap's dispatcher thread can't touch the wgpu `Device` (it lives
-/// on the render thread); the handler resolves the request, parks
-/// it on `queue`, and the chassis main loop reads from there on
-/// the next redraw. `wake` nudges that loop — desktop fires an
-/// `EventLoopProxy<UserEvent>::Capture`; substrate-harness sends on its
-/// `EventSender`.
-///
-/// `outbound` is the cap's reply edge for the inline-failure
-/// paths (decode error, bundle-resolution error, queue full,
-/// wake target dead). All four bail before parking the request,
-/// so the only happy-path reply comes from the render thread
-/// after readback completes — that path uses its own outbound
-/// clone the chassis driver keeps.
-#[derive(Clone)]
-pub struct CaptureBackend {
-    pub queue: CaptureQueue,
-    pub wake: Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>,
-    pub outbound: Arc<HubOutbound>,
-}
+use aether_substrate::capture::ReferenceCapture;
 
 /// Resolve the optional reference image for a `#1780` similarity
 /// check, reading it synchronously on the cap dispatcher thread so all
