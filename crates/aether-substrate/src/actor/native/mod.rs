@@ -72,6 +72,7 @@ pub(crate) mod dispatcher_slot;
 pub mod envelope;
 pub mod local;
 pub mod mailbox;
+pub mod pumped_slot;
 pub mod spawn;
 pub mod spawn_thread;
 pub mod task_queue;
@@ -89,6 +90,7 @@ pub use dispatch::{
 };
 pub use envelope::Envelope;
 pub use mailbox::NativeActorMailbox;
+pub use pumped_slot::PumpedSlot;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};
 // iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the
