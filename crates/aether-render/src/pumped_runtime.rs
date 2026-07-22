@@ -90,7 +90,7 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 
 /// Chassis-internal frame-request kind (ADR-0161 §Decision 1). The driver
 /// mails one each `RedrawRequested` after the advance chain settles;
-/// [`PumpedRenderCapability::on_frame`] records the frame (and resolves any
+/// `PumpedRenderCapability::on_frame` records the frame (and resolves any
 /// pending capture). `replay_cache_when_idle` carries the issue 847
 /// semantic — harness captures replay the last committed accumulators when
 /// the producer was idle; desktop always commits current.
@@ -104,7 +104,7 @@ pub struct Frame {
 
 /// Chassis-internal pre-mail-settlement notice (ADR-0161 §Decision 4). One
 /// arrives per capture pre-mail whose causal chain has settled;
-/// [`PumpedRenderCapability::on_pre_settled`] decrements the pending
+/// `PumpedRenderCapability::on_pre_settled` decrements the pending
 /// capture's `pre_remaining`. Wire-identical to `aether.trace.settled` (a
 /// single `MailId` field) so the settlement registry's notice-mail bridge
 /// (`subscribe_settlement_mail`) delivers it directly.
@@ -118,7 +118,7 @@ pub struct PreSettled {
 
 /// Chassis-internal window-occlusion signal (ADR-0161 §Decision 4). The
 /// driver forwards `WindowEvent::Occluded`;
-/// [`PumpedRenderCapability::on_occluded`] fail-fasts a pending capture
+/// `PumpedRenderCapability::on_occluded` fail-fasts a pending capture
 /// when the window becomes occluded (relocating `fail_capture_if_occluded`
 /// into the actor, issue 1317).
 #[derive(
