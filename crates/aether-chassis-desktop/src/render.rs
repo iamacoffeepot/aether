@@ -71,9 +71,9 @@ impl Gpu {
     /// Construct the desktop chassis's wgpu state and install the shared
     /// `RenderGpu` into `render_handles`. Called once during desktop boot
     /// from inside winit's `resumed` handler. The instance / surface /
-    /// adapter / device / swapchain boot is the shared
-    /// [`boot_surface`](aether_render::boot_surface); this owns the desktop
-    /// surface + the optional wireframe overlay pipeline on top.
+    /// adapter / device / swapchain boot is the shared [`boot_surface`];
+    /// this owns the desktop surface + the optional wireframe overlay
+    /// pipeline on top.
     ///
     /// # Panics
     /// Panics if surface creation, adapter selection, or device
