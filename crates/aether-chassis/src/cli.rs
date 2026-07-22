@@ -35,6 +35,19 @@
 //! (#3849 retired its hand-written flag); the per-chassis default lives at each
 //! compose site, not in the flag.
 //!
+//! Issue 3882 closed the remaining `--help` gap: the four tuning overlays every
+//! chassis resolved env/file-only are now flattened where the chassis resolves
+//! them — `ActorRingOverlay` / `SchedulerTuningOverlay` / `SettlementOverlay`
+//! into the shared `CommonOverlay` (both full-stack chassis) and `HubCli` (which
+//! hosts its own registry actors), plus `RenderTuningOverlay` into `DesktopCli`
+//! alone (headless composes the nop render cap, which resolves no
+//! `RenderTuningConfig`). The knobs that legitimately stay env-only — the
+//! `RuntimeConfig` log/panic-hook directives (the panic hook reads env directly,
+//! below the config layer) and the `FrameSizeConfig` wire cap — are rendered into
+//! each root's `after_help` (`crate::boot::env_only_after_help`) by harvesting the
+//! derive-emitted overlays' own clap help, so the section carries each knob's doc
+//! + env + default and cannot drift from the registry.
+//!
 //! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
 //! structs now ride the `#[derive(aether_substrate::Config)]` next to
 //! the domain struct in the cap crate. This file re-exports them so
@@ -58,12 +71,14 @@ pub use aether_contentgen::ContentGenOverlay;
 pub use aether_fleet::FleetOverlay;
 pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
 pub use aether_gemini::GeminiOverlay;
+pub use aether_harness_substrate::SettlementOverlay;
 pub use aether_http::HttpOverlay;
 pub use aether_http::HttpServerOverlay;
 pub use aether_lifecycle::LifecycleOverlay;
+pub use aether_render::RenderTuningOverlay;
 pub use aether_rpc::RpcServerOverlay;
 
-pub use crate::boot::ChassisBootOverlay;
+pub use crate::boot::{ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, env_only_after_help};
 pub use crate::tick::TickOverlay;
 pub use crate::window::WindowOverlay;
 
@@ -94,6 +109,24 @@ pub struct CommonOverlay {
     #[command(flatten)]
     pub lifecycle: LifecycleOverlay,
 
+    /// Per-actor ring-capacity knobs (issue 1990): `--actor-log-ring-capacity` /
+    /// `--actor-trace-ring-capacity` / `--actor-trace-ring-max-size`, shadowing the
+    /// `AETHER_ACTOR_*` env. Both full-stack chassis resolve `ActorRingConfig` off
+    /// the shared stack (issue 3882 flattened the derive-emitted overlay here).
+    #[command(flatten)]
+    pub actor_ring: ActorRingOverlay,
+    /// Scheduler hot-path tuning knobs (issue 2485): `--scheduler-*`, shadowing the
+    /// `AETHER_SPIN_WINDOW_USEC` / `AETHER_LOCAL_*` / `AETHER_*_RECRUIT_*` env. Both
+    /// full-stack chassis resolve `SchedulerTuningConfig` off the shared stack
+    /// (issue 3882).
+    #[command(flatten)]
+    pub scheduler: SchedulerTuningOverlay,
+    /// Settlement-patience backstop (issue 2062): `--settlement-cap-secs`, shadowing
+    /// `AETHER_SETTLEMENT_CAP_SECS`. Resolved for both the settlement gates and the
+    /// teardown budget (issue 3882 flattened its overlay here).
+    #[command(flatten)]
+    pub settlement: SettlementOverlay,
+
     /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
     /// port. Absent → the member's `None` default, so desktop / headless skip
     /// the RPC server entirely; the hub applies its own `DEFAULT_RPC_PORT`
@@ -110,13 +143,20 @@ pub struct CommonOverlay {
     long_about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \
         through to env then the default. For the full source-resolved value of every knob use \
-        --print-config, and for this binary's linked caps and build provenance use --describe."
+        --print-config, and for this binary's linked caps and build provenance use --describe.",
+    after_help = env_only_after_help()
 )]
 pub struct DesktopCli {
     #[command(flatten)]
     pub common: CommonOverlay,
     #[command(flatten)]
     pub audio: AudioOverlay,
+    /// Render cap tuning (desktop composes the wgpu render cap):
+    /// `--render-vertex-buffer-bytes`, shadowing `AETHER_RENDER_VERTEX_BUFFER_BYTES`
+    /// (issue 3882 flattened its overlay here; headless composes the nop render cap,
+    /// which resolves no `RenderTuningConfig`, so it carries no render flag).
+    #[command(flatten)]
+    pub render: RenderTuningOverlay,
     /// Desktop window knobs: `--window-mode`, `--window-title`.
     #[command(flatten)]
     pub window: WindowOverlay,
@@ -150,7 +190,8 @@ pub struct DesktopCli {
     long_about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \
         through to env then the default. For the full source-resolved value of every knob use \
-        --print-config, and for this binary's linked caps and build provenance use --describe."
+        --print-config, and for this binary's linked caps and build provenance use --describe.",
+    after_help = env_only_after_help()
 )]
 pub struct HeadlessCli {
     #[command(flatten)]
@@ -188,7 +229,8 @@ pub struct HeadlessCli {
     long_about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \
         through to env then the default. For the full source-resolved value of every knob use \
-        --print-config, and for this binary's linked caps and build provenance use --describe."
+        --print-config, and for this binary's linked caps and build provenance use --describe.",
+    after_help = env_only_after_help()
 )]
 pub struct HubCli {
     /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
@@ -201,6 +243,20 @@ pub struct HubCli {
     /// issue 1339). Flattened from the derive-emitted overlay.
     #[command(flatten)]
     pub fleet: FleetOverlay,
+
+    /// Per-actor ring-capacity knobs (issue 1990): `--actor-*`. The hub resolves
+    /// `ActorRingConfig` off its own source stack for the actors its registry hosts
+    /// (issue 3882 flattened the overlay here).
+    #[command(flatten)]
+    pub actor_ring: ActorRingOverlay,
+    /// Scheduler hot-path tuning knobs (issue 2485): `--scheduler-*`. The hub
+    /// resolves `SchedulerTuningConfig` off its own source stack (issue 3882).
+    #[command(flatten)]
+    pub scheduler: SchedulerTuningOverlay,
+    /// Settlement-patience backstop (issue 2062): `--settlement-cap-secs`. The hub
+    /// resolves `SettlementConfig` for its own teardown budget (issue 3882).
+    #[command(flatten)]
+    pub settlement: SettlementOverlay,
 
     /// Sectioned TOML chassis config file. Values from this file sit
     /// below env and argv in the source stack.
@@ -234,7 +290,8 @@ mod checkability_tests {
     //! (or a stale flag left in the root) fails the assertion honestly.
 
     use super::{
-        CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli, RpcServerOverlay, TickOverlay,
+        ActorRingOverlay, CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli,
+        RenderTuningOverlay, RpcServerOverlay, SchedulerTuningOverlay, SettlementOverlay, TickOverlay,
     };
     use crate::window::WindowOverlay;
     use aether_audio::AudioOverlay;
@@ -264,6 +321,9 @@ mod checkability_tests {
     fn desktop_root_flags_equal_composed_overlay_set() {
         let mut expected = overlay_flags::<CommonOverlay>();
         expected.extend(overlay_flags::<AudioOverlay>());
+        // Desktop composes the wgpu render cap, so its `RenderTuningConfig` overlay
+        // is flattened only here, not into the shared `CommonOverlay` (issue 3882).
+        expected.extend(overlay_flags::<RenderTuningOverlay>());
         expected.extend(overlay_flags::<WindowOverlay>());
         expected.extend(meta_flags());
         assert_eq!(long_flags(&DesktopCli::command()), expected);
@@ -312,9 +372,14 @@ mod checkability_tests {
     fn hub_root_flags_equal_composed_overlay_set() {
         // The hub composes the engines cap plus the RPC server; `--rpc-port`
         // now rides the derive-emitted `RpcServerOverlay` (#3849) like every
-        // other flag, alongside the meta flags.
+        // other flag, alongside the meta flags. Issue 3882 flattened the three
+        // tuning overlays the hub resolves off its own source stack (actor ring /
+        // scheduler / settlement).
         let mut expected = overlay_flags::<FleetOverlay>();
         expected.extend(overlay_flags::<RpcServerOverlay>());
+        expected.extend(overlay_flags::<ActorRingOverlay>());
+        expected.extend(overlay_flags::<SchedulerTuningOverlay>());
+        expected.extend(overlay_flags::<SettlementOverlay>());
         expected.extend(meta_flags());
         assert_eq!(long_flags(&HubCli::command()), expected);
     }

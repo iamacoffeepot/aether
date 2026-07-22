@@ -187,6 +187,20 @@ fn actor_trace_ring_size_env_reaches_chassis_boot() {
 }
 
 #[test]
+fn actor_trace_ring_capacity_argv_reaches_chassis_boot() {
+    // Issue 3882: the per-actor ring overlay is flattened into the shared
+    // `CommonOverlay`, so `--actor-trace-ring-capacity` reaches the headless
+    // chassis boot the same argv > env > default way `--tick-hz` does. Guards
+    // the flattening — a regression that dropped the overlay from the CLI root
+    // (or its staging) leaves the flag unrecognized or unresolved, and the boot
+    // line reports the default floor (4096) instead of the argv value.
+    let lines = run_headless_capture(&["--actor-trace-ring-capacity", "8191"], Duration::from_secs(2));
+    let cap = find_numeric_field(&lines, "trace_ring_capacity")
+        .unwrap_or_else(|| panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}"));
+    assert_eq!(cap, 8191, "--actor-trace-ring-capacity must reach the chassis boot");
+}
+
+#[test]
 fn actor_trace_ring_max_size_env_reaches_chassis_boot() {
     // Issue 2076 integration boot: a non-default
     // `AETHER_ACTOR_TRACE_RING_MAX_SIZE` (the growth ceiling) is resolved
