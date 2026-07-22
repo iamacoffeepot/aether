@@ -47,6 +47,7 @@ members = [
     "crates/aether-contentgen",
     "crates/aether-anthropic",
     "crates/aether-gemini",
+    "crates/aether-process",
     "crates/aether-mcp",
     "crates/aether-context-canary",
     # Test fixtures — a container dir of single-output crates: one shared

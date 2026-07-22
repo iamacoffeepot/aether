@@ -42,6 +42,7 @@ aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
 aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
 aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
+aether-process = { path = "../aether-process", features = ["runtime"] }
 aether-trace = { path = "../aether-trace", features = ["runtime"] }
 aether-fs = { path = "../aether-fs" }
 aether-inventory = { path = "../aether-inventory", features = ["runtime"] }

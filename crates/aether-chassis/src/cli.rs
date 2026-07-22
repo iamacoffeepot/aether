@@ -75,6 +75,7 @@ pub use aether_harness_substrate::SettlementOverlay;
 pub use aether_http::HttpOverlay;
 pub use aether_http::HttpServerOverlay;
 pub use aether_lifecycle::LifecycleOverlay;
+pub use aether_process::ProcessOverlay;
 pub use aether_render::RenderTuningOverlay;
 pub use aether_rpc::RpcServerOverlay;
 
@@ -98,6 +99,11 @@ pub struct CommonOverlay {
     pub anthropic: AnthropicOverlay,
     #[command(flatten)]
     pub gemini: GeminiOverlay,
+    /// One-shot exec cap knobs (ADR-0157): `--process-allowlist` /
+    /// `--process-max-in-flight` / `--process-timeout-ms`, shadowing the
+    /// `AETHER_PROCESS_*` env.
+    #[command(flatten)]
+    pub process: ProcessOverlay,
     /// Content-gen staging root: `--gen-dir` / `AETHER_GEN_DIR`.
     #[command(flatten)]
     pub generated_asset_staging: ContentGenOverlay,

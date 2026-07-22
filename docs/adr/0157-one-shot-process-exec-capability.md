@@ -1,6 +1,6 @@
 # ADR-0157: One-shot process exec capability
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-21
 
 ## Context

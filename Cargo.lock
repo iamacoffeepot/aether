@@ -181,6 +181,7 @@ dependencies = [
  "aether-inventory",
  "aether-kinds",
  "aether-lifecycle",
+ "aether-process",
  "aether-render",
  "aether-rpc",
  "aether-substrate",
@@ -778,6 +779,21 @@ dependencies = [
  "lexpr",
  "pretty_assertions",
  "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "aether-process"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "inventory",
+ "libc",
+ "serde",
  "tracing",
 ]
 
