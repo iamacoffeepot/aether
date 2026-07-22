@@ -73,9 +73,11 @@ pub struct RenderParams {
 /// channel rather than an extension of the pooled [`RenderParams`]: the
 /// `WindowCell` is winit-typed and desktop-only, so a separate struct
 /// (mirroring aether-window's `DesktopWindowParams`) keeps the shared
-/// pooled params — and its consumers — byte-for-byte untouched. Behind the
-/// `desktop` feature.
-#[cfg(feature = "desktop")]
+/// pooled params — and its consumers — byte-for-byte untouched.
+///
+/// ADR-0161 slice R4 lifts the struct off the `desktop` gate (its winit
+/// `window` field stays gated inside) so the substrate harness's offscreen
+/// pumped runtime can construct it without pulling winit.
 #[derive(Clone, Default)]
 pub struct PumpedRenderParams {
     /// `SubstrateHarness` observation sink (see [`RenderParams::observed_kinds`]).
@@ -88,7 +90,14 @@ pub struct PumpedRenderParams {
     /// cell. The chassis mints one [`WindowCell`] and clones it into both
     /// this and the `aether.window` desktop actor's params, so both
     /// observe the same window. `None` in tests, which never own a surface.
+    #[cfg(feature = "desktop")]
     pub window: Option<WindowCell>,
+    /// ADR-0161 slice R4: offscreen boot dimensions for a surfaceless
+    /// runtime (the substrate harness). `Some((w, h))` makes the lazy
+    /// `on_frame` boot stand up a surfaceless GPU at these dimensions when
+    /// no window cell is filled; `None` leaves the runtime windowed (or
+    /// never booted, in a no-GPU test).
+    pub offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value (argv > env > default), threaded
     /// so the lazy wgpu boot picks the wireframe mode the desktop `Gpu`
     /// boot does. `None` / `"off"` is filled faces.

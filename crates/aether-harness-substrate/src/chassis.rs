@@ -17,14 +17,13 @@ use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
-use aether_kinds::{FrameCheck, FrameVerdict, Tick};
+use aether_kinds::{FrameVerdict, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigSources;
 use aether_substrate::mail::MailboxId;
-use aether_substrate::{Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue};
+use aether_substrate::{Chassis, Mailer, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue};
 use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
@@ -106,25 +105,60 @@ pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateHarnessChassis>) -> Builder
 /// `reference` (iamacoffeepot/aether#1780).
 pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
 
-/// Frame-pump seam for GPU render support (issue #3765). The core harness
-/// owns the advance/capture pump but no render types; a hook (the
-/// `GpuFrameHook` in `aether-harness-substrate-capture`) supplies the
-/// per-frame draw, the capture readback, and the render mailbox the
-/// capture request routes to. A harness without a hook skips the draw on
-/// advance and replies `Err` to captures.
-pub trait FrameHook: Send {
-    /// Draw the current accumulator into the offscreen target — the
-    /// advance path's per-frame render, no readback.
-    fn render_frame(&mut self);
-    /// Render with capture readback: encoded PNG plus optional verdict
-    /// and similarity scoring on the same RGBA.
-    fn render_and_capture(&mut self, checks: &[FrameCheck], reference: Option<&ReferenceCapture>) -> CaptureOutcome;
-    /// The mailbox `capture_frame` requests route to (the render cap's
-    /// namespace, resolved by the hook so the core stays render-free).
-    fn capture_mailbox(&self) -> MailboxId;
+/// Frame-pump seam for the pumped GPU render runtime (ADR-0161 slice R4).
+/// The core harness owns the advance / capture drive loop but no render
+/// types; a hook (the `GpuFrameHook` in `aether-harness-substrate-capture`)
+/// owns the [`PumpedSlot`](aether_substrate::PumpedSlot) for the pumped
+/// `aether.render` actor and drains it at the harness's pump points, so
+/// draw dispatch, capture readback, and present all run on the harness
+/// thread that owns the offscreen GPU. A harness without a hook skips the
+/// draw on advance and replies `Err` to captures.
+///
+/// The hook is `!Send` (it owns the `!Send` pumped slot); the harness is
+/// single-threaded per instance, so it never crosses a thread boundary.
+pub trait FrameHook {
+    /// Mail one `aether.render.frame { replay_cache_when_idle }` to the
+    /// pumped render actor and drain its slot so the frame records this
+    /// call. `replay_cache_when_idle` is the issue 847 semantic: the advance
+    /// path commits current (`false`); a capture-driving frame replays the
+    /// last committed accumulators (`true`).
+    fn send_frame(&mut self, replay_cache_when_idle: bool);
+    /// Drain the pumped render slot without recording a frame — dispatches
+    /// any queued render mail (advance draws, capture pre-mails, the
+    /// `pre_settled` notices). Called each pump-loop iteration so a
+    /// render-recipient chain settles while the harness blocks on a reply.
+    fn pump(&mut self);
+    /// Whether the pumped render actor holds a pending capture, read from
+    /// its state without mutating it (via `PumpedSlot::read_state`). The
+    /// capture drive loop mails a frame while this is `true`.
+    fn has_pending_capture(&self) -> bool;
+    /// The mailbox `capture_frame` / `frame` requests route to (the pumped
+    /// render actor's namespace, resolved by the hook so the core stays
+    /// render-free).
+    fn render_mailbox(&self) -> MailboxId;
+    /// Run the pumped slot's Closed-path teardown (`unwire`, cost-row drop,
+    /// registry close + monitor fan-out). Called once on harness drop.
+    fn shutdown(&mut self);
     /// Downcast surface for capture-crate extension methods (overlay
     /// snapshots) that need the hook's concrete type.
     fn as_any(&self) -> &dyn Any;
+}
+
+/// The render wiring the [`HookFactory`](crate::HookFactory) needs to boot
+/// the pumped render slot after `build_passive` (ADR-0161 slice R4). The
+/// pumped path composes no build-time render cap — the hook claims the
+/// `aether.render` slot post-boot via
+/// [`PassiveChassis::boot_pumped_actor`](aether_substrate::chassis::builder::PassiveChassis::boot_pumped_actor)
+/// — so the non-knob wiring that rode `RenderParams` through
+/// [`RenderExt::compose`] on the pooled path is handed straight to the hook
+/// factory instead.
+pub struct RenderHookWiring {
+    /// The chassis mailer, so the hook can mail `frame` to the pumped slot.
+    pub mailer: Arc<Mailer>,
+    /// `SubstrateHarness` observation sink threaded into `PumpedRenderParams`.
+    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    /// Resolved `"assets"` root for `capture_frame` similarity references.
+    pub assets_dir: Option<PathBuf>,
 }
 
 /// Boot-internal wiring handed to a [`RenderExt`] so it can construct

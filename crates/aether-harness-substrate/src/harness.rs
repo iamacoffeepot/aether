@@ -43,7 +43,6 @@ use aether_trace::walk::TreeWalk;
 use crate::settlement_config::SettlementConfig;
 use aether_actor::Addressable;
 use aether_fs::NamespaceRoots;
-use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::config::ConfigMember;
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
@@ -53,17 +52,26 @@ use aether_substrate::{
 };
 
 use super::chassis::{
-    ComposeFn, FrameHook, RenderExt, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
+    ComposeFn, FrameHook, RenderExt, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis,
+    SubstrateHarnessEnv, WORKERS,
 };
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
 use std::thread;
 
 /// Boxed [`FrameHook`] constructor the render extension registers on the
-/// builder: runs after the chassis boots, against the live passive (to
-/// fetch published render handles) and the builder's offscreen size.
-pub type HookFactory =
-    Box<dyn FnOnce(&PassiveChassis<SubstrateHarnessChassis>, u32, u32) -> anyhow::Result<Box<dyn FrameHook>> + Send>;
+/// builder: runs after the chassis boots, against the live passive (to boot
+/// the pumped render slot via `PassiveChassis::boot_pumped_actor`), the
+/// render wiring, and the builder's offscreen size (ADR-0161 slice R4). Not
+/// `Send`: it constructs the `!Send` pumped slot on the harness thread.
+pub type HookFactory = Box<
+    dyn FnOnce(
+        &PassiveChassis<SubstrateHarnessChassis>,
+        RenderHookWiring,
+        u32,
+        u32,
+    ) -> anyhow::Result<Box<dyn FrameHook>>,
+>;
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness
@@ -153,12 +161,12 @@ pub struct SubstrateHarness {
     outbound: Arc<HubOutbound>,
     loopback_rx: mpsc::Receiver<EgressEvent>,
 
-    capture_queue: CaptureQueue,
     events_rx: EventReceiver,
 
     /// Frame-pump render seam, `Some` iff the builder registered a
     /// render extension (issues #3764/#3765). Captures require it; an
-    /// advance without one skips the per-frame draw.
+    /// advance without one skips the per-frame draw. ADR-0161 slice R4:
+    /// the hook owns the pumped `aether.render` slot.
     hook: Option<Box<dyn FrameHook>>,
 
     /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
@@ -485,6 +493,13 @@ impl SubstrateHarness {
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
 
+        // ADR-0161 slice R4: the pumped render slot is booted post-`build_passive`
+        // by the hook factory, so the non-knob render wiring (observation sink,
+        // similarity assets root) is handed to the factory rather than composed
+        // through `RenderParams`. Resolve the assets root before `namespace_roots`
+        // moves into the env, mirroring the chassis's own capture-similarity wiring.
+        let render_assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
+
         // ADR-0071 phase 6: substrate boot + every cap goes through
         // `SubstrateHarnessChassis::build_passive` — the same path the
         // binary uses. Io is part of the chain when
@@ -499,7 +514,7 @@ impl SubstrateHarness {
             scheduler_tuning: SchedulerTuning::default(),
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
-            capture_queue: capture_queue.clone(),
+            capture_queue,
             namespace_roots,
             render_ext,
             component_host,
@@ -512,13 +527,29 @@ impl SubstrateHarness {
         let SubstrateHarnessBuild { passive, boot, kind_tick } =
             SubstrateHarnessChassis::build_passive(env).map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
 
-        // Issue #3765: the render extension's frame hook builds against
-        // the booted chassis (it fetches the published render handles)
-        // at the builder's offscreen size.
-        let hook = hook_factory
-            .map(|factory| factory(&passive, width, height))
+        // ADR-0161 slice R4: the render extension's frame hook boots the
+        // pumped `aether.render` slot against the booted chassis (via
+        // `PassiveChassis::boot_pumped_actor`) at the builder's offscreen
+        // size, threading the render wiring the pumped path no longer
+        // composes at build time.
+        let mut hook = hook_factory
+            .map(|factory| {
+                let wiring = RenderHookWiring {
+                    mailer: Arc::clone(&boot.queue),
+                    observed_kinds: Some(Arc::clone(&observed_kinds)),
+                    assets_dir: render_assets_dir,
+                };
+                factory(&passive, wiring, width, height)
+            })
             .transpose()
             .map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
+
+        // ADR-0160 / ADR-0161: the drain-at-pump-start rule — a pumped
+        // driver whose loop starts parked drains once before its first real
+        // pump so any mail queued during `init` / `wire` dispatches.
+        if let Some(hook) = hook.as_mut() {
+            hook.pump();
+        }
 
         // Attach a `RecordingBackend` to the boot's outbound. Replies
         // the substrate emits via `outbound.send_reply` arrive here
@@ -545,7 +576,6 @@ impl SubstrateHarness {
             registry,
             outbound,
             loopback_rx,
-            capture_queue,
             events_rx,
             hook,
             lifecycle_mailbox,
@@ -666,7 +696,7 @@ impl SubstrateHarness {
     /// observation is causally after the producer's full chain — no
     /// nudge_tick-style band-aids needed for render-flush races.
     pub(crate) fn send_bytes(
-        &self,
+        &mut self,
         recipient_name: &str,
         kind: KindId,
         bytes: Vec<u8>,
@@ -681,29 +711,70 @@ impl SubstrateHarness {
     /// Body of [`Self::send_bytes`]: push as a chassis-root mail (so
     /// the trace pipeline tracks the chain) and block on
     /// `Settled { root }`. Returns `SettlementTimeout` if the chain
-    /// doesn't drain within [`SETTLEMENT_TIMEOUT`].
+    /// doesn't drain within the settlement cap.
+    ///
+    /// ADR-0161 slice R4: this is a settlement wait that can include a
+    /// render-recipient chain (a `send_mail(DrawTriangle / DestroyTexture /
+    /// …)` addressed to `aether.render`, or one whose descendants reach it),
+    /// so it must drain the pumped render slot while waiting — the chain
+    /// settles only because this pump runs (the ADR deadlock). It polls the
+    /// settlement receiver, draining the slot each round, rather than
+    /// blocking in `await_internal_signal` which never pumps; the drain is
+    /// the pumped analogue of `await_settlement_pumped`, on the harness's
+    /// existing receiver-poll wait model.
     fn push_and_settle(
-        &self,
+        &mut self,
         recipient_name: &str,
         kind_name: &'static str,
         mailbox: MailboxId,
         kind: KindId,
         payload: Vec<u8>,
     ) -> Result<(), SubstrateHarnessError> {
+        use crossbeam_channel::RecvTimeoutError;
+
         let cid = self.fresh_correlation_id();
-        let registry = self.passive.settlement_registry();
         let root = self.queue.push_chassis_root_mail(cid, mailbox, kind, payload, 1);
-        let rx = registry.subscribe_settlement(root);
-        match await_internal_signal(
-            &rx,
-            "substrate_harness.push_and_settle",
-            SETTLEMENT_TIMEOUT,
-            self.settlement_cap,
-            TerminalDisposition::ReplyErr,
-        ) {
-            WaitOutcome::Settled => Ok(()),
-            WaitOutcome::Wedged(_) => {
-                Err(self.settlement_timeout(recipient_name.to_owned(), kind_name, "substrate_harness.push_and_settle"))
+        let rx = self.passive.settlement_registry().subscribe_settlement(root);
+
+        // A short drain cadence so a render chain gated on the pumped slot
+        // (a render mail that emits another render mail) advances every round;
+        // the warn cadence stays `SETTLEMENT_TIMEOUT`, the wedge cap the
+        // configured settlement backstop.
+        let drain_round = Duration::from_millis(2);
+        let start = Instant::now();
+        let mut last_warn = start;
+        loop {
+            if let Some(hook) = self.hook.as_mut() {
+                hook.pump();
+            }
+            match rx.recv_timeout(drain_round) {
+                Ok(()) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self.settlement_timeout(
+                        recipient_name.to_owned(),
+                        kind_name,
+                        "substrate_harness.push_and_settle",
+                    ));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if start.elapsed() >= self.settlement_cap {
+                        return Err(self.settlement_timeout(
+                            recipient_name.to_owned(),
+                            kind_name,
+                            "substrate_harness.push_and_settle",
+                        ));
+                    }
+                    if last_warn.elapsed() >= SETTLEMENT_TIMEOUT {
+                        tracing::warn!(
+                            target: "aether_substrate::settlement",
+                            gate = "substrate_harness.push_and_settle",
+                            waited_millis = start.elapsed().as_millis(),
+                            cap_millis = self.settlement_cap.as_millis(),
+                            "gate substrate_harness.push_and_settle slow: extending",
+                        );
+                        last_warn = Instant::now();
+                    }
+                }
             }
         }
     }
@@ -952,17 +1023,19 @@ impl SubstrateHarness {
         pre: Vec<aether_kinds::NamedMail>,
         after: Vec<aether_kinds::NamedMail>,
     ) -> Result<Vec<u8>, SubstrateHarnessError> {
-        // Issue 603 Phase 2: capture_frame routes to the render cap's
-        // mailbox; the hook supplies the id so the core stays
-        // render-free (issue #3765). No hook ⇒ no render cap booted ⇒
-        // fail fast instead of warn-dropping the mail.
-        let capture_mailbox =
-            self.hook.as_ref().map(|hook| hook.capture_mailbox()).ok_or_else(|| {
+        // ADR-0161 slice R4: capture_frame routes to the pumped render
+        // actor's mailbox; the hook supplies the id so the core stays
+        // render-free. No hook ⇒ no render slot booted ⇒ fail fast instead
+        // of warn-dropping the mail. The pumped `on_capture_frame` parks the
+        // request; `pump_until_reply` drives the slot (drain + frame) until
+        // the deferred reply lands on the loopback.
+        let render_mailbox =
+            self.hook.as_ref().map(|hook| hook.render_mailbox()).ok_or_else(|| {
                 SubstrateHarnessError::Capture("render not composed — no capture pipeline".to_owned())
             })?;
         let cid = self.fresh_correlation_id();
         self.push_to_mailbox(
-            capture_mailbox,
+            render_mailbox,
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,
@@ -1092,6 +1165,23 @@ impl SubstrateHarness {
             while let Ok(event) = self.events_rx.try_recv() {
                 self.dispatch_event(event)?;
                 progressed = true;
+            }
+
+            // ADR-0161 slice R4: the harness is the pumped render actor's
+            // driver, so it must drain the slot on every pump iteration —
+            // render-recipient chains (an advance's `DrawTriangle` /
+            // `ViewProjection`, a capture's issue-860 pre-mails and their
+            // `pre_settled` notices) settle only because this pump runs, the
+            // deadlock the ADR names. When a capture is pending, mail a frame
+            // (replay-cache, issue 847) so the actor's mail-driven capture
+            // machine advances the pre-mail countdown to readback and the
+            // deferred reply lands on the loopback below.
+            if let Some(hook) = self.hook.as_mut() {
+                hook.pump();
+                if hook.has_pending_capture() {
+                    hook.send_frame(/* replay_cache_when_idle */ true);
+                    progressed = true;
+                }
             }
 
             // Look for our reply on the loopback.
@@ -1265,70 +1355,20 @@ impl SubstrateHarness {
                 }
             }
         }
-        // ADR-0082 §6 / PR 3c: the advance settlement above already
-        // waited for the whole frame chain (Tick → component →
-        // DrawTriangle → render cap accumulator) to drain, so render's
-        // inbox is quiesced by the time we reach submit. The prior
-        // `drain_frame_bound_or_abort` pending-counter poll is
-        // redundant under settlement gating and retired.
-        match self.capture_queue.take() {
-            Some(req) => {
-                // iamacoffeepot/aether#860: wait for each pre-mail's
-                // causal chain to settle before rendering. Matches the
-                // structural settlement gate the Advance path uses for
-                // `Tick` above — without this, the cross-thread chain
-                // pre-mails kick off (component handler → emitted
-                // DrawTriangle → render cap accumulator) races
-                // `render_and_capture` and an empty `frame_vertices`
-                // falls back to the cache. Empty `pre_settlements`
-                // (no pre-mails, or a chassis without trace pipeline)
-                // skips the loop cleanly.
-                for rx in req.pre_settlements {
-                    if let WaitOutcome::Wedged(_) = await_internal_signal(
-                        &rx,
-                        "substrate_harness.capture_pre_mail",
-                        SETTLEMENT_TIMEOUT,
-                        self.settlement_cap,
-                        TerminalDisposition::ReplyErr,
-                    ) {
-                        return Err(self.settlement_timeout(
-                            "capture pre-mail chain".to_owned(),
-                            "<pre-mail>",
-                            "substrate_harness.capture_pre_mail",
-                        ));
-                    }
-                }
-                // A capture request can only originate from the render
-                // cap's capture backend, so the hook is `Some` on every
-                // reachable path; reply `Err` rather than panic if that
-                // invariant ever breaks.
-                let result = match self.hook.as_mut() {
-                    Some(hook) => {
-                        CaptureFrameResult::from(hook.render_and_capture(&req.checks, req.reference.as_ref()))
-                    }
-                    None => CaptureFrameResult::Err { error: "render not composed — no capture pipeline".to_owned() },
-                };
-                for mail in req.after_mails {
-                    self.queue.push(mail);
-                }
-                // Reply through the retained inbound guard (ADR-0106 /
-                // #1758). The harness's capture reply target is a `Session`,
-                // so the guard's `reply` routes through the same `outbound`
-                // egress `send_reply` did (the `RecordingBackend` loopback
-                // picks it up by correlation).
-                req.reply.reply(&result);
-                // iamacoffeepot/aether#1273 / #1758: `req` still owns
-                // `req.reply` after the partial moves above; the retained
-                // inbound guard drops at end of this match arm — *after*
-                // `reply` returns — so the inbound's `Finished` records
-                // after the reply's `Sent` (ADR-0080 §6). Don't restructure
-                // to move the reply below other work in this arm.
-            }
-            None => {
-                if let Some(hook) = self.hook.as_mut() {
-                    hook.render_frame();
-                }
-            }
+        // ADR-0082 §6 / PR 3c: the advance settlement above already waited
+        // for the whole frame chain (Tick → component → DrawTriangle →
+        // pumped render accumulator) to drain — and because the pumped
+        // render slot is drained inside `pump_until_event`, the advance's
+        // `DrawTriangle` / `ViewProjection` handlers have already dispatched
+        // onto the owned accumulators by the time we reach here.
+        //
+        // ADR-0161 slice R4: record the frame by mailing one
+        // `aether.render.frame { replay_cache_when_idle: false }` (advance
+        // commits current) and draining the slot. Capture is no longer a
+        // driver-side readback — the pumped `on_capture_frame` owns the
+        // mail-driven capture machine, driven from `pump_until_event`.
+        if let Some(hook) = self.hook.as_mut() {
+            hook.send_frame(/* replay_cache_when_idle */ false);
         }
 
         Ok(())
