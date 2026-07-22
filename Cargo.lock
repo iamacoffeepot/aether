@@ -1005,6 +1005,7 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "inventory",
+ "winit",
 ]
 
 [[package]]

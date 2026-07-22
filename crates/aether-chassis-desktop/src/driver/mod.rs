@@ -25,23 +25,22 @@ use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_input::InputCapability;
 use aether_kinds::{
-    CaptureFrameResult, FocusWindow, FocusWindowResult, ImePreedit, Key, KeyRelease, Modifiers, MouseButton,
-    MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, TextInput, Tick, WindowMode, WindowSize,
+    CaptureFrameResult, ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    Quit, TextInput, Tick, WindowMode, WindowSize,
 };
 use aether_render::{CaptureBackend, RenderHandles};
-use aether_substrate::actor::native::local;
+use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{
-    ChassisCtx, HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
+    ChassisCtx, HubOutbound, Mailer, SettlingInbox, Source, SourceAddr, SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
-use aether_window::resolve_fullscreen;
+use aether_window::{DesktopWindowCapability, DesktopWindowParams, WindowCell, resolve_fullscreen};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -53,7 +52,7 @@ use super::render::Gpu;
 use aether_substrate::capture::CaptureQueue;
 use capture::{OccludedCaptureDisposition, occluded_capture_disposition};
 use input::{TextSource, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
-use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply, try_framework_dispatch};
+use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply};
 use shutdown::install_shutdown_handler;
 use std::io;
 use winit::dpi::PhysicalSize;
@@ -160,44 +159,26 @@ pub struct App {
     /// itself. The wireframe value threads to `Gpu::new`, whose
     /// `WireframeMode::from_config_value` owns the tri-state parse.
     window_settings: aether_chassis::WindowSettings,
-    /// Currently-applied window mode. Updated by `set_window_mode`
-    /// and read by `platform_info`'s window-state field. Starts as
-    /// `window_settings.mode`.
-    current_mode: WindowMode,
-    /// `aether.window` inbox claimed via `DriverCtx::claim_mailbox`
-    /// at boot (issue 603 Phase 3). The driver is the cap — drained
-    /// inside [`ApplicationHandler::about_to_wait`] between frames to
-    /// apply `SetWindowMode` / `SetWindowTitle` / `FocusWindow` inline
-    /// on the chassis main thread (winit / macOS require window
-    /// mutations there). No dispatcher thread; the receiver is the
-    /// drain source. Mail arrival pokes `UserEvent::WindowMail` via the
-    /// claim's wake slot (iamacoffeepot/aether#1318), so `about_to_wait`
-    /// runs and drains even under `ControlFlow::Wait` (set when the
-    /// window occludes) — the case `aether.window.focus` most needs,
-    /// since the loop is otherwise parked until a winit event arrives.
-    window_inbox: SettlingInbox,
-    /// Per-actor [`local::ActorSlots`] carried out of the
-    /// [`aether_substrate::MailboxClaim`] this driver produced at boot.
-    /// Stamped into TLS via [`local::with_stamped`] around
-    /// the bespoke `aether.window` inbox drain so framework-built-in
-    /// dispatch arms (`aether.log.tail` / `aether.trace.tail` /
-    /// `aether.cost.tail`) reach the driver's per-actor `Local<T>`
-    /// rings — the same shape the standard
-    /// `DispatcherSlot::run_cycle` path opens for every other actor
-    /// (iamacoffeepot/aether#1272).
-    actor_slots: SharedActorSlots,
-    /// The driver's own mailbox id (`aether.window` claim). Threaded
-    /// through to the cost-tail dispatch arm, which filters the global
-    /// cost table by `self_mailbox` (the standard variant pulls this
-    /// from `NativeBinding::self_mailbox`; driver-as-actor has no
-    /// binding, so we cache the id directly).
-    window_mailbox: MailboxId,
-    kind_set_window_mode: aether_data::KindId,
-    kind_set_window_title: aether_data::KindId,
-    /// `aether.window.focus` kind id, resolved at boot. The dispatch
-    /// arm calls [`App::apply_window_focus`] to raise the window
-    /// (iamacoffeepot/aether#1318).
-    kind_focus_window: aether_data::KindId,
+    /// The `aether.window` desktop runtime, pumped on the winit thread
+    /// (ADR-0160 §Decision 3). Booted from the Claim-stage `aether.window`
+    /// reservation via [`DriverCtx::boot_pumped_actor`]; drained inside
+    /// [`ApplicationHandler::about_to_wait`] between frames — inline on the
+    /// chassis main thread, since winit / macOS require window mutations
+    /// there. Mail arrival pokes `UserEvent::WindowMail` via the claim's
+    /// wake slot (iamacoffeepot/aether#1318), so `about_to_wait` runs and
+    /// drains even under `ControlFlow::Wait` (set when the window occludes)
+    /// — the case `aether.window.focus` most needs, since the loop is
+    /// otherwise parked until a winit event arrives. The shared
+    /// `dispatch_envelope` body owns the framework arms (`aether.log.tail` /
+    /// `aether.trace.tail` / `aether.cost.tail`), cost fold, and trace hops,
+    /// so `aether.window` reports identically to any pooled actor;
+    /// [`PumpedSlot::shutdown`] runs the actor's `unwire` on loop exit.
+    window_slot: PumpedSlot<DesktopWindowCapability>,
+    /// One-shot handle shared with the pumped [`DesktopWindowCapability`]:
+    /// `resumed` fills it exactly once after `create_window`, and the
+    /// actor's handlers read the winit `Window` from it. A double-fill is a
+    /// bug (guarded by `resumed`'s window-already-set early return).
+    window_cell: WindowCell,
     /// ADR-0080 §6 chassis-root correlation counter (issue
     /// iamacoffeepot/aether#723). Bumped per chassis-source push so
     /// every input/window/frame-stats emission carries a fresh
@@ -329,141 +310,6 @@ impl App {
         }
     }
 
-    fn apply_window_mode(&mut self, mode: WindowMode, width: Option<u32>, height: Option<u32>) -> SetWindowModeResult {
-        let Some(window) = self.window.clone() else {
-            return SetWindowModeResult::Err {
-                error: "set_window_mode requested before window initialized".to_owned(),
-            };
-        };
-        let monitor = window.current_monitor();
-        let fullscreen = match resolve_fullscreen(&mode, monitor.as_ref()) {
-            Ok(fs) => fs,
-            Err(e) => return SetWindowModeResult::Err { error: e },
-        };
-        window.set_fullscreen(fullscreen);
-        if matches!(mode, WindowMode::Windowed)
-            && let (Some(w), Some(h)) = (width, height)
-        {
-            let _ = window.request_inner_size(PhysicalSize::new(w, h));
-        }
-
-        self.current_mode = mode.clone();
-        let size = window.inner_size();
-        SetWindowModeResult::Ok { mode, width: size.width, height: size.height }
-    }
-
-    fn apply_window_title(&self, title: String) -> SetWindowTitleResult {
-        let Some(window) = self.window.as_ref() else {
-            return SetWindowTitleResult::Err {
-                error: "set_window_title requested before window initialized".to_owned(),
-            };
-        };
-        window.set_title(&title);
-        SetWindowTitleResult::Ok { title }
-    }
-
-    /// Bring the window to the foreground (iamacoffeepot/aether#1318):
-    /// un-minimize, show if hidden, then raise + focus. winit's
-    /// `focus_window` is best-effort per platform, but the three calls
-    /// are the full lever the substrate has. `Err` if the window isn't
-    /// created yet (mail arrived before `resumed`).
-    fn apply_window_focus(&self) -> FocusWindowResult {
-        let Some(window) = self.window.as_ref() else {
-            return FocusWindowResult::Err { error: "focus requested before window initialized".to_owned() };
-        };
-        window.set_minimized(false);
-        window.set_visible(true);
-        window.focus_window();
-        FocusWindowResult::Ok
-    }
-
-    /// Drain the `aether.window` inbox without blocking. Called from
-    /// `about_to_wait` (per-frame cadence). Each envelope dispatches
-    /// inline against the framework-built-in arms first
-    /// (`aether.log.tail` / `aether.trace.tail` / `aether.cost.tail`,
-    /// iamacoffeepot/aether#1272) and only then the driver-specific
-    /// `kind_set_window_mode` / `kind_set_window_title` arms; anything
-    /// else warns and drops.
-    ///
-    /// The whole drain is wrapped in
-    /// [`local::with_stamped`] against
-    /// [`Self::actor_slots`] so the framework arms reach this driver's
-    /// per-actor `ActorLogRing` / `ActorTraceRing` (the same property
-    /// `DispatcherSlot::run_cycle` opens for every standard actor).
-    fn drain_window_inbox(&mut self) {
-        // Stamp once around the whole drain rather than per-envelope —
-        // the stamp is cheap (single TLS write + RAII guard) but keeping
-        // it open across the full burst means a handler that fires
-        // `tracing::*` (e.g. apply_window_mode's failure log) also lands
-        // in the driver's ring.
-        let slots = self.actor_slots.clone();
-        local::with_stamped(slots.slots(), || {
-            // ADR-0106: `try_next` yields each mail as an owned
-            // `InboundMail` guard, so dispatch can still take `&mut self`
-            // (the guard borrows nothing from `self.window_inbox`). Each
-            // guard settles its inbound when `dispatch_window_envelope`
-            // returns — no hand-rolled per-arm bracket.
-            while let Some(mail) = self.window_inbox.try_next() {
-                self.dispatch_window_envelope(mail);
-            }
-        });
-    }
-
-    // ADR-0106: `mail` is an owned `InboundMail` guard. It settles its
-    // ADR-0080 §2 bracket + ADR-0094 obligation when it falls out of
-    // scope at the end of this function — on every arm, including the
-    // decode-error early returns — so there is no hand-rolled
-    // `record_finished` / `discharge` pair. Replies go through
-    // `mail.reply`, which joins the inbound's causal chain (ADR-0080
-    // §5/§6) instead of minting the bare lineage-less NONE triple.
-    //
-    // `mail` is taken by value so its guard's `Drop` (the settlement)
-    // binds to this scope; the body only calls `&self` methods on it,
-    // which clippy reads as a needless by-value.
-    #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_window_envelope(&mut self, mail: InboundMail) {
-        // iamacoffeepot/aether#1272: framework-built-in dispatch arms
-        // run BEFORE the driver-specific kinds, matching
-        // `DispatcherSlot::run_cycle`'s ordering. Factored into a free
-        // fn so the desktop-driver unit test exercises the routing shape
-        // directly without standing up a winit `App`. On a match the
-        // helper has already replied through `mail`'s drain guard (the
-        // chain-joined path, #1710); the guard settles on return.
-        if try_framework_dispatch(&self.queue, self.window_mailbox, &mail) {
-            return;
-        }
-        if mail.kind() == self.kind_set_window_mode {
-            let Some(payload) = SetWindowMode::decode_from_bytes(mail.payload()) else {
-                mail.reply(&SetWindowModeResult::Err { error: "SetWindowMode decode failed".to_owned() });
-                return;
-            };
-            let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
-            mail.reply(&result);
-        } else if mail.kind() == self.kind_set_window_title {
-            let Some(payload) = SetWindowTitle::decode_from_bytes(mail.payload()) else {
-                mail.reply(&SetWindowTitleResult::Err { error: "SetWindowTitle decode failed".to_owned() });
-                return;
-            };
-            let result = self.apply_window_title(payload.title);
-            mail.reply(&result);
-        } else if mail.kind() == self.kind_focus_window {
-            // `FocusWindow` is a unit payload — nothing to decode.
-            // Reply through `mail.reply` (the chain-joined `Mailer`
-            // path), never `self.outbound` (`HubOutbound` drops
-            // `SourceAddr::Component`, iamacoffeepot/aether#1316).
-            let result = self.apply_window_focus();
-            mail.reply(&result);
-        } else {
-            tracing::warn!(
-                target: "aether_substrate::driver",
-                kind = %mail.kind_name(),
-                "desktop driver dropped unrecognised aether.window kind",
-            );
-        }
-        // `mail` drops here — the success arms AND the unrecognised-kind
-        // warn-drop arm settle (ADR-0106).
-    }
-
     fn publish_window_size(&self, width: u32, height: u32) {
         let payload = encode(&WindowSize { width, height });
         self.push_chassis_root(self.input_mailbox, self.kind_window_size, payload, 1);
@@ -561,7 +407,6 @@ impl ApplicationHandler<UserEvent> for App {
                     "AETHER_WINDOW_MODE boot request rejected — falling back to Windowed",
                 );
                 self.window_settings.mode = WindowMode::Windowed;
-                self.current_mode = WindowMode::Windowed;
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
@@ -575,6 +420,13 @@ impl ApplicationHandler<UserEvent> for App {
             Some(Gpu::new(Arc::clone(&window), self.render_handles.clone(), self.window_settings.wireframe.as_deref()));
         window.request_redraw();
         let initial_size = window.inner_size();
+        // ADR-0160 §Decision 3: hand the freshly-created window to the pumped
+        // `aether.window` actor through its one-shot cell. `resumed`
+        // early-returns once `self.window` is set (above), so this fills
+        // exactly once — a double-fill is a bug, so the `set` `Err` arm is
+        // unreachable here.
+        debug_assert!(self.window_cell.get().is_none(), "window cell filled twice — resumed ran again");
+        let _ = self.window_cell.set(Arc::clone(&window));
         self.window = Some(window);
         self.started = Some(Instant::now());
         self.publish_window_size(initial_size.width, initial_size.height);
@@ -928,7 +780,7 @@ impl ApplicationHandler<UserEvent> for App {
     /// drain happens here instead of riding through `EventLoopProxy`
     /// from a separate dispatcher thread.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.drain_window_inbox();
+        self.window_slot.drain_available();
         // iamacoffeepot/aether#1489: poll the SIGINT/SIGTERM flag the
         // signal-watcher flips. On first observation, run the same
         // graceful-shutdown path `CloseRequested` uses. Force
@@ -1048,34 +900,35 @@ impl DriverCapability for DesktopDriverCapability {
         let kind_text_input = boot.registry.kind_id(TextInput::NAME).expect("TextInput registered");
         let kind_ime_preedit = boot.registry.kind_id(ImePreedit::NAME).expect("ImePreedit registered");
         let kind_modifiers = boot.registry.kind_id(Modifiers::NAME).expect("Modifiers registered");
-        let kind_set_window_mode = boot.registry.kind_id(SetWindowMode::NAME).expect("SetWindowMode registered");
-        let kind_set_window_title = boot.registry.kind_id(SetWindowTitle::NAME).expect("SetWindowTitle registered");
-        let kind_focus_window = boot.registry.kind_id(FocusWindow::NAME).expect("FocusWindow registered");
 
-        // Issue 603 Phase 3: the desktop driver is the cap for
-        // `aether.window`. ADR-0155 §4: the inbox was reserved at the Claim
-        // stage by `DesktopDriverCapability::claim`; recover the live
-        // `MailboxClaim` here at Start rather than re-claiming (a second
-        // claim would collide). The receiver lives on `App` and
-        // `about_to_wait` drains it inline between frames.
-        //
-        // iamacoffeepot/aether#1318: install an `EventLoopProxy` wake on
-        // the recovered claim so window-control mail (`focus` / `set_mode` /
+        // Issue 603 Phase 3 / ADR-0160 §Decision 3: the desktop driver is the
+        // pump host for the `aether.window` actor (`DesktopWindowCapability`).
+        // `boot_pumped_actor` recovers the Claim-stage `aether.window`
+        // reservation `DesktopDriverCapability::claim` made (ADR-0155 §4 —
+        // recovered here at Start rather than re-claiming, since a second
+        // claim would collide), builds the pumped slot, runs the actor's
+        // `init` / `wire`, and hands back the claim's wake slot. The actor
+        // mutates the winit `Window` through a one-shot [`WindowCell`] the
+        // `resumed` handler fills post-create; its initial mode mirrors the
+        // boot `AETHER_WINDOW_MODE`. `about_to_wait` drains the slot inline
+        // between frames.
+        let window_cell = WindowCell::default();
+        let (window_slot, window_wake_slot) = ctx.boot_pumped_actor::<DesktopWindowCapability>(
+            (),
+            DesktopWindowParams { window: window_cell.clone(), initial_mode: window.mode.clone() },
+        )?;
+
+        // iamacoffeepot/aether#1318: install an `EventLoopProxy` wake on the
+        // claim's wake slot so window-control mail (`focus` / `set_mode` /
         // `set_title`) arriving at an occluded window pokes
-        // `UserEvent::WindowMail`, letting winit run `about_to_wait` and
-        // drain even under `ControlFlow::Wait`. The proxy is minted here
-        // while `event_loop` is still owned by the capability (it moves
-        // into `DesktopDriverRunning` after `boot`) — the winit event loop
-        // that could not exist at claim time is present at Start, which is
-        // exactly why the wake install is Start-stage.
-        let window_claim = ctx.take_claimed_mailbox("aether.window").ok_or_else(|| {
-            BootError::Other(Box::new(io::Error::other(
-                "DesktopDriverCapability::boot: the aether.window claim is missing — \
-                 DriverCapability::claim must reserve it at the Claim stage before boot (ADR-0155 §4)",
-            )))
-        })?;
+        // `UserEvent::WindowMail`, letting winit run `about_to_wait` and drain
+        // even under `ControlFlow::Wait`. The proxy is minted here while
+        // `event_loop` is still owned by the capability (it moves into
+        // `DesktopDriverRunning` after `boot`) — the winit event loop that
+        // could not exist at claim time is present at Start, which is exactly
+        // why the wake install is Start-stage.
         let window_mail_proxy = event_loop.create_proxy();
-        window_claim.wake_slot.set(Arc::new(move || {
+        window_wake_slot.set(Arc::new(move || {
             let _ = window_mail_proxy.send_event(UserEvent::WindowMail);
         }));
 
@@ -1134,14 +987,9 @@ impl DriverCapability for DesktopDriverCapability {
             started: None,
             frame: 0,
             occluded: false,
-            current_mode: window.mode.clone(),
             window_settings: window,
-            window_inbox: window_claim.inbox,
-            actor_slots: window_claim.actor_slots,
-            window_mailbox: window_claim.id,
-            kind_set_window_mode,
-            kind_set_window_title,
-            kind_focus_window,
+            window_slot,
+            window_cell,
             // 0 is the "no correlation" sentinel; mirror NativeBinding's
             // start-at-1 convention.
             chassis_correlation: AtomicU64::new(1),
@@ -1175,6 +1023,14 @@ impl DriverRunning for DesktopDriverRunning {
         } = *self;
 
         event_loop.run_app(&mut app).map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
+
+        // ADR-0160 §Decision 3: run the pumped `aether.window` actor's
+        // Closed-path teardown (residual drain, `unwire`, cost-row drop,
+        // registry finalize + monitor fan-out) — the `unwire` the bespoke
+        // driver drain never had. The driver boots last, so this lands before
+        // the chassis tears down each passive in reverse boot order (`_boot`
+        // drops at the end of this fn).
+        app.window_slot.shutdown();
 
         let total = triangles_rendered.load(Ordering::Relaxed);
         let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
