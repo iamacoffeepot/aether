@@ -17,13 +17,14 @@
 //! transition is a handler with trace brackets and a cost row, and the
 //! capture state machine is testable headlessly with a toy pump.
 //!
-//! Gated behind the `desktop` feature (winit + the surface state); the
-//! pooled runtime and headless companion pay nothing.
+//! Gated on the `runtime` feature: ADR-0161 R4 lifts the runtime off
+//! `desktop` so the substrate harness builds the **offscreen** (surfaceless)
+//! pumped path without winit — the windowed boot inside is `desktop`-gated
+//! line by line. The pooled runtime and headless companion pay nothing.
 //!
-//! ## Deviations from ADR-0161 forced by the slicing state (documented in
-//! the R2 PR):
+//! ## Slicing notes:
 //! - **Settlement bridge.** The ADR's callback-form `subscribe_settlement`
-//!   (R1) is not yet landed; [`on_capture_frame`](PumpedRenderCapability::on_capture_frame)
+//!   (R1) is not consumed here; [`on_capture_frame`](PumpedRenderCapability::on_capture_frame)
 //!   bridges each pre-mail settlement to a [`PreSettled`] mail through the
 //!   existing [`SettlementRegistry::subscribe_settlement_mail`], which
 //!   pushes a settlement-notice mail from whatever thread the settlement
@@ -31,11 +32,12 @@
 //!   `PreSettled` is wire-identical to `aether.trace.settled` (a single
 //!   `MailId` field), so the pushed notice decodes as `PreSettled`.
 //! - **Capture scoring.** `FrameCheck` verdicts and similarity scoring live
-//!   in `aether-harness-substrate-capture`, which depends on `aether-render`
-//!   — so this crate cannot score them without a dependency cycle. The
-//!   ready-branch readback replies the PNG with `verdict` / `similarity`
-//!   `None`; full scoring lands with the driver swap (R3/R4), where the
-//!   scorer is reachable.
+//!   in `aether-harness-substrate-capture` (and the desktop chassis's
+//!   scorer), which depend on `aether-render` — so this crate cannot name
+//!   them without a dependency cycle. ADR-0161 R4 injects the scorer through
+//!   [`PumpedRenderParams::scorer`] instead: the ready-readback branch calls
+//!   it with the raw RGBA + the request's `checks` / `reference`. With no
+//!   scorer injected the reply carries `verdict` / `similarity` `None`.
 
 use std::io;
 use std::iter;
@@ -65,10 +67,16 @@ use aether_substrate::render::{
 };
 
 use crate::runtime::{
-    MaterialBatch, QuadBatch, RenderGpu, StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, WindowCell,
-    acquire_surface_texture, boot_surface, build_wireframe_overlay_pipeline, expected_pixel_bytes,
-    record_material_batches, record_overlay_batches,
+    MaterialBatch, QuadBatch, RenderGpu, StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, acquire_surface_texture,
+    boot_offscreen, build_wireframe_overlay_pipeline, expected_pixel_bytes, record_material_batches,
+    record_overlay_batches,
 };
+// Winit-window boot (ADR-0161 R4: the offscreen harness path boots
+// surfaceless via `boot_offscreen` and never touches a winit window).
+#[cfg(feature = "desktop")]
+use crate::runtime::{WindowCell, boot_surface};
+
+use crate::runtime::CaptureScorer;
 
 use super::runtime::resolve_reference;
 use super::{
@@ -133,15 +141,12 @@ pub struct Occluded {
 struct PendingCapture {
     reply: InboundMail,
     after_mails: Vec<Mail>,
-    // Carried per the ADR-0161 plain-state shape and resolved off the hot
-    // path in `on_capture_frame`, but not yet consumed: `FrameCheck` /
-    // similarity scoring lives in `aether-harness-substrate-capture`, which
-    // depends on this crate, so R2 cannot score them without a cycle. The
-    // ready-branch readback replies `verdict` / `similarity` `None`; the
-    // driver swap (R3/R4) wires the reachable scorer against these fields.
-    #[allow(dead_code, reason = "consumed by the R3/R4 scoring path; see the field comment")]
+    // Resolved off the hot path in `on_capture_frame` and consumed by the
+    // ready-branch readback (ADR-0161 R4): the composer-injected
+    // `PumpedRenderParams::scorer` scores these against the de-padded RGBA.
+    // With no scorer injected (R2 / a no-config chassis) the reply carries
+    // `verdict` / `similarity` `None`.
     checks: Vec<FrameCheck>,
-    #[allow(dead_code, reason = "consumed by the R3/R4 scoring path; see the field comment")]
     reference: Option<ReferenceCapture>,
     /// Count of pre-mail settlements still awaited; `on_pre_settled`
     /// decrements it, and `on_frame` captures once it reaches zero.
@@ -179,9 +184,20 @@ pub struct PumpedRenderCapabilityState {
 
     /// Shared late-bound window handle; the first `on_frame` after the
     /// chassis fills it boots wgpu. `None` until params provide it.
+    /// Desktop-only: the offscreen harness path (`offscreen_size`) owns no
+    /// window (ADR-0161 R4).
+    #[cfg(feature = "desktop")]
     window: Option<WindowCell>,
+    /// ADR-0161 R4: offscreen boot dimensions. `Some((w, h))` makes the
+    /// first `on_frame` (with no window cell filled) boot a surfaceless GPU
+    /// at these dimensions — the substrate harness's path.
+    offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value threaded from params.
     wireframe: Option<String>,
+    /// ADR-0161 R4: capture-scoring callback, injected by the composer so
+    /// the ready-readback branch can score `FrameCheck` verdicts +
+    /// similarity without a dependency cycle on the scorer's crate.
+    scorer: Option<CaptureScorer>,
     /// wgpu bundle, booted lazily on the first `on_frame` with a filled
     /// window cell (`get_or_insert_with`).
     gpu: Option<RenderGpu>,
@@ -193,6 +209,15 @@ pub struct PumpedRenderCapabilityState {
     last_submission: Option<wgpu::SubmissionIndex>,
     /// Whether the window is currently occluded (issue 1317).
     occluded: bool,
+
+    /// ADR-0161 R4: committed-overlay observation sink for the substrate
+    /// harness's `committed_overlay_snapshot`. `record_overlay_batches`
+    /// populates it with the batches that *survived* record-time rejection
+    /// (missing texture / invalid clip / past budget), so the snapshot
+    /// reflects what was drawn — not the raw accumulator. `Mutex` only
+    /// because `record_overlay_batches` takes `&Mutex<_>` (the pooled sink's
+    /// shape); the pumped state is single-threaded, so it never contends.
+    overlay_observation: Mutex<Vec<DrawTexturedQuads>>,
 
     pending_capture: Option<PendingCapture>,
 
@@ -208,6 +233,29 @@ pub struct PumpedRenderCapabilityState {
 }
 
 impl PumpedRenderCapabilityState {
+    /// Whether a capture is currently parked (ADR-0161 R4). Read by the
+    /// substrate harness's frame hook through `PumpedSlot::read_state` to
+    /// decide whether to drive a frame — the pumped state's fields are
+    /// private, so this is the read surface the pump-owning thread uses.
+    #[must_use]
+    pub fn has_pending_capture(&self) -> bool {
+        self.pending_capture.is_some()
+    }
+
+    /// Snapshot the ordered overlay batches from the most recently committed
+    /// frame as their public [`DrawTexturedQuads`] shape (ADR-0105 /
+    /// ADR-0161 R4). Reads the observation sink `record_overlay_batches`
+    /// populates, so batches rejected at record time (missing texture,
+    /// invalid/empty clip, past the vertex budget) are excluded and solid
+    /// submissions appear normalized over the reserved white texture — the
+    /// exact texture / space / clip / geometry / tint / painter's order the
+    /// overlay pass drew. Read by the harness's `committed_overlay_snapshot`
+    /// extension through `PumpedSlot::read_state`. Owns its data.
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.overlay_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
+    }
+
     /// Push a dispatched kind name into the `SubstrateHarness` observation
     /// sink, when one is installed. Production chassis leave it `None`.
     fn observe(&self, name: &str) {
@@ -224,28 +272,52 @@ impl PumpedRenderCapabilityState {
         if self.gpu.is_some() {
             return;
         }
-        let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) else {
+        // Windowed path (desktop): boot against the shared window cell once
+        // the chassis's `resumed` fills it, standing up a surface + swapchain.
+        #[cfg(feature = "desktop")]
+        if let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) {
+            let size = window.inner_size();
+            let booted = boot_surface(window, (size.width, size.height), self.wireframe.as_deref());
+            let gpu = RenderGpu::new(
+                Arc::clone(&booted.device),
+                Arc::clone(&booted.queue),
+                booted.format,
+                booted.config.width,
+                booted.config.height,
+                booted.polygon_mode,
+                self.vertex_buffer_bytes,
+            );
+            // Built post-`RenderGpu::new` so it can borrow the main pipeline's
+            // layout (same camera bind group). The overlay draws into the
+            // offscreen color target, so it uses `RenderGpu`'s color format.
+            self.wire_pipeline = booted.build_overlay.then(|| {
+                build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout)
+            });
+            self.surface = Some(booted.surface);
+            self.surface_config = Some(booted.config);
+            self.gpu = Some(gpu);
+            return;
+        }
+        // Offscreen path (ADR-0161 R4, the substrate harness): boot a
+        // surfaceless GPU at the configured dimensions. No surface / swapchain
+        // — capture reads back from the offscreen targets directly, and the
+        // best-effort present in `on_frame` no-ops with `surface: None`.
+        let Some((width, height)) = self.offscreen_size else {
             return;
         };
-        let size = window.inner_size();
-        let booted = boot_surface(window, (size.width, size.height), self.wireframe.as_deref());
+        let booted = boot_offscreen(self.wireframe.as_deref());
         let gpu = RenderGpu::new(
             Arc::clone(&booted.device),
             Arc::clone(&booted.queue),
             booted.format,
-            booted.config.width,
-            booted.config.height,
+            width,
+            height,
             booted.polygon_mode,
             self.vertex_buffer_bytes,
         );
-        // Built post-`RenderGpu::new` so it can borrow the main pipeline's
-        // layout (same camera bind group). The overlay draws into the
-        // offscreen color target, so it uses `RenderGpu`'s color format.
         self.wire_pipeline = booted
             .build_overlay
             .then(|| build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout));
-        self.surface = Some(booted.surface);
-        self.surface_config = Some(booted.config);
         self.gpu = Some(gpu);
     }
 
@@ -302,7 +374,7 @@ impl PumpedRenderCapabilityState {
                 &mut self.textures,
                 &self.quad_last_submitted,
                 self.camera_state,
-                None,
+                Some(&self.overlay_observation),
             );
         }
         Ok(())
@@ -354,14 +426,18 @@ impl NativeActor for PumpedRenderCapability {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
+            #[cfg(feature = "desktop")]
             window: params.window,
+            offscreen_size: params.offscreen_size,
             wireframe: params.wireframe,
+            scorer: params.scorer,
             gpu: None,
             surface: None,
             surface_config: None,
             wire_pipeline: None,
             last_submission: None,
             occluded: false,
+            overlay_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             registry,
             mailer,
@@ -679,21 +755,30 @@ impl NativeActor for PumpedRenderCapability {
                 state.mailer.push(mail);
             }
             let gpu = state.gpu.as_ref().expect("gpu present in this branch");
-            let result = {
+            // Map the readback once, then encode the PNG and score the
+            // verdict / similarity from the same de-padded RGBA so a verdict
+            // scores the exact bytes the PNG carries (issue 1777).
+            let mapped = {
                 let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
                 map_capture_rgba(&gpu.device, &targets, &meta)
-                    .and_then(|rgba| encode_png(&rgba, meta.width, meta.height))
             };
-            match result {
-                // Full `FrameCheck` / similarity scoring lands with the
-                // driver swap (R3/R4), where the scorer is reachable
-                // without the aether-harness-substrate-capture cycle.
-                Ok(png) => pending.reply.reply(&CaptureFrameResult::Ok {
+            let result = mapped.and_then(|rgba| {
+                // ADR-0161 R4: score before encoding so the scorer sees the
+                // raw RGBA; the injected scorer (harness / desktop) reaches
+                // the `FrameCheck` + similarity logic this crate cannot name.
+                let (verdict, similarity_score, similarity_pass) = match &state.scorer {
+                    Some(scorer) => scorer(&rgba, meta.width, meta.height, &pending.checks, pending.reference.as_ref()),
+                    None => (None, None, None),
+                };
+                encode_png(&rgba, meta.width, meta.height).map(|png| CaptureFrameResult::Ok {
                     png,
-                    verdict: None,
-                    similarity_score: None,
-                    similarity_pass: None,
-                }),
+                    verdict,
+                    similarity_score,
+                    similarity_pass,
+                })
+            });
+            match result {
+                Ok(ok) => pending.reply.reply(&ok),
                 Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
             };
         }
@@ -861,14 +946,18 @@ mod tests {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             vertex_buffer_bytes: 1024,
+            #[cfg(feature = "desktop")]
             window: None,
+            offscreen_size: None,
             wireframe: None,
+            scorer: None,
             gpu: None,
             surface: None,
             surface_config: None,
             wire_pipeline: None,
             last_submission: None,
             occluded: false,
+            overlay_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             registry: Arc::clone(mailer.registry()),
             mailer: Arc::clone(mailer),

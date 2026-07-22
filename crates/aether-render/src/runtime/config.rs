@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
+use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_substrate::capture::ReferenceCapture;
+
 #[cfg(feature = "desktop")]
 use winit::window::Window;
 
@@ -68,14 +71,37 @@ pub struct RenderParams {
     pub assets_dir: Option<PathBuf>,
 }
 
+/// The capture-scoring callback the pumped render runtime invokes on a
+/// ready readback (ADR-0161 slice R4). `FrameCheck` verdicts and similarity
+/// scoring live in `aether-harness-substrate-capture` (and the desktop
+/// chassis's scorer), which depend on `aether-render` — so the runtime
+/// cannot name them without a dependency cycle. The composer injects the
+/// scorer through [`PumpedRenderParams::scorer`] instead: the runtime hands
+/// it the de-padded RGBA plus the request's `checks` / `reference`, and the
+/// scorer returns the `(verdict, similarity_score, similarity_pass)` triple
+/// the reply carries. `None` replies all-`None` (the R2 behavior).
+pub type CaptureScorer = Arc<
+    dyn Fn(
+            &[u8],
+            u32,
+            u32,
+            &[FrameCheck],
+            Option<&ReferenceCapture>,
+        ) -> (Option<FrameVerdict>, Option<f32>, Option<bool>)
+        + Send
+        + Sync,
+>;
+
 /// Composer-supplied construction params for the pumped render runtime
 /// (`PumpedRenderCapability`, ADR-0161 slice R2). A dedicated params
 /// channel rather than an extension of the pooled [`RenderParams`]: the
 /// `WindowCell` is winit-typed and desktop-only, so a separate struct
 /// (mirroring aether-window's `DesktopWindowParams`) keeps the shared
-/// pooled params — and its consumers — byte-for-byte untouched. Behind the
-/// `desktop` feature.
-#[cfg(feature = "desktop")]
+/// pooled params — and its consumers — byte-for-byte untouched.
+///
+/// ADR-0161 slice R4 lifts the struct off the `desktop` gate (its winit
+/// `window` field stays gated inside) so the substrate harness's offscreen
+/// pumped runtime can construct it without pulling winit.
 #[derive(Clone, Default)]
 pub struct PumpedRenderParams {
     /// `SubstrateHarness` observation sink (see [`RenderParams::observed_kinds`]).
@@ -88,9 +114,20 @@ pub struct PumpedRenderParams {
     /// cell. The chassis mints one [`WindowCell`] and clones it into both
     /// this and the `aether.window` desktop actor's params, so both
     /// observe the same window. `None` in tests, which never own a surface.
+    #[cfg(feature = "desktop")]
     pub window: Option<WindowCell>,
+    /// ADR-0161 slice R4: offscreen boot dimensions for a surfaceless
+    /// runtime (the substrate harness). `Some((w, h))` makes the lazy
+    /// `on_frame` boot stand up a surfaceless GPU at these dimensions when
+    /// no window cell is filled; `None` leaves the runtime windowed (or
+    /// never booted, in a no-GPU test).
+    pub offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value (argv > env > default), threaded
     /// so the lazy wgpu boot picks the wireframe mode the desktop `Gpu`
     /// boot does. `None` / `"off"` is filled faces.
     pub wireframe: Option<String>,
+    /// ADR-0161 slice R4: capture-scoring callback, injected by the composer
+    /// so the runtime can score `FrameCheck` verdicts + similarity without a
+    /// dependency cycle on the scorer's crate. `None` replies all-`None`.
+    pub scorer: Option<CaptureScorer>,
 }
