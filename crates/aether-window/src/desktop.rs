@@ -36,8 +36,8 @@ use winit::window::{Fullscreen, Window};
 
 /// The late-bound winit window handle, shared between the desktop chassis's
 /// winit `resumed` handler (which fills it exactly once after
-/// `create_window`) and [`DesktopWindowCapabilityState`] (which reads it in
-/// every handler). A one-shot `OnceLock` behind an `Arc` so both sides hold
+/// `create_window`) and the actor state (which reads it in every handler).
+/// A one-shot `OnceLock` behind an `Arc` so both sides hold
 /// the same cell; winit 0.30's `Window` is `Send + Sync`, so the inner
 /// `Arc<Window>` crosses the fill/read boundary freely.
 pub type WindowCell = Arc<OnceLock<Arc<Window>>>;
@@ -50,7 +50,7 @@ pub type WindowCell = Arc<OnceLock<Arc<Window>>>;
 pub struct DesktopWindowParams {
     /// The one-shot window handle the winit `resumed` handler fills.
     pub window: WindowCell,
-    /// The mode the window boots into; seeds [`DesktopWindowCapabilityState::current_mode`].
+    /// The mode the window boots into; seeds the actor state's current mode.
     pub initial_mode: WindowMode,
 }
 
