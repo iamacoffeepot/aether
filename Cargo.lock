@@ -521,9 +521,13 @@ name = "aether-gemini"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-contentgen",
  "aether-data",
  "aether-fs",
+ "aether-gemini",
+ "aether-harness-substrate",
+ "aether-http",
  "aether-kinds",
  "aether-substrate",
  "clap",

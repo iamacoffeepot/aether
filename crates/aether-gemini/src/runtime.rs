@@ -7,9 +7,8 @@
 //! types, and reply helpers through the single `use super::runtime::*` glob in
 //! the parent.
 
-use super::adapter::{
-    DisabledGeminiAdapter, UreqGeminiAdapter, aspect_ratio_str, image_size_str, map_adapter_error, thinking_level_str,
-};
+use super::adapter::{DisabledGeminiAdapter, UreqGeminiAdapter};
+use super::body::{aspect_ratio_str, image_size_str, map_adapter_error, thinking_level_str};
 use super::config::GeminiConfig;
 use super::{
     GeminiCapability, GeminiError, GroundingMetadata, LyriaGenerate, LyriaGenerateResult, NanobananaGenerate,

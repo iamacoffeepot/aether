@@ -39,7 +39,9 @@ aether-audio = { path = "../aether-audio", features = ["runtime"] }
 # which stages the cap configs as programmatic overrides; the chassis lib composes
 # these caps through `aether-chassis`'s `with_common_caps`.
 aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
-aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
+# ADR-0159: `aether-gemini` defaults to the wasm guest component; the native
+# headless chassis takes the legacy native cap explicitly.
+aether-gemini = { path = "../aether-gemini", default-features = false, features = ["runtime"] }
 aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
 aether-game = { path = "../aether-game" }
 aether-actor = { path = "../aether-actor" }

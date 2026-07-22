@@ -7,11 +7,14 @@
 
 use super::GeminiError;
 
-use aether_contentgen::transport::{parse_status_prefix, snippet};
+#[cfg(feature = "runtime")]
+use aether_contentgen::parse_status_prefix;
+use aether_contentgen::snippet;
 
-/// Sentinel an adapter returns to mean "no API key" so the cap maps it
-/// onto [`GeminiError::Unauthorized`]. The `DisabledGeminiAdapter`
-/// returns this for every request.
+/// Sentinel the native `DisabledGeminiAdapter` returns to mean "no API key" so
+/// the cap maps it onto [`GeminiError::Unauthorized`]. Native-only — the guest
+/// replies `Unauthorized` directly rather than through a sentinel string.
+#[cfg(feature = "runtime")]
 pub const UNAUTHORIZED_SENTINEL: &str = "unauthorized";
 
 /// Map an HTTP status code from a Gemini API onto a [`GeminiError`].
@@ -34,7 +37,10 @@ pub fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str)
 /// Convert a free-form adapter error string into a typed
 /// [`GeminiError`]. Recognises the `UNAUTHORIZED_SENTINEL` and the
 /// `status=<n>` prefix the ureq backends prepend; falls back to
-/// `AdapterError`.
+/// `AdapterError`. Native-only — only the `ureq` backend produces these
+/// strings; the guest maps `FetchResult` arms with [`status_to_error`] and its
+/// own `HttpError` mapping.
+#[cfg(feature = "runtime")]
 #[must_use]
 pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
     if raw == UNAUTHORIZED_SENTINEL {
@@ -48,7 +54,7 @@ pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
     GeminiError::AdapterError(snippet(raw))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::{adapter_error_to_typed, status_to_error};
     use crate::GeminiError;
