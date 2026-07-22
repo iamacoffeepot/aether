@@ -25,8 +25,10 @@
 // share this vocabulary crate (ADR-0066).
 mod kinds;
 
-// Pure provider logic (no I/O): the request-body builders + base64 codec, the
+// Pure provider logic (no I/O): the adapter-facing request DTO the body
+// builder converts through, the request-body builders + base64 codec, the
 // per-model validation tables + response parsers, and the error taxonomy.
+mod adapter;
 mod body;
 mod error;
 mod lyria;

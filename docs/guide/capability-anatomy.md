@@ -24,14 +24,15 @@ re-export facade (a facade would put every downstream back in the cap's
 reverse-dependency closure).
 
 A provider that shares pure logic with a sibling factors that logic into a thin
-foundation crate the provider depends on rather than a grab-bag crate. The
-content-gen providers show the shape: `aether-contentgen` holds the wasm-safe
-DTO and string helpers, and the `aether.gemini` guest component depends on it.
-The foundation is a plain dependency, not a facade over the provider: nothing
-re-exports the provider crate through the foundation, so the provider stays a
-leaf and only its own reverse-dependency closure reruns on a change to it. (The
-content-gen providers are wasm guest components loaded on demand, not native
-chassis capabilities — ADR-0159.)
+foundation crate the provider depends on rather than a grab-bag crate — a plain
+dependency, not a facade: nothing re-exports the provider through the
+foundation, so the provider stays a leaf and only its own reverse-dependency
+closure reruns on a change to it. Reach for the foundation crate only once the
+logic is genuinely shared; the content-gen providers each keep their own
+wasm-safe DTO and string helpers rather than sharing a one-consumer crate, so
+`aether-anthropic` and `aether-gemini` are self-contained leaves. (Both are
+wasm guest components loaded on demand, not native chassis capabilities —
+ADR-0159.)
 
 ## Typical directory
 
@@ -212,7 +213,7 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 - Light single-file runtime: `fs/`, `input/`, `clipboard/`
 - Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
 - Multi-actor cluster: `engine/`, `http/`, `tcp/`
-- Guest provider components over a pure foundation: `anthropic/`, `gemini/`, `shared/contentgen/`
+- Self-contained guest provider components: `anthropic/`, `gemini/`
 - Split test support: `rpc/server/test_echo.rs`
 
 See [Guest/native boundaries](architecture/guest-native-boundary.md),

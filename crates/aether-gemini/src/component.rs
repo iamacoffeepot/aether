@@ -37,7 +37,7 @@ use aether_kinds::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use aether_contentgen::adapter::GeminiImageRequest;
+use crate::adapter::GeminiImageRequest;
 
 use super::body::{
     aspect_ratio_str, build_lyria_body, build_nanobanana_body, genlang_url, image_size_str, thinking_level_str,
@@ -454,7 +454,6 @@ impl GeminiComponent {
         }
 
         let image_req = GeminiImageRequest {
-            model: read_ctx.model.clone(),
             prompt: read_ctx.prompt,
             aspect_ratio: read_ctx.aspect_ratio,
             image_size: read_ctx.image_size,

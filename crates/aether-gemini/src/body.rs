@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value, json};
 
-use aether_contentgen::adapter::GeminiImageRequest;
+use crate::adapter::GeminiImageRequest;
 
 use super::{AspectRatio, ImageSize, ThinkingLevel};
 
@@ -163,7 +163,7 @@ pub fn thinking_level_str(level: ThinkingLevel) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use aether_contentgen::adapter::GeminiImageRequest;
+    use crate::adapter::GeminiImageRequest;
 
     /// With every knob set, the request body carries
     /// `imageConfig.imageSize`, `thinkingConfig.thinkingLevel` /
@@ -171,7 +171,6 @@ mod tests {
     #[test]
     fn nanobanana_body_carries_set_params() {
         let body = super::build_nanobanana_body(&GeminiImageRequest {
-            model: "gemini-3.1-flash-image-preview".to_string(),
             prompt: "a cat".to_string(),
             aspect_ratio: "16:9".to_string(),
             image_size: Some("2K".to_string()),
@@ -194,7 +193,6 @@ mod tests {
     #[test]
     fn nanobanana_body_omits_unset_params() {
         let body = super::build_nanobanana_body(&GeminiImageRequest {
-            model: "gemini-3.1-flash-image-preview".to_string(),
             prompt: "a cat".to_string(),
             aspect_ratio: "1:1".to_string(),
             reference_images: Vec::new(),

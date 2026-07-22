@@ -33,9 +33,6 @@ aether-data = { path = "../aether-data" }
 # The generate result kinds carry an `aether.Usage` token + clock accounting.
 aether-kinds = { path = "../aether-kinds" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
-# The pure `GeminiImageRequest` DTO the body builder converts through, plus the
-# `strparse` helpers the `error` taxonomy calls.
-aether-contentgen = { path = "../aether-contentgen" }
 # The guest stages artifacts and reads reference images through the `aether.fs`
 # cap, addressed via the marker face (`default-features = false` keeps the guest
 # build off the fs runtime).
