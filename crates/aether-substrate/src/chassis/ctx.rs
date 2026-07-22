@@ -264,6 +264,59 @@ pub(crate) fn relay_or_transfer(
     RelayOutcome::Delivered
 }
 
+/// Register a plain relay mailbox inbox under `name` and return its derived
+/// [`MailboxId`], the receiver half, and a fresh [`MailboxWakeSlot`]. The
+/// registered closure holds the strong `Sender` for the registry's lifetime
+/// and routes each delivery through [`relay_or_transfer`] (the shared
+/// upgrade → send → wake core with both ADR-0094 transfer seams), so the
+/// derived `Weak` always upgrades and `SenderGone` is unreachable.
+///
+/// The registration core of [`ChassisCtx::claim_mailbox_with_override`],
+/// factored so the post-boot passive pumped-actor boot (ADR-0161 slice R4,
+/// [`crate::chassis::builder::PassiveChassis::boot_pumped_actor`]) can claim
+/// a fresh relay mailbox without a live [`ChassisCtx`]. The caller wraps the
+/// receiver in a [`SettlingInbox`] and owns whatever bookkeeping
+/// (`claimed_actor_mailboxes`, the ctx-bound `MailboxClaim`) it needs.
+pub(crate) fn register_relay_inbox(
+    registry: &Arc<Registry>,
+    name: &str,
+) -> Result<(MailboxId, mpsc::Receiver<Envelope>, Arc<MailboxWakeSlot>), BootError> {
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let tx = Arc::new(tx);
+    // iamacoffeepot/aether#1318: optional wake hook fired after each accepted
+    // send. Unset by default (a single relaxed atomic load on the hot path);
+    // the desktop window driver installs an `EventLoopProxy` wake so
+    // `aether.window` mail nudges the winit loop under `ControlFlow::Wait`.
+    let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
+    let wake_for_handler = Arc::clone(&wake_slot);
+    let id = registry.try_register_inbox(
+        name.to_owned(),
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // The strong `tx` is captured for liveness; this keeps the
+            // move-closure holding it and documents that the derived `Weak`
+            // below always upgrades.
+            debug_assert!(Arc::strong_count(&tx) >= 1);
+            match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler) {
+                RelayOutcome::Delivered => {}
+                RelayOutcome::ReceiverGone { kind_name } => {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = %kind_name,
+                        "capability mailbox receiver dropped — mail discarded"
+                    );
+                }
+                RelayOutcome::SenderGone { .. } => {
+                    // Unreachable: the closure holds the strong `tx`, so the
+                    // derived `Weak` always upgrades. Handled for match
+                    // exhaustiveness.
+                    debug_assert!(false, "register_relay_inbox sender cannot be gone");
+                }
+            }
+        }),
+    )?;
+    Ok((id, rx, wake_slot))
+}
+
 /// Strong handle to the inbound `Sender<Envelope>` for a mailbox
 /// claimed via [`ChassisCtx::claim_mailbox_drop_on_shutdown`]. Held
 /// by the capability for the lifetime of its dispatcher thread;
@@ -386,49 +439,7 @@ impl<'a> ChassisCtx<'a> {
     /// closure stored on the registry until the registry itself is
     /// dropped.
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        let tx = Arc::new(tx);
-        // iamacoffeepot/aether#1318: optional wake hook fired after each
-        // accepted send. Unset by default (a single relaxed atomic load
-        // on the hot path); the desktop window driver installs an
-        // `EventLoopProxy` wake so `aether.window` mail nudges the winit
-        // loop under `ControlFlow::Wait`. Mirrors the `MailboxWakeSlot`
-        // the `claim_mailbox_drop_on_shutdown` variant carries.
-        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
-        let wake_for_handler = Arc::clone(&wake_slot);
-        let id = self.registry.try_register_inbox(
-            name.to_owned(),
-            // iamacoffeepot/aether#848: closure takes [`OwnedDispatch`]
-            // and routes it through [`relay_or_transfer`], which owns the
-            // upgrade → send → wake core and both ADR-0094 transfer seams.
-            // This claim holds the *strong* `tx` for the registry's
-            // lifetime (the channel must outlive every claimer), and
-            // passes a derived `Weak` so it shares the same helper as the
-            // drop-on-shutdown / instanced closures. The upgrade always
-            // succeeds here, so `SenderGone` is unreachable.
-            Arc::new(move |dispatch: OwnedDispatch| {
-                // The strong `tx` is captured for liveness; this keeps the
-                // move-closure holding it and documents that the derived
-                // `Weak` below always upgrades.
-                debug_assert!(Arc::strong_count(&tx) >= 1);
-                match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler) {
-                    RelayOutcome::Delivered => {}
-                    RelayOutcome::ReceiverGone { kind_name } => {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = %kind_name,
-                            "capability mailbox receiver dropped — mail discarded"
-                        );
-                    }
-                    RelayOutcome::SenderGone { .. } => {
-                        // Unreachable: the closure holds the strong `tx`,
-                        // so the derived `Weak` always upgrades. Handled
-                        // for match exhaustiveness.
-                        debug_assert!(false, "claim_mailbox_with_override sender cannot be gone");
-                    }
-                }
-            }),
-        )?;
+        let (id, rx, wake_slot) = register_relay_inbox(self.registry, name)?;
         self.claimed_actor_mailboxes.push(id);
         // iamacoffeepot/aether#1272: every claim returns its
         // per-actor [`ActorSlots`] wrapped in [`SharedActorSlots`]. The

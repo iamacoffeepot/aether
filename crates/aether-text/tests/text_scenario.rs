@@ -45,7 +45,7 @@ use aether_harness_substrate_capture::{
 };
 use aether_kinds::{CachedFontMetrics, ClipRect, NamedMail, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
-use aether_render::ViewProjection;
+use aether_render::{DrawSolidQuads, SolidQuad, ViewProjection};
 use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
 
 /// Namespace-relative path of the vendored font under the `assets` root.
@@ -219,6 +219,169 @@ fn text_draws_a_screen_space_string() {
         "text silhouette {silhouette:?} should bound the upper-left of the \
          {frame_width}x{frame_height} frame",
     );
+}
+
+/// ADR-0161 R4 regression (issue #3917, the redo of the reverted #3923): a
+/// harness capture must pin the **current** tick's rendered content, never a
+/// stale prior frame. The reverted slice drove the capture frame while the
+/// capture was merely *pending* — before every pre-mail chain had drained its
+/// draw onto the render accumulator — so a frame recorded mid-fill: it
+/// committed the batches that had landed, cleared the accumulator, and the
+/// later-arriving batches from the same capture landed in the *next* frame,
+/// dropping the earlier ones. The fix drives exactly one frame, and only once
+/// the capture is *ready* (every pre-mail chain settled with the slot drained),
+/// so a single commit records the whole draw set.
+///
+/// The reproduction is the panel's shape, minimized to a producer whose output
+/// changes every tick: two overlay batches that land in *different* pump drains
+/// but share the one `quad_frame` accumulator, so a mid-fill commit drops one
+/// of them. The first is a **direct** `DrawSolidQuads`, dispatched by
+/// `on_capture_frame` straight to `aether.render`, so it lands on the first
+/// drain; the second is a `DrawText` through `aether.text`, whose cap lays the
+/// string out on its own thread and emits the glyph `draw_textured_quads` a hop
+/// later, so it lands on a *later* drain.
+///
+/// The solid quad moves to a fresh column each iteration ("output changes every
+/// tick"); the capture must show it at its **current** column. Under the
+/// reverted ordering the first-committed batch (the solid quad) is the one the
+/// mid-fill frame drops, so its region reads background — the stale-frame
+/// signature. Because the drop is racy (the two batches sometimes coincide on
+/// one drain), issue #3917 runs this in a ≥20-iteration loop alongside the two
+/// widget scenarios; the per-capture loop below also multiplies the chances.
+///
+/// Skips without wgpu like the sibling scenarios; `AETHER_REQUIRE_RUNTIME`
+/// (CI) makes the skip a hard failure.
+///
+// Tripwire: under the reverted capture-versus-drain ordering the moving solid
+// quad's current column reads background (its batch was dropped by a mid-fill
+// commit), firing the current-column-lit assertion.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn capture_pins_current_tick_content_not_stale_frame() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    let (frame_width, frame_height) = (128u32, 64u32);
+    let mut harness = SubstrateHarness::builder()
+        .with_render()
+        .with_actor::<TextCapability>(())
+        .size(frame_width, frame_height)
+        .namespace_roots(font_namespace_roots())
+        .build()
+        .expect("boot");
+
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await(
+                "aether.text",
+                &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
+            ),
+        )])
+        .expect("load_font sequence");
+    let font_id = match loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
+        LoadFontResult::Ok { font_id, .. } => font_id,
+        LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
+    };
+
+    // Prime the atlas: the first-ever draw of the session lazily creates the
+    // atlas texture (an async `create_texture` round trip through the renderer)
+    // and draws nothing that turn. Settling it now means the per-iteration draw
+    // only has to rasterize + lay out its glyphs and emit the quad batch — the
+    // per-iteration strings below use fresh, uncached glyphs so that emit lands
+    // a drain *after* the direct solid quad, the split the race needs.
+    let prime_draw = DrawText {
+        font_id,
+        text: "prime".to_owned(),
+        size_pixels: 28.0,
+        color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        origin: [0.0, 0.0],
+        space: QuadSpace::Screen,
+        clip: None,
+    };
+    harness
+        .execute(vec![
+            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &prime_draw)),
+            ("settle", HarnessOp::advance(2)),
+        ])
+        .expect("prime atlas");
+
+    // A 16×16 solid quad on the bottom row, stepped across four columns so
+    // each capture's content differs from the last. Positions stay in integer
+    // window pixels for the region reads; only the `SolidQuad`'s float fields
+    // widen to `f32` (the `cast_precision_loss` these small ints incur is
+    // covered by the fn-level allow, matching the sibling scenarios).
+    let quad_size = 16u32;
+    let quad_y = frame_height - quad_size - 4;
+    let columns: [u32; 4] = [8, 40, 72, 104];
+    // A distinct, previously-unseen glyph string each iteration forces the text
+    // cap to rasterize fresh glyphs (not replay a cached batch), so its
+    // draw_textured_quads emit reliably trails the direct solid quad by a
+    // drain — heavier work than a cached string, matching the widget panel's
+    // multi-batch fan-out that made the reverted race observable.
+    let strings = ["alpha", "bravo", "charlie", "delta"];
+    let tolerance = 5u8;
+
+    let mut prior_x: Option<u32> = None;
+    for (i, &quad_x) in columns.iter().enumerate() {
+        let solid = DrawSolidQuads {
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![SolidQuad {
+                x: quad_x as f32,
+                y: quad_y as f32,
+                width: quad_size as f32,
+                height: quad_size as f32,
+                color: Rgba::new(0.9, 0.9, 0.2, 1.0),
+            }],
+        };
+        let glyph_draw = DrawText {
+            font_id,
+            text: strings[i].to_owned(),
+            size_pixels: 28.0,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            origin: [0.0, 0.0],
+            space: QuadSpace::Screen,
+            clip: None,
+        };
+        // Order matters: the direct solid quad is dispatched first, so it lands
+        // on the first drain and is the batch a mid-fill commit would strand.
+        let pre = vec![envelope("aether.render", &solid), envelope("aether.text", &glyph_draw)];
+        let label = format!("frame_{i}");
+        let captured = harness
+            .execute(vec![(label.as_str(), HarnessOp::capture_with_mails(pre, vec![]))])
+            .expect("capture-with-mails");
+        let img = decode_png(captured.captured(&label).expect("capture step ran")).expect("decode capture png");
+        let bg = background_top_left(&img);
+
+        // The glyphs (drain-2 batch) light the upper-left every frame — a
+        // sanity floor that the capture is not simply empty.
+        let glyph_lit = lit_fraction_in_rect(&img, 0, 0, 40, 32, bg, tolerance);
+        assert!(glyph_lit > 0.02, "frame {i}: the glyph batch is missing (lit {glyph_lit}) — capture drew nothing");
+
+        // The current tick's solid quad must be present at its column. Under
+        // the reverted ordering this drain-1 batch is stranded by the mid-fill
+        // commit, so its region reads background.
+        let current = lit_fraction_in_rect(&img, quad_x, quad_y, quad_size, quad_size, bg, tolerance);
+        assert!(
+            current > 0.8,
+            "frame {i}: the current tick's solid quad at column x={quad_x} is missing (lit {current}) — \
+             the capture recorded a stale frame that dropped the drain-1 batch",
+        );
+
+        // And the prior tick's column must have cleared — the capture reflects
+        // the latest tick's placement, not an accreted or replayed prior frame.
+        if let Some(prior_x) = prior_x {
+            let stale = lit_fraction_in_rect(&img, prior_x, quad_y, quad_size, quad_size, bg, tolerance);
+            assert!(
+                stale < 0.2,
+                "frame {i}: the prior tick's solid quad at column x={prior_x} is still lit (lit {stale}) — \
+                 the capture shows stale content",
+            );
+        }
+        prior_x = Some(quad_x);
+    }
 }
 
 /// Issue #2855: `aether.text.draw` forwards its framebuffer clip to the
