@@ -704,7 +704,7 @@ pub struct CommonEnv {
     pub namespace_roots: NamespaceRoots,
     /// The substrate runtime knobs (#3849), resolved off the source stack. Only
     /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
-    /// the subscriber installs, in each chassis's `build_inner`); the field
+    /// the subscriber installs, in each chassis's `Chassis::build`); the field
     /// carries the whole resolved member so its `[runtime]` file / env values are
     /// resolved once. `aether.rpc.server`'s bind port rides the source stack too
     /// (`RpcServerConfig`), so there is no separate `rpc_address` field — the
@@ -759,7 +759,7 @@ impl CommonEnv {
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?.to_scheduler_tuning();
         let teardown_budget = sources.resolve::<SettlementConfig>()?.to_cap();
         // #3849: resolve the substrate runtime knobs (log filter + panic-hook
-        // knobs) off the same stack; `build_inner` re-applies `log_filter` once
+        // knobs) off the same stack; `Chassis::build` re-applies `log_filter` once
         // the subscriber is installed.
         let runtime = sources.resolve::<RuntimeConfig>()?;
         // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
@@ -769,7 +769,7 @@ impl CommonEnv {
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved through
         // `ChassisBootConfig`). When set, the listed components' wasm + config are
-        // read into the autoload list `build_inner` drains into
+        // read into the autoload list `Chassis::build` drains into
         // `aether.component.load`; an unreadable manifest aborts boot (ADR-0090
         // §4) via `ConfigError`.
         let autoload = match chassis_boot.boot_manifest.clone() {

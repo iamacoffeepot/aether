@@ -45,7 +45,17 @@ impl Chassis for HubChassis {
     type Env = HubEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        Self::build_inner(env)
+        let boot = SubstrateBoot::build()?;
+        // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
+        // the subscriber is installed (env > `[runtime]` file > `info`).
+        apply_filter(&env.runtime.log_filter);
+        let builder = Self::compose(&boot, env);
+        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
+        // var, sweeping against the composition-derived known-key set (the
+        // declared fleet pass-through) plus the hub residual hand records.
+        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
+        let driver = HubServerDriverCapability { boot };
+        builder.driver(driver).build()
     }
 }
 
@@ -62,11 +72,11 @@ impl BootableChassis for HubChassis {
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots: the trace
     /// dispatcher, the engines cap, and the RPC server. Returns the composed
-    /// builder before the driver is installed — `build_inner` adds the
+    /// builder before the driver is installed — [`Chassis::build`] adds the
     /// signal-blocking driver and starts, while the describe / config helpers
     /// read the claim / config terminals off it. Takes the boot handle by
-    /// reference so `build_inner` can move the same `boot` into the driver
-    /// afterward.
+    /// reference so [`Chassis::build`] can move the same `boot` into the
+    /// driver afterward.
     fn compose(boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
         let HubEnv { sources, rpc_port, runtime: _, ring_capacities, scheduler_tuning, teardown_budget } = env;
         let registry = Arc::clone(&boot.registry);
@@ -123,7 +133,7 @@ pub struct HubEnv {
     /// [`DEFAULT_RPC_PORT`] fallback when unset (#3849), then composed as an
     /// explicit `with_actor_configured` override.
     pub rpc_port: u16,
-    /// The substrate runtime knobs (#3849); `build_inner` re-applies
+    /// The substrate runtime knobs (#3849); [`Chassis::build`] re-applies
     /// [`RuntimeConfig::log_filter`] after the subscriber installs.
     pub runtime: RuntimeConfig,
     pub ring_capacities: RingCapacities,
@@ -162,7 +172,7 @@ impl HubEnv {
     /// `Result` keeps the hard-error half free to join without a
     /// call-site change, matching desktop / headless.
     pub fn from_env_with_argv(cli: &HubCli) -> Result<Self, ConfigError> {
-        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `build_inner`,
+        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
         // where the composed builder's `config_manifest` (including the
         // declared fleet pass-through) supplies the hub's known-key set.
         let config_file = load_chassis_config(cli.config.clone())?;
@@ -193,22 +203,6 @@ impl HubEnv {
         // `with_actor_configured` override so the builder binds it.
         let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
         Ok(Self { sources, rpc_port, runtime, ring_capacities, scheduler_tuning, teardown_budget })
-    }
-}
-
-impl HubChassis {
-    fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::build()?;
-        // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
-        // the subscriber is installed (env > `[runtime]` file > `info`).
-        apply_filter(&env.runtime.log_filter);
-        let builder = Self::compose(&boot, env);
-        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
-        // var, sweeping against the composition-derived known-key set (the
-        // declared fleet pass-through) plus the hub residual hand records.
-        validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
-        let driver = HubServerDriverCapability { boot };
-        builder.driver(driver).build()
     }
 }
 

@@ -143,7 +143,12 @@ impl Chassis for BloomeryChassis {
     type Env = BloomeryEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        Self::build_inner(env)
+        let boot = SubstrateBoot::build()?;
+        let builder = Self::compose(&boot, env);
+        // The driver owns the boot and drops it on the shutdown signal — it
+        // moves in here, after `compose` finished borrowing it.
+        let driver = BloomeryDriverCapability { boot };
+        builder.driver(driver).build()
     }
 }
 
@@ -153,7 +158,7 @@ impl BloomeryChassis {
     /// provenance. Runs the shared ADR-0155 claim ceremony
     /// ([`aether_substrate::chassis::describe_caps`]) — resolve the bloomery
     /// config the same argv/env way a real boot does, compose the exact chain
-    /// `build_inner` runs, claim, read the roster — so it can never drift from
+    /// [`Chassis::build`] runs, claim, read the roster — so it can never drift from
     /// what boots. Bloomery keeps its own manifest assembly here rather than
     /// routing through `aether_chassis::describe_manifest`: it deliberately does
     /// not depend on the `aether-chassis` aggregate, and the `build.rs`
@@ -186,10 +191,10 @@ impl BootableChassis for BloomeryChassis {
     /// Compose the bloomery capability chain — the single claim/build path
     /// (ADR-0155) both [`Chassis::build`] and [`Self::describe_manifest`] run,
     /// so the manifest roster can never drift from what boots. Returns the
-    /// composed builder before the driver is installed: `build_inner` adds the
-    /// signal-blocking driver and starts, while `describe_manifest` reads the
-    /// claim terminal off it. Takes the boot handle by reference so
-    /// `build_inner` can move the same `boot` into the driver afterward.
+    /// composed builder before the driver is installed: [`Chassis::build`] adds
+    /// the signal-blocking driver and starts, while `describe_manifest` reads
+    /// the claim terminal off it. Takes the boot handle by reference so
+    /// [`Chassis::build`] can move the same `boot` into the driver afterward.
     fn compose(boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
@@ -268,17 +273,6 @@ impl BootableChassis for BloomeryChassis {
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
             )
             .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file })
-    }
-}
-
-impl BloomeryChassis {
-    fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::build()?;
-        let builder = Self::compose(&boot, env);
-        // The driver owns the boot and drops it on the shutdown signal — it
-        // moves in here, after `compose` finished borrowing it.
-        let driver = BloomeryDriverCapability { boot };
-        builder.driver(driver).build()
     }
 }
 

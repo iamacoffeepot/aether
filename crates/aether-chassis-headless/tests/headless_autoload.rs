@@ -1,7 +1,7 @@
 //! Headless boot-time autoload smoke (iamacoffeepot/aether#1529).
 //!
 //! Boots a real `HeadlessChassis` (not the substrate harness — the point is
-//! the headless `build_inner` autoload drain) with a probe component
+//! the headless `Chassis::build` autoload drain) with a probe component
 //! queued through the bundle-pack path, **no hub and no RPC server**,
 //! and asserts the component's trampoline comes up. The component list
 //! rides an encode→decode round trip of the pack format first, so this
