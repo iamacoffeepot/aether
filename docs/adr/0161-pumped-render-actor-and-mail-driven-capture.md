@@ -1,6 +1,6 @@
 # ADR-0161: Pumped Render Actor and Mail-Driven Capture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-22
 
 ## Context
