@@ -15,7 +15,7 @@
 //! 2. **Supervise** the hub and `aether-mcp` children: fork them with the
 //!    right ports injected, restart either on exit (capped backoff), and
 //!    SIGTERM→SIGKILL→reap them on shutdown / `Drop`. This mirrors the
-//!    fork+kill-on-drop precedent in `aether-engine`'s proxy
+//!    fork+kill-on-drop precedent in `aether-fleet`'s proxy
 //!    (`server.rs` fork, `proxy.rs` Drop).
 //!
 //! A tiny out-of-band `/admin` endpoint (never under `/mcp`) lets Claude
@@ -242,8 +242,8 @@ impl Tunnel {
 impl Drop for Tunnel {
     /// Last-resort reap: if the process is torn down without an orderly
     /// `terminate_all`, still SIGTERM→SIGKILL the children so no hub /
-    /// `aether-mcp` is orphaned. Mirrors `EngineProxy`'s Drop
-    /// (`aether-engine/src/proxy`).
+    /// `aether-mcp` is orphaned. Mirrors `FleetProxy`'s Drop
+    /// (`aether-fleet/src/proxy`).
     fn drop(&mut self) {
         let children = self.children.get_mut();
         for sup in children.values_mut() {

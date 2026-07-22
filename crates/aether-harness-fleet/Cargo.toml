@@ -16,7 +16,7 @@ license.workspace = true
 [dependencies]
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
-aether-engine = { path = "../aether-engine" }
+aether-fleet = { path = "../aether-fleet" }
 aether-kinds = { path = "../aether-kinds" }
 aether-rpc = { path = "../aether-rpc" }
 # The harness boots its hub chassis through the canonical

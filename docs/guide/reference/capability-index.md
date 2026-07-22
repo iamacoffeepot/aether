@@ -24,14 +24,14 @@ fallback or omits the runtime.
 | `aether.rpc.server` | framed internal process RPC | `aether-rpc/src` | [RPC](../systems/rpc.md) |
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-inventory/src` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-trace/src` | [Tracing](../systems/tracing-and-settlement.md) |
-| `aether.engine` | hub fleet and artifact control | `aether-engine/src` | [Engine fleet](../operating/engine-fleet.md) |
+| `aether.fleet` | hub fleet and artifact control | `aether-fleet/src` | [Engine fleet](../operating/engine-fleet.md) |
 | `aether.anthropic` | Messages API and CLI text generation | `aether-anthropic/src` | [Content generation](../systems/content-generation.md) |
 | `aether.gemini` | image and music generation | `aether-gemini/src` | [Content generation](../systems/content-generation.md) |
 | `aether.game.gateway` | trusted player/session-to-sim binding | `aether-game/src` | [Player sessions](../systems/player-sessions.md) |
 | `aether.substrate_harness` | deterministic test-chassis advance/control | `aether-harness-substrate/src` | [SubstrateHarness](../testing/substrateharness-and-fleetharness.md) |
 
 Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
-`aether.engine.proxy`, `aether.http.server.shard`, and guest trampolines gain
+`aether.fleet.proxy`, `aether.http.server.shard`, and guest trampolines gain
 lineage suffixes. Resolve them from results/inventory rather than constructing
 ids by hand.
 

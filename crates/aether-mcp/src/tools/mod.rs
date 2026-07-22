@@ -3,7 +3,7 @@
 //!
 //! Each tool translates to RPC `Call`s over the shared [`RpcSession`].
 //! Engine-management tools (`list_engines`, `spawn_substrate`,
-//! `terminate_substrate`) address the hub's own `aether.engine` cap
+//! `terminate_substrate`) address the hub's own `aether.fleet` cap
 //! (`engine = None`, dispatched locally on the hub); the per-engine
 //! tools (`send_mail`, `load_component`, `replace_component`,
 //! `capture_frame`) address a specific substrate (`engine = Some`),
@@ -117,7 +117,7 @@ const AWAIT_TIMEOUT_CAP_MS: u32 = 600_000;
 
 /// Mailbox name of the hub's engines cap — the `engine = None` target
 /// for the engine-management tools.
-const ENGINE_CAP: &str = "aether.engine";
+const FLEET_CAP: &str = "aether.fleet";
 /// Mailbox name of a substrate's component-host cap.
 const COMPONENT_CAP: &str = "aether.component";
 /// Mailbox name of a substrate's render cap.

@@ -92,8 +92,8 @@ authority over that alias. The artifact runbook defines the verification chain.
 ## Source routes
 
 - Native/component ingestion and `--describe` execution:
-  `crates/aether-engine/src/server/artifacts.rs`
-- Hub artifact store: `crates/aether-engine/src/store/`
+  `crates/aether-fleet/src/server/artifacts.rs`
+- Hub artifact store: `crates/aether-fleet/src/store/`
 - MCP component orchestration: `crates/aether-mcp/src/tools/components.rs`
 - Bytes-field host reads and reply spills: `crates/aether-mcp/src/tools/bytes.rs`
 - Capture validation and host write: `crates/aether-mcp/src/tools/capture.rs`

@@ -1,10 +1,10 @@
-//! `aether.engine.proxy:<id>` — per-engine proxy actor (issue 763 P3).
+//! `aether.fleet.proxy:<id>` — per-engine proxy actor (issue 763 P3).
 //!
 //! An instanced `NativeActor` that wraps one *outbound* RPC client
 //! connection to a substrate. The forward-model architecture (issue
 //! 763) makes every substrate an RPC server; the hub is the client.
 //! Each substrate the hub talks to gets one proxy, addressed
-//! `aether.engine.proxy:<engine-id>`.
+//! `aether.fleet.proxy:<engine-id>`.
 //!
 //! ## What it does
 //!
@@ -33,7 +33,7 @@
 //! Native-only: the state owns a `TcpStream` (via `RpcConnection`)
 //! and an OS thread, so the substrate-typed runtime half lives in the
 //! `runtime` module. The `#[actor]` macro divides the
-//! identity from that runtime (ADR-0122): the [`EngineProxy`] ZST and its
+//! identity from that runtime (ADR-0122): the [`FleetProxy`] ZST and its
 //! addressing markers stay in the identity file, while the state, handlers,
 //! and `Drop` live behind
 //! `runtime`.
@@ -63,35 +63,35 @@ mod heartbeat;
 #[cfg(test)]
 mod sinks;
 
-// `EngineProxyConfig` / `HeartbeatParams` carry only wasm-safe types,
+// `FleetProxyConfig` / `HeartbeatParams` carry only wasm-safe types,
 // but the proxy that consumes them is native-only, so the re-export is
-// gated like `TcpListenerConfig`. `EngineProxyConfig` rides `not(wasm)`
+// gated like `TcpListenerConfig`. `FleetProxyConfig` rides `not(wasm)`
 // because it re-exports on up to the crate root for chassis builders;
 // `HeartbeatParams` has no consumer outside the `runtime` half (the
 // `connect` / `heartbeat` modules and `server::runtime`), so it rides the
 // `runtime` gate to stay off a marker-only host build.
 #[cfg(not(target_family = "wasm"))]
-pub use config::EngineProxyConfig;
+pub use config::FleetProxyConfig;
 #[cfg(not(target_family = "wasm"))]
 pub use config::HeartbeatParams;
 
-// The engines cap (`aether.engine`) classifies a failed `spawn_child`
+// The engines cap (`aether.fleet`) classifies a failed `spawn_child`
 // with this to decide whether to re-fork on a fresh port (a stolen-port
 // child-exited death) or report a dead spawn. Native-only — it names
 // `SpawnError` / `BootError`.
 #[cfg(not(target_family = "wasm"))]
 pub use connect::is_reforkable_spawn_failure;
 
-/// `aether.engine.proxy:<id>` cap **identity** (ADR-0122 identity/runtime
+/// `aether.fleet.proxy:<id>` cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable` (`NAMESPACE`,
 /// `Resolver`), the per-handler `HandlesKind` markers, and the instanced
 /// name-inventory entry, all emitted always-on by
-/// `#[actor]`. The state-bearing runtime (`runtime::EngineProxyState`, which
+/// `#[actor]`. The state-bearing runtime (`runtime::FleetProxyState`, which
 /// holds the `aether_substrate`-typed RPC connection + the forked child +
 /// heartbeat handle) lives in `runtime.rs`, so the identity file never names
-/// `EngineProxyState`.
+/// `FleetProxyState`.
 #[actor(instanced)]
-pub struct EngineProxy;
+pub struct FleetProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
 // divides what it emits). Everything that names an `aether_substrate` type —
@@ -104,7 +104,7 @@ pub struct EngineProxy;
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `EngineProxyState`, its `Drop` + helper methods, `engine_cap_mailbox`) plus
+// `FleetProxyState`, its `Drop` + helper methods, `fleet_cap_mailbox`) plus
 // the `#[runtime] impl NativeActor` — lives in `runtime.rs`, gated once here.
 // The struct-hosted `#[actor]` above reads it off disk to emit the identity.
 mod runtime;
@@ -112,7 +112,7 @@ mod runtime;
 #[cfg(test)]
 use aether_kinds::DeathReason;
 #[cfg(test)]
-use sinks::{EngineCapCells, EngineCapSink, ProxyReplySink};
+use sinks::{FleetCapCells, FleetCapSink, ProxyReplySink};
 
 #[cfg(test)]
 mod tests {
@@ -120,7 +120,7 @@ mod tests {
     // fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{
-        DeathReason, EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig, HeartbeatParams, ProxyReplySink,
+        DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
     };
     use crate::kinds::ForwardEnvelope;
     use aether_actor::Addressable;
@@ -145,7 +145,7 @@ mod tests {
     }
 
     /// Full bridge round-trip: boot an RPC server + the echo actor + a
-    /// reply sink, spawn an `EngineProxy` pointed at the server's port,
+    /// reply sink, spawn an `FleetProxy` pointed at the server's port,
     /// forge a `ForwardEnvelope` at the proxy with the sink as
     /// reply-to, and observe the echoed value land on the sink — proof
     /// the proxy forwards as a `Call` and routes the `ReplyEvent` back
@@ -175,9 +175,9 @@ mod tests {
         // loopback. A successful `finish()` means `init` connected +
         // handshook.
         chassis
-            .spawn_actor::<EngineProxy>(
+            .spawn_actor::<FleetProxy>(
                 Subname::Named("e1"),
-                EngineProxyConfig {
+                FleetProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(1)),
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
@@ -191,7 +191,7 @@ mod tests {
             .finish()
             .expect("proxy spawns + connects");
 
-        let proxy_mailbox = chassis.resolve_actor::<EngineProxy>("e1").expect("proxy resolves Live");
+        let proxy_mailbox = chassis.resolve_actor::<FleetProxy>("e1").expect("proxy resolves Live");
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
         let sink_mailbox = mailbox_id_from_name(<ProxyReplySink as Addressable>::NAMESPACE);
 
@@ -239,9 +239,9 @@ mod tests {
         drop(listener);
 
         let result = chassis
-            .spawn_actor::<EngineProxy>(
+            .spawn_actor::<FleetProxy>(
                 Subname::Named("dead"),
-                EngineProxyConfig {
+                FleetProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(2)),
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,
@@ -304,25 +304,25 @@ mod tests {
     }
 
     /// Boot a chassis hosting the engine-cap sink, point an
-    /// `EngineProxy` (with the given heartbeat) at `port`, and return
+    /// `FleetProxy` (with the given heartbeat) at `port`, and return
     /// the chassis (kept alive for its dispatcher threads) + the sink
     /// cells. `engine_id` is `Uuid::from_u128(seed)`.
     fn spawn_proxy_with_heartbeat(
         seed: u128,
         port: u16,
         heartbeat: Option<HeartbeatParams>,
-    ) -> (PassiveChassis<TestChassis>, EngineCapCells, String) {
+    ) -> (PassiveChassis<TestChassis>, FleetCapCells, String) {
         let (registry, mailer) = fresh_substrate();
-        let cells = EngineCapCells::default();
+        let cells = FleetCapCells::default();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<EngineCapSink>(cells.clone())
+            .with_actor::<FleetCapSink>(cells.clone())
             .build_passive()
             .expect("caps boot");
         let engine_id = EngineId(Uuid::from_u128(seed));
         chassis
-            .spawn_actor::<EngineProxy>(
+            .spawn_actor::<FleetProxy>(
                 Subname::Named("e"),
-                EngineProxyConfig {
+                FleetProxyConfig {
                     engine_id,
                     rpc_addr: format!("127.0.0.1:{port}"),
                     spawned: None,

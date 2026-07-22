@@ -515,14 +515,14 @@ pub fn chassis_residual_knobs() -> Vec<KnobRecord> {
 }
 
 /// The hub's residual knobs: the shared [`chassis_residual_knobs`] plus the
-/// hub-only `AETHER_ENGINE_STORE_ROOT` hand knob (the engines cap's inline
+/// hub-only `AETHER_FLEET_STORE_ROOT` hand knob (the engines cap's inline
 /// ops override, issue 1968 — a knob with no confique `Meta`, so it stays a
 /// hand record rather than an aggregate member).
 #[must_use]
 pub fn hub_residual_knobs() -> Vec<KnobRecord> {
     let mut records = chassis_residual_knobs();
     records.push(KnobRecord {
-        env_key: "AETHER_ENGINE_STORE_ROOT",
+        env_key: "AETHER_FLEET_STORE_ROOT",
         doc: "Parent directory for the engines cap's per-engine handle-store dirs; ops escape \
               hatch (unset falls back to the platform data dir, then the system temp dir).",
         default: None,
@@ -538,8 +538,8 @@ pub fn hub_residual_knobs() -> Vec<KnobRecord> {
 /// config layer) and [`FrameSizeConfig`] (`AETHER_MAX_FRAME_SIZE`, pushed into
 /// the codec by [`install_frame_size`]) both ride derive-`Config` members whose
 /// overlays are deliberately not flattened into the CLI roots. Every other knob
-/// a chassis resolves — including the engines cap's `AETHER_ENGINE_STORE_ROOT`
-/// (`--hub-engine-store-root`) — has a flag, so it stays out of this section (the
+/// a chassis resolves — including the engines cap's `AETHER_FLEET_STORE_ROOT`
+/// (`--hub-fleet-store-root`) — has a flag, so it stays out of this section (the
 /// issue's no-duplication rule); the residue is the same on all three chassis.
 ///
 /// The per-knob line is harvested from the derive-emitted overlay's clap help,
@@ -1175,12 +1175,12 @@ mod tests {
     }
 
     #[test]
-    fn hub_residual_knobs_add_the_engine_store_root() {
+    fn hub_residual_knobs_add_the_fleet_store_root() {
         // The hub folds one extra hand record over the shared residual set:
-        // the engines-cap `AETHER_ENGINE_STORE_ROOT` ops override (a knob with
+        // the engines-cap `AETHER_FLEET_STORE_ROOT` ops override (a knob with
         // no confique `Meta`, so it stays a hand record rather than a member).
         let keys: Vec<&str> = super::hub_residual_knobs().iter().map(|record| record.env_key).collect();
-        assert!(keys.contains(&"AETHER_ENGINE_STORE_ROOT"), "hub residual knobs must carry AETHER_ENGINE_STORE_ROOT");
+        assert!(keys.contains(&"AETHER_FLEET_STORE_ROOT"), "hub residual knobs must carry AETHER_FLEET_STORE_ROOT");
         assert!(keys.contains(&"AETHER_CONFIG_FILE"), "hub residual knobs must extend the shared residual set");
     }
 

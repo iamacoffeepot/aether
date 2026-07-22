@@ -128,7 +128,7 @@ pub fn connect_proxy(
         return match RpcClient::connect(
             addr,
             PeerKind::Client {
-                client_name: "aether.engine.proxy".to_owned(),
+                client_name: "aether.fleet.proxy".to_owned(),
                 client_version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             on_frame,
@@ -171,7 +171,7 @@ pub fn connect_proxy(
     }
 }
 
-/// `true` when a failed `spawn_child::<EngineProxy>` is the re-forkable
+/// `true` when a failed `spawn_child::<FleetProxy>` is the re-forkable
 /// child-exited-during-startup death — a stolen RPC port made the
 /// substrate's bind fatal, surfaced through `SpawnError::InitFailed` →
 /// `BootError::Other` → a boxed `ProxyConnectError::ChildExited`.

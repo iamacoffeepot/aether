@@ -6,7 +6,7 @@ use super::super::*;
 /// `list_engines` with no `show` argument yields an object with empty
 /// `engines` / `recently_died` arrays on a fresh hub — proves the
 /// whole `RpcSession` demux + the `engine = None` Call path against
-/// the real `aether.engine` cap, the issue-1906 output shape, and that
+/// the real `aether.fleet` cap, the issue-1906 output shape, and that
 /// the issue-2985 `show` default (`"all"`) preserves the pre-filter
 /// shape byte-for-byte so existing callers see no change.
 #[tokio::test]

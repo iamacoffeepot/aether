@@ -1,7 +1,7 @@
 //! Hub chassis (post-issue-763 P5f). The hub is now a thin coordinator
 //! between the out-of-process `aether-mcp` MCP server and the
 //! substrates the engines cap forks: it stands up a `SubstrateBoot` to
-//! host actors, wires `TraceDispatchCapability` + `EngineServer` +
+//! host actors, wires `TraceDispatchCapability` + `FleetServer` +
 //! `RpcServerCapability` (the inbound `aether-mcp` dials), and blocks
 //! on a SIGINT/SIGTERM signal in `run`. The OLD `EngineToHub` TCP
 //! listener, hub-side sessions, `ProcessCapability`, loopback drainers,
@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_engine::EngineServer;
+use aether_fleet::FleetServer;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
@@ -75,10 +75,10 @@ impl BootableChassis for HubChassis {
         // ADR-0156 §4: declare the hub's fleet pass-through set — the full
         // fleet knobs a hub-spawned substrate inherits from the hub's env, the
         // one documented over-approximation in the aggregate. The engines cap
-        // (`EngineConfig`) declares its own member via `with_actor` below.
+        // (`FleetConfig`) declares its own member via `with_actor` below.
         //
         // ADR-0156 §5: hand the builder the source stack so it resolves the
-        // composed `EngineServer`'s `EngineConfig` (the liveness-heartbeat
+        // composed `FleetServer`'s `FleetConfig` (the liveness-heartbeat
         // tuning, issue 1339) off it. #3849: the RPC server's `Config` is now a
         // derive member resolved off the stack; the hub always binds, so it
         // composes the resolved-with-default port as an explicit override.
@@ -87,7 +87,7 @@ impl BootableChassis for HubChassis {
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_budget(teardown_budget)
             .with_actor::<TraceDispatchCapability>(())
-            .with_actor::<EngineServer>(())
+            .with_actor::<FleetServer>(())
             .with_actor_configured::<RpcServerCapability>(
                 RpcServerParams {
                 peer_kind: PeerKind::Substrate {
@@ -96,7 +96,7 @@ impl BootableChassis for HubChassis {
                     kinds: vec![],
                 },
                 #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
-                route_target: Some(aether_data::mailbox_id_from_name("aether.engine")),
+                route_target: Some(aether_data::mailbox_id_from_name("aether.fleet")),
             },
                 RpcServerConfig { port: Some(rpc_port) },
             )
@@ -108,14 +108,14 @@ impl BootableChassis for HubChassis {
 /// coordinator dials — resolved off the source stack (`--rpc-port` >
 /// `AETHER_RPC_PORT` > `[rpc]` file) with the [`DEFAULT_RPC_PORT`] fallback.
 ///
-/// ADR-0156 §5: the engines-cap `Config` (`EngineConfig`, the liveness
+/// ADR-0156 §5: the engines-cap `Config` (`FleetConfig`, the liveness
 /// heartbeat tuning) no longer rides as a field — the builder resolves it off
 /// [`Self::sources`]. What remains is the source stack plus the chassis-side
 /// reads of the non-cap pool / ring / scheduler / teardown / runtime knobs and
 /// the RPC port.
 pub struct HubEnv {
     /// The config source stack (file + the engines-cap argv overlay) the
-    /// builder resolves the composed `EngineServer`'s `Config` off (ADR-0156 §5).
+    /// builder resolves the composed `FleetServer`'s `Config` off (ADR-0156 §5).
     pub sources: ConfigSources,
     /// The resolved `aether.rpc.server` bind port. The hub always binds (unlike
     /// desktop / headless): `RpcServerConfig` is resolved off the source stack
@@ -168,7 +168,7 @@ impl HubEnv {
         let config_file = load_chassis_config(cli.config.clone())?;
         // ADR-0156 §5: assemble the source stack — the loaded config file plus
         // the engines-cap and RPC-server argv overlays. The builder resolves the
-        // composed `EngineServer`'s `EngineConfig` off this; the chassis resolves
+        // composed `FleetServer`'s `FleetConfig` off this; the chassis resolves
         // the non-cap ring / scheduler / teardown / runtime knobs and the
         // RPC-server port below off the same stack via their `ConfigMember`
         // sections.
@@ -320,6 +320,6 @@ mod config_manifest_tests {
         assert!(known.contains("AETHER_WINDOW_MODE"), "hub declares the fleet window knob as pass-through");
         assert!(known.contains("AETHER_TICK_HZ"), "hub declares the fleet tick knob as pass-through");
         assert!(known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"), "hub claims its own composed engines-cap knob");
-        assert!(known.contains("AETHER_ENGINE_STORE_ROOT"), "hub folds in the store-root residual knob");
+        assert!(known.contains("AETHER_FLEET_STORE_ROOT"), "hub folds in the store-root residual knob");
     }
 }

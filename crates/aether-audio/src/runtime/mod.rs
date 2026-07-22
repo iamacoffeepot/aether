@@ -11,7 +11,7 @@
 //! sender. `Drop` drops the shutdown sender (the worker's `recv()` returns, it
 //! drops the `cpal::Stream` on its own thread and exits) then joins the
 //! worker, so the RAII teardown follows those fields onto the state — the same
-//! shape the already-split heavy `EngineProxyState` uses to reap its child +
+//! shape the already-split heavy `FleetProxyState` uses to reap its child +
 //! sidecar thread.
 
 use std::sync::mpsc;

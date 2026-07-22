@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[kind(name = "aether.rpc.inbound_ready")]
 pub struct RpcInboundReady {}
 
-/// `aether.rpc.route` — ask the engines cap (`aether.engine`) to
+/// `aether.rpc.route` — ask the engines cap (`aether.fleet`) to
 /// relay one mail to a *specific* engine's substrate. Issue 763 P5a.
 ///
 /// The engine-addressed sibling of `ForwardEnvelope`: where
@@ -26,7 +26,7 @@ pub struct RpcInboundReady {}
 /// `RpcServerCapability`, relaying an `engine = Some(_)` wire
 /// `Call`) doesn't know which proxy hosts that engine. The engines
 /// cap looks the engine up in its table and re-emits a
-/// `ForwardEnvelope` at the right `aether.engine.proxy:<id>`,
+/// `ForwardEnvelope` at the right `aether.fleet.proxy:<id>`,
 /// propagating the original reply-to so the substrate's reply
 /// streams back to the originating `RpcServerCapability`.
 #[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone)]

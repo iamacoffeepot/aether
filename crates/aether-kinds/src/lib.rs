@@ -80,11 +80,11 @@ mod engine {
     use crate::KindDescriptorWire;
     use serde::{Deserialize, Serialize};
 
-    /// `aether.engine.list` — ask the engines cap (`aether.engine`) to
+    /// `aether.fleet.list` — ask the engines cap (`aether.fleet`) to
     /// enumerate every engine it currently supervises. Fieldless
     /// request; the reply is a [`ListEnginesResult`]. Issue 763 P4.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.engine.list")]
+    #[kind(name = "aether.fleet.list")]
     pub struct ListEngines {}
 
     /// One supervised engine, as reported in a [`ListEnginesResult`].
@@ -113,7 +113,7 @@ mod engine {
     /// the cause without parsing free text; the `detail` string on the
     /// non-clean variants carries the specifics.
     ///
-    /// - `Terminated` — a deliberate `aether.engine.terminate` shut the
+    /// - `Terminated` — a deliberate `aether.fleet.terminate` shut the
     ///   engine down. The clean-shutdown case; carries no detail.
     /// - `Crashed { detail }` — the substrate closed its RPC connection
     ///   (`Bye` / eof) on its own; `detail` is the close reason the proxy
@@ -150,11 +150,11 @@ mod engine {
         pub died_age_millis: u64,
     }
 
-    /// `aether.engine.list_result` — reply to [`ListEngines`]: every
+    /// `aether.fleet.list_result` — reply to [`ListEngines`]: every
     /// engine the cap supervises right now, plus a bounded sidecar of the
     /// engines that recently left and why. Issue 763 P4.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.list_result")]
+    #[kind(name = "aether.fleet.list_result")]
     pub struct ListEnginesResult {
         pub engines: Vec<EngineDescriptor>,
         /// The recently-died ring: the last few engines that left the
@@ -192,7 +192,7 @@ mod engine {
         pub target: Option<String>,
     }
 
-    /// `aether.engine.spawn` — ask the engines cap to fork+exec a
+    /// `aether.fleet.spawn` — ask the engines cap to fork+exec a
     /// substrate binary and connect a per-engine proxy to it. Issue
     /// 763 P4.
     ///
@@ -201,7 +201,7 @@ mod engine {
     /// an executable temp file, picks a free localhost port for the
     /// substrate's `RpcServerCapability`, injects it as `AETHER_RPC_PORT`,
     /// forks the realized binary with `args` forwarded verbatim, then
-    /// boots an `aether.engine.proxy:<id>` actor that dials it. Reply:
+    /// boots an `aether.fleet.proxy:<id>` actor that dials it. Reply:
     /// [`SpawnEngineResult`] — `Err` if the selector resolves to no stored
     /// binary. The host filesystem path is gone from the spawn surface;
     /// the only path input is the one-time [`UploadBinary`].
@@ -214,7 +214,7 @@ mod engine {
     /// loading — no follow-up `load_component` round-trips. `None` boots
     /// a bare engine, the pre-existing behaviour.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.spawn")]
+    #[kind(name = "aether.fleet.spawn")]
     pub struct SpawnEngine {
         pub selector: BinarySelector,
         pub args: Vec<String>,
@@ -234,22 +234,22 @@ mod engine {
     /// entry in [`ListEnginesResult`]'s `recently_died` ring, so a caller
     /// can correlate and reap. On `Err` no child process is left running.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.spawn_result")]
+    #[kind(name = "aether.fleet.spawn_result")]
     pub enum SpawnEngineResult {
         Ok { engine_id: String, rpc_port: u16 },
         Err { engine_id: Option<String>, error: String },
     }
 
-    /// `aether.engine.terminate` — ask the engines cap to shut down a
+    /// `aether.fleet.terminate` — ask the engines cap to shut down a
     /// supervised engine. Issue 763 P4.
     ///
     /// The cap forwards this kind to the engine's
-    /// `aether.engine.proxy:<id>` actor, which SIGKILLs the child
+    /// `aether.fleet.proxy:<id>` actor, which SIGKILLs the child
     /// substrate it forked and self-shuts-down. `engine_id` is the
     /// plain UUID string from [`SpawnEngineResult`] /
     /// [`ListEnginesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.terminate")]
+    #[kind(name = "aether.fleet.terminate")]
     pub struct TerminateEngine {
         pub engine_id: String,
     }
@@ -257,7 +257,7 @@ mod engine {
     /// Reply to [`TerminateEngine`]. Issue 763 P4. `Err` is for an
     /// `engine_id` that doesn't parse or names no supervised engine.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.terminate_result")]
+    #[kind(name = "aether.fleet.terminate_result")]
     pub enum TerminateEngineResult {
         Ok,
         Err { error: String },
@@ -300,7 +300,7 @@ mod engine {
         pub manifest: BinaryManifest,
     }
 
-    /// `aether.engine.upload_binary` — ingest a binary into the hub's
+    /// `aether.fleet.upload_binary` — ingest a binary into the hub's
     /// content-addressed store (ADR-0115, issue 1953). `staged_path` is an
     /// absolute host path the hub reads itself (aether-mcp never reads the
     /// bytes — a binary is too large to ride the tool channel); the cap
@@ -309,7 +309,7 @@ mod engine {
     /// stores both. `name`, when set, points that human-readable name at
     /// the resulting hash. Reply: [`UploadBinaryResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_binary")]
+    #[kind(name = "aether.fleet.upload_binary")]
     pub struct UploadBinary {
         pub staged_path: String,
         pub name: Option<String>,
@@ -322,13 +322,13 @@ mod engine {
     /// `staged_path`, or a `--describe` that failed or didn't yield a
     /// parseable manifest.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_binary_result")]
+    #[kind(name = "aether.fleet.upload_binary_result")]
     pub enum UploadBinaryResult {
         Ok { hash: String, name: Option<String> },
         Err { error: String },
     }
 
-    /// `aether.engine.list_binaries` — enumerate the hub's stored binaries
+    /// `aether.fleet.list_binaries` — enumerate the hub's stored binaries
     /// (ADR-0115, issue 1953). The filter fields are AND-combined and each
     /// defaults to "no constraint": `chassis` keeps only entries whose
     /// `manifest.chassis` matches, `caps` keeps only entries whose
@@ -339,7 +339,7 @@ mod engine {
     /// after filtering (`None` defaults to 20; `Some(0)` returns no entries).
     /// Reply: [`ListEngineBinariesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.engine.list_binaries")]
+    #[kind(name = "aether.fleet.list_binaries")]
     pub struct ListEngineBinaries {
         pub chassis: Option<String>,
         pub caps: Vec<String>,
@@ -354,7 +354,7 @@ mod engine {
     /// manifest. `total_matched` is counted after attribute/history filtering
     /// and before the requested limit is applied.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.list_binaries_result")]
+    #[kind(name = "aether.fleet.list_binaries_result")]
     pub struct ListEngineBinariesResult {
         pub binaries: Vec<BinaryEntry>,
         pub total_matched: u32,
@@ -448,7 +448,7 @@ mod engine {
         pub handled_kind: Option<aether_data::KindId>,
     }
 
-    /// `aether.engine.upload_component` — ingest a component wasm into the
+    /// `aether.fleet.upload_component` — ingest a component wasm into the
     /// hub's content-addressed store (ADR-0116, issue 1956). `staged_path`
     /// is an absolute host path the hub reads itself (aether-mcp never reads
     /// the bytes — too large for the tool channel); the cap sha256-hashes
@@ -458,7 +458,7 @@ mod engine {
     /// `name`, when set, points that human-readable name at the resulting
     /// hash. Reply: [`UploadComponentResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_component")]
+    #[kind(name = "aether.fleet.upload_component")]
     pub struct UploadComponent {
         pub staged_path: String,
         pub name: Option<String>,
@@ -470,19 +470,19 @@ mod engine {
     /// at it, if any. `Err` carries a free-form reason — an unreadable
     /// `staged_path` or a wasm whose manifest can't be parsed.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.upload_component_result")]
+    #[kind(name = "aether.fleet.upload_component_result")]
     pub enum UploadComponentResult {
         Ok { hash: String, name: Option<String> },
         Err { error: String },
     }
 
-    /// `aether.engine.resolve_component` — resolve a [`ComponentSelector`]
+    /// `aether.fleet.resolve_component` — resolve a [`ComponentSelector`]
     /// to a stored component's wasm bytes + manifest (ADR-0116, issue
     /// 1956). aether-mcp calls this hub-local before forwarding a
     /// `LoadComponent` to the target substrate, so the resolve hop keeps the
     /// load seam path-free. Reply: [`ResolveComponentResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.resolve_component")]
+    #[kind(name = "aether.fleet.resolve_component")]
     pub struct ResolveComponent {
         pub selector: ComponentSelector,
     }
@@ -498,7 +498,7 @@ mod engine {
     /// attribute query matching more than one (a clean ambiguity error).
     #[allow(clippy::large_enum_variant)]
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.resolve_component_result")]
+    #[kind(name = "aether.fleet.resolve_component_result")]
     pub enum ResolveComponentResult {
         Ok {
             hash: String,
@@ -518,7 +518,7 @@ mod engine {
         },
     }
 
-    /// `aether.engine.list_components` — enumerate the hub's stored
+    /// `aether.fleet.list_components` — enumerate the hub's stored
     /// components (ADR-0116, issue 1956). The filter fields are
     /// AND-combined and each defaults to "no constraint": `namespace` keeps
     /// only entries exporting that actor namespace, `handled_kind` keeps
@@ -528,7 +528,7 @@ mod engine {
     /// (`None` defaults to 20; `Some(0)` returns no entries). Reply:
     /// [`ListComponentBinariesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kind(name = "aether.engine.list_components")]
+    #[kind(name = "aether.fleet.list_components")]
     pub struct ListComponentBinaries {
         pub namespace: Option<String>,
         pub handled_kind: Option<aether_data::KindId>,
@@ -542,7 +542,7 @@ mod engine {
     /// read from the wasm. `total_matched` is counted after attribute/history
     /// filtering and before the requested limit is applied.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.engine.list_components_result")]
+    #[kind(name = "aether.fleet.list_components_result")]
     pub struct ListComponentBinariesResult {
         pub components: Vec<ComponentEntry>,
         pub total_matched: u32,

@@ -1,7 +1,7 @@
 //! Content-addressed artifact store for the hub (ADR-0115, issue 1953).
 //!
-//! Private implementation detail of the `aether.engine` cap: a plain
-//! struct held as one field of `EngineServer`, keeping uploaded binaries
+//! Private implementation detail of the `aether.fleet` cap: a plain
+//! struct held as one field of `FleetServer`, keeping uploaded binaries
 //! content-addressed, ingesting one from a staged host path, and reading
 //! what each binary *is*. The store is hub-scoped and keyed on a sha256
 //! over the raw bytes, so an identical re-upload dedups to the same entry.
@@ -31,7 +31,7 @@
 //! ## Layout
 //!
 //! Under a hub-scoped, layout-versioned root — the dir resolved from
-//! `EngineConfig`'s `binary_store_dir` field (the `AETHER_BINARY_STORE_DIR`
+//! `FleetConfig`'s `binary_store_dir` field (the `AETHER_BINARY_STORE_DIR`
 //! env layer, ADR-0090) or the computed default `data_dir/aether/binaries/v1`:
 //!
 //! ```text
@@ -81,7 +81,7 @@ pub const LAYOUT_VERSION_DIR: &str = "v1";
 
 /// Default on-disk byte budget. 16 GiB; binaries are tens of megabytes,
 /// so this holds a deep history before LRU eviction kicks in.
-/// `EngineConfig`'s `binary_disk_budget_bytes`
+/// `FleetConfig`'s `binary_disk_budget_bytes`
 /// carries this as its literal default (`17_179_869_184`) and folds an
 /// unparseable env value back to it.
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -112,8 +112,8 @@ impl ArtifactStore {
     /// The computed default layout root for the store — `data_dir`'s
     /// `aether/binaries/<LAYOUT_VERSION_DIR>`, or a `temp_dir` fallback
     /// when no platform data dir resolves. No env read: the
-    /// `AETHER_BINARY_STORE_DIR` override now rides `EngineConfig`'s
-    /// `binary_store_dir` field (ADR-0090), and `EngineServer::init` joins
+    /// `AETHER_BINARY_STORE_DIR` override now rides `FleetConfig`'s
+    /// `binary_store_dir` field (ADR-0090), and `FleetServer::init` joins
     /// [`LAYOUT_VERSION_DIR`] to a configured override or falls back here
     /// when it's unset. Hub-domain naming, so it stays hub-side glue rather
     /// than moving into the domain-neutral core (ADR-0149 §Affected surfaces).

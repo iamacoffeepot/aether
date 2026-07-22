@@ -2,14 +2,14 @@
 // (issue 763 P5a).
 //
 // Boots a "hub" chassis (forwarding `RpcServerCapability` + the
-// `aether.engine` engines cap), connects a raw RPC client to it, and
+// `aether.fleet` engines cap), connects a raw RPC client to it, and
 // drives the whole forward model through that one socket — exactly
 // the shape the out-of-process `aether-mcp` binary will take in P5d:
 //
 //   1. An `engine = None` Call spawns a real `aether-substrate-headless`
 //      via the engines cap and yields its `engine_id`.
 //   2. An `engine = Some(engine_id)` Call is *routed* — hub RpcServer
-//      -> `aether.engine` -> proxy -> (RPC) -> substrate -> back — and
+//      -> `aether.fleet` -> proxy -> (RPC) -> substrate -> back — and
 //      the substrate's reply streams home as `ReplyEvent` + `ReplyEnd`.
 //   3. An `engine = None` `TerminateEngine` Call cleans the engine up.
 //
@@ -22,7 +22,7 @@
 
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
-use aether_engine::{EngineConfig, EngineServer};
+use aether_fleet::{FleetConfig, FleetServer};
 use aether_fs::{List, ListResult};
 use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
@@ -44,10 +44,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs, process};
 
 /// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
-/// (engine-addressed Calls route through `aether.engine`), the engines
+/// (engine-addressed Calls route through `aether.fleet`), the engines
 /// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
 /// (`spawn`, `terminate`) settle and close.
-fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
+fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -56,7 +56,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor_configured::<EngineServer>((), engine_config)
+        .with_actor_configured::<FleetServer>((), engine_config)
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
                 peer_kind: PeerKind::Substrate {
@@ -64,7 +64,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                route_target: Some(mailbox_id_from_name("aether.engine")),
+                route_target: Some(mailbox_id_from_name("aether.fleet")),
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -168,7 +168,7 @@ impl Drop for SubstrateReaper {
             &WireFrame::Call {
                 cid: Some(99),
                 envelope: MailEnvelope {
-                    to: MailboxAddress { engine: None, mailbox: mailbox_id_from_name("aether.engine") },
+                    to: MailboxAddress { engine: None, mailbox: mailbox_id_from_name("aether.fleet") },
                     from: None,
                     kind: TerminateEngine::ID,
                     correlation_id: None,
@@ -206,17 +206,17 @@ mod tests {
         let bin_store = env::temp_dir().join(format!("aether-rpcroute-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-rpcroute-store-{}-{nanos}", process::id()));
         // The store dir / engine-store-root / bootstrap list ride
-        // `EngineConfig` (ADR-0090) instead of an env side-channel; the
-        // heartbeat stays disabled (the `Default`). `engine_store_root`
+        // `FleetConfig` (ADR-0090) instead of an env side-channel; the
+        // heartbeat stays disabled (the `Default`). `fleet_store_root`
         // isolates this run's per-engine spawn-dir parent (issue 1274)
         // from the shared default (`~/.local/share/aether/engines`),
         // which would collide with any sibling test, leaked orphan, or
         // live MCP engine on id `0…01`.
-        let engine_config = EngineConfig {
+        let engine_config = FleetConfig {
             binary_store_dir: Some(bin_store.to_string_lossy().into_owned()),
-            engine_store_root: Some(root.to_string_lossy().into_owned()),
+            fleet_store_root: Some(root.to_string_lossy().into_owned()),
             binary_bootstrap: HashSet::from([headless]),
-            ..EngineConfig::default()
+            ..FleetConfig::default()
         };
 
         let (_chassis, hub_port) = boot_hub(engine_config);
@@ -253,7 +253,7 @@ mod tests {
             &mut stream,
             1,
             None,
-            "aether.engine",
+            "aether.fleet",
             &SpawnEngine {
                 selector: BinarySelector { query: None, chassis: None, caps: vec![], target: None },
                 args: vec![],
@@ -270,7 +270,7 @@ mod tests {
         let mut reaper = SubstrateReaper { hub_port, engine_id: Some(engine_id.0.to_string()) };
 
         // 2. engine = Some(_): a ROUTED call. The hub forwards it through
-        //    aether.engine -> proxy -> (RPC) -> the substrate's aether.fs
+        //    aether.fleet -> proxy -> (RPC) -> the substrate's aether.fs
         //    -> back. This is the P5a proof.
         let (routed_kind, _routed_payload) = call_round_trip(
             &mut stream,
@@ -291,7 +291,7 @@ mod tests {
             &mut stream,
             3,
             None,
-            "aether.engine",
+            "aether.fleet",
             &TerminateEngine { engine_id: engine_id.0.to_string() },
         );
         assert_eq!(term_kind, <aether_kinds::TerminateEngineResult as Kind>::ID);

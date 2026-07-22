@@ -171,7 +171,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-render) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The `aether-engine` integration tests (`fleetharness_spawn`,
+# The `aether-fleet` integration tests (`fleetharness_spawn`,
 # `fleetharness_terminate`, `engines_cap`, rehomed from the bundle by
 # iamacoffeepot/aether#3779) are the same slow class: they fork real debug
 # `aether-substrate-headless` processes and wait for them to bind, which
@@ -181,7 +181,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # default. No binary-specific override exists for this package, so
 # first-match-wins ordering is unconstrained here.
 [[profile.ci.overrides]]
-filter = "package(=aether-engine) & kind(test)"
+filter = "package(=aether-fleet) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The fleetharness replace binary also cold-loads `aether_kit.wasm` and was

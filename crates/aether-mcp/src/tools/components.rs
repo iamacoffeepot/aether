@@ -2,7 +2,7 @@ use super::bytes::resolve_bytes_params;
 use super::envelope::{engine_envelope, local_envelope};
 use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind, static_kind_name};
 use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
-use super::{COMPONENT_CAP, ENGINE_CAP, Mcp};
+use super::{COMPONENT_CAP, FLEET_CAP, Mcp};
 use crate::args::{
     ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
     UploadComponentArgs,
@@ -299,7 +299,7 @@ pub(super) async fn upload_binary(mcp: &Mcp, args: UploadBinaryArgs) -> Result<S
     // reading the bytes (unlike load_component).
     let reply = mcp
         .session
-        .call_one(local_envelope(ENGINE_CAP, &UploadBinary { staged_path: args.staged_path, name: args.name }))
+        .call_one(local_envelope(FLEET_CAP, &UploadBinary { staged_path: args.staged_path, name: args.name }))
         .await
         .map_err(internal)?;
     match UploadBinaryResult::decode_from_bytes(&reply.payload) {
@@ -313,7 +313,7 @@ pub(super) async fn list_binaries(mcp: &Mcp, args: ListBinariesArgs) -> Result<S
     let reply = mcp
         .session
         .call_one(local_envelope(
-            ENGINE_CAP,
+            FLEET_CAP,
             &ListEngineBinaries {
                 chassis: args.chassis,
                 caps: args.caps,
@@ -336,7 +336,7 @@ pub(super) async fn upload_component(mcp: &Mcp, args: UploadComponentArgs) -> Re
     // pulls the bytes back from the store).
     let reply = mcp
         .session
-        .call_one(local_envelope(ENGINE_CAP, &UploadComponent { staged_path: args.staged_path, name: args.name }))
+        .call_one(local_envelope(FLEET_CAP, &UploadComponent { staged_path: args.staged_path, name: args.name }))
         .await
         .map_err(internal)?;
     match UploadComponentResult::decode_from_bytes(&reply.payload) {
@@ -354,7 +354,7 @@ pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Resu
     let reply = mcp
         .session
         .call_one(local_envelope(
-            ENGINE_CAP,
+            FLEET_CAP,
             &ListComponentBinaries {
                 namespace: args.namespace,
                 handled_kind,

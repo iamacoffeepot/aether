@@ -11,36 +11,36 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use std::sync::{Arc, Mutex};
 
-/// Shared capture cells for [`EngineCapSink`]. Lives at file root (not
-/// inside an actor's state) like `EngineServer`'s `ReplyCells` — it's the
+/// Shared capture cells for [`FleetCapSink`]. Lives at file root (not
+/// inside an actor's state) like `FleetServer`'s `ReplyCells` — it's the
 /// sink actor's `Config`, so it must be addressable from the actor's `init`.
 /// `died` keeps the whole [`EngineDied`] (id + reason) so the death-path
 /// tests can assert the surfaced cause.
 #[derive(Clone, Default)]
-pub struct EngineCapCells {
+pub struct FleetCapCells {
     pub alive: Arc<Mutex<Vec<String>>>,
     pub died: Arc<Mutex<Vec<EngineDied>>>,
 }
 
 /// Test-only stand-in for the engines cap, registered at the cap's own
-/// `aether.engine` mailbox so a proxy's `EngineAlive` / `EngineDied`
-/// reports land here without booting the real `EngineServer`. Records
+/// `aether.fleet` mailbox so a proxy's `EngineAlive` / `EngineDied`
+/// reports land here without booting the real `FleetServer`. Records
 /// the reported `engine_id`s into shared vecs the heartbeat tests
 /// assert on. A field-bearing `#[cfg(test)]` actor, so it stays the
 /// un-split `type State = Self` shape (ADR-0122).
-pub struct EngineCapSink {
-    cells: EngineCapCells,
+pub struct FleetCapSink {
+    cells: FleetCapCells,
 }
 
 #[actor(singleton)]
-impl NativeActor for EngineCapSink {
+impl NativeActor for FleetCapSink {
     // ADR-0156 §3: the shared capture cells are construction wiring, not
     // operator config, so they ride the `Params` channel; `Config` is `()`.
     type Config = ();
-    type Params = EngineCapCells;
-    const NAMESPACE: &'static str = "aether.engine";
+    type Params = FleetCapCells;
+    const NAMESPACE: &'static str = "aether.fleet";
 
-    fn init((): (), cells: EngineCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), cells: FleetCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { cells })
     }
 
@@ -70,7 +70,7 @@ impl NativeActor for ProxyReplySink {
     // is `()`, which declares no aggregate member.
     type Config = ();
     type Params = Arc<Mutex<Option<u64>>>;
-    const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
+    const NAMESPACE: &'static str = "aether.fleet.test.reply_sink";
 
     fn init((): (), recorded: Arc<Mutex<Option<u64>>>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { recorded })
