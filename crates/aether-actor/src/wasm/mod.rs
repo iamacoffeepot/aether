@@ -1019,7 +1019,6 @@ macro_rules! __export_multi_internal {
     // `init_with_config_p32` that constructs `$default`, then the shared body.
     (@default $default:ty ; @all $($component:ty),+) => {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[used]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$default as $crate::Addressable>::NAMESPACE.len()] = {
             let bytes = <$default as $crate::Addressable>::NAMESPACE.as_bytes();
@@ -1078,7 +1077,6 @@ macro_rules! __export_multi_internal {
         // what lets the host distinguish a defaultless multi-actor module
         // from a legacy single-actor module.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[used]
         #[unsafe(link_section = "aether.no_default")]
         static __AETHER_NO_DEFAULT_SECTION: [u8; 1] = [1u8];
 
@@ -1137,7 +1135,6 @@ macro_rules! __export_multi_internal {
         )+;
 
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; __AETHER_MULTI_INPUTS_LEN] = {
             let mut out = [0u8; __AETHER_MULTI_INPUTS_LEN];
