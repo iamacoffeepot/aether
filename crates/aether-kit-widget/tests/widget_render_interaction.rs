@@ -784,7 +784,13 @@ fn capture(harness: &mut SubstrateHarness, checks: Vec<FrameCheck>) -> FrameVerd
             "snap",
             HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
-                &CaptureFrame { mails: vec![tick_to_panel()], after_mails: Vec::new(), checks, similarity: None },
+                &CaptureFrame {
+                    window: None,
+                    mails: vec![tick_to_panel()],
+                    after_mails: Vec::new(),
+                    checks,
+                    similarity: None,
+                },
             ),
         )])
         .expect("capture with region checks");
@@ -813,6 +819,7 @@ fn capture_guarded(
             HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
+                    window: None,
                     mails: vec![tick_to_panel()],
                     after_mails: Vec::new(),
                     checks: checks.clone(),

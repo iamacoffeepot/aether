@@ -270,7 +270,13 @@ fn panel_glyphs_sit_inside_their_row_frames() {
             "snap",
             HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
-                &CaptureFrame { mails: vec![tick_to_panel()], after_mails: Vec::new(), checks, similarity: None },
+                &CaptureFrame {
+                    window: None,
+                    mails: vec![tick_to_panel()],
+                    after_mails: Vec::new(),
+                    checks,
+                    similarity: None,
+                },
             ),
         )])
         .expect("capture with region checks");

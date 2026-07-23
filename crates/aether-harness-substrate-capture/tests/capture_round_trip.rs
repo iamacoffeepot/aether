@@ -69,7 +69,13 @@ fn capture_frame_send_and_await_returns_png() {
                 "capture",
                 HarnessOp::send_and_await(
                     RenderCapability::NAMESPACE,
-                    &CaptureFrame { mails: Vec::new(), after_mails: Vec::new(), checks: Vec::new(), similarity: None },
+                    &CaptureFrame {
+                        window: None,
+                        mails: Vec::new(),
+                        after_mails: Vec::new(),
+                        checks: Vec::new(),
+                        similarity: None,
+                    },
                 ),
             ),
         ])

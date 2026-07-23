@@ -294,7 +294,7 @@ impl HarnessDriver {
             next_chassis_correlation(&self.chassis_correlation),
             self.render_mailbox,
             <Frame as Kind>::ID,
-            Frame { replay_cache_when_idle }.encode_into_bytes(),
+            Frame { replay_cache_when_idle, windows: Vec::new() }.encode_into_bytes(),
             1,
         );
         self.render_slot.drain_available();

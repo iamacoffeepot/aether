@@ -1031,6 +1031,7 @@ impl SubstrateHarness {
         self.push_to_mailbox(
             render_mailbox,
             &CaptureFrame {
+                window: None,
                 mails: pre,
                 after_mails: after,
                 // The `SubstrateHarness::capture` API returns the PNG only; the

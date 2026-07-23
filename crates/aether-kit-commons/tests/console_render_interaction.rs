@@ -175,6 +175,7 @@ fn coverage_in_region(
             HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
+                    window: None,
                     mails: vec![envelope(&console_address(), &Tick)],
                     after_mails: Vec::new(),
                     checks: vec![FrameCheck {
@@ -208,6 +209,7 @@ fn history_text_differs_from_panel(harness: &mut SubstrateHarness, label: &'stat
             HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
+                    window: None,
                     mails: vec![envelope(&console_address(), &Tick)],
                     after_mails: Vec::new(),
                     checks: vec![FrameCheck {

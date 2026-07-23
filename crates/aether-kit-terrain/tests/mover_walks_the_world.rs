@@ -193,6 +193,7 @@ fn capture_scene(harness: &mut SubstrateHarness, mover: &str, world: &str, label
             HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
+                    window: None,
                     mails: vec![envelope(mover, &Render), envelope(world, &Render)],
                     after_mails: Vec::new(),
                     checks: checks.clone(),

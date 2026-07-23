@@ -506,6 +506,7 @@ fn capture_guarded(
             HarnessOp::send_and_await(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
+                    window: None,
                     mails: vec![envelope(RenderCapability::NAMESPACE, &view_projection), envelope(world, &Render)],
                     after_mails: Vec::new(),
                     checks: checks.clone(),

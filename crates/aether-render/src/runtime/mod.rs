@@ -8,7 +8,7 @@
 //! [`RenderCapability`] is a *pumped* actor (ADR-0160), dispatched on the
 //! chassis driver thread, so it owns every accumulator as a plain field and
 //! the GPU + pending capture outright: frame recording, capture readback,
-//! and present all run on the one thread that owns the surface. The three
+//! and present all run on the one thread that owns the surfaces. The three
 //! chassis-internal kinds ([`Frame`], [`PreSettled`], [`Occluded`], defined
 //! in [`crate::kinds`]) turn frame invocation, pre-mail settlement, and
 //! window occlusion into mail — so every capture transition is a handler
@@ -32,6 +32,9 @@
 //!   [`aether_substrate::render::visual`], so the ready-branch readback scores
 //!   the verdict and similarity directly.
 
+#[cfg(feature = "desktop")]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io;
 use std::iter;
 use std::mem;
@@ -42,7 +45,7 @@ use std::time::{Duration, Instant};
 use aether_actor::runtime;
 pub use aether_data::Kind;
 
-use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameCheck};
+use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameCheck, WindowId};
 
 use aether_substrate::Manual;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -56,8 +59,10 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
-    IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
+    CaptureMeta, IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
 };
+#[cfg(feature = "desktop")]
+use winit::window::Window;
 
 // The native impl seams, nested under this `runtime` directory so the one
 // `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):
@@ -83,16 +88,16 @@ mod texture;
 // The cap-root re-exports source these names through `runtime`. The
 // `RenderTuning*` trio is the derive-Config surface (ADR-0090) the chassis
 // resolves the render boot knobs through; `RenderParams` is the composer
-// wiring channel. `WindowCell` is winit-typed and stays `desktop`-only.
-#[cfg(feature = "desktop")]
-pub use self::config::WindowCell;
+// wiring channel.
 pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
 pub use self::pipeline::RenderGpu;
 
 use self::pipeline::{record_material_batches, record_overlay_batches};
 #[cfg(feature = "desktop")]
-use self::surface::boot_surface;
-use self::surface::{acquire_surface_texture, boot_offscreen, build_wireframe_overlay_pipeline};
+use self::surface::acquire_surface_texture;
+#[cfg(feature = "desktop")]
+use self::surface::{attach_surface, boot_surface};
+use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline};
 
 // These seam items are `pub` (visible in `render`) in their now-nested child
 // modules, so the re-export up to runtime level keeps that exact visibility.
@@ -120,6 +125,8 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 /// un-fired `record_finished` keeps the inbound's chain open until the
 /// reply lands (ADR-0080 §6, ADR-0106).
 struct PendingCapture {
+    /// Selected desktop target. `None` is the explicit surfaceless path.
+    window: Option<WindowId>,
     reply: InboundMail,
     after_mails: Vec<Mail>,
     /// `FrameCheck` verdict requests, scored on the read-back RGBA in
@@ -148,8 +155,109 @@ impl PendingCapture {
     }
 }
 
+#[cfg(feature = "desktop")]
+struct WindowTargets<T> {
+    entries: BTreeMap<WindowId, T>,
+}
+
+#[cfg(feature = "desktop")]
+impl<T> Default for WindowTargets<T> {
+    fn default() -> Self {
+        Self { entries: BTreeMap::new() }
+    }
+}
+
+#[cfg(feature = "desktop")]
+impl<T> WindowTargets<T> {
+    fn attach_with<R>(&mut self, id: WindowId, build: impl FnOnce() -> Result<(T, R), String>) -> Result<R, String> {
+        if self.entries.contains_key(&id) {
+            return Err(format!("render target for window {} is already attached", id.0));
+        }
+        let (target, result) = build()?;
+        self.entries.insert(id, target);
+        Ok(result)
+    }
+
+    fn detach(&mut self, id: WindowId) -> Option<T> {
+        self.entries.remove(&id)
+    }
+
+    fn set_occluded(&mut self, id: WindowId, occluded: bool, update: impl FnOnce(&mut T, bool)) -> bool {
+        let Some(target) = self.entries.get_mut(&id) else {
+            return false;
+        };
+        update(target, occluded);
+        true
+    }
+
+    fn validate_capture_selection(
+        &self,
+        window: Option<WindowId>,
+        is_occluded: impl Fn(&T) -> bool,
+    ) -> Result<bool, String> {
+        let Some(id) = window else {
+            if self.entries.is_empty() {
+                return Ok(false);
+            }
+            return Err(
+                "capture_frame failed: a window target is required when desktop targets are attached".to_owned()
+            );
+        };
+        let target =
+            self.entries.get(&id).ok_or_else(|| format!("capture_frame failed: unknown window target {}", id.0))?;
+        if is_occluded(target) {
+            return Err(format!("capture_frame failed: window target {} is occluded", id.0));
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(feature = "desktop")]
+struct RenderTarget {
+    /// Retained with its surface so detachment drops render's native-window
+    /// ownership before the window manager completes close.
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    occluded: bool,
+}
+
+#[cfg(feature = "desktop")]
+impl RenderTarget {
+    fn prepare_frame(&mut self, device: &wgpu::Device) -> Option<(u32, u32, Option<wgpu::SurfaceTexture>)> {
+        if self.occluded {
+            return None;
+        }
+        let size = self.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        if size.width != self.config.width || size.height != self.config.height {
+            self.config.width = size.width;
+            self.config.height = size.height;
+            self.surface.configure(device, &self.config);
+        }
+        let surface_texture = acquire_surface_texture(&self.surface, device, &self.config);
+        Some((self.config.width, self.config.height, surface_texture))
+    }
+}
+
+#[cfg(feature = "desktop")]
+struct DesktopGpuContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+}
+
+#[cfg(feature = "desktop")]
+struct FirstWindowGpu {
+    context: DesktopGpuContext,
+    gpu: RenderGpu,
+    wire_pipeline: Option<wgpu::RenderPipeline>,
+}
+
 /// Pumped `aether.render` runtime state (ADR-0161). Owns the accumulators,
-/// the GPU + surface, and the pending capture as plain fields. The
+/// the shared GPU + window-keyed surfaces, and the pending capture as plain
+/// fields. The
 /// addressing identity is the distinct ZST [`super::RenderCapability`].
 pub struct RenderCapabilityState {
     frame_vertices: Vec<u8>,
@@ -163,30 +271,27 @@ pub struct RenderCapabilityState {
     textures: TextureRegistry,
     vertex_buffer_bytes: usize,
 
-    /// Shared late-bound window handle; the first `on_frame` after the
-    /// chassis fills it boots wgpu. `None` until params provide it.
-    /// Desktop-only: the offscreen harness path (`offscreen_size`) owns no
-    /// window (ADR-0161 R4).
+    /// Attached desktop surfaces keyed by the canonical engine window id.
     #[cfg(feature = "desktop")]
-    window: Option<WindowCell>,
+    targets: WindowTargets<RenderTarget>,
+    /// Instance/adapter selected by the first successful window attachment;
+    /// retained so later surfaces negotiate against the same device.
+    #[cfg(feature = "desktop")]
+    desktop_gpu: Option<DesktopGpuContext>,
     /// ADR-0161 R4: offscreen boot dimensions. `Some((w, h))` makes the
-    /// first `on_frame` (with no window cell filled) boot a surfaceless GPU
-    /// at these dimensions — the substrate harness's path.
+    /// first target-free `on_frame` boot a surfaceless GPU at these
+    /// dimensions — the substrate harness's path.
     offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value threaded from params.
     wireframe: Option<String>,
-    /// wgpu bundle, booted lazily on the first `on_frame` with a filled
-    /// window cell (or `offscreen_size`).
+    /// Shared wgpu device, pipelines, and reusable offscreen target. Desktop
+    /// boots it transactionally with the first window attachment; the
+    /// harness boots it lazily from `offscreen_size`.
     gpu: Option<RenderGpu>,
-    surface: Option<wgpu::Surface<'static>>,
-    surface_config: Option<wgpu::SurfaceConfiguration>,
     wire_pipeline: Option<wgpu::RenderPipeline>,
     /// Prior frame's submission index, drained at the top of the next
     /// frame to bound the present loop to one frame in flight (issue 1312).
     last_submission: Option<wgpu::SubmissionIndex>,
-    /// Whether the window is currently occluded (issue 1317).
-    occluded: bool,
-
     /// ADR-0161 R4: committed-overlay observation sink for the substrate
     /// harness's `committed_overlay_snapshot`. `record_overlay_batches`
     /// populates it with the batches that *survived* record-time rejection
@@ -269,44 +374,117 @@ impl RenderCapabilityState {
         }
     }
 
-    /// Boot wgpu against the shared window cell if it is now filled and the
-    /// GPU is not yet booted. Idempotent — the one-time boot lands visibly
-    /// in the first frame's cost sample (ADR-0161). No-op until the chassis
-    /// `resumed` handler fills the cell.
-    fn ensure_gpu_booted(&mut self) {
+    /// Attach one native window as a render target. The first attachment
+    /// selects the adapter/device and builds shared pipelines; later
+    /// attachments must support the same copy-compatible color format.
+    /// Every fallible operation completes before insertion, so failure leaves
+    /// both the target map and shared GPU state unchanged.
+    #[cfg(feature = "desktop")]
+    pub fn attach_window(&mut self, id: WindowId, window: Arc<Window>) -> Result<(), String> {
+        if self.offscreen_size.is_some() {
+            return Err("cannot attach a window target to an explicitly surfaceless render runtime".to_owned());
+        }
+        let size = window.inner_size();
+        let wireframe = self.wireframe.clone();
+        let vertex_buffer_bytes = self.vertex_buffer_bytes;
+
+        let install = if let (Some(gpu), Some(context)) = (self.gpu.as_ref(), self.desktop_gpu.as_ref()) {
+            let instance = context.instance.clone();
+            let adapter = context.adapter.clone();
+            let device = Arc::clone(&gpu.device);
+            let format = gpu.color_format;
+            self.targets.attach_with(id, || {
+                let attached = attach_surface(
+                    &instance,
+                    &adapter,
+                    &device,
+                    Arc::clone(&window),
+                    (size.width, size.height),
+                    format,
+                )?;
+                Ok((RenderTarget { window, surface: attached.surface, config: attached.config, occluded: false }, None))
+            })?
+        } else if self.gpu.is_none() && self.desktop_gpu.is_none() {
+            self.targets.attach_with(id, || {
+                let booted = boot_surface(Arc::clone(&window), (size.width, size.height), wireframe.as_deref())?;
+                let gpu = RenderGpu::new(
+                    Arc::clone(&booted.device),
+                    Arc::clone(&booted.queue),
+                    booted.format,
+                    booted.config.width,
+                    booted.config.height,
+                    booted.polygon_mode,
+                    vertex_buffer_bytes,
+                );
+                let wire_pipeline = booted.build_overlay.then(|| {
+                    build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout)
+                });
+                Ok((
+                    RenderTarget { window, surface: booted.surface, config: booted.config, occluded: false },
+                    Some(FirstWindowGpu {
+                        context: DesktopGpuContext { instance: booted.instance, adapter: booted.adapter },
+                        gpu,
+                        wire_pipeline,
+                    }),
+                ))
+            })?
+        } else {
+            return Err("render GPU boot state cannot accept desktop window targets".to_owned());
+        };
+
+        if let Some(FirstWindowGpu { context, gpu, wire_pipeline }) = install {
+            self.desktop_gpu = Some(context);
+            self.gpu = Some(gpu);
+            self.wire_pipeline = wire_pipeline;
+        }
+        Ok(())
+    }
+
+    /// Detach one window surface. A capture selected for that target fails
+    /// immediately; captures for other targets and the shared scene survive.
+    #[cfg(feature = "desktop")]
+    pub fn detach_window(&mut self, id: WindowId) -> bool {
+        let removed = self.targets.detach(id).is_some();
+        if removed {
+            self.fail_capture_for_detached_window(id);
+        }
+        removed
+    }
+
+    #[cfg(feature = "desktop")]
+    fn fail_capture_for_detached_window(&mut self, id: WindowId) {
+        if self.pending_capture.as_ref().is_some_and(|pending| pending.window == Some(id)) {
+            let pending = self.pending_capture.take().expect("just checked Some");
+            pending.reply.reply(&CaptureFrameResult::Err {
+                error: format!("capture_frame failed: window target {} detached before capture", id.0),
+            });
+        }
+    }
+
+    fn validate_capture_target(&self, window: Option<WindowId>) -> Result<(), String> {
+        #[cfg(feature = "desktop")]
+        {
+            if self.targets.validate_capture_selection(window, |target| target.occluded)? {
+                return Ok(());
+            }
+        }
+        #[cfg(not(feature = "desktop"))]
+        if let Some(id) = window {
+            return Err(format!("capture_frame failed: window target {} is unavailable on this render runtime", id.0));
+        }
+        if self.offscreen_size.is_some() {
+            Ok(())
+        } else {
+            Err("capture_frame failed: no surfaceless capture target is configured".to_owned())
+        }
+    }
+
+    /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
+    /// `attach_window`, never by a frame or a shared handle.
+    fn ensure_offscreen_gpu_booted(&mut self) {
         if self.gpu.is_some() {
             return;
         }
-        // Windowed path (desktop): boot against the shared window cell once
-        // the chassis's `resumed` fills it, standing up a surface + swapchain.
-        #[cfg(feature = "desktop")]
-        if let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) {
-            let size = window.inner_size();
-            let booted = boot_surface(window, (size.width, size.height), self.wireframe.as_deref());
-            let gpu = RenderGpu::new(
-                Arc::clone(&booted.device),
-                Arc::clone(&booted.queue),
-                booted.format,
-                booted.config.width,
-                booted.config.height,
-                booted.polygon_mode,
-                self.vertex_buffer_bytes,
-            );
-            // Built post-`RenderGpu::new` so it can borrow the main pipeline's
-            // layout (same camera bind group). The overlay draws into the
-            // offscreen color target, so it uses `RenderGpu`'s color format.
-            self.wire_pipeline = booted.build_overlay.then(|| {
-                build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout)
-            });
-            self.surface = Some(booted.surface);
-            self.surface_config = Some(booted.config);
-            self.gpu = Some(gpu);
-            return;
-        }
-        // Offscreen path (ADR-0161 R4, the substrate harness): boot a
-        // surfaceless GPU at the configured dimensions. No surface / swapchain
-        // — capture reads back from the offscreen targets directly, and the
-        // best-effort present in `on_frame` no-ops with `surface: None`.
         let Some((width, height)) = self.offscreen_size else {
             return;
         };
@@ -326,56 +504,17 @@ impl RenderCapabilityState {
         self.gpu = Some(gpu);
     }
 
-    /// Reconfigure the surface + offscreen targets when the window has
-    /// resized since the last frame (ADR-0161: the surface reconfigure rides
-    /// the next `on_frame` rather than a driver reach-in — the frame mail
-    /// carries no size). No-op until the GPU is booted, when the size is
-    /// unchanged, or on a `0×0` minimize (winit reports `Resized(0, 0)`
-    /// there, which `Targets::resize` also guards). Desktop-only: the
-    /// offscreen harness path owns no window to resize against (ADR-0161 R4).
-    #[cfg(feature = "desktop")]
-    fn reconfigure_if_resized(&mut self) {
-        let Some(window) = self.window.as_ref().and_then(|cell| cell.get().cloned()) else {
-            return;
-        };
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let Some(config) = self.surface_config.as_mut() else {
-            return;
-        };
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 || (size.width == config.width && size.height == config.height) {
-            return;
-        }
-        config.width = size.width;
-        config.height = size.height;
-        if let Some(surface) = self.surface.as_ref() {
-            surface.configure(&gpu.device, config);
-        }
-        gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063").resize(
-            &gpu.device,
-            size.width,
-            size.height,
-        );
-    }
-
-    /// Record the world / material / overlay passes into `encoder` from the
-    /// owned accumulators, committing each per the issue 847 cache
-    /// semantic. Returns `Err` if the vertex buffer overflowed (the frame
-    /// is dropped). The GPU must be booted.
-    fn record_passes(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        replay_cache_when_idle: bool,
-    ) -> Result<(), RenderError> {
-        // Commit every accumulator first (mutating owned fields) so the
-        // shared GPU borrow taken for recording never overlaps a `&mut`
-        // on a sibling field.
+    fn commit_scene(&mut self, replay_cache_when_idle: bool) {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.quad_frame, &mut self.quad_last_submitted, replay_cache_when_idle);
+    }
 
+    /// Record the world / material / overlay passes into `encoder` from the
+    /// already-committed global scene. The caller may invoke it once per
+    /// dirty target at that target's dimensions without consuming the scene
+    /// again.
+    fn record_passes(&mut self, encoder: &mut wgpu::CommandEncoder) -> Result<(), RenderError> {
         let gpu = self.gpu.as_ref().expect("record_passes requires a booted GPU");
         let extras_storage: [&wgpu::RenderPipeline; 1];
         let extras: &[&wgpu::RenderPipeline] = match self.wire_pipeline.as_ref() {
@@ -418,6 +557,82 @@ impl RenderCapabilityState {
         }
         Ok(())
     }
+
+    fn record_target_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        surface_texture: Option<wgpu::SurfaceTexture>,
+        capture: bool,
+    ) -> Result<Option<CaptureMeta>, RenderError> {
+        let gpu = self.gpu.as_ref().expect("record_target_frame requires a booted GPU");
+        let device = Arc::clone(&gpu.device);
+        let queue = Arc::clone(&gpu.queue);
+        {
+            let mut targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            if targets.width() != width || targets.height() != height {
+                targets.resize(&device, width, height);
+            }
+        }
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame encoder") });
+        self.record_passes(&mut encoder)?;
+        let capture_meta = capture.then(|| {
+            let gpu = self.gpu.as_ref().expect("gpu present in this branch");
+            let mut targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            prepare_capture_copy(&gpu.device, &mut targets, &mut encoder)
+        });
+
+        if let Some(texture) = surface_texture.as_ref() {
+            let gpu = self.gpu.as_ref().expect("gpu present in this branch");
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: targets.color_texture(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+        }
+
+        self.last_submission = Some(queue.submit(iter::once(encoder.finish())));
+        if let Some(texture) = surface_texture {
+            texture.present();
+        }
+        Ok(capture_meta)
+    }
+
+    fn complete_capture(&mut self, meta: CaptureMeta) {
+        let pending = self.pending_capture.take().expect("capture metadata requires a pending capture");
+        for mail in pending.after_mails {
+            self.mailer.push(mail);
+        }
+        let gpu = self.gpu.as_ref().expect("capture metadata requires a booted GPU");
+        let outcome: Result<CaptureFrameResult, String> = {
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            map_capture_rgba(&gpu.device, &targets, &meta).and_then(|rgba| {
+                let png = encode_png(&rgba, meta.width, meta.height)?;
+                let (similarity_score, similarity_pass) =
+                    visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
+                let verdict = (!pending.checks.is_empty())
+                    .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
+                Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
+            })
+        };
+        match outcome {
+            Ok(result) => pending.reply.reply(&result),
+            Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
+        };
+    }
 }
 
 /// Owned-field commit-or-replay (ADR-0161 §Scope: "a bare `mem::swap`").
@@ -431,6 +646,10 @@ fn commit_or_replay<T>(live: &mut Vec<T>, last: &mut Vec<T>, replay_cache_when_i
     } else if !replay_cache_when_idle {
         last.clear();
     }
+}
+
+fn deduplicate_windows(windows: Vec<WindowId>) -> BTreeSet<WindowId> {
+    windows.into_iter().collect()
 }
 
 #[runtime]
@@ -465,15 +684,14 @@ impl NativeActor for RenderCapability {
             textures: TextureRegistry::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
             #[cfg(feature = "desktop")]
-            window: params.window,
+            targets: WindowTargets::default(),
+            #[cfg(feature = "desktop")]
+            desktop_gpu: None,
             offscreen_size: params.offscreen_size,
             wireframe: params.wireframe,
             gpu: None,
-            surface: None,
-            surface_config: None,
             wire_pipeline: None,
             last_submission: None,
-            occluded: false,
             overlay_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             registry,
@@ -674,36 +892,36 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `Occluded` (ADR-0161) — track window occlusion and fail-fast a
-    /// pending capture the moment the window becomes occluded (issue 1317
-    /// `fail_capture_if_occluded`, relocated into the actor). The reply
-    /// rides the retained guard, so the inbound's chain settles after it.
+    /// `Occluded` — update only the named target and fail only a capture
+    /// selected for that target.
     #[handler::single]
     fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
         state.observe(<Occluded as Kind>::NAME);
-        state.occluded = mail.occluded;
-        if mail.occluded
-            && let Some(pending) = state.pending_capture.take()
+        #[cfg(feature = "desktop")]
+        let became_occluded =
+            state.targets.set_occluded(mail.window, mail.occluded, |target, occluded| target.occluded = occluded)
+                && mail.occluded;
+        #[cfg(not(feature = "desktop"))]
+        let became_occluded = false;
+
+        if became_occluded && state.pending_capture.as_ref().is_some_and(|pending| pending.window == Some(mail.window))
         {
+            let pending = state.pending_capture.take().expect("just checked Some");
             pending.reply.reply(&CaptureFrameResult::Err {
-                error: "capture_frame failed: the window became occluded before the frame could be captured".to_owned(),
+                error: format!("capture_frame failed: window target {} became occluded before capture", mail.window.0),
             });
         }
     }
 
-    /// `Frame` (ADR-0161 §Decision 1) — the per-frame record + capture
-    /// decision. Boots wgpu lazily on the first frame with a filled window
-    /// cell, records the world / material / overlay passes, and resolves a
-    /// pending capture: past its deadline → reply `Err`; ready
-    /// (`pre_remaining == 0`) → read back + reply through the retained
-    /// guard; otherwise the capture rides a later frame.
+    /// `Frame` commits the application-scoped scene once, deduplicates its
+    /// dirty window ids, then records and presents that committed scene at
+    /// each live non-occluded target's dimensions. An empty target list is
+    /// reserved for the explicitly surfaceless harness.
     #[handler::single]
     fn on_frame(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Frame) {
         state.observe(<Frame as Kind>::NAME);
-        state.ensure_gpu_booted();
-        // Desktop-only: the offscreen harness path owns no window to resize.
-        #[cfg(feature = "desktop")]
-        state.reconfigure_if_resized();
+        let Frame { replay_cache_when_idle, windows } = mail;
+        let windows = deduplicate_windows(windows);
 
         // Deadline disposition first — a wedged pre-chain replies `Err`
         // even on a frame where nothing else happens.
@@ -716,13 +934,13 @@ impl NativeActor for RenderCapability {
             });
         }
 
-        let capture_this_frame = state.pending_capture.as_ref().is_some_and(PendingCapture::is_ready);
+        state.commit_scene(replay_cache_when_idle);
+        state.ensure_offscreen_gpu_booted();
 
         let Some(gpu) = state.gpu.as_ref() else {
-            // No surface yet (window cell unfilled / boot skipped). A ready
-            // capture cannot read back without a GPU — fail it fast rather
-            // than park it forever.
-            if capture_this_frame && let Some(pending) = state.pending_capture.take() {
+            if state.pending_capture.as_ref().is_some_and(PendingCapture::is_ready)
+                && let Some(pending) = state.pending_capture.take()
+            {
                 pending.reply.reply(&CaptureFrameResult::Err {
                     error: "capture_frame failed: the render GPU is not booted on this chassis".to_owned(),
                 });
@@ -730,99 +948,60 @@ impl NativeActor for RenderCapability {
             return;
         };
         let device = Arc::clone(&gpu.device);
-        let queue = Arc::clone(&gpu.queue);
 
         // One-frame-in-flight: drain the prior submission before recording
-        // the next (issue 1312).
+        // any target in the next global frame (issue 1312).
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
             tracing::warn!(target: "aether_substrate::render", ?error, "device.poll for previous frame failed; continuing");
         }
 
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame encoder") });
-        match state.record_passes(&mut encoder, mail.replay_cache_when_idle) {
-            Ok(()) => {}
-            Err(RenderError::VertexBufferOverflow { .. }) => return,
-        }
-
-        // Capture copy against the offscreen — independent of surface
-        // availability.
-        let capture_meta = capture_this_frame.then(|| {
-            let gpu = state.gpu.as_ref().expect("gpu present in this branch");
-            let mut targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-            prepare_capture_copy(&gpu.device, &mut targets, &mut encoder)
-        });
-
-        // Best-effort blit to the swapchain + present.
-        let surface_tex = state
-            .surface
-            .as_ref()
-            .zip(state.surface_config.as_ref())
-            .and_then(|(surface, config)| acquire_surface_texture(surface, &device, config));
-        if let Some(tex) = surface_tex.as_ref() {
-            let gpu = state.gpu.as_ref().expect("gpu present in this branch");
-            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-            let (width, height) = (targets.width(), targets.height());
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: targets.color_texture(),
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            );
-        }
-
-        state.last_submission = Some(queue.submit(iter::once(encoder.finish())));
-        if let Some(tex) = surface_tex {
-            tex.present();
-        }
-
-        // Capture readback + deferred reply through the retained guard.
-        if let Some(meta) = capture_meta {
-            let pending = state.pending_capture.take().expect("capture_this_frame => pending is Some");
-            for mail in pending.after_mails {
-                state.mailer.push(mail);
+        #[cfg(feature = "desktop")]
+        for window in windows.iter().copied() {
+            let prepared = {
+                let Some(target) = state.targets.entries.get_mut(&window) else {
+                    continue;
+                };
+                target.prepare_frame(&device)
+            };
+            let Some((width, height, surface_texture)) = prepared else {
+                continue;
+            };
+            let capture = state
+                .pending_capture
+                .as_ref()
+                .is_some_and(|pending| pending.is_ready() && pending.window == Some(window));
+            let meta = match state.record_target_frame(width, height, surface_texture, capture) {
+                Ok(meta) => meta,
+                Err(RenderError::VertexBufferOverflow { .. }) => return,
+            };
+            if let Some(meta) = meta {
+                state.complete_capture(meta);
             }
-            let gpu = state.gpu.as_ref().expect("gpu present in this branch");
-            // Map the readback once, then encode the PNG and score the
-            // verdict / similarity from the same de-padded RGBA (ADR-0161
-            // §Decision 4). `score_similarity` borrows the slice; `run_checks`
-            // consumes it, so the similarity check runs first (issue 1780).
-            let outcome: Result<CaptureFrameResult, String> = {
+        }
+
+        if state.offscreen_size.is_some() && windows.is_empty() {
+            let (width, height) = {
+                let gpu = state.gpu.as_ref().expect("offscreen booted above");
                 let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-                map_capture_rgba(&gpu.device, &targets, &meta).and_then(|rgba| {
-                    let png = encode_png(&rgba, meta.width, meta.height)?;
-                    let (similarity_score, similarity_pass) =
-                        visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
-                    let verdict = (!pending.checks.is_empty())
-                        .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
-                    Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
-                })
+                (targets.width(), targets.height())
             };
-            match outcome {
-                Ok(result) => pending.reply.reply(&result),
-                Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
+            let capture =
+                state.pending_capture.as_ref().is_some_and(|pending| pending.is_ready() && pending.window.is_none());
+            let meta = match state.record_target_frame(width, height, None, capture) {
+                Ok(meta) => meta,
+                Err(RenderError::VertexBufferOverflow { .. }) => return,
             };
+            if let Some(meta) = meta {
+                state.complete_capture(meta);
+            }
         }
     }
 
-    /// `CaptureFrame` (ADR-0161 §Decision 4) — the mail-driven capture
-    /// entry. Fails fast when the window is occluded or a capture is
-    /// already pending (issue 1317 semantics preserved at the source),
-    /// then resolves the pre / after bundles, dispatches each pre-mail on a
-    /// fresh chassis-rooted chain, bridges its settlement to a `PreSettled`
-    /// mail, parks the [`PendingCapture`], and retains the inbound guard so
-    /// the reply defers to `on_frame`.
+    /// `CaptureFrame` — validate the explicit desktop/offscreen selection,
+    /// enforce the one global in-flight limit, then park the mail-driven
+    /// capture state machine until the selected target's next dirty frame.
     ///
     /// A render handler must **never** block on a pre-mail settlement (the
     /// ADR Context deadlock: pre-chains terminate back at this mailbox), so
@@ -832,11 +1011,8 @@ impl NativeActor for RenderCapability {
         state.observe(<CaptureFrame as Kind>::NAME);
         let sender = ctx.reply_target();
 
-        if state.occluded {
-            state.outbound.send_reply(
-                sender,
-                &CaptureFrameResult::Err { error: "capture_frame failed: the window is occluded".to_owned() },
-            );
+        if let Err(error) = state.validate_capture_target(mail.window) {
+            state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
             return;
         }
         if state.pending_capture.is_some() {
@@ -895,6 +1071,7 @@ impl NativeActor for RenderCapability {
 
         let reply = ctx.take_inbound();
         state.pending_capture = Some(PendingCapture {
+            window: mail.window,
             reply,
             after_mails: after,
             checks: mail.checks,
@@ -940,7 +1117,12 @@ mod tests {
     /// source so the toy pump can observe the deferred reply through the
     /// egress channel. The inbound is queued straight onto a
     /// `SettlingInbox` (no route), then drained to the guard.
-    fn parked_capture(mailer: &Arc<Mailer>, pre_remaining: usize, deadline: Instant) -> PendingCapture {
+    fn parked_capture(
+        mailer: &Arc<Mailer>,
+        window: Option<WindowId>,
+        pre_remaining: usize,
+        deadline: Instant,
+    ) -> PendingCapture {
         let id = MailboxId(0x0CA8);
         let (tx, rx) = mpsc::channel::<Envelope>();
         tx.send(OwnedDispatch::disarmed(
@@ -961,7 +1143,15 @@ mod tests {
         .expect("queue the inbound");
         let inbox = SettlingInbox::new(id, rx, Arc::clone(mailer));
         let reply = inbox.try_next().expect("one queued");
-        PendingCapture { reply, after_mails: Vec::new(), checks: Vec::new(), reference: None, pre_remaining, deadline }
+        PendingCapture {
+            window,
+            reply,
+            after_mails: Vec::new(),
+            checks: Vec::new(),
+            reference: None,
+            pre_remaining,
+            deadline,
+        }
     }
 
     /// A minimal headless state for the capture state-machine tests — no
@@ -981,15 +1171,14 @@ mod tests {
             textures: TextureRegistry::new(),
             vertex_buffer_bytes: 1024,
             #[cfg(feature = "desktop")]
-            window: None,
+            targets: WindowTargets::default(),
+            #[cfg(feature = "desktop")]
+            desktop_gpu: None,
             offscreen_size: None,
             wireframe: None,
             gpu: None,
-            surface: None,
-            surface_config: None,
             wire_pipeline: None,
             last_submission: None,
-            occluded: false,
             overlay_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             registry: Arc::clone(mailer.registry()),
@@ -1020,7 +1209,7 @@ mod tests {
     fn park_then_pre_settled_countdown_readies_on_frame() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state(&mailer);
-        state.pending_capture = Some(parked_capture(&mailer, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
+        state.pending_capture = Some(parked_capture(&mailer, None, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
 
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
@@ -1030,7 +1219,7 @@ mod tests {
         assert!(state.pending_capture.as_ref().expect("still pending").is_ready());
 
         // A frame past readiness acts on the capture (consumes it).
-        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false });
+        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false, windows: Vec::new() });
         assert!(state.pending_capture.is_none(), "a ready capture is resolved on the next frame");
         assert!(capture_err(&rx).contains("GPU"), "no adapter in unit tests => the ready branch fails fast");
     }
@@ -1043,31 +1232,79 @@ mod tests {
         let mut state = headless_state(&mailer);
         // A deadline in the past, with pre-mails still outstanding.
         let past = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock is past the epoch");
-        state.pending_capture = Some(parked_capture(&mailer, 3, past));
+        state.pending_capture = Some(parked_capture(&mailer, None, 3, past));
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
-        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false });
+        RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false, windows: Vec::new() });
 
         assert!(state.pending_capture.is_none(), "an expired capture is cleared");
         assert!(capture_err(&rx).contains("settlement cap"), "the wedge disposition replies Err");
     }
 
-    /// The window becoming occluded while a capture is pending fail-fasts it
-    /// through the guard (issue 1317, relocated into the actor).
+    /// Target bookkeeping is transactional: failed and duplicate attachments
+    /// do not replace entries; occlusion and removal stay local to one id.
     #[test]
-    fn occlusion_while_pending_replies_err() {
+    #[cfg(feature = "desktop")]
+    fn window_target_bookkeeping_is_transactional_and_target_local() {
+        let mut targets = WindowTargets::<bool>::default();
+        let failed: Result<(), String> = targets.attach_with(WindowId(1), || Err("surface failed".to_owned()));
+        assert!(failed.is_err());
+        assert!(targets.entries.is_empty(), "a failed builder must not insert a target");
+
+        targets.attach_with(WindowId(1), || Ok((false, ()))).expect("first target attaches");
+        let duplicate: Result<(), String> =
+            targets.attach_with(WindowId(1), || panic!("duplicate validation must run before the target builder"));
+        assert!(duplicate.expect_err("duplicate id is rejected").contains("already attached"));
+        targets.attach_with(WindowId(2), || Ok((false, ()))).expect("second target attaches");
+
+        assert!(targets.set_occluded(WindowId(1), true, |target, value| *target = value));
+        assert!(targets.entries[&WindowId(1)]);
+        assert!(!targets.entries[&WindowId(2)]);
+        assert!(targets.validate_capture_selection(Some(WindowId(1)), |target| *target).is_err());
+        assert_eq!(targets.validate_capture_selection(Some(WindowId(2)), |target| *target), Ok(true),);
+        assert!(targets.validate_capture_selection(Some(WindowId(99)), |target| *target).is_err());
+        assert!(targets.validate_capture_selection(None, |target| *target).is_err());
+
+        assert_eq!(targets.detach(WindowId(1)), Some(true));
+        assert!(targets.entries.contains_key(&WindowId(2)), "detaching one target leaves the other live");
+    }
+
+    #[test]
+    #[cfg(feature = "desktop")]
+    fn detached_target_fails_only_its_pending_capture() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state(&mailer);
-        state.pending_capture = Some(parked_capture(&mailer, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
-        let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        state.pending_capture =
+            Some(parked_capture(&mailer, Some(WindowId(7)), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
 
-        RenderCapability::on_occluded(&mut state, &mut ctx, Occluded { occluded: true });
+        state.fail_capture_for_detached_window(WindowId(8));
+        assert!(state.pending_capture.is_some(), "a different target's capture survives");
 
-        assert!(state.pending_capture.is_none(), "occlusion clears the pending capture");
-        assert!(state.occluded, "occlusion state is tracked");
-        assert!(capture_err(&rx).contains("occluded"), "occlusion fail-fasts the capture");
+        state.fail_capture_for_detached_window(WindowId(7));
+        assert!(state.pending_capture.is_none(), "the detached target's capture is cleared");
+        assert!(capture_err(&rx).contains("detached"));
+    }
+
+    #[test]
+    fn surfaceless_capture_selection_is_explicit() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+
+        assert!(state.validate_capture_target(None).is_err(), "an unconfigured runtime is not implicitly offscreen");
+        state.offscreen_size = Some((64, 48));
+        assert!(state.validate_capture_target(None).is_ok(), "None explicitly selects the configured offscreen target");
+        assert!(state.validate_capture_target(Some(WindowId(3))).is_err(), "unknown window ids stay explicit");
+    }
+
+    #[test]
+    fn frame_window_ids_are_deduplicated_in_identity_order() {
+        assert_eq!(
+            deduplicate_windows(vec![WindowId(8), WindowId(2), WindowId(8), WindowId(5)])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [WindowId(2), WindowId(5), WindowId(8)],
+        );
     }
 
     /// A second `capture_frame` while one is pending replies `Err`
@@ -1076,7 +1313,8 @@ mod tests {
     fn capture_while_pending_replies_err_immediately() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = headless_state(&mailer);
-        state.pending_capture = Some(parked_capture(&mailer, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
+        state.offscreen_size = Some((64, 48));
+        state.pending_capture = Some(parked_capture(&mailer, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new_dispatching(
             &binding,
@@ -1088,7 +1326,13 @@ mod tests {
         RenderCapability::on_capture_frame(
             &mut state,
             &mut ctx,
-            CaptureFrame { mails: Vec::new(), after_mails: Vec::new(), checks: Vec::new(), similarity: None },
+            CaptureFrame {
+                window: None,
+                mails: Vec::new(),
+                after_mails: Vec::new(),
+                checks: Vec::new(),
+                similarity: None,
+            },
         );
 
         assert!(state.pending_capture.is_some(), "the in-flight capture is untouched");
