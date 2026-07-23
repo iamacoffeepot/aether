@@ -1,6 +1,6 @@
 # ADR-0163: Content-Addressed Packages and Asset Bundles
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-22
 
 ## Context
@@ -121,7 +121,7 @@ Deliberate absences, each a decision: no runtime payload fetch (dead-data hazard
 - `wire` changes signature to take `WireCtx`. This is the one breaking change to the existing actor surface.
 - Authors must uphold `unwire` symmetry or the census over-reports; the engine does not enforce it. The reference bundle actor is the enforcement-by-example.
 - Load work is front-loaded: everything a component will ever need from its payload must be pulled and transformed inside the window. Sprite-scale bundles pay microseconds; large content must be granulated into separately loaded bundles.
-- Follow-on work, each its own change: the manifest format and store-backed chassis boot; the `export_asset!` macro in `aether-actor-derive`; the section indexer, load window, and `WireCtx` in `aether-component` / `aether-actor`; the reference bundle actor in `aether-kit`; an `xtask` package target emitting the depot layout; retirement of the bundle-pack's inline-bytes form (the standalone bundle binaries embed the package artifact instead).
+- Follow-on work, each its own change: the manifest format and store-backed chassis boot; the `export_asset!` macro in `aether-actor-derive`; the section indexer, load window, and `WireCtx` in `aether-component` / `aether-actor`; the reference bundle actor in `aether-kit`; an `xtask` package target emitting the depot layout; retirement of the bundle-pack's inline-bytes form. (The standalone bundle binaries initially embedded the package artifact; they were subsequently retired outright in favor of the depot directory — the chassis boot applies the manifest's settings and `cargo xtask package` authors the product, so a shipped game is the depot, and "bundle" names only the asset-bundle actor.)
 - Implementation risk to verify first: `#[link_section]`-to-custom-section emission on the wasm target has sharp edges; the macro must be validated against the same toolchain path that emits `aether.kinds` today.
 - Foreclosed while this ADR stands: runtime asset fetch surfaces, engine-owned asset caching, and a separate asset interchange format.
 
