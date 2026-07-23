@@ -11,7 +11,6 @@
 //! minimal RPC-only chassis, substrate-harness drives a loopback), so the
 //! helper module stays scoped to the two full-stack chassis.
 
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,14 +27,16 @@ use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayParams};
 use aether_http::{HttpCapability, HttpConfig, HttpServerConfig};
 use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
-use aether_kinds::{BinaryManifest, Shutdown, Tick};
+use aether_kinds::{Shutdown, Tick};
 use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
 use aether_process::{ProcessCapability, ProcessConfig, ProcessParams};
 use aether_render::RenderTuningConfig;
 use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::{BootableChassis, Chassis, config_manifest, describe_caps};
+use aether_substrate::chassis::{
+    BootableChassis, BuildProvenance, Chassis, PreludeAction, PreludeFlags, run_chassis_prelude,
+};
 use aether_substrate::config::{
     ConfigError, ConfigMember, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning,
 };
@@ -965,56 +966,36 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor_configured::<GameGatewayCapability>(boot.game_gateway_params, GameGatewayConfig::default())
 }
 
-/// Assemble a chassis bin's `--describe` [`BinaryManifest`] (ADR-0115,
-/// amended by ADR-0155): the chassis profile, the mailbox namespaces it
-/// claims, and the build provenance `build.rs` baked into this crate
-/// (`AETHER_GIT_SHA` / `AETHER_BUILD_PROFILE` / `AETHER_TARGET_TRIPLE`).
-/// The `env!`s resolve in this crate, where `build.rs` set them.
+/// This crate's `build.rs`-baked build provenance (ADR-0115): the source
+/// revision, build profile, and target triple, read back via `env!`, which
+/// resolves in this crate — the one whose build script set them.
 ///
-/// `caps` is the claim-derived namespace set the describe path reads off
-/// `Builder::claim_namespaces` — the same claim code a real boot runs over
-/// the composed `with_actor` chain, driver claims, and inline sinks — so
-/// there is no hand-maintained list to drift. The [`BTreeSet`] arrives
-/// sorted; the manifest's `caps` field preserves that order. Each chassis
-/// bin calls this on `--describe`, prints the JSON, and exits before boot
-/// — the hub's binary store forks `<binary> --describe` once at upload time
-/// to capture exactly this.
+/// The chassis binaries that depend on `aether-chassis` (desktop / headless /
+/// hub) hand this to [`run_describe_prelude`] as their `--describe` provenance.
+/// The bloomery chassis, which does not depend on this aggregate, fills a
+/// [`BuildProvenance`] from its own crate's `build.rs` instead (ADR-0162).
 #[must_use]
-pub fn binary_manifest(chassis: &str, caps: BTreeSet<String>) -> BinaryManifest {
-    BinaryManifest {
-        chassis: chassis.to_owned(),
-        caps: caps.into_iter().collect(),
+pub fn build_provenance() -> BuildProvenance {
+    BuildProvenance {
         git_sha: env!("AETHER_GIT_SHA").to_owned(),
         profile: env!("AETHER_BUILD_PROFILE").to_owned(),
         target: env!("AETHER_TARGET_TRIPLE").to_owned(),
     }
 }
 
-/// The `--describe` entry point for a chassis whose build provenance lives in
-/// this crate (desktop / headless / hub): run the ADR-0155 claim ceremony via
-/// [`describe_caps`] and wrap the roster in a [`binary_manifest`] carrying
-/// `aether-chassis`'s `build.rs` provenance. The bloomery chassis wraps
-/// [`describe_caps`] with its own crate's provenance instead — it does not
-/// depend on this crate — so it does not route through here.
+/// The shared chassis-main prelude for the binaries that depend on
+/// `aether-chassis` (desktop / headless / hub): run [`run_chassis_prelude`]
+/// with this crate's [`build_provenance`]. A binary calls this straight after
+/// parsing its CLI; [`PreludeAction::Handled`] means it printed a discovery
+/// dump and `main` should return, [`PreludeAction::Boot`] means it should
+/// resolve its env and run (ADR-0162).
 ///
 /// # Errors
 ///
-/// Returns [`BootError`] when env resolution, substrate boot, or the claim pass
-/// fails.
-pub fn describe_manifest<C: BootableChassis>() -> Result<BinaryManifest, BootError> {
-    Ok(binary_manifest(C::PROFILE, describe_caps::<C>()?))
-}
-
-/// The `--print-config` discovery dump for a chassis: render the
-/// composition-derived config aggregate ([`config_manifest`]) plus the chassis's
-/// [`residual knobs`](BootableChassis::residual_knobs). The bin prints this and
-/// exits before boot.
-///
-/// # Errors
-///
-/// Returns [`BootError`] when env resolution or substrate boot fails.
-pub fn config_dump<C: BootableChassis>() -> Result<String, BootError> {
-    Ok(config_manifest::<C>()?.dump(&C::residual_knobs()))
+/// Returns [`BootError`] when env resolution, substrate boot, the claim pass, or
+/// manifest serialization fails.
+pub fn run_describe_prelude<C: BootableChassis>(flags: PreludeFlags) -> Result<PreludeAction, BootError> {
+    run_chassis_prelude::<C>(flags, &build_provenance())
 }
 
 /// ADR-0155 §3: always compose the RPC server on the substrate chassis; its

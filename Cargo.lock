@@ -259,7 +259,6 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "ctrlc",
- "serde_json",
  "signal-hook 0.4.4",
  "tracing",
  "winit",
@@ -330,7 +329,6 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "serde_json",
  "signal-hook 0.4.4",
  "tracing",
 ]
