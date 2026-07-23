@@ -9,6 +9,8 @@ use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
+use crate::actor::wasm::asset_manifest::LoadWindow;
+
 use super::StateBundle;
 
 /// Per-component context stored as wasmtime `Store` data. Holds the
@@ -118,6 +120,16 @@ pub struct ComponentCtx {
     /// actual `spawn_child::<WasmTrampoline>`; substrate can't name that
     /// capabilities-layer type (ADR-0097 §4).
     pub pending_spawns: Vec<PendingSpawn>,
+    /// ADR-0163 §3 asset load window. `Some` for a component loaded
+    /// through the trampoline (installed before `Component::instantiate`,
+    /// so the guest's `init` and `wire` can pull assets); the
+    /// `asset_fetch_p32` / `asset_catalog_p32` host fns serve the guest's
+    /// `AssetWindow` / `AssetCatalog` surfaces from it. Closed after the
+    /// guest's `wire` returns — the payload pin and ranges are dropped, so
+    /// `asset_fetch` traps thereafter, while the catalog metadata is
+    /// retained for the instance's life so `asset_catalog` still answers.
+    /// `None` on the test paths that build a bare ctx.
+    pub load_window: Option<LoadWindow>,
 }
 
 /// The mailbox-name prefix every wasm component (loaded or spawned)
@@ -177,6 +189,26 @@ impl ComponentCtx {
             in_flight_root: Cell::new(MailId::NONE),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawns: Vec::new(),
+            load_window: None,
+        }
+    }
+
+    /// Install the ADR-0163 asset load window before
+    /// `Component::instantiate`, so the guest's `init` and `wire` can pull
+    /// asset bytes through the `asset_fetch_p32` host fn. Called by
+    /// `WasmTrampoline::init`, mirroring [`Self::install_binding`].
+    pub fn install_load_window(&mut self, window: LoadWindow) {
+        self.load_window = Some(window);
+    }
+
+    /// Close the asset load window when the guest's `wire` returns
+    /// (ADR-0163 §3): drop the payload pin and byte ranges so
+    /// `asset_fetch` no longer serves, retaining the catalog metadata for
+    /// the instance's life so `asset_catalog` still answers. Idempotent; a
+    /// no-op when no window was installed.
+    pub fn close_load_window(&mut self) {
+        if let Some(window) = self.load_window.as_mut() {
+            window.close();
         }
     }
 

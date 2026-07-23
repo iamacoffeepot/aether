@@ -58,7 +58,9 @@
 // `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, AssetWindow, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -66,13 +68,16 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
-    ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender,
-    TextInputObserved, TickObserved,
+    AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig,
+    SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender, TextInputObserved, TickObserved,
 };
 
 pub struct Probe {
     tick_count: u64,
     render: SetRender,
+    /// ADR-0163 §3 (#3984): what `wire` pulled from the asset load window,
+    /// surfaced later through [`Probe::on_asset_probe`].
+    asset: AssetProbeResult,
 }
 
 #[actor]
@@ -80,7 +85,7 @@ impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test.probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Probe { tick_count: 0, render: SetRender::default() })
+        Ok(Probe { tick_count: 0, render: SetRender::default(), asset: AssetProbeResult::default() })
     }
 
     //noinspection DuplicatedCode
@@ -95,6 +100,15 @@ impl WasmActor for Probe {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         ctx.actor::<InputCapability>().subscribe::<Key>();
         ctx.actor::<InputCapability>().subscribe::<TextInput>();
+        // ADR-0163 §3 (#3984): pull the bundle's asset through the load
+        // window (open during `wire`) and stash a content fingerprint —
+        // length + a wrapping-sum checksum — so a later `AssetProbe` proves
+        // the guest-side pull round-tripped the exact bytes across the FFI
+        // and that the value survived the window closing after `wire`.
+        if let Some(bytes) = ctx.asset("asset_fixture.txt") {
+            let checksum = bytes.iter().fold(0u64, |acc, &byte| acc.wrapping_add(u64::from(byte)));
+            self.asset = AssetProbeResult { pulled: true, len: bytes.len() as u64, checksum };
+        }
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running
@@ -167,6 +181,23 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_set_render(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetRender) {
         self.render = mail;
+    }
+
+    /// ADR-0163 §3 (#3984): reply with the fingerprint of the asset this
+    /// fixture pulled from its load window during `wire`. Runs post-`wire`
+    /// (the window has closed), so a non-zero `pulled` reply proves the
+    /// guest-side `AssetWindow::asset` pull worked while the window was open
+    /// and the bytes survived into the instance's ordinary state.
+    ///
+    /// # Agent
+    /// Send `aether.test_fixtures.asset_probe`; the reply
+    /// `aether.test_fixtures.asset_probe_result` carries `{ pulled, len,
+    /// checksum }`.
+    #[handler::manual]
+    fn on_asset_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: AssetProbe) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&self.asset);
+        }
     }
 }
 

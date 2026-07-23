@@ -16,12 +16,15 @@
 //!   can match a reply to the request it sent — it's mail-level metadata.
 //! - `persist` — migration-bundle deposit
 //!   (`save_state`), used during `on_dehydrate` only.
+//! - `asset` — ADR-0163 load-window asset pull (`asset_fetch`,
+//!   `asset_catalog`), used during `init` / `wire` only.
 //!
 //! Per-stage capability ctx impls in [`crate::wasm::ctx`] call these
 //! functions directly; the cross-target abstraction layer is the
 //! per-stage capability traits in [`crate::model::ctx`], not a single
 //! transport trait.
 
+pub(crate) mod asset;
 pub(crate) mod log;
 pub(crate) mod mail;
 pub(crate) mod persist;

@@ -33,6 +33,14 @@ impl Component {
         Ok(())
     }
 
+    /// ADR-0163 §3: close the asset load window on this component's store
+    /// ctx. The trampoline calls this once the guest's `wire` has returned,
+    /// so post-window `asset_fetch_p32` traps while the catalog metadata
+    /// stays queryable through `asset_catalog_p32` for the instance's life.
+    pub fn close_load_window(&mut self) {
+        self.store.data_mut().close_load_window();
+    }
+
     /// Deliver a mail into the component's linear memory and invoke
     /// `receive`. Returns the guest's return value (contract is
     /// currently informational; host-visible errors propagate as

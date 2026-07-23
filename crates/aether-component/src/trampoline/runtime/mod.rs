@@ -34,6 +34,7 @@ use aether_actor::runtime;
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::{CostCells, KindId, Mail};
@@ -70,6 +71,15 @@ impl NativeActor for WasmTrampoline {
         // binding (issue 634 Phase 4 PR 3 — single source of inbox
         // truth lives on `NativeBinding`, not on `ComponentCtx`).
         substrate_ctx.install_binding(Arc::clone(ctx.binding()));
+        // ADR-0163 §3 (#3984): index an asset load window over the module's
+        // `aether.asset.*` sections and install it before instantiate, so
+        // the guest's `init` (run inside `instantiate`) and its later `wire`
+        // can pull assets through the `asset_fetch_p32` host fn. Closed once
+        // `wire` returns (below). The bytes are validated at load, so an
+        // index error here is a torn build rather than a user error.
+        let load_window = asset_manifest::LoadWindow::index(Arc::clone(&config.wasm_bytes))
+            .map_err(|e| BootError::Other(io::Error::other(format!("asset index failed: {e}")).into()))?;
+        substrate_ctx.install_load_window(load_window);
         // ADR-0090 (issue 1257): thread the load mail's config bytes
         // into the guest's typed `init`. An empty slice ("no config")
         // is decoded uniformly by a `Config = ()` guest via
@@ -112,6 +122,7 @@ impl NativeActor for WasmTrampoline {
             type_tag: config.type_tag,
             module: config.module,
             actor_caps: config.actor_caps,
+            wasm_bytes: config.wasm_bytes,
         })
     }
 
@@ -125,14 +136,20 @@ impl NativeActor for WasmTrampoline {
     /// races the input cap's `validate_subscriber_mailbox`,
     /// silently dropping subscribes.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        if let Some(component) = state.component.as_mut()
-            && let Err(e) = component.wire()
-        {
-            tracing::error!(
-                target: "aether_component",
-                error = %e,
-                "wasm guest `wire` hook returned error",
-            );
+        if let Some(component) = state.component.as_mut() {
+            if let Err(e) = component.wire() {
+                tracing::error!(
+                    target: "aether_component",
+                    error = %e,
+                    "wasm guest `wire` hook returned error",
+                );
+            }
+            // ADR-0163 §3 (#3984): the asset load window closes when `wire`
+            // returns — drop the payload pin and byte ranges so
+            // `asset_fetch_p32` traps thereafter, retaining the catalog
+            // metadata for the instance's life. Runs whether or not `wire`
+            // errored; the window's job (init + wire) is done either way.
+            component.close_load_window();
         }
     }
 

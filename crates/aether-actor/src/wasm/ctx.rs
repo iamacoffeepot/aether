@@ -11,11 +11,15 @@
 //! Ctxs hold per-mail state only (mailbox id at init; reply target at
 //! receive), and dispatch goes through the bridge functions directly.
 
+use core::cell::OnceCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 
 use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
+
+use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
+use crate::wasm::bridge::asset;
 
 use crate::mail::ReplyHandle;
 use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
@@ -42,6 +46,10 @@ use alloc::vec::Vec;
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmInitCtx<'a> {
     mailbox: u64,
+    /// ADR-0163 §3 asset catalog, fetched lazily on the first
+    /// [`AssetCatalog::assets`] call and cached for the ctx's life —
+    /// `init` is inside the load window, so asset access is live here.
+    catalog: OnceCell<Vec<AssetInfo>>,
     _borrow: PhantomData<&'a ()>,
 }
 
@@ -50,7 +58,7 @@ impl WasmInitCtx<'_> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64) -> Self {
-        Self { mailbox, _borrow: PhantomData }
+        Self { mailbox, catalog: OnceCell::new(), _borrow: PhantomData }
     }
 
     /// The component's own mailbox id — the value the substrate uses to
@@ -83,6 +91,18 @@ impl WasmInitCtx<'_> {
     // `wire`, where `WasmCtx` carries the registry.
 }
 
+impl AssetCatalog for WasmInitCtx<'_> {
+    fn assets(&self) -> &[AssetInfo] {
+        self.catalog.get_or_init(asset::fetch_catalog).as_slice()
+    }
+}
+
+impl AssetWindow for WasmInitCtx<'_> {
+    fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
+        asset::fetch_asset(name)
+    }
+}
+
 /// The window-bearing context `wire` receives (ADR-0163 §3). A thin
 /// borrow-wrapper around the post-init [`WasmCtx`] that `Deref`s to it, so
 /// every send / subscribe / resolve verb a `wire` body already uses keeps
@@ -110,6 +130,11 @@ impl WasmInitCtx<'_> {
 #[allow(clippy::module_name_repetitions)]
 pub struct WireCtx<'ctx, 'a> {
     inner: &'ctx mut WasmCtx<'a>,
+    /// ADR-0163 §3 asset catalog, fetched lazily on the first
+    /// [`AssetCatalog::assets`] call and cached for the ctx's life. A
+    /// `wire` body that never enumerates assets pays no hostcall; one that
+    /// only pulls by name (`asset(name)`) never touches this cell.
+    catalog: OnceCell<Vec<AssetInfo>>,
 }
 
 impl<'ctx, 'a> WireCtx<'ctx, 'a> {
@@ -119,7 +144,7 @@ impl<'ctx, 'a> WireCtx<'ctx, 'a> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(inner: &'ctx mut WasmCtx<'a>) -> Self {
-        Self { inner }
+        Self { inner, catalog: OnceCell::new() }
     }
 }
 
@@ -133,6 +158,18 @@ impl<'a> Deref for WireCtx<'_, 'a> {
 impl<'a> DerefMut for WireCtx<'_, 'a> {
     fn deref_mut(&mut self) -> &mut WasmCtx<'a> {
         self.inner
+    }
+}
+
+impl AssetCatalog for WireCtx<'_, '_> {
+    fn assets(&self) -> &[AssetInfo] {
+        self.catalog.get_or_init(asset::fetch_catalog).as_slice()
+    }
+}
+
+impl AssetWindow for WireCtx<'_, '_> {
+    fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
+        asset::fetch_asset(name)
     }
 }
 

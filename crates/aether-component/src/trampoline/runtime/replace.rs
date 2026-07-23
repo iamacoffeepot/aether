@@ -51,6 +51,9 @@ impl WasmTrampolineState {
             config: pending.config,
             type_tag: Some(pending.tag),
             actor_caps: self.actor_caps.clone(),
+            // ADR-0163 §3 (#3984): the sibling shares this module's bytes, so
+            // it indexes its own asset load window from the same content.
+            wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
         if let Err(e) = ctx.spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config, ()).finish() {
             tracing::warn!(
@@ -148,14 +151,19 @@ impl WasmTrampolineState {
             Err(error) => return ReplaceResult::Err { error },
         };
 
-        // ADR-0163 §3: re-index the replacement module's asset catalog so
-        // the post-swap `describe_component` / `ReplaceResult` report the
-        // new bundle's assets. A malformed asset section fails the replace
-        // loudly, before the swap runs.
-        match asset_manifest::read_assets_from_bytes(&payload.wasm) {
-            Ok(records) => capabilities.assets = records.into_iter().map(|record| record.info).collect(),
+        // ADR-0163 §3 (#3984): re-index the replacement module's assets into
+        // a load window. Its catalog feeds the post-swap
+        // `describe_component` / `ReplaceResult`; the window itself is
+        // installed on the new instance's ctx below so the replacement's
+        // `init` can pull asset bytes (replace re-runs `init`, not `wire`,
+        // so the window closes after instantiate). A malformed asset section
+        // fails the replace loudly, before the swap runs.
+        let new_wasm_bytes: Arc<[u8]> = Arc::from(payload.wasm.as_slice());
+        let load_window = match asset_manifest::LoadWindow::index(Arc::clone(&new_wasm_bytes)) {
+            Ok(window) => window,
             Err(error) => return ReplaceResult::Err { error },
-        }
+        };
+        capabilities.assets = load_window.catalog();
 
         // Run unwire then on_dehydrate on the old instance and lift
         // any saved-state bundle. If the trampoline is currently
@@ -186,12 +194,16 @@ impl WasmTrampolineState {
         // mailer + registry/outbound/input references, new
         // ReplyTable since wasm-side state resets. Mailbox id is
         // preserved across replace per ADR-0022 §4.
-        let substrate_ctx = ComponentCtx::new(
+        let mut substrate_ctx = ComponentCtx::new(
             self.mailbox,
             Arc::clone(&self.registry),
             Arc::clone(&self.mailer),
             Arc::clone(&self.outbound),
         );
+        // ADR-0163 §3 (#3984): install the load window before instantiate so
+        // the replacement's `init` can pull assets; closed after instantiate
+        // (replace re-runs `init`, not `wire`).
+        substrate_ctx.install_load_window(load_window);
 
         // ADR-0090 (issue 1257): thread the replace mail's config
         // bytes into the new instance's typed `init`, the same way
@@ -210,12 +222,19 @@ impl WasmTrampolineState {
                 return ReplaceResult::Err { error: format!("wasm instantiation failed: {e}") };
             }
         };
+        // ADR-0163 §3 (#3984): replace re-runs `init` but not `wire`, so the
+        // load window's job ends once the replacement instantiated — close
+        // it, retaining the catalog metadata for the instance's life.
+        new_component.close_load_window();
 
         // ADR-0097: the new module is now resident — retain it (and
         // the refreshed per-type cap map) so sibling spawns after this
         // replace re-instantiate the new code, not the old.
         self.module = module;
         self.actor_caps = actors;
+        // ADR-0163 §3 (#3984): future sibling spawns index the new module's
+        // assets, not the replaced module's.
+        self.wasm_bytes = new_wasm_bytes;
         // ADR-0096: track the actor type this trampoline now hosts, so
         // a later bare (`export: None`) replace reuses the *current*
         // type rather than reverting to the original load's. A bare
