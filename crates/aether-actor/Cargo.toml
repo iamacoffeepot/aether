@@ -50,6 +50,11 @@ tracing = { workspace = true, default-features = false }
 # + `LifecycleMailboxExt`. Its departure left no path into the old
 # capabilities monolith from any example, so that dependency is gone.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# ADR-0163 §2: the asset_sections test parses the built
+# aether-test-fixtures-bundle wasm to pin export_asset!'s custom-section
+# emission (name, exact bytes, absence from data segments). Same version
+# aether-substrate uses for its section walks.
+wasmparser = "0.246"
 # iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
 # the `input_logger` example addresses `InputCapability` + `SubscribeInput`.
 aether-input = { path = "../aether-input", default-features = false }
