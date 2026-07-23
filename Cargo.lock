@@ -480,7 +480,7 @@ dependencies = [
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-kit",
+ "aether-kit-sim",
  "aether-substrate",
  "aether-tcp",
  "clap",
@@ -658,11 +658,9 @@ name = "aether-kit"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-codec",
  "aether-component",
  "aether-data",
  "aether-fs",
- "aether-game",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-input",
@@ -673,8 +671,31 @@ dependencies = [
  "aether-math",
  "aether-mesh",
  "aether-render",
- "aether-tcp",
  "aether-text",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "aether-kit-sim"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-codec",
+ "aether-component",
+ "aether-data",
+ "aether-game",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-input",
+ "aether-kinds",
+ "aether-kit",
+ "aether-kit-terrain",
+ "aether-lifecycle",
+ "aether-math",
+ "aether-render",
+ "aether-tcp",
  "inventory",
  "serde",
  "tracing",

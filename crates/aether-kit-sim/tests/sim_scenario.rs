@@ -1,4 +1,4 @@
-//! Tick-native turn simulation through two real instances of the kit wasm.
+//! Tick-native turn simulation through two real instances of the kit-sim wasm.
 
 use aether_harness_substrate::test_helpers::require_wasm;
 use std::fs;
@@ -8,13 +8,13 @@ use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_kit::sim::{
+use aether_kit_sim::sim::{
     CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn,
     TrajectoryEvent, TrajectoryKind,
 };
 
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_sim as _;
 
 const FIRST_SIM_NAME: &str = "turn-sim-a";
 const SECOND_SIM_NAME: &str = "turn-sim-b";
@@ -23,7 +23,7 @@ const ENTITY_ID: u64 = 41;
 #[test]
 fn sim_vocabulary_is_the_exact_lower_crate_wire_contract() {
     use aether_game::Spawn as CapabilitySpawn;
-    use aether_kit::Spawn as RootSpawn;
+    use aether_kit_sim::Spawn as RootSpawn;
 
     let lower = CapabilitySpawn { entity_id: 9, cell_x: -2, cell_z: 4 };
     let root_reexport: RootSpawn = lower;
@@ -78,7 +78,7 @@ fn poll(harness: &mut SubstrateHarness, address: &str, label: &'static str) -> P
 
 #[test]
 fn turn_sim_moves_in_tick_order_and_replays_byte_identically_through_real_wasm() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_sim") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(96, 96).with_component_host().build().expect("boot");

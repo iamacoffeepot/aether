@@ -67,7 +67,7 @@ treated as a durable public protocol.
 
 ## Reference client
 
-`aether-kit::client::PlayerClient` demonstrates client-side state and frame
+`aether-kit-sim::client::PlayerClient` demonstrates client-side state and frame
 handling. It is an in-tree reference, not proof that every external client must
 be Rust or link the kit. The portable contract is the framed wire vocabulary
 plus the gateway/session policy.
@@ -85,9 +85,9 @@ plus the gateway/session policy.
 ## Change route
 
 - Simulation kinds: `crates/aether-game/src/kinds.rs`
-- Reference sim: `crates/aether-kit/src/sim/`
+- Reference sim: `crates/aether-kit-sim/src/sim/`
 - Gateway/session: `crates/aether-game/src/player/`
 - Player frame: `crates/aether-game/src/player/frame.rs`
-- Reference client: `crates/aether-kit/src/client/`
+- Reference client: `crates/aether-kit-sim/src/client/`
 - Integration tests: `crates/aether-game/tests/player_gateway.rs`
 - Decisions: accepted ADR-0144; proposed ADR-0145

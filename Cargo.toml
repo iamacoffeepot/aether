@@ -29,6 +29,7 @@ members = [
     "crates/aether-inventory",
     "crates/aether-mesh",
     "crates/aether-kit",
+    "crates/aether-kit-sim",
     "crates/aether-kit-terrain",
     "crates/aether-kit-widget",
     "crates/aether-kit-workbench",

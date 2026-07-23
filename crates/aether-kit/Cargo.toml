@@ -43,35 +43,16 @@ aether-input = { path = "../aether-input", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
-# iamacoffeepot/aether#3754: the game player-gateway cap was extracted to
-# `aether-game`. The kit's sim and client actors share its tick-native intent /
-# fact vocabulary; kit is a wasm guest, so it takes the marker-only identity
-# face.
-aether-game = { path = "../aether-game", default-features = false }
-# iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`. The
-# client actor dials and streams over it; kit is a wasm guest, so it takes the
-# marker-only identity face.
-aether-tcp = { path = "../aether-tcp", default-features = false }
 # iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-text = { path = "../aether-text", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — kit loads meshes / worlds
 # through it. Marker face only (kit is a wasm component addressing fs by mail).
 aether-fs = { path = "../aether-fs", default-features = false }
-aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
 aether-mesh = { path = "../aether-mesh" }
-# iamacoffeepot/aether#3951: the terrain stack (mark / world / terra / mover)
-# was extracted to `aether-kit-terrain`. kit's sim, client, and workbench
-# systems still consume its `CellPos` / `WorldPoint` / octimeter position
-# vocabulary and its mark / terra / world types, so kit takes an rlib
-# dependency on it. kit is itself a cdylib whose `export!` binds the fixed-name
-# FFI entries, and a wasm module carries exactly one `export!`, so kit enables
-# the terrain crate's `library` feature to strip its `export!` entry surface
-# from the embedding wasm module.
-aether-kit-terrain = { path = "../aether-kit-terrain", features = ["library"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail
 # (out-of-bounds teleport, etc.). Default-features-off per the SDK pattern.
@@ -92,12 +73,10 @@ inventory = { workspace = true }
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
-aether-game = { path = "../aether-game" }
 aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-aether-tcp = { path = "../aether-tcp" }
 aether-text = { path = "../aether-text" }
 # iamacoffeepot/aether#3953: the workbench (kit's last source consumer of the
 # widget crate) moved to `aether-kit-workbench`, so the widget rlib dependency
@@ -105,6 +84,12 @@ aether-text = { path = "../aether-text" }
 # the widget editor shell and imports its `EditorConfig` vocabulary at source,
 # so it stays as a dev-dependency here.
 aether-kit-widget = { path = "../aether-kit-widget" }
+# iamacoffeepot/aether#3953: with the workbench (and, per #3952, sim / client)
+# gone, no kit system consumes the terrain vocabulary in source, so the terrain
+# rlib dependency left kit's `[dependencies]`. `camera_controller_drives_camera`
+# still runtime-loads the terrain world wasm and imports its `SetChunk` /
+# `Material` vocabulary at source, so it stays as a dev-dependency here.
+aether-kit-terrain = { path = "../aether-kit-terrain" }
 
 [lints]
 workspace = true
