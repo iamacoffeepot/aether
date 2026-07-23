@@ -199,7 +199,7 @@ pub(super) struct BinaryStoreEntry {
     manifest: BinaryStoreManifest,
 }
 
-/// The `list_binaries` projection of a stored [`BinaryManifest`] (ADR-0162).
+/// The `list_binaries` projection of a stored `BinaryManifest` (ADR-0162).
 /// The config surface — `env_keys` / `argv_flags` — is rendered as counts, not
 /// full lists: a full-stack chassis carries dozens of each, so inlining them per
 /// entry across a listing would bloat the tool output without a caller need. The
