@@ -40,7 +40,7 @@ use std::collections::HashMap;
 
 use aether_data::tagged_id;
 use aether_data::{fill_template, id_for_name};
-use aether_kinds::{ManifestResult, NameEntryWire, ParamKindWire, TemplateEntryWire};
+use aether_inventory::kinds::{ManifestResult, NameEntryWire, ParamKindWire, TemplateEntryWire};
 
 /// Fold a served [`ManifestResult`] into a `hash → name` reverse map
 /// (ADR-0088 §3/§4), mirroring the substrate's

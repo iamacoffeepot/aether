@@ -41,11 +41,16 @@ runtime = ["dep:aether-substrate"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
+# `derive` for the `#[derive(Kind, Schema)]` on the cap's own kind family.
+aether-data = { path = "../aether-data", features = ["derive"] }
+# `KindDescriptorWire` — shared with `aether-fleet`, so it stays central
+# while the rest of the `aether.inventory.*` family lives in `kinds.rs`.
 aether-kinds = { path = "../aether-kinds" }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime (the `Arc<Registry>` state + `thread_name` reverse-lookup arm).
 aether-substrate = { path = "../aether-substrate", optional = true }
+# The kind family's `Serialize` / `Deserialize` derives.
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` HandlerEntry per handler, so native builds need the
@@ -61,12 +66,8 @@ inventory = { workspace = true }
 # the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The manifest test touches `aether_fs::FsCapability` (identity only) to force
-# its link-time `NameEntry` into the test binary; the reverse-lookup test
-# derives probe `Kind`s via `aether-data`'s derive.
+# its link-time `NameEntry` into the test binary.
 aether-fs = { path = "../aether-fs", default-features = false }
-aether-data = { path = "../aether-data", features = ["derive"] }
-# The `ReplyProbeCap` test fixture derives `serde` on its probe kinds.
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [lints]
 workspace = true

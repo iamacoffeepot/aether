@@ -23,11 +23,12 @@ mod resolve;
 
 pub use resolve::resolve_ids;
 
+pub use crate::kinds::{HandlerEntryWire, NameEntryWire, ParamKindWire, TemplateEntryWire};
 pub use aether_data::KindId;
 pub use aether_data::canonical::kind_id_from_parts;
 pub use aether_data::name_inventory::{ParamKind, handler_entries, name_entries, template_entries};
 pub use aether_data::wire;
-pub use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, ParamKindWire, TemplateEntryWire};
+pub use aether_kinds::KindDescriptorWire;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 use std::collections::HashSet;
@@ -207,11 +208,11 @@ impl NativeActor for InventoryCapability {
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::*;
+    use crate::kinds::ParamKindWire;
     use aether_actor::actor;
     use aether_data::name_inventory::HandlerEntry;
     use aether_data::tagged_id;
     use aether_data::{MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name};
-    use aether_kinds::ParamKindWire;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;

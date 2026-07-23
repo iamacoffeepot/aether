@@ -47,6 +47,11 @@ aether-codec = { path = "../aether-codec" }
 # (ADR-0091). Inherited transitively through the old capabilities monolith
 # until the rpc/engine extraction (#3735) dropped that dependency.
 aether-fs = { path = "../aether-fs", default-features = false }
+# The `aether.inventory.*` kind family (`manifest` / `resolve` / `kinds` /
+# `handlers`) the coordinator speaks to every engine. Identity-only, like
+# `aether-fs` above — the coordinator never mounts the inventory cap, it links
+# the crate for the kinds.
+aether-inventory = { path = "../aether-inventory", default-features = false }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 

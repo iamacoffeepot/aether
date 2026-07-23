@@ -116,8 +116,16 @@ serde, and lightweight data dependencies only.
 
 Keep a kind in `aether-kinds` only when a named upstream consumer cannot depend
 on the cap's own crate, or when it is truly substrate-wide. Document that
-must-stay reason next to the exception. Current examples include inventory and
-some engine/control/capture contracts consumed by MCP or substrate core.
+must-stay reason next to the exception. Current examples include
+`KindDescriptorWire`, which `aether-inventory` and `aether-fleet` both carry,
+and some engine/control/capture contracts consumed by MCP or substrate core.
+
+Being consumed by MCP is not itself a must-stay reason. `aether-mcp` takes a
+capability crate identity-only — `default-features = false`, no runtime, no
+substrate — precisely so a cap can own its kinds and still have them reach the
+harness's static `descriptors::all()` vocabulary through the link. `aether-fs`
+and `aether-inventory` are both wired that way; reach for the same shape before
+promoting a kind to the central crate.
 
 Do not put render/audio/fs/HTTP kinds into the central crate by habit; those
 families are capability-owned.

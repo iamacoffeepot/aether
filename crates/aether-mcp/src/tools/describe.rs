@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
 
 use aether_data::{EngineId, Kind, KindDescriptor, Uuid, tagged_id};
-use aether_kinds::{
-    DescribeComponent, DescribeComponentResult, HandlersResult, ListEngines, ListEnginesResult, ListHandlers,
-    descriptors,
-};
+use aether_inventory::kinds::{HandlersResult, ListHandlers};
+use aether_kinds::{DescribeComponent, DescribeComponentResult, ListEngines, ListEnginesResult, descriptors};
 use rmcp::ErrorData as McpError;
 
 use crate::args::{
