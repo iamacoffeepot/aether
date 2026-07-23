@@ -30,7 +30,7 @@ aether-actor = { path = "../aether-actor" }
 # on for the host-side test build through the dev-dependency entries below.
 aether-component = { path = "../aether-component", default-features = false }
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
-aether-input = { path = "../aether-input", default-features = false }
+aether-window = { path = "../aether-window", default-features = false }
 aether-render = { path = "../aether-render", default-features = false }
 # The `aether.fs` cap — the world actor loads worlds through it. Marker face
 # only (terrain addresses fs by mail).
@@ -57,7 +57,6 @@ inventory = { workspace = true }
 # crates a scenario composes appear here with their default `runtime` feature
 # on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
-aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }

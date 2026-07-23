@@ -29,7 +29,6 @@ use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{
     ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats,
 };
-use aether_input::InputCapability;
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
@@ -267,7 +266,6 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(())
         .build()
         .expect("boot");
     let world = component_address("world");
@@ -298,11 +296,10 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
             ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
             (
                 "retained-window-size",
-                HarnessOp::actor::<InputCapability>().send(&WindowSize {
-                    window: TEST_WINDOW_ID,
-                    width: WINDOW_WIDTH,
-                    height: WINDOW_HEIGHT,
-                }),
+                HarnessOp::window_event(
+                    TEST_WINDOW_ID,
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
             ("place", HarnessOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             ("settle", HarnessOp::advance(2)),
@@ -312,23 +309,20 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
     let before = capture_scene(&mut harness, &mover_address, &world, "opt-out-before");
     harness
         .execute(vec![
-            ("unrouted-w", HarnessOp::actor::<InputCapability>().send(&Key { window: TEST_WINDOW_ID, code: KEY_W })),
+            ("unrouted-w", HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_W })),
             ("unrouted-advance", HarnessOp::advance(32)),
         ])
         .expect("unrouted input window");
     let blocked = capture_scene(&mut harness, &mover_address, &world, "opt-out-blocked");
 
     load_mover_editor_shell(&mut harness, &widget_wasm, mover_mailbox);
-    // #3995 removes the legacy half when terrain's remaining input surface migrates.
     let routed_press = Key { window: TEST_WINDOW_ID, code: KEY_W };
     let routed_release = KeyRelease { window: TEST_WINDOW_ID, code: KEY_W };
     harness
         .execute(vec![
-            ("legacy-routed-w", HarnessOp::actor::<InputCapability>().send(&routed_press)),
-            ("window-routed-w", HarnessOp::window_event(TEST_WINDOW_ID, &routed_press)),
+            ("routed-w", HarnessOp::window_event(TEST_WINDOW_ID, &routed_press)),
             ("routed-advance", HarnessOp::advance(32)),
-            ("legacy-routed-release", HarnessOp::actor::<InputCapability>().send(&routed_release)),
-            ("window-routed-release", HarnessOp::window_event(TEST_WINDOW_ID, &routed_release)),
+            ("routed-release", HarnessOp::window_event(TEST_WINDOW_ID, &routed_release)),
         ])
         .expect("editor-routed input window");
     let routed = capture_scene(&mut harness, &mover_address, &world, "editor-routed");
@@ -359,7 +353,6 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(())
         .build()
         .expect("boot");
 
@@ -385,8 +378,8 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
             ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
             (
                 "aspect",
-                HarnessOp::send_mail(
-                    mover.as_str(),
+                HarnessOp::window_event(
+                    TEST_WINDOW_ID,
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
             ),
@@ -403,7 +396,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
     // follow camera without crossing it.
     harness
         .execute(vec![
-            ("press_w", HarnessOp::send_mail(mover.as_str(), &Key { window: TEST_WINDOW_ID, code: KEY_W })),
+            ("press_w", HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_W })),
             ("walk", HarnessOp::advance(96)),
         ])
         .expect("hold W + walk north");
@@ -414,7 +407,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
     // second stopped capture would scroll by another cell.
     harness
         .execute(vec![
-            ("release_w", HarnessOp::send_mail(mover.as_str(), &KeyRelease { window: TEST_WINDOW_ID, code: KEY_W })),
+            ("release_w", HarnessOp::window_event(TEST_WINDOW_ID, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_W })),
             ("settle_release", HarnessOp::advance(4)),
         ])
         .expect("release W + settle");
