@@ -47,6 +47,13 @@ pub const CHASSIS_BINS: &[(&str, &str)] = &[
     ("aether-chassis-hub", "aether-substrate-hub"),
 ];
 
+/// The chassis binary a `cargo xtask package` depot carries by default
+/// (ADR-0163 §1 names `aether-substrate`, the desktop chassis): a
+/// `(package, bin)` pair, the first [`CHASSIS_BINS`] entry. The platform
+/// updates this file; the package's `pack/` holds the content-addressed
+/// component objects it boots.
+pub const PACKAGE_CHASSIS: (&str, &str) = CHASSIS_BINS[0];
+
 /// One discovered wasm component artifact.
 #[derive(Debug, Clone)]
 pub struct Component {

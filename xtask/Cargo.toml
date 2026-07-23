@@ -6,6 +6,12 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# The `package` target writes the persisted `pack/manifest` with the
+# chassis's own `encode_manifest` (ADR-0163 §1) — the same encoder its
+# decoder reads — rather than re-implementing the byte layout, so xtask
+# depends on the chassis crate that owns `package::{PackageManifest,
+# PackageEntry, Sha256, encode_manifest}`.
+aether-chassis = { path = "../crates/aether-chassis" }
 anyhow = { workspace = true }
 cargo_metadata = "0.23.1"
 clap = { workspace = true }
@@ -13,6 +19,10 @@ determinator = "0.12.0"
 guppy = "0.17.26"
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
+# Content-addressed hashing for `pack/objects/<sha256>` — the same crate
+# the hub binary store hashes uploads with (ADR-0115). Native build tool,
+# so `std`.
+sha2 = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
