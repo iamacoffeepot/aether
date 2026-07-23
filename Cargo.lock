@@ -114,7 +114,7 @@ dependencies = [
  "aether-fs",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-kit",
+ "aether-kit-widget",
  "aether-test-fixtures-behavior",
  "serde",
  "tracing",
@@ -660,8 +660,6 @@ name = "aether-kit"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-behavior",
- "aether-clipboard",
  "aether-codec",
  "aether-component",
  "aether-data",
@@ -671,11 +669,57 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-input",
  "aether-kinds",
+ "aether-kit-terrain",
+ "aether-kit-widget",
  "aether-lifecycle",
  "aether-math",
  "aether-mesh",
  "aether-render",
  "aether-tcp",
+ "aether-text",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "aether-kit-terrain"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-data",
+ "aether-fs",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-input",
+ "aether-kinds",
+ "aether-kit-widget",
+ "aether-lifecycle",
+ "aether-math",
+ "aether-render",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "aether-kit-widget"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-behavior",
+ "aether-clipboard",
+ "aether-component",
+ "aether-data",
+ "aether-fs",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-input",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-math",
+ "aether-render",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "aether-text",
