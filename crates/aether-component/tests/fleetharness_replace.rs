@@ -1,6 +1,6 @@
 //! `FleetHarness` `replace_component` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate, then atomically swap it for
-//! `aether-kit`'s `aether.kit.camera` export (selector `aether_kit@aether.kit.camera`) at the
+//! `aether-kit-commons`'s `aether.kit.camera` export (selector `aether_kit_commons@aether.kit.camera`) at the
 //! same trampoline mailbox id (ADR-0022) and assert the returned
 //! capability set reflects the new binary while the lineage address
 //! stays put.
@@ -10,14 +10,14 @@ mod tests {
     use aether_component::WasmTrampoline;
     use aether_data::Kind;
     use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
-    use aether_kit::camera::CameraCreate;
+    use aether_kit_commons::camera::CameraCreate;
     use aether_test_fixtures_kinds::SetRender;
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
-    /// it with `aether-kit`'s non-entry `aether.camera` export (selector
-    /// `aether_kit@aether.kit.camera`; handlers `CameraCreate` + `Tick` + the
+    /// it with `aether-kit-commons`'s non-entry `aether.camera` export (selector
+    /// `aether_kit_commons@aether.kit.camera`; handlers `CameraCreate` + `Tick` + the
     /// camera-driver kinds) targeting the captured trampoline
     /// `mailbox_id` — exercising `ReplaceComponent.export` (#2027)
     /// end-to-end over the wire. The returned
@@ -53,7 +53,7 @@ mod tests {
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
         assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
 
-        let caps = harness.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
+        let caps = harness.replace_export(engine, loaded.mailbox_id, "aether_kit_commons", "aether.kit.camera");
 
         // Post-replace: the camera handler set is active, the probe's
         // is gone, and Tick (declared by both) survives the swap.

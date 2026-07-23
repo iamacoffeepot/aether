@@ -2,7 +2,7 @@
 //! obligation table, nothing on the actor SDK.
 //!
 //! A deferred route forwards its request to a peer and answers only when that
-//! reply lands. This is the exact pattern audio / text / aether-kit already
+//! reply lands. This is the exact pattern audio / text / aether-kit-commons already
 //! use for fs replies: capture the requester's `Source`, `send_with_context`
 //! to the peer, and answer later via `take_context` + `reply_to`. The send
 //! *inherits* the request's causal chain (ADR-0080 §7), so the request stays

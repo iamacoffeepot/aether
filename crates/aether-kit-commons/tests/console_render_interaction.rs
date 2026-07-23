@@ -6,7 +6,7 @@
 //! `Backquote` mapping; this suite proves the engine key code actually opens
 //! the console overlay and reaches the render sink.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit_commons` wasm has not
 //! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1` to make either skip a
 //! hard failure.
 
@@ -29,7 +29,7 @@ use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
     LoadResult, NamedMail, Tick, WindowSize,
 };
-use aether_kit::{ConsoleCommandOutput, ConsoleConfig};
+use aether_kit_commons::{ConsoleCommandOutput, ConsoleConfig};
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 use aether_render::RenderCapability;
 use aether_text::TextCapability;
@@ -235,7 +235,7 @@ fn history_text_differs_from_panel(harness: &mut SubstrateHarness, label: &'stat
 
 #[test]
 fn backquote_key_opens_console_overlay() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -262,7 +262,7 @@ fn backquote_key_opens_console_overlay() {
 
 #[test]
 fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direct() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     // The `EditorShell` arbiter now ships in the `aether-kit-widget` wasm
@@ -298,7 +298,7 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
 
 #[test]
 fn markdown_command_output_renders_into_history_band() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -339,7 +339,7 @@ fn markdown_command_output_renders_into_history_band() {
 
 #[test]
 fn configured_font_override_renders_into_history_band() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

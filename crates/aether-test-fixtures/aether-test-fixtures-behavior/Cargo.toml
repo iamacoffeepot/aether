@@ -11,10 +11,10 @@ license.workspace = true
 # on `aether-behavior` (never `aether-actor`) so structural component
 # discovery does not misclassify it — a component has an `aether-actor`
 # dependency, a behavior does not. That same absence rules out depending on
-# `aether-kit` for the widget kinds (kit deps `aether-actor` unconditionally),
-# so `src/lib.rs` carries local twins of the kinds the scripts transform,
-# re-derived under the matching `#[kind(name)]` so the `KindId` and wire bytes
-# match the kit originals.
+# `aether-kit-widget` for the widget kinds (the widget crate deps `aether-actor`
+# unconditionally), so `src/lib.rs` carries local twins of the kinds the scripts
+# transform, re-derived under the matching `#[kind(name)]` so the `KindId` and
+# wire bytes match the widget originals.
 
 [lib]
 # The shared kind twins the example scripts consume. A plain rlib — only the

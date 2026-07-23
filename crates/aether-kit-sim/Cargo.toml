@@ -70,9 +70,9 @@ inventory = { workspace = true }
 # runtime under `target/wasm32-unknown-unknown/{debug,release}/`. The cap
 # crates a scenario composes appear here with their default `runtime` feature
 # on — dev-only, the wasm lib build keeps the marker-only face above.
-# `client_scenario` also runtime-loads the camera wasm, which stays in
-# `aether-kit` until the commons rename (iamacoffeepot/aether#3954), so it
-# keeps a dev-dependency on `aether-kit` and imports its camera vocabulary.
+# `client_scenario` also runtime-loads the camera wasm, which lives in
+# `aether-kit-commons` (iamacoffeepot/aether#3954), so it keeps a
+# dev-dependency on `aether-kit-commons` and imports its camera vocabulary.
 [dev-dependencies]
 aether-component = { path = "../aether-component" }
 aether-game = { path = "../aether-game" }
@@ -81,7 +81,7 @@ aether-render = { path = "../aether-render" }
 aether-tcp = { path = "../aether-tcp" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-aether-kit = { path = "../aether-kit" }
+aether-kit-commons = { path = "../aether-kit-commons" }
 
 [lints]
 workspace = true

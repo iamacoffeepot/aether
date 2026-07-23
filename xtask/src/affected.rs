@@ -298,7 +298,9 @@ mod tests {
             assert!(global_screen(&strings(&[path])).is_some(), "{path} must force run_all");
         }
 
-        for path in ["crates/aether-kit/src/lib.rs", "crates/aether-kit/Cargo.toml", "docs/guide/testing.md"] {
+        for path in
+            ["crates/aether-kit-commons/src/lib.rs", "crates/aether-kit-commons/Cargo.toml", "docs/guide/testing.md"]
+        {
             assert!(global_screen(&strings(&[path])).is_none(), "{path} must not force run_all");
         }
     }

@@ -45,7 +45,7 @@
 //! [#3458]: https://github.com/iamacoffeepot/aether/issues/3458
 
 // `std`, not `#![no_std]` (issue #3497): the crate emits a `cdylib` control-core
-// wasm component (ADR-0149 §Packaging, the `aether-kit` precedent), and a
+// wasm component (ADR-0149 §Packaging, the `aether-kit-commons` precedent), and a
 // `cdylib` target must build for the native host — where a `#![no_std]` crate has
 // no global allocator. `std` compiles to `wasm32` like every component here, and
 // no consumer requires `no_std`. The pure core still leans on `alloc` paths, so

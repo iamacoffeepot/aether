@@ -17,15 +17,15 @@ const ACTOR_DEP: &str = "aether-actor";
 /// The dependency that marks a package as a behavior script (ADR-0137, issue
 /// 2688): a cdylib depending on the behavior SDK. Paired with the *absence*
 /// of [`ACTOR_DEP`] so a behavior and a component stay disjoint artifact
-/// classes — a component has `aether-actor`, a behavior does not. `aether-kit`
-/// declares both (an unconditional `aether-actor` dep and an optional
-/// `aether-behavior` one), and `cargo metadata` lists optional deps, so the
-/// absence guard is what keeps kit a component rather than misclassifying it.
+/// classes — a component has `aether-actor`, a behavior does not.
+/// `aether-kit-widget` declares both (an unconditional `aether-actor` dep and an
+/// optional `aether-behavior` one), and `cargo metadata` lists optional deps, so
+/// the absence guard is what keeps it a component rather than misclassifying it.
 const BEHAVIOR_DEP: &str = "aether-behavior";
 
 /// The feature-value token a feature declares to enable the optional
 /// `aether-behavior` dependency. A component package carrying such a feature
-/// (the kit's `behavior` feature) is built with it enabled so its wasm carries
+/// (the widget crate's `behavior` feature) is built with it enabled so its wasm carries
 /// the host; keying on this token rather than a hardcoded feature/package name
 /// keeps the rule structural, on the same `aether-behavior` signal
 /// [`discover_behaviors`] excludes on.
@@ -59,12 +59,12 @@ pub struct Component {
     pub from_example: bool,
     /// Wasm output filename stem — the lib or example target name. This
     /// is the same string `locate_component_wasm` keys on (e.g.
-    /// `aether_kit`, `probe`).
+    /// `aether_kit_commons`, `probe`).
     pub stem: String,
     /// Package features to enable for this component's wasm build — the
     /// features whose declared value pulls in `aether-behavior`
     /// (structurally derived, see [`behavior_features`]). Empty for a
-    /// component with no such feature; `["behavior"]` for `aether-kit`, so
+    /// component with no such feature; `["behavior"]` for `aether-kit-widget`, so
     /// its wasm carries the `BehaviorHost` and the `wasmi` interpreter.
     pub features: Vec<String>,
 }
@@ -142,7 +142,7 @@ pub fn discover_components(metadata: &Metadata) -> Vec<Component> {
 pub struct BehaviorVariant {
     /// `cargo build -p <package>` argument.
     pub package: String,
-    /// The stock wasm stem (`aether_kit`); the variant is copied to
+    /// The stock wasm stem (`aether_kit_widget`); the variant is copied to
     /// `<stem>_behavior.wasm`.
     pub stem: String,
     /// The behavior feature(s) to enable for the variant build.
@@ -173,7 +173,7 @@ pub fn discover_behavior_variants(metadata: &Metadata) -> Vec<BehaviorVariant> {
 /// Discover the behavior-script set (ADR-0137, issue 2688): every workspace
 /// package that depends on `aether-behavior`, exposes a `cdylib` target, and
 /// does **not** depend on `aether-actor`. The `aether-actor`-absence guard is
-/// load-bearing — it keeps behaviors and components disjoint, so `aether-kit`
+/// load-bearing — it keeps behaviors and components disjoint, so `aether-kit-widget`
 /// (which deps both) stays a component. Behavior scripts are `[[example]]`
 /// cdylibs, landing under `<profile>/examples/<stem>.wasm` exactly where
 /// `locate_component_wasm` already probes, so the scenario locates each script
@@ -201,11 +201,11 @@ pub fn discover_behaviors(metadata: &Metadata) -> Vec<Behavior> {
 }
 
 /// The feature names on `package` whose declared value enables the optional
-/// `aether-behavior` dependency ([`BEHAVIOR_FEATURE_TOKEN`]). For `aether-kit`
+/// `aether-behavior` dependency ([`BEHAVIOR_FEATURE_TOKEN`]). For `aether-kit-widget`
 /// this is `["behavior"]`, the feature that pulls the `BehaviorHost` `export!`
 /// entry and the `wasmi` interpreter into its wasm — which the #2688 scenario
-/// needs the kit build to carry. Deriving it structurally (rather than
-/// hardcoding `"aether-kit"` / `"behavior"`) keys the rule on the same
+/// needs the widget build to carry. Deriving it structurally (rather than
+/// hardcoding `"aether-kit-widget"` / `"behavior"`) keys the rule on the same
 /// `aether-behavior` signal `discover_behaviors` excludes on.
 fn behavior_features(package: &Package) -> Vec<String> {
     let mut features: Vec<String> = package

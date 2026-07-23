@@ -1,6 +1,6 @@
 //! Real-TCP player client scenarios through the shipped `aether-kit-sim` wasm.
-//! The camera the first scenario composes stays in `aether-kit`, so that
-//! scenario loads two wasm modules — the camera export from `aether-kit`, the
+//! The camera the first scenario composes lives in `aether-kit-commons`, so that
+//! scenario loads two wasm modules — the camera export from `aether-kit-commons`, the
 //! client export from `aether-kit-sim`.
 
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
@@ -25,7 +25,7 @@ use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
 use aether_input::InputCapability;
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
-use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
+use aether_kit_commons::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit_sim::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
     StateSummary, TickBundle,
@@ -242,13 +242,13 @@ fn gateway_listener_port(harness: &mut SubstrateHarness) -> u16 {
 
 #[test]
 fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
-    let Some(camera_wasm_path) = require_runtime("aether_kit") else {
+    let Some(camera_wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let Some(client_wasm_path) = require_runtime("aether_kit_sim") else {
         return;
     };
-    let camera_wasm = fs::read(camera_wasm_path).expect("read aether-kit wasm");
+    let camera_wasm = fs::read(camera_wasm_path).expect("read aether-kit-commons wasm");
     let client_wasm = fs::read(client_wasm_path).expect("read aether-kit-sim wasm");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind controlled loopback peer");
     let server_addr = listener.local_addr().expect("controlled peer address").to_string();

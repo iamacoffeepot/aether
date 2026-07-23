@@ -145,7 +145,7 @@ impl WasmActor for MeshViewer {
         let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
         let context = MeshLoadContext { reply: ctx.reply_target(), namespace: msg.namespace, path: msg.path };
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_commons",
             namespace = %read.namespace,
             path = %read.path,
             "load requested; issuing read",
@@ -176,7 +176,7 @@ impl WasmActor for MeshViewer {
             ReadResult::Ok { bytes, .. } => self.load_bytes(&context.path, &bytes),
             ReadResult::Err { error, .. } => {
                 tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_commons",
                     namespace = %context.namespace,
                     path = %context.path,
                     error = ?error,
@@ -219,7 +219,7 @@ impl MeshViewer {
         let lower = path.rsplit('.').next().map(str::to_ascii_lowercase);
         let Ok(text) = str::from_utf8(bytes) else {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_commons",
                 path = %path,
                 "mesh file is not valid UTF-8; keeping prior mesh",
             );
@@ -231,7 +231,7 @@ impl MeshViewer {
             self.try_replace_obj(text)
         } else {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_commons",
                 path = %path,
                 "unsupported file extension; expected .dsl or .obj",
             );
@@ -263,7 +263,7 @@ impl MeshViewer {
             Ok(ast) => ast,
             Err(error) => {
                 tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_commons",
                     error = %error,
                     "DSL parse failed; keeping prior mesh",
                 );
@@ -274,7 +274,7 @@ impl MeshViewer {
             Ok(p) => p,
             Err(error) => {
                 tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_commons",
                     error = %error,
                     "DSL mesh build failed; keeping prior mesh",
                 );
@@ -291,7 +291,7 @@ impl MeshViewer {
             }
         }
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_commons",
             polygons = polygons.len(),
             triangles = out.len(),
             "DSL load complete; cache replaced",
@@ -304,7 +304,7 @@ impl MeshViewer {
         match parse_obj(obj) {
             Ok(tris) => {
                 tracing::info!(
-                    target: "aether_kit",
+                    target: "aether_kit_commons",
                     triangles = tris.len(),
                     "OBJ load complete; cache replaced",
                 );
@@ -313,7 +313,7 @@ impl MeshViewer {
             }
             Err(error) => {
                 tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_commons",
                     error = ?error,
                     "OBJ parse failed; keeping prior mesh",
                 );

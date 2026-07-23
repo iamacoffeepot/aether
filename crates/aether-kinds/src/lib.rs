@@ -1455,7 +1455,7 @@ mod control_plane {
     // `warnings` is a sibling issue — this kind ships only the shape.
 
     /// `aether.mesh.load_result` — reply to `aether.kit.mesh.load`
-    /// (`aether_kit::mesh::LoadMesh`). Echoes the request's
+    /// (`aether_kit_commons::mesh::LoadMesh`). Echoes the request's
     /// `namespace` + `path` so the caller correlates the reply to its
     /// source without a pending-op queue — operation identity comes
     /// from the reply kind, target identity from the echoed fields.
@@ -1645,7 +1645,7 @@ mod control_plane {
 
     // ADR-0066: camera control kinds (`aether.kit.camera.{create, destroy,
     // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
-    // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
+    // `TopdownParams` / `ModeInit`) live in the `aether-kit-commons::camera`
     // trunk module. The `aether.view_projection` view_proj sink contract stays
     // in `aether-render` — it's a chassis primitive consumed by the desktop chassis's
     // `aether.render` mailbox (the camera mailbox folded into
@@ -1654,8 +1654,8 @@ mod control_plane {
     // schemas unchanged); only the source-side home moved.
 
     // ADR-0066: `aether.kit.mesh.load` moved to the `aether-mesh-viewer`
-    // trunk crate; that crate was later folded into `aether-kit`
-    // (`aether-kit::mesh`), which is its home now.
+    // trunk crate; that crate was later folded into `aether-kit-commons`
+    // (`aether-kit-commons::mesh`), which is its home now.
 
     /// `aether.substrate_harness.advance` — request the substrate-harness chassis
     /// step the world forward by `ticks` Tick events. Each tick

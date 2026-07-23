@@ -12,7 +12,7 @@
 //! Skipped when no wgpu adapter is available or a required wasm has not been
 //! pre-built: the world / mover exports come from the `aether_kit_terrain`
 //! wasm, and the editor-routing case additionally loads the widget editor
-//! shell from the `aether_kit` wasm. CI sets `AETHER_REQUIRE_RUNTIME=1`,
+//! shell from the `aether_kit_widget` wasm. CI sets `AETHER_REQUIRE_RUNTIME=1`,
 //! turning either skip into a hard failure.
 
 // Integration-test diagnostics intentionally surface alongside a failing test.

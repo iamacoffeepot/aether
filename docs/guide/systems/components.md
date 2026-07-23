@@ -6,8 +6,8 @@
 > (binding-stable hot-swap; the earlier drain design in [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) is superseded), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
 > selected at load), and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) / [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (sibling spawn and its
 > lineage-correct addressing). The authoring and loading surface here is **stable** — it's
-> what the reference component `aether-kit` (a multi-actor module: locomotion,
-> camera, and mesh viewer) is built on, and the signatures were read from the
+> what the reference component `aether-kit-commons` (a multi-actor module: camera,
+> console, and mesh viewer) is built on, and the signatures were read from the
 > current SDK.
 
 A **component** is the wasm host of an actor. The shared model — the `#[actor]`

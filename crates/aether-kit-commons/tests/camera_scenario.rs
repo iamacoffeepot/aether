@@ -1,5 +1,5 @@
 //! Camera scenario tests. Each test boots a `SubstrateHarness`, loads
-//! `aether-kit`'s wasm artifact (built separately for
+//! `aether-kit-commons`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `camera` export
 //! (ADR-0096), drives the `CameraComponent` through its
 //! `aether.kit.camera.*` mail surface, and asserts mail-flow / render
@@ -11,7 +11,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit_commons.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -25,10 +25,10 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{decode_png, not_all_black};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_kit::camera::CameraDestroy;
+use aether_kit_commons::camera::CameraDestroy;
 use aether_render::ViewProjection;
 
-// Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
+// Force linkage of `aether-kit-commons`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
 // separate crates that link against the test target's host rlib, but
 // the linker strips inventory submits for kinds the test code doesn't
@@ -37,7 +37,7 @@ use aether_render::ViewProjection;
 // still resolve, but other inventory-collected metadata wouldn't —
 // keep the anchor for parity with the other component scenario files.
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_commons as _;
 use std::fs;
 use std::path::Path;
 
@@ -56,7 +56,7 @@ fn component_address() -> String {
     format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
 }
 
-/// Load `aether-kit`'s pre-built wasm into the harness, selecting the
+/// Load `aether-kit-commons`'s pre-built wasm into the harness, selecting the
 /// `camera` export (ADR-0096; the kit is defaultless per ADR-0138, so
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
@@ -85,7 +85,7 @@ fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) {
 
 #[test]
 fn camera_component_lifecycle() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
 
@@ -112,7 +112,7 @@ fn camera_component_lifecycle() {
 /// the kind name.
 #[test]
 fn camera_default_static_publishes_view_proj() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
 
@@ -143,7 +143,7 @@ fn camera_default_static_publishes_view_proj() {
 /// shouldn't take down the chassis.
 #[test]
 fn camera_destroy_main_keeps_substrate_alive() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
 

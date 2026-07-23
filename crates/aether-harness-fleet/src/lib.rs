@@ -1324,7 +1324,7 @@ mod tests {
     fn manifest_missing_bundle_stem_is_classified() {
         let manifest = r#"{
             "components": {
-                "aether_kit": "components/aether_kit.wasm"
+                "aether_kit_commons": "components/aether_kit_commons.wasm"
             }
         }"#;
         assert_eq!(

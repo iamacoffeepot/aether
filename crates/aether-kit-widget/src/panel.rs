@@ -863,7 +863,7 @@ fn spawn_behavior_host(_ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, _
 /// `aether.kit.widget.panel`) with a [`PanelConfig`].
 ///
 /// # Agent
-/// Load `aether_kit.wasm` with `export: "aether.kit.widget.panel"` and a
+/// Load `aether_kit_widget.wasm` with `export: "aether.kit.widget.panel"` and a
 /// `PanelConfig` (top-left, width, theme, a font to load, and the `children`
 /// it stacks). With an empty `children` list it spawns a demonstration stack
 /// of the original interactive/reference widgets; otherwise it stacks exactly

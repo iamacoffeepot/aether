@@ -69,7 +69,7 @@ inventory = { workspace = true }
 # this crate's SDK defines. They drive the real hub → RPC →
 # forked-headless stack through `FleetHarness` (a dev-dep cycle back
 # through the bundle, which cargo permits for the test-target graph —
-# same precedent as aether-kit).
+# same precedent as aether-kit-commons).
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The shared `Kind` definitions the fleet tests decode + assert against;
 # also pinned (`use … as _`) so the fixture kinds' `inventory::submit!`

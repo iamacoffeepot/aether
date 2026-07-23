@@ -50,7 +50,7 @@ The short form selects workspace packages or prebuilt `.wasm` paths:
 cargo xtask bundle \
   --profile release \
   --chassis desktop \
-  --components aether-kit \
+  --components aether-kit-commons \
   --title example
 ```
 

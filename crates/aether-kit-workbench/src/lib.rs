@@ -5,7 +5,7 @@
 //! assembly crate. [`TerrainWorkbench`] arbitrates its editor regions with
 //! `EditorShell` and populates them with the `set::*` widgets from
 //! [`aether-kit-widget`](aether_kit_widget), inline-spawns [`ConsoleOverlay`]
-//! from [`aether-kit`](aether_kit), and drives the mark / terra / world
+//! from [`aether-kit-commons`](aether_kit_commons), and drives the mark / terra / world
 //! vocabulary from [`aether-kit-terrain`](aether_kit_terrain). Its two
 //! sub-actors — [`TerrainToolPanel`] and [`TerrainViewport`] — are inline
 //! children of the workbench root.
@@ -18,7 +18,7 @@
 //! `library` feature: its `export!` owns the sole entry surface in the
 //! assembled wasm module.
 //!
-//! [`ConsoleOverlay`]: aether_kit::console::ConsoleOverlay
+//! [`ConsoleOverlay`]: aether_kit_commons::console::ConsoleOverlay
 
 extern crate alloc;
 

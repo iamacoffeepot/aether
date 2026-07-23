@@ -1,5 +1,5 @@
 //! Mesh-viewer scenario tests. Each test boots a `SubstrateHarness`, loads
-//! `aether-kit`'s wasm artifact (built separately for
+//! `aether-kit-commons`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `mesh_viewer`
 //! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
 //! substrate's `save://` namespace, and drives the component through
@@ -10,7 +10,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit_commons.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -28,15 +28,15 @@ use aether_harness_substrate_capture::test_helpers::{
 };
 use aether_harness_substrate_capture::visual::{decode_png, differs_from_background};
 use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
-use aether_kit::mesh::LoadMesh;
+use aether_kit_commons::mesh::LoadMesh;
 
-// Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
+// Force linkage of `aether-kit-commons`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
 // separate crates that link against the test target's host rlib, but
 // the linker strips inventory submits for kinds the test code doesn't
 // statically reference.
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_commons as _;
 use std::fs;
 use std::path::Path;
 
@@ -66,7 +66,7 @@ f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 
-/// Load `aether-kit`'s pre-built wasm into the harness, selecting the
+/// Load `aether-kit-commons`'s pre-built wasm into the harness, selecting the
 /// `mesh_viewer` export (ADR-0096; the kit is defaultless per ADR-0138, so
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
@@ -112,7 +112,7 @@ fn assert_draw_triangle_observed(harness: &SubstrateHarness) {
 /// emission, and the per-tick render-sink replay.
 #[test]
 fn dsl_box_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -151,7 +151,7 @@ fn dsl_box_loads_and_renders() {
 /// regressing while the DSL branch keeps working.
 #[test]
 fn obj_quad_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -189,7 +189,7 @@ fn obj_quad_loads_and_renders() {
 /// the clear color.
 #[test]
 fn parse_failure_keeps_prior_mesh() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -245,7 +245,7 @@ fn parse_failure_keeps_prior_mesh() {
 /// from rendered geometry.
 #[test]
 fn good_dsl_load_replies_ok() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -284,7 +284,7 @@ fn good_dsl_load_replies_ok() {
 /// `engine_logs`.
 #[test]
 fn bad_dsl_load_replies_err() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -321,7 +321,7 @@ fn bad_dsl_load_replies_err() {
 /// load must not steal the first load's eventual `MeshLoadResult`.
 #[test]
 fn overlapping_loads_reply_to_their_own_requesters() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");

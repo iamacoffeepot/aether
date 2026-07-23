@@ -27,7 +27,7 @@ use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult, Tick};
-use aether_kit::camera::CameraCreate;
+use aether_kit_commons::camera::CameraCreate;
 use aether_test_fixtures_kinds::SetRender;
 use std::fs;
 
@@ -88,7 +88,7 @@ fn cap_registry_reports_fallback() {
     assert!(!caps.accepts(mbox, Ping::ID));
 }
 
-/// `aether.component.replace` swaps the probe wasm for `aether-kit`'s
+/// `aether.component.replace` swaps the probe wasm for `aether-kit-commons`'s
 /// non-entry `camera` export (a distinct handler set), exercising
 /// `ReplaceComponent.export` (#2027) — the trampoline's hosted type is
 /// `probe`, so reaching the camera handler set requires naming the
@@ -100,7 +100,7 @@ fn cap_registry_updates_on_replace() {
     let Some(probe_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let Some(kit_path) = require_wasm("aether_kit") else {
+    let Some(kit_path) = require_wasm("aether_kit_commons") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");

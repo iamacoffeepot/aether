@@ -36,10 +36,10 @@ aether-kit-widget = { path = "../aether-kit-widget", features = ["library"] }
 # `features = ["library"]` strips its `export!` entry surface from this
 # embedding wasm module the same way.
 aether-kit-terrain = { path = "../aether-kit-terrain", features = ["library"] }
-# The gameplay-systems layer. The workbench inline-spawns `ConsoleOverlay` and
+# The common standalone actors. The workbench inline-spawns `ConsoleOverlay` and
 # reads its `ConsoleConfig` / `ConsoleTheme` vocabulary; `features = ["library"]`
-# strips kit's `export!` entry surface from this embedding wasm module.
-aether-kit = { path = "../aether-kit", features = ["library"] }
+# strips the crate's `export!` entry surface from this embedding wasm module.
+aether-kit-commons = { path = "../aether-kit-commons", features = ["library"] }
 # iamacoffeepot/aether#3749: the lifecycle cap. The workbench and its panel /
 # viewport subscribe the frame stage through it; wasm guest, marker-only
 # identity face.

@@ -129,6 +129,6 @@ The worked authoring path is [Writing a behavior](../recipes/writing-a-behavior.
 - Script SDK, ABI, manifest: `crates/aether-behavior/src/{runtime,abi,manifest,envelope}.rs`
 - Derives: `crates/aether-behavior-derive/`
 - Host actor/config/persistence: `crates/aether-behavior/src/host/`
-- Widget composition adapter: `crates/aether-kit/src/widget/`
+- Widget composition adapter: `crates/aether-kit-widget/src/`
 - Build discovery: `xtask/src/inventory.rs`
 - Decision: accepted ADR-0137

@@ -364,7 +364,7 @@ dependencies = [
  "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-kit",
+ "aether-kit-commons",
  "aether-rpc",
  "aether-substrate",
  "aether-test-fixtures-boot",
@@ -654,7 +654,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-kit"
+name = "aether-kit-commons"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
@@ -690,7 +690,7 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-input",
  "aether-kinds",
- "aether-kit",
+ "aether-kit-commons",
  "aether-kit-terrain",
  "aether-lifecycle",
  "aether-math",
@@ -758,7 +758,7 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-input",
  "aether-kinds",
- "aether-kit",
+ "aether-kit-commons",
  "aether-kit-terrain",
  "aether-kit-widget",
  "aether-lifecycle",
@@ -914,7 +914,7 @@ dependencies = [
  "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-kit",
+ "aether-kit-commons",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "bytemuck",

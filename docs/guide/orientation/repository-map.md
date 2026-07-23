@@ -4,7 +4,7 @@ The workspace is layered. Most changes should move down this list only as far
 as their responsibility requires.
 
 ```text
-product actors and reusable UI/gameplay pieces       aether-kit
+product actors and reusable UI/gameplay pieces       aether-kit-*
 native services and their public mail contracts      aether-<capability> crates
 guest actor and behavior authoring SDKs               aether-actor, aether-behavior
 process profiles, binaries, packaging     aether-chassis, aether-chassis-*
@@ -68,12 +68,16 @@ server.
 
 | Crate | Owns |
 |---|---|
-| `aether-kit` | reference/product actors: camera, widgets, workbench, world/terrain, console, movement, simulation client pieces |
+| `aether-kit-commons` | common standalone reference actors: camera + camera-controller, console overlay, mesh viewer |
+| `aether-kit-widget` | reusable widget set and the `EditorShell` composition arbiter |
+| `aether-kit-terrain` | world / mark / terra / mover terrain-authoring actors |
+| `aether-kit-sim` | reference game-loop pair: the `TurnSim` authority and `PlayerClient` presentation actor |
+| `aether-kit-workbench` | terrain-annotation workbench assembly composing the widget / terrain / console layers |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets |
 
-These crates are valuable examples, but “in tree” does not mean “native.”
-`aether-kit` is actor code hosted by the same component machinery available to
-other guest modules.
+These crates are valuable examples, but “in tree” does not mean “native.” The
+`aether-kit-*` crates are actor code hosted by the same component machinery
+available to other guest modules.
 
 ## Derive, fixture, and tooling crates
 
@@ -110,7 +114,7 @@ uses the nightly fuzzing toolchain.
 | Add a message to a native capability | that capability's own crate, `aether-<cap>/src/kinds.rs` | runtime handler, descriptors, wasm-facing feature gates |
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
-| Add a reusable guest actor | `aether-kit` or a new component crate | `aether-actor`, export/cardinality rules |
+| Add a reusable guest actor | an `aether-kit-*` crate or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |
 | Change a wire shape | owning kind plus `aether-data`/`aether-codec` | compatibility fixtures and any RPC framing |
 

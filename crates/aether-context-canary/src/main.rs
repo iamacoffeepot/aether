@@ -43,8 +43,8 @@ struct Args {
     #[arg(long)]
     endpoint: Option<String>,
 
-    /// Path to the staged `aether_kit.wasm` fixture.
-    #[arg(long, default_value = "dist/components/aether_kit.wasm")]
+    /// Path to the staged `aether_kit_commons.wasm` fixture.
+    #[arg(long, default_value = "dist/components/aether_kit_commons.wasm")]
     component: PathBuf,
 
     /// Checked-in budget manifest.

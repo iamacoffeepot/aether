@@ -682,12 +682,12 @@ mod tests {
         // Parity with the structural sweep CI runs before this xtask: a drop
         // here surfaces as an AETHER_REQUIRE_RUNTIME panic. The
         // test fixtures are three single-output cdylib crates discovered the
-        // same way as `aether-kit` — no example path.
+        // same way as `aether-kit-commons` — no example path.
         for expected in [
             "aether_test_fixtures_bundle",
             "aether_test_fixtures_stateful_typed",
             "aether_test_fixtures_stateful_reshaped",
-            "aether_kit",
+            "aether_kit_commons",
         ] {
             assert!(stems.contains(expected), "discovery dropped component {expected}; found {stems:?}");
         }
@@ -723,14 +723,14 @@ mod tests {
             assert!(stems.contains(expected), "behavior discovery dropped {expected}; found {stems:?}");
         }
 
-        // The disjointness guard: `aether-kit` declares an optional
+        // The disjointness guard: `aether-kit-widget` declares an optional
         // `aether-behavior` dep (its `behavior` feature) AND an unconditional
         // `aether-actor` dep, and `cargo metadata` lists optional deps — so a
-        // rule keyed on `aether-behavior` alone would sweep kit in. The
-        // `aether-actor`-absence guard keeps it a component, not a behavior.
+        // rule keyed on `aether-behavior` alone would sweep the widget crate in.
+        // The `aether-actor`-absence guard keeps it a component, not a behavior.
         assert!(
-            !stems.contains("aether_kit"),
-            "the actor-absence guard must exclude aether-kit (a component) from behaviors; \
+            !stems.contains("aether_kit_widget"),
+            "the actor-absence guard must exclude aether-kit-widget (a component) from behaviors; \
              found {stems:?}",
         );
 
