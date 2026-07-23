@@ -18,6 +18,8 @@ fn manifest(chassis: &str) -> StoredManifest {
         git_sha: "deadbee".to_owned(),
         profile: "debug".to_owned(),
         target: "x86_64-unknown-linux-gnu".to_owned(),
+        env_keys: vec!["AETHER_RPC_PORT".to_owned()],
+        argv_flags: vec!["rpc-port".to_owned()],
     })
 }
 

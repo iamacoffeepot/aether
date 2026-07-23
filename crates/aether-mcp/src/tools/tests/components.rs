@@ -54,6 +54,8 @@ fn binary_listing_wraps_entries_and_match_count() {
                 git_sha: "deadbee".to_owned(),
                 profile: "debug".to_owned(),
                 target: "x86_64-unknown-linux-gnu".to_owned(),
+                env_keys: vec!["AETHER_TICK_HZ".to_owned(), "AETHER_RPC_PORT".to_owned()],
+                argv_flags: vec!["tick-hz".to_owned(), "rpc-port".to_owned(), "workers".to_owned()],
             },
         }],
         total_matched: 3,
@@ -61,6 +63,12 @@ fn binary_listing_wraps_entries_and_match_count() {
     let value = serde_json::to_value(response).expect("binary listing response serializes");
     assert_eq!(value["entries"][0]["hash"], "abc");
     assert_eq!(value["entries"][0]["manifest"]["chassis"], "headless");
+    // ADR-0162: the config surface is rendered as bounded counts, not full
+    // lists — the full sets live in the store, not the listing.
+    assert_eq!(value["entries"][0]["manifest"]["env_key_count"], 2);
+    assert_eq!(value["entries"][0]["manifest"]["argv_flag_count"], 3);
+    assert!(value["entries"][0]["manifest"].get("env_keys").is_none(), "env_keys is not inlined in the listing");
+    assert!(value["entries"][0]["manifest"].get("argv_flags").is_none(), "argv_flags is not inlined in the listing");
     assert_eq!(value["total_matched"], 3);
     assert_eq!(value["shown"], 1);
     assert_eq!(value["truncated"], true);
