@@ -27,8 +27,10 @@ use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RuntimeConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs,
     install_frame_size,
 };
-use aether_chassis::cli::{ChassisCli, HubCli};
+use aether_chassis::cli::ChassisCli;
 use std::thread;
+
+use crate::cli::HubCli;
 
 /// ADR-0071 marker for the hub chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HubChassis>`] returned by

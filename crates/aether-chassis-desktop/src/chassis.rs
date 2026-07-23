@@ -36,7 +36,9 @@ use aether_chassis::{WindowConfig, WindowSettings};
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
 use aether_chassis::boot::{ChassisBase, CommonEnv, chassis_residual_knobs, with_full_stack_caps, with_rpc_server};
-use aether_chassis::cli::{ChassisCli, DesktopCli};
+use aether_chassis::cli::ChassisCli;
+
+use crate::cli::DesktopCli;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 use winit::event_loop::ControlFlow;
 

@@ -7,9 +7,8 @@
 // CLI diagnostic before tracing subscriber is installed (issue 891).
 #![allow(clippy::print_stderr)]
 
-use aether_chassis::cli::HubCli;
 use aether_chassis::run_describe_prelude;
-use aether_chassis_hub::{Chassis, HubChassis, HubEnv};
+use aether_chassis_hub::{Chassis, HubChassis, HubCli, HubEnv};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {

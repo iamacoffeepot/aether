@@ -5,8 +5,10 @@
 //! binary over the shared `aether-chassis` composition layer.
 
 pub mod chassis;
+pub mod cli;
 pub mod driver;
 
 pub use chassis::{HeadlessChassis, HeadlessEnv};
+pub use cli::HeadlessCli;
 
 pub use aether_chassis::autoload::AutoloadComponent;
