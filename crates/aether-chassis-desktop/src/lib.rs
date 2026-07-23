@@ -11,9 +11,11 @@
 //! pure pump host for the render + window actors.
 
 pub mod chassis;
+pub mod cli;
 pub mod driver;
 
 pub use chassis::{DesktopChassis, DesktopEnv, UserEvent};
+pub use cli::DesktopCli;
 pub use driver::{DesktopDriverCapability, DesktopDriverRunning};
 
 pub use aether_chassis::autoload::AutoloadComponent;

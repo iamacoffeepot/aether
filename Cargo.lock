@@ -164,11 +164,9 @@ name = "aether-chassis"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-audio",
  "aether-codec",
  "aether-component",
  "aether-data",
- "aether-fleet",
  "aether-fs",
  "aether-game",
  "aether-harness-substrate",
@@ -178,7 +176,6 @@ dependencies = [
  "aether-kinds",
  "aether-lifecycle",
  "aether-process",
- "aether-render",
  "aether-rpc",
  "aether-substrate",
  "aether-tcp",
@@ -322,6 +319,7 @@ dependencies = [
  "aether-data",
  "aether-fleet",
  "aether-harness-fleet",
+ "aether-harness-substrate",
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",

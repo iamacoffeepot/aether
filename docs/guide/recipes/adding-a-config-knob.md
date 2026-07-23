@@ -165,7 +165,7 @@ no `.env()` source, so it's env-free and CI-safe (issue 464).
 The derive emits `<Name>Overlay` (here `HttpOverlay`) with an `into_layer()`
 method. For a field on an existing struct whose overlay is already flattened into
 a chassis CLI, the new field rides the existing overlay automatically — confirm
-your struct's overlay is reached. `HttpOverlay` is re-exported from
+your struct's overlay is reached. `HttpOverlay` is imported into
 `crates/aether-chassis/src/cli.rs` and flattened into `CommonOverlay`:
 
 ```rust
@@ -249,9 +249,10 @@ If the knob doesn't belong on any existing struct, you're declaring a new
   `METAS` slice in `chassis_registry()`
   (`crates/aether-chassis/src/boot.rs`) so the `--print-config` dump
   and the unknown-key sweep (`chassis_known_keys`) both see its knobs.
-- **Flatten its overlay into a chassis CLI.** Re-export `YourOverlay` in
+- **Flatten its overlay into a chassis CLI.** Import `YourOverlay` into
   `crates/aether-chassis/src/cli.rs` and `#[command(flatten)]` it into
-  `CommonOverlay` (or a per-chassis root).
+  `CommonOverlay`, or into a per-chassis root in its own chassis crate
+  (`crates/aether-chassis-{desktop,headless,hub}/src/cli.rs`).
 - **Choose and wire a stable TOML section.** Pick the explicit section name that
   belongs to the subsystem, then call
   `resolve_with_file::<YourConfig>(overlay.into_layer(), config_file, "your-section")`

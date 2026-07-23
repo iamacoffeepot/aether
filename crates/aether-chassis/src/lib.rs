@@ -31,8 +31,8 @@ pub mod autoload;
 pub mod boot;
 pub mod bundle_pack;
 pub mod cli;
-mod tick;
-mod window;
+pub mod tick;
+pub mod window;
 
 pub use aether_substrate::chassis::{BuildProvenance, PreludeAction, PreludeFlags};
 pub use boot::{

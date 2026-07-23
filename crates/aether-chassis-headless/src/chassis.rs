@@ -39,8 +39,10 @@ use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
 use aether_chassis::boot::{
     ChassisBase, CommonEnv, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps, with_rpc_server,
 };
-use aether_chassis::cli::{ChassisCli, HeadlessCli};
+use aether_chassis::cli::ChassisCli;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
+
+use crate::cli::HeadlessCli;
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::log_install::apply_filter;
 

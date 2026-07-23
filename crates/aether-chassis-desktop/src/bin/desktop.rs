@@ -5,9 +5,8 @@
 //! each per-cap overlay shadows its `AETHER_*` env var, unset flags
 //! fall through to env-only resolution.
 
-use aether_chassis::cli::DesktopCli;
 use aether_chassis::run_describe_prelude;
-use aether_chassis_desktop::{DesktopChassis, DesktopEnv};
+use aether_chassis_desktop::{DesktopChassis, DesktopCli, DesktopEnv};
 use aether_substrate::Chassis;
 use clap::Parser as _;
 

@@ -29,6 +29,9 @@ aether-substrate = { path = "../aether-substrate" }
 # (aether-chassis), so the hub no longer depends on aether-trace directly.
 aether-fleet = { path = "../aether-fleet" }
 aether-rpc = { path = "../aether-rpc" }
+# `HubCli` flattens the `SettlementOverlay` for the hub's own teardown-budget
+# knob (`--settlement-cap-secs`), resolved off its source stack.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 # Fully-qualified `aether_data::mailbox_id_from_name` resolves the
 # engines-cap route target.
 aether-data = { path = "../aether-data" }

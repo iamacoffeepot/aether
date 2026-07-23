@@ -1,16 +1,20 @@
-//! Per-chassis clap CLI roots (ADR-0090 unit d, issue 1258). Each
-//! chassis bin calls `<Cli>::parse()` and threads the resolved
-//! overlays through `*Env::resolve(cli)`; each overlay's
-//! `into_layer()` writes argv-set fields into a partial
-//! `<*ConfigLayer as confique::Config>::Layer`, which the cap's
-//! `from_argv_then_env(...)` then preloads ahead of `.env()` so argv
-//! beats env beats literal defaults. Absent flags resolve `None` and
-//! fall through to env-only resolution — boot is byte-identical when
-//! argv is empty.
+//! Shared chassis-CLI machinery (ADR-0090 unit d, issue 1258): the pieces every
+//! chassis root composes from — the [`CommonOverlay`] full-stack cap bundle, the
+//! [`ChassisMeta`] source-selecting flags, and the [`ChassisCli`] trait that
+//! assembles the file+argv source stack. Each chassis crate owns its own root
+//! (`DesktopCli` / `HeadlessCli` / `HubCli` live in their chassis crates); this
+//! crate carries what those roots share.
+//!
+//! A chassis bin calls `<Cli>::parse()` and threads the resolved overlays through
+//! `*Env::resolve(cli)`; each overlay's `into_layer()` writes argv-set fields into
+//! a partial `<*ConfigLayer as confique::Config>::Layer`, which the cap's
+//! `from_argv_then_env(...)` then preloads ahead of `.env()` so argv beats env
+//! beats literal defaults. Absent flags resolve `None` and fall through to
+//! env-only resolution — boot is byte-identical when argv is empty.
 //!
 //! ADR-0156 §5 (issue 3872): staging each overlay onto the source stack is
 //! **derived**, not hand-maintained. `#[derive(aether_substrate::Config)]` emits
-//! a leaf `StageArgv` on every `*Overlay`, and each root here carries
+//! a leaf `StageArgv` on every `*Overlay`, and each chassis root carries
 //! `#[derive(aether_substrate::StageArgv)]` — the container half that delegates
 //! to every field's `stage_argv`. A chassis then stages its whole CLI in one
 //! `cli.stage_argv(&mut sources)` call, so adding an overlay field to a root IS
@@ -47,41 +51,19 @@
 //! each root's `after_help` (`crate::boot::env_only_after_help`) by harvesting the
 //! derive-emitted overlays' own clap help, so the section carries each knob's doc
 //! + env + default and cannot drift from the registry.
-//!
-//! ADR-0090 unit g (iamacoffeepot/aether#1264): the per-cap `*Overlay`
-//! structs now ride the `#[derive(aether_substrate::Config)]` next to
-//! the domain struct in the cap crate. This file re-exports them so
-//! `cli.common.http.into_layer()` call sites stay unchanged; the
-//! chassis-root CLI structs stay hand-written because they cover
-//! chassis-shape (cross-cap) composition the derive deliberately
-//! doesn't try to model.
 
+use std::collections::BTreeSet;
+
+use aether_fs::NamespaceRootsOverlay;
+use aether_harness_substrate::SettlementOverlay;
+use aether_http::{HttpOverlay, HttpServerOverlay};
+use aether_lifecycle::LifecycleOverlay;
+use aether_process::ProcessOverlay;
+use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::{ConfigError, ConfigSources, StageArgv};
-use clap::{Args, Parser};
+use clap::Args;
 
-use crate::boot::load_chassis_config;
-
-// Per-cap overlays are emitted by `#[derive(aether_substrate::Config)]`
-// next to the domain struct in each cap's own crate. Re-exporting them
-// here keeps the `cli.common.<cap>.into_layer()` call sites unchanged.
-// The `NamespaceRoots` overlay's name follows the domain struct
-// (`NamespaceRootsOverlay`), not the namespace prefix (`FsOverlay`) —
-// alias the historical name so the bundle's compose code keeps
-// reading.
-pub use aether_audio::AudioOverlay;
-pub use aether_fleet::FleetOverlay;
-pub use aether_fs::NamespaceRootsOverlay as FsOverlay;
-pub use aether_harness_substrate::SettlementOverlay;
-pub use aether_http::HttpOverlay;
-pub use aether_http::HttpServerOverlay;
-pub use aether_lifecycle::LifecycleOverlay;
-pub use aether_process::ProcessOverlay;
-pub use aether_render::RenderTuningOverlay;
-pub use aether_rpc::RpcServerOverlay;
-
-pub use crate::boot::{ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, env_only_after_help};
-pub use crate::tick::TickOverlay;
-pub use crate::window::WindowOverlay;
+use crate::boot::{ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, load_chassis_config};
 
 /// The three source-selecting meta flags every chassis root carries. They name
 /// the file source and the print/describe exits, so they belong to no cap
@@ -141,7 +123,7 @@ pub struct CommonOverlay {
     #[command(flatten)]
     pub http_server: HttpServerOverlay,
     #[command(flatten)]
-    pub fs: FsOverlay,
+    pub fs: NamespaceRootsOverlay,
     /// One-shot exec cap knobs (ADR-0157): `--process-allowlist` /
     /// `--process-max-in-flight` / `--process-timeout-ms`, shadowing the
     /// `AETHER_PROCESS_*` env.
@@ -181,185 +163,36 @@ pub struct CommonOverlay {
     pub rpc: RpcServerOverlay,
 }
 
-/// Desktop chassis CLI root.
-#[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
-#[command(
-    name = "aether-substrate",
-    about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.",
-    long_about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.\n\n\
-        Each flag below carries its resolved env key and default in brackets; unset flags fall \
-        through to env then the default. For the full source-resolved value of every knob use \
-        --print-config, and for this binary's linked caps and build provenance use --describe.",
-    after_help = env_only_after_help()
-)]
-pub struct DesktopCli {
-    #[command(flatten)]
-    pub common: CommonOverlay,
-    #[command(flatten)]
-    pub audio: AudioOverlay,
-    /// Render cap tuning (desktop composes the wgpu render cap):
-    /// `--render-vertex-buffer-bytes`, shadowing `AETHER_RENDER_VERTEX_BUFFER_BYTES`
-    /// (issue 3882 flattened its overlay here; headless composes the nop render cap,
-    /// which resolves no `RenderTuningConfig`, so it carries no render flag).
-    #[command(flatten)]
-    pub render: RenderTuningOverlay,
-    /// Desktop window knobs: `--window-mode`, `--window-title`.
-    #[command(flatten)]
-    pub window: WindowOverlay,
-
-    /// The source-selecting meta flags (`--config` / `--print-config` /
-    /// `--describe`); see [`ChassisMeta`].
-    #[command(flatten)]
-    #[stage(skip)]
-    pub meta: ChassisMeta,
+/// Every `--long` flag a clap command declares. The building block chassis crates
+/// assemble their root-flag checkability tests from (see [`overlay_flags`]).
+#[must_use]
+pub fn long_flags(command: &clap::Command) -> BTreeSet<String> {
+    command.get_arguments().filter_map(|arg| arg.get_long().map(str::to_owned)).collect()
 }
 
-impl ChassisCli for DesktopCli {
-    fn meta(&self) -> &ChassisMeta {
-        &self.meta
-    }
+/// The long flags an [`Args`] overlay contributes, gathered by augmenting a
+/// throwaway command with it — the same flags a chassis root gets by
+/// `#[command(flatten)]`-ing the overlay. A chassis crate builds its root's
+/// expected flag set by unioning `overlay_flags::<T>()` over the overlays it
+/// composes, plus [`meta_flags`].
+#[must_use]
+pub fn overlay_flags<T: Args>() -> BTreeSet<String> {
+    long_flags(&T::augment_args(clap::Command::new("probe")))
 }
 
-/// Headless chassis CLI root.
-#[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
-#[command(
-    name = "aether-substrate-headless",
-    about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.",
-    long_about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.\n\n\
-        Each flag below carries its resolved env key and default in brackets; unset flags fall \
-        through to env then the default. For the full source-resolved value of every knob use \
-        --print-config, and for this binary's linked caps and build provenance use --describe.",
-    after_help = env_only_after_help()
-)]
-pub struct HeadlessCli {
-    #[command(flatten)]
-    pub common: CommonOverlay,
-    /// Headless tick knob: `--tick-hz`.
-    #[command(flatten)]
-    pub tick: TickOverlay,
-
-    /// The source-selecting meta flags (`--config` / `--print-config` /
-    /// `--describe`); see [`ChassisMeta`].
-    #[command(flatten)]
-    #[stage(skip)]
-    pub meta: ChassisMeta,
-}
-
-impl ChassisCli for HeadlessCli {
-    fn meta(&self) -> &ChassisMeta {
-        &self.meta
-    }
-}
-
-/// Hub chassis CLI root — coordinator-only, no full-stack caps.
-#[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
-#[command(
-    name = "aether-substrate-hub",
-    about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.",
-    long_about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.\n\n\
-        Each flag below carries its resolved env key and default in brackets; unset flags fall \
-        through to env then the default. For the full source-resolved value of every knob use \
-        --print-config, and for this binary's linked caps and build provenance use --describe.",
-    after_help = env_only_after_help()
-)]
-pub struct HubCli {
-    /// `--rpc-port` shadows `AETHER_RPC_PORT` — the `aether.rpc.server` bind
-    /// port (the hub applies its `DEFAULT_RPC_PORT`, 8901, when unset).
-    #[command(flatten)]
-    pub rpc: RpcServerOverlay,
-
-    /// Engines-cap knobs — the liveness-heartbeat tuning
-    /// (`--hub-heartbeat-interval-secs` / `--hub-heartbeat-miss-limit`,
-    /// issue 1339). Flattened from the derive-emitted overlay.
-    #[command(flatten)]
-    pub fleet: FleetOverlay,
-
-    /// Per-actor ring-capacity knobs (issue 1990): `--actor-*`. The hub resolves
-    /// `ActorRingConfig` off its own source stack for the actors its registry hosts
-    /// (issue 3882 flattened the overlay here).
-    #[command(flatten)]
-    pub actor_ring: ActorRingOverlay,
-    /// Scheduler hot-path tuning knobs (issue 2485): `--scheduler-*`. The hub
-    /// resolves `SchedulerTuningConfig` off its own source stack (issue 3882).
-    #[command(flatten)]
-    pub scheduler: SchedulerTuningOverlay,
-    /// Settlement-patience backstop (issue 2062): `--settlement-cap-secs`. The hub
-    /// resolves `SettlementConfig` for its own teardown budget (issue 3882).
-    #[command(flatten)]
-    pub settlement: SettlementOverlay,
-
-    /// The source-selecting meta flags (`--config` / `--print-config` /
-    /// `--describe`); see [`ChassisMeta`].
-    #[command(flatten)]
-    #[stage(skip)]
-    pub meta: ChassisMeta,
-}
-
-impl ChassisCli for HubCli {
-    fn meta(&self) -> &ChassisMeta {
-        &self.meta
-    }
+/// The source-selecting meta flags every chassis root carries directly (they
+/// name the file source and the print/describe exits, so they belong to no cap
+/// member). Derived from the [`ChassisMeta`] `Args` group itself, the same
+/// flatten a root gets, so the expected set cannot drift from the declaration.
+#[must_use]
+pub fn meta_flags() -> BTreeSet<String> {
+    overlay_flags::<ChassisMeta>()
 }
 
 #[cfg(test)]
-mod checkability_tests {
-    //! ADR-0156 §5: the CLI roots stay hand-written static clap structs, so
-    //! each carries a checkable invariant in place of the old lockstep comment
-    //! — its long-flag set equals the union of the flags declared by the
-    //! overlays of the members it composes (plus the meta flags that select the
-    //! source itself: `--config` / `--print-config` / `--describe`). A cap added
-    //! to a chassis's composition without flattening its overlay into the root
-    //! (or a stale flag left in the root) fails the assertion honestly.
-
-    use super::{
-        ActorRingOverlay, ChassisMeta, CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli,
-        RenderTuningOverlay, RpcServerOverlay, SchedulerTuningOverlay, SettlementOverlay, TickOverlay,
-    };
-    use crate::window::WindowOverlay;
-    use aether_audio::AudioOverlay;
-    use clap::{Args, CommandFactory};
-    use std::collections::BTreeSet;
-
-    /// Every `--long` flag a clap command declares.
-    fn long_flags(command: &clap::Command) -> BTreeSet<String> {
-        command.get_arguments().filter_map(|arg| arg.get_long().map(str::to_owned)).collect()
-    }
-
-    /// The long flags an [`Args`] overlay contributes, gathered by augmenting a
-    /// throwaway command with it — the same flags the chassis root gets by
-    /// `#[command(flatten)]`-ing the overlay.
-    fn overlay_flags<T: Args>() -> BTreeSet<String> {
-        long_flags(&T::augment_args(clap::Command::new("probe")))
-    }
-
-    /// The source-selecting meta flags every chassis root carries directly
-    /// (they name the file source and the print/describe exits, so they belong
-    /// to no cap member). Derived from the [`ChassisMeta`] Args group itself,
-    /// the same flatten a root gets, so the expected set cannot drift from the
-    /// declaration.
-    fn meta_flags() -> BTreeSet<String> {
-        overlay_flags::<ChassisMeta>()
-    }
-
-    #[test]
-    fn desktop_root_flags_equal_composed_overlay_set() {
-        let mut expected = overlay_flags::<CommonOverlay>();
-        expected.extend(overlay_flags::<AudioOverlay>());
-        // Desktop composes the wgpu render cap, so its `RenderTuningConfig` overlay
-        // is flattened only here, not into the shared `CommonOverlay` (issue 3882).
-        expected.extend(overlay_flags::<RenderTuningOverlay>());
-        expected.extend(overlay_flags::<WindowOverlay>());
-        expected.extend(meta_flags());
-        assert_eq!(long_flags(&DesktopCli::command()), expected);
-    }
-
-    #[test]
-    fn headless_root_flags_equal_composed_overlay_set() {
-        let mut expected = overlay_flags::<CommonOverlay>();
-        expected.extend(overlay_flags::<TickOverlay>());
-        expected.extend(meta_flags());
-        assert_eq!(long_flags(&HeadlessCli::command()), expected);
-    }
+mod tests {
+    use super::HttpOverlay;
+    use clap::Args as _;
 
     #[test]
     fn derived_flag_help_carries_doc_env_and_default() {
@@ -390,21 +223,5 @@ mod checkability_tests {
         let value_names: Vec<String> =
             arg.get_value_names().unwrap_or_default().iter().map(ToString::to_string).collect();
         assert_eq!(value_names, ["MILLIS"], "ms_duration hint stamps the typed value name");
-    }
-
-    #[test]
-    fn hub_root_flags_equal_composed_overlay_set() {
-        // The hub composes the engines cap plus the RPC server; `--rpc-port`
-        // now rides the derive-emitted `RpcServerOverlay` (#3849) like every
-        // other flag, alongside the meta flags. Issue 3882 flattened the three
-        // tuning overlays the hub resolves off its own source stack (actor ring /
-        // scheduler / settlement).
-        let mut expected = overlay_flags::<FleetOverlay>();
-        expected.extend(overlay_flags::<RpcServerOverlay>());
-        expected.extend(overlay_flags::<ActorRingOverlay>());
-        expected.extend(overlay_flags::<SchedulerTuningOverlay>());
-        expected.extend(overlay_flags::<SettlementOverlay>());
-        expected.extend(meta_flags());
-        assert_eq!(long_flags(&HubCli::command()), expected);
     }
 }
