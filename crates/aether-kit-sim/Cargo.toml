@@ -1,0 +1,87 @@
+[package]
+name = "aether-kit-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The reference game-loop pair extracted from `aether-kit`
+# (iamacoffeepot/aether#3952): `TurnSim` (the deterministic fixed-tick
+# reference simulation) and `PlayerClient` (the outbound player-session and
+# authoritative presentation actor). The pair depends on `aether-kit-terrain`
+# only for its `CellPos` / `WorldPoint` / octimeter position vocabulary, so it
+# lives in its own crate rather than the kit remainder — terrain churn then
+# reaches only these two small scenarios and `aether-game`'s gateway test,
+# never the fleet chassis tests that dev-depend on kit for the camera export.
+# Guest code throughout — no data/runtime split — so `export!` emits the
+# wasm32-only FFI shims that stay inert in a host rlib and integration tests
+# link the same artifact.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# iamacoffeepot/aether#3951: the terrain stack was extracted to
+# `aether-kit-terrain`. The sim / client pair consumes its `CellPos` /
+# `WorldPoint` / octimeter position vocabulary, so this crate takes an rlib
+# dependency on it. This crate is itself a cdylib whose `export!` binds the
+# fixed-name FFI entries, and a wasm module carries exactly one `export!`, so
+# it enables the terrain crate's `library` feature to strip terrain's own
+# `export!` entry surface from the embedding wasm module.
+aether-kit-terrain = { path = "../aether-kit-terrain", features = ["library"] }
+# iamacoffeepot/aether#3754: the game player-gateway cap was extracted to
+# `aether-game`. The sim and client actors share its tick-native intent / fact
+# vocabulary; this crate is a wasm guest, so it takes the marker-only identity
+# face.
+aether-game = { path = "../aether-game", default-features = false }
+# iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`. The
+# client actor dials and streams over it; this crate is a wasm guest, so it
+# takes the marker-only identity face.
+aether-tcp = { path = "../aether-tcp", default-features = false }
+# iamacoffeepot/aether#3749: the lifecycle cap was extracted to
+# `aether-lifecycle`. This crate is a wasm guest, so it takes the marker-only
+# identity face.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`. The
+# client subscribes movement keys; this crate is a wasm guest, so it takes the
+# marker-only identity face.
+aether-input = { path = "../aether-input", default-features = false }
+# iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
+# This crate is a wasm guest, so it takes the marker-only identity face.
+aether-render = { path = "../aether-render", default-features = false }
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail
+# (uncorrelated reply, client close). Default-features-off per the SDK pattern.
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native builds
+# so the `aether.kinds` descriptor list picks up its types. Wasm guests skip
+# the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+# Integration tests boot a `SubstrateHarness`, load this crate's own wasm
+# artifact, and assert mail-flow + render properties. Tests run host-side; the
+# wasm is built separately for `wasm32-unknown-unknown` and discovered at
+# runtime under `target/wasm32-unknown-unknown/{debug,release}/`. The cap
+# crates a scenario composes appear here with their default `runtime` feature
+# on — dev-only, the wasm lib build keeps the marker-only face above.
+# `client_scenario` also runtime-loads the camera wasm, which stays in
+# `aether-kit` until the commons rename (iamacoffeepot/aether#3954), so it
+# keeps a dev-dependency on `aether-kit` and imports its camera vocabulary.
+[dev-dependencies]
+aether-component = { path = "../aether-component" }
+aether-game = { path = "../aether-game" }
+aether-input = { path = "../aether-input" }
+aether-render = { path = "../aether-render" }
+aether-tcp = { path = "../aether-tcp" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+aether-kit = { path = "../aether-kit" }
+
+[lints]
+workspace = true

@@ -23,7 +23,7 @@ use aether_game::{
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
+use aether_kit_sim::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
 use aether_tcp::TcpCapability;
 use aether_tcp::{ListListeners, ListListenersResult};
 
@@ -127,7 +127,7 @@ fn advance(harness: &mut SubstrateHarness) {
 
 #[test]
 fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_sim") else {
         return;
     };
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
@@ -148,7 +148,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
         .build()
         .expect("boot active game gateway SubstrateHarness");
     let listener_port = gateway_listener_port(&mut harness);
-    load_turn_sim(&mut harness, fs::read(wasm_path).expect("read aether-kit wasm"));
+    load_turn_sim(&mut harness, fs::read(wasm_path).expect("read aether-kit-sim wasm"));
 
     let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
     first.set_read_timeout(Some(TCP_TIMEOUT)).expect("set first client timeout");

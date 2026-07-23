@@ -46,22 +46,12 @@ aether-input = { path = "../aether-input", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
-# iamacoffeepot/aether#3754: the game player-gateway cap was extracted to
-# `aether-game`. The kit's sim and client actors share its tick-native intent /
-# fact vocabulary; kit is a wasm guest, so it takes the marker-only identity
-# face.
-aether-game = { path = "../aether-game", default-features = false }
-# iamacoffeepot/aether#3751: the tcp cap was extracted to `aether-tcp`. The
-# client actor dials and streams over it; kit is a wasm guest, so it takes the
-# marker-only identity face.
-aether-tcp = { path = "../aether-tcp", default-features = false }
 # iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-text = { path = "../aether-text", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — kit loads meshes / worlds
 # through it. Marker face only (kit is a wasm component addressing fs by mail).
 aether-fs = { path = "../aether-fs", default-features = false }
-aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
@@ -95,12 +85,10 @@ inventory = { workspace = true }
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
-aether-game = { path = "../aether-game" }
 aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-aether-tcp = { path = "../aether-tcp" }
 aether-text = { path = "../aether-text" }
 
 [lints]
