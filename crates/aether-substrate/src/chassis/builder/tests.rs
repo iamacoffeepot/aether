@@ -1,3 +1,7 @@
+// These builder tests are deliberate embedders: they exercise `Builder::new`
+// directly (it is the unit under test) rather than the `composed` boot seam.
+#![allow(clippy::disallowed_methods)]
+
 use super::*;
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::Dispatch;

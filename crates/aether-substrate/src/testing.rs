@@ -20,6 +20,10 @@
     clippy::missing_panics_doc,
     reason = "test-support fixtures: the returned seeds are always consumed by the caller, and the `expect`s on setup are themselves the test assertions"
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the canonical test fixture is a deliberate embedder — it builds a bare `TestChassis` via `Builder::new` rather than the `composed` boot seam production chassis route through"
+)]
 
 use std::env::temp_dir;
 use std::fs;

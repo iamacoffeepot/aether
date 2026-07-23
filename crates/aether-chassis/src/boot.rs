@@ -14,7 +14,6 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
@@ -33,12 +32,11 @@ use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapabilit
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{
-    BootableChassis, BuildProvenance, Chassis, PreludeAction, PreludeFlags, run_chassis_prelude,
+    BootableChassis, BuildProvenance, Chassis, ComposeBase, PreludeAction, PreludeFlags, run_chassis_prelude,
 };
 use aether_substrate::config::{
     ConfigError, ConfigMember, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning,
 };
-use aether_substrate::runtime::lifecycle::FatalAborter;
 
 use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
@@ -444,8 +442,8 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
 /// and `--print-config` dump — like any other member instead of riding
 /// [`chassis_residual_knobs`]. Each chassis resolves it before Compose and
 /// declares its membership via `declare_config_member` (its value applies off
-/// the builder, so it is declaration-only; folded into [`with_common_caps`] and
-/// the hub compose).
+/// the builder, so it is declaration-only; folded into [`ChassisBase`], the
+/// shared base every full-stack chassis and the hub install).
 ///
 /// `env_prefix = "AETHER"` with an explicit `env =` per field pins each
 /// historical key byte-for-byte. Only [`log_filter`](Self::log_filter) is
@@ -636,6 +634,69 @@ impl<C: Chassis> BuilderChassisConfigMember<C> for Builder<C> {
     }
 }
 
+/// The shared pre-composition base every full-stack chassis and the hub carry.
+/// Its [`ComposeBase`] impl is what
+/// [`composed`](aether_substrate::chassis::composed) installs on the
+/// framework-minted builder before each chassis's own `compose` delta runs: it
+/// hands the builder the config source stack, fuses the three non-cap members
+/// onto their builder seams, declares the two process-global members whose value
+/// applies off the builder, and composes the trace dispatcher (`aether-trace`,
+/// which sits above `aether-substrate` — the reason the base crosses the crate
+/// layer as a value rather than a substrate method).
+///
+/// [`ChassisBootConfig`] (workers + boot manifest) is deliberately NOT a member
+/// here: it rides the full-stack side ([`with_full_stack_caps`]), since
+/// `boot_manifest` is meaningless without a component host and folding it into
+/// the base would silently grow the hub's accepted env surface (`AETHER_WORKERS`
+/// / `AETHER_BOOT_MANIFEST`) — ADR-0162 keeps the hub's env surface unchanged.
+///
+/// `Default` is what lets a chassis env lift the base out of itself with
+/// `mem::take` on both the boot and describe paths (the leftover default is
+/// never re-read — a chassis's `compose` delta consumes only the full-stack
+/// remainder).
+#[derive(Default)]
+pub struct ChassisBase {
+    /// ADR-0156 §5: the config source stack (file + per-cap argv overlays) the
+    /// builder resolves each composed cap's `Config` off. Installed via
+    /// `with_config_sources`.
+    pub sources: ConfigSources,
+    /// Issue 1990: the resolved per-actor ring-capacity knob, fused onto
+    /// `with_ring_capacities` (and its aggregate-membership declaration) via
+    /// [`with_chassis_config_member`](BuilderChassisConfigMember::with_chassis_config_member).
+    pub actor_ring: ActorRingConfig,
+    /// Issue 2485: the resolved scheduler hot-path tuning knob, fused onto
+    /// `with_scheduler_tuning`.
+    pub scheduler_tuning: SchedulerTuningConfig,
+    /// Issue #2509: the resolved settlement/teardown knob, fused onto
+    /// `with_teardown_budget`.
+    pub settlement: SettlementConfig,
+}
+
+impl<C: Chassis> ComposeBase<C> for ChassisBase {
+    fn install(self, builder: Builder<C>) -> Builder<C> {
+        builder
+            .with_config_sources(self.sources)
+            // ADR-0156 §4 / #3930: the chassis-declared non-cap members — knobs
+            // that configure the shared base rather than any single cap. Each
+            // fuses its value install with its aggregate-membership declaration
+            // in one call, so a knob can never be swept-as-known yet silently
+            // left at the builder's default.
+            .with_chassis_config_member(&self.actor_ring)
+            .with_chassis_config_member(&self.scheduler_tuning)
+            .with_chassis_config_member(&self.settlement)
+            // ADR-0156 §6: the wire-frame-size knob (#3850) — its value is pushed
+            // into the codec by `install_frame_size` at env time (off the
+            // builder), so it declares membership only.
+            .declare_config_member::<FrameSizeConfig>()
+            // The substrate runtime knobs (log filter + panic-hook, #3849)
+            // configure the process, not any single cap, and apply off the
+            // builder (`apply_filter` in `Chassis::build`, the panic hook's own
+            // env read), so they declare membership only.
+            .declare_config_member::<RuntimeConfig>()
+            .with_actor::<TraceDispatchCapability>(())
+    }
+}
+
 /// Build the single-stage lifecycle params the headless chassis runs
 /// (ADR-0082 PR 3b): a `Tick` self-loop with a `Quit` escape to a
 /// `Shutdown` terminal. Components subscribe the `Tick` stage directly
@@ -664,39 +725,28 @@ pub fn tick_only_lifecycle_params() -> LifecycleParams {
     LifecycleParams { graph, initial_subscribers: vec![] }
 }
 
-/// Args every full-stack chassis hands to [`with_common_caps`]. Kept
+/// Args every full-stack chassis hands to [`with_full_stack_caps`]. Kept
 /// as a flat struct (no defaults) so an added cap forces the chassis
 /// builders to acknowledge it.
 ///
 /// ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
 /// `ProcessConfig`, …) no longer ride here — the builder resolves each off the
-/// source stack the chassis handed it via `Builder::with_config_sources`. What
-/// remains is the composer-supplied construction input (`Params`, the aborter,
-/// the resolved non-cap member structs `with_common_caps` fuses onto their
-/// builder seams via `with_chassis_config_member`) plus `namespace_roots`,
-/// passed programmatically so the fs cap uses the exact roots value the chassis
-/// resolved.
+/// source stack [`ChassisBase`] handed it. What remains is the composer-supplied
+/// construction input (`Params`, plus the resolved `chassis_boot` member
+/// [`with_full_stack_caps`] fuses onto its builder seam via
+/// `with_chassis_config_member`) plus `namespace_roots`, passed programmatically
+/// so the fs cap uses the exact roots value the chassis resolved. The aborter
+/// and the base non-cap members moved to `composed` / [`ChassisBase`].
 pub struct CommonBoot {
-    pub aborter: Arc<dyn FatalAborter>,
     /// The resolved boot knobs (worker count + boot manifest). Installed onto the
     /// builder via [`with_chassis_config_member`](BuilderChassisConfigMember::with_chassis_config_member),
     /// which lowers `workers` through [`ChassisBootConfig::to_workers`] onto
     /// `with_workers` and declares the aggregate membership in the same call.
+    ///
+    /// This stays on the full-stack side rather than in [`ChassisBase`]:
+    /// `boot_manifest` is meaningless without a component host, and moving it
+    /// into the base would grow the hub's accepted env surface (ADR-0162).
     pub chassis_boot: ChassisBootConfig,
-    /// Issue 1990: the resolved per-actor ring-capacity knob. Lowered through
-    /// [`ActorRingConfig::to_ring_capacities`] onto `with_ring_capacities` at
-    /// install time.
-    pub actor_ring: ActorRingConfig,
-    /// Issue 2485: the resolved scheduler hot-path tuning knob. Lowered through
-    /// [`SchedulerTuningConfig::to_scheduler_tuning`] onto `with_scheduler_tuning`
-    /// at install time.
-    pub scheduler_tuning: SchedulerTuningConfig,
-    /// Issue #2509: the resolved settlement/teardown knob
-    /// (`AETHER_SETTLEMENT_CAP_SECS`). Lowered through [`SettlementConfig::to_cap`]
-    /// (including its `0 → wait forever` sentinel) onto `with_teardown_budget` at
-    /// install time, so one knob covers both the settlement gates and the
-    /// teardown gate.
-    pub settlement: SettlementConfig,
     /// Composer-supplied wasmtime / egress handles for the component host
     /// cap (ADR-0156 §3 `Params`); the cap's `Config` is `()`.
     pub component_host_params: ComponentHostParams,
@@ -727,11 +777,6 @@ pub struct CommonBoot {
 /// headless host. A test constructs one by staging programmatic overrides into
 /// `sources` (`ConfigSources::set_override`).
 pub struct CommonEnv {
-    /// ADR-0156 §5: the config source stack (file + per-cap argv overlays) the
-    /// builder resolves each composed cap's `Config` off (http / http-server /
-    /// audio / render tuning / lifecycle). The cap `Config`s no longer ride as
-    /// fields — a test stages programmatic overrides here.
-    pub sources: ConfigSources,
     /// The resolved `aether.fs` namespace roots (save / assets / config).
     /// Resolved chassis-side and passed to the fs cap programmatically so the
     /// cap uses the exact same value.
@@ -749,22 +794,9 @@ pub struct CommonEnv {
     /// through [`ChassisBootConfig::to_workers`] onto the builder's `with_workers`
     /// seam at install time (the headless / desktop boot log line reads the same
     /// lowered value off it). `boot_manifest` is consumed by [`Self::resolve`] for
-    /// the autoload list before the struct is stored.
+    /// the autoload list before the struct is stored. Rides the full-stack side
+    /// rather than [`ChassisBase`] (ADR-0162 keeps the hub's env surface unchanged).
     pub chassis_boot: ChassisBootConfig,
-    /// Issue 1990: the resolved per-actor ring-capacity knob
-    /// (`AETHER_ACTOR_LOG_RING_SIZE` / `AETHER_ACTOR_TRACE_RING_SIZE`). Lowered to
-    /// [`RingCapacities`] through [`ActorRingConfig::to_ring_capacities`] at
-    /// install time (and for the boot log line).
-    pub actor_ring: ActorRingConfig,
-    /// Issue 2485: the resolved scheduler hot-path tuning knob
-    /// (`AETHER_SPIN_WINDOW_USEC` / `AETHER_LOCAL_STICKY_MAX` / …). Lowered to
-    /// [`SchedulerTuning`] through [`SchedulerTuningConfig::to_scheduler_tuning`]
-    /// at install time.
-    pub scheduler_tuning: SchedulerTuningConfig,
-    /// Issue #2509: the resolved settlement/teardown knob
-    /// (`AETHER_SETTLEMENT_CAP_SECS` / `[settlement]`). Lowered to the teardown
-    /// budget [`Duration`] through [`SettlementConfig::to_cap`] at install time.
-    pub settlement: SettlementConfig,
 }
 
 impl CommonEnv {
@@ -785,7 +817,7 @@ impl CommonEnv {
     /// Returns [`ConfigError`] when a known `AETHER_*` member (or argv overlay
     /// value) holds an unparseable value (ADR-0090 §4), or when a boot manifest
     /// named by `AETHER_BOOT_MANIFEST` / `--boot-manifest` cannot be read.
-    pub fn resolve(mut sources: ConfigSources) -> Result<(Self, Vec<AutoloadComponent>), ConfigError> {
+    pub fn resolve(mut sources: ConfigSources) -> Result<(ChassisBase, Self, Vec<AutoloadComponent>), ConfigError> {
         // Chassis-side reads of resolved members (ADR-0156 §5) — each resolves
         // off the same stack via its `ConfigMember` section: the derived staging
         // inputs (fs roots + content-gen) and the non-cap pool / ring / scheduler
@@ -817,94 +849,73 @@ impl CommonEnv {
             None => Vec::new(),
         };
 
-        Ok((
-            Self { sources, namespace_roots, runtime, chassis_boot, actor_ring, scheduler_tuning, settlement },
-            autoload,
-        ))
+        // The base stratum (`ChassisBase`) takes the source stack and the three
+        // non-cap members `composed` installs ahead of the chassis's own delta;
+        // the full-stack remainder rides `CommonEnv`.
+        let base = ChassisBase { sources, actor_ring, scheduler_tuning, settlement };
+        Ok((base, Self { namespace_roots, runtime, chassis_boot }, autoload))
     }
 
     /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
-    /// place, so neither chassis's `compose` hand-copies the same env-sourced
-    /// fields. The three composer-constructed handles (`aborter`,
-    /// `component_host_params`, `game_gateway_params`) are supplied by the caller;
-    /// the source stack is threaded back out for the builder's
-    /// `with_config_sources`. `runtime` is dropped here — it is consumed
-    /// chassis-side (`apply_filter`)
-    /// before `compose` runs and is not a `CommonBoot` field.
+    /// place, so neither chassis's `compose` delta hand-copies the same
+    /// env-sourced fields. The two composer-constructed handles
+    /// (`component_host_params`, `game_gateway_params`) are supplied by the
+    /// caller. `runtime` is dropped here — it is consumed chassis-side
+    /// (`apply_filter`) before `compose` runs and is not a `CommonBoot` field.
+    /// The aborter and the source stack are no longer threaded through: the
+    /// framework mints the aborter in `composed`, and the source stack rides
+    /// [`ChassisBase`].
     #[must_use]
     pub fn into_common_boot(
         self,
-        aborter: Arc<dyn FatalAborter>,
         component_host_params: ComponentHostParams,
         game_gateway_params: GameGatewayParams,
-    ) -> (CommonBoot, ConfigSources) {
-        let Self { sources, namespace_roots, runtime: _, chassis_boot, actor_ring, scheduler_tuning, settlement } =
-            self;
-        (
-            CommonBoot {
-                aborter,
-                chassis_boot,
-                actor_ring,
-                scheduler_tuning,
-                settlement,
-                component_host_params,
-                namespace_roots,
-                game_gateway_params,
-            },
-            sources,
-        )
+    ) -> CommonBoot {
+        let Self { namespace_roots, runtime: _, chassis_boot } = self;
+        CommonBoot { chassis_boot, component_host_params, namespace_roots, game_gateway_params }
     }
 }
 
-/// Wire the aborter, worker count, and the common caps every full-
-/// stack chassis carries. The renderer / window caps each chassis
+/// Wire the worker count and the full-stack app caps that desktop and headless
+/// share (`Input`, `ComponentHost`, `Fs`, `Text`, `Inventory`, `Http`, `Tcp`,
+/// `Process`, `GameGateway`). The renderer / window / audio caps each chassis
 /// adds after this in `.with_actor::<_>()` chains.
 ///
+/// The universal base stratum — the aborter, the config sources, the non-cap
+/// ring / scheduler / settlement members, the two declare-only members, and
+/// `TraceDispatchCapability` — is NOT here: it is minted by `composed` and
+/// installed by [`ChassisBase`] ahead of every chassis's `compose` delta. This
+/// function is the delta-scoped remainder desktop and headless call inside their
+/// own `compose`; `ChassisBootConfig` (workers) stays here rather than in the
+/// base so `boot_manifest` is only accepted where a component host exists
+/// (ADR-0162).
+///
 /// ADR-0156 §5: every operator-resolvable cap `Config` is resolved by the
-/// builder off the source stack the chassis handed it (`with_config_sources`),
-/// so each cap composes with `with_actor::<_>(params)` alone — no per-cap
-/// config value, no chassis-side section string. The two exceptions ride the
-/// programmatic layer: the fs roots (resolved chassis-side, then passed here so
-/// the cap uses the identical value) and the
-/// game gateway's `Config`, which stays a hardcoded default so the common
-/// chassis opens no player listener from a stray `AETHER_GAME_*` env var
-/// (byte-identical to the pre-inversion `GameGatewayConfig::default()`).
+/// builder off the source stack [`ChassisBase`] handed it, so each cap composes
+/// with `with_actor::<_>(params)` alone — no per-cap config value, no
+/// chassis-side section string. The two exceptions ride the programmatic layer:
+/// the fs roots (resolved chassis-side, then passed here so the cap uses the
+/// identical value) and the game gateway's `Config`, which stays a hardcoded
+/// default so the full-stack chassis opens no player listener from a stray
+/// `AETHER_GAME_*` env var (byte-identical to the pre-inversion
+/// `GameGatewayConfig::default()`).
 ///
 /// Boot order is declaration order. ADR-0081 retired the central
 /// `LogCapability` — every actor owns its own per-actor log ring; no
 /// boot ordering is needed for logging anymore.
 #[must_use]
-pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
+pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Builder<C> {
     // ADR-0157 §Security: a subprocess run is confined to the `aether.fs`
     // `save` namespace root — the same writable sandbox the fs cap governs —
     // so it starts inside that sandbox rather than the substrate's cwd. Cloned
     // here because `boot.namespace_roots` is moved into the fs cap below.
     let process_work_root = boot.namespace_roots.save.clone();
     builder
-        .with_aborter(boot.aborter)
-        // ADR-0156 §4 / #3930: the chassis-declared non-cap members — knobs that
-        // configure the shared base rather than any single cap, so they have no
-        // `with_actor` entry to ride. Each fuses its value install (`with_workers`
-        // / `with_ring_capacities` / `with_scheduler_tuning` / `with_teardown_budget`)
-        // with its aggregate-membership declaration in one `with_chassis_config_member`
-        // call, so a knob can never be swept-as-known yet silently left at the
-        // builder's default.
+        // ADR-0162: workers stays a full-stack member (not a `ChassisBase` one)
+        // so the hub's env surface never accepts `AETHER_WORKERS` /
+        // `AETHER_BOOT_MANIFEST`. Fuses its value install (`with_workers`) with
+        // its aggregate-membership declaration in one call.
         .with_chassis_config_member(&boot.chassis_boot)
-        .with_chassis_config_member(&boot.actor_ring)
-        .with_chassis_config_member(&boot.scheduler_tuning)
-        .with_chassis_config_member(&boot.settlement)
-        // ADR-0156 §6: the wire-frame-size knob (#3850). It configures the shared
-        // codec rather than any single cap, and its value is pushed into the codec
-        // by `install_frame_size` at env time — off the builder — so it declares
-        // membership only (the retired `AETHER_MAX_FRAME_SIZE` `KnobRecord`'s
-        // replacement).
-        .declare_config_member::<FrameSizeConfig>()
-        // The substrate runtime knobs (log filter + panic-hook knobs, #3849)
-        // configure the process, not any single cap, and their value applies off
-        // the builder (`apply_filter` in `Chassis::build`, the panic hook's own
-        // env read), so they declare membership only.
-        .declare_config_member::<RuntimeConfig>()
-        .with_actor::<TraceDispatchCapability>(())
         .with_actor::<InputCapability>(())
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
         // Programmatic: the fs cap uses the exact roots resolved chassis-side.

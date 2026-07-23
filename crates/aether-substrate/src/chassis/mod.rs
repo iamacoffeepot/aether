@@ -39,6 +39,8 @@ use crate::chassis::error::BootError;
 // linked.
 #[cfg(feature = "wasm")]
 use std::collections::BTreeSet;
+#[cfg(feature = "wasm")]
+use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
 use aether_kinds::BinaryManifest;
@@ -49,6 +51,8 @@ use crate::SubstrateBoot;
 use crate::chassis::builder::Builder;
 #[cfg(feature = "wasm")]
 use crate::config::{ConfigError, ConfigManifest, KnobRecord};
+#[cfg(feature = "wasm")]
+use crate::runtime::lifecycle::OutboundFatalAborter;
 
 /// The composition contract a concrete chassis implements. Each
 /// chassis declares its driver and the env-shaped config it takes
@@ -118,6 +122,59 @@ pub fn engine_name<C: Chassis>() -> String {
     format!("aether-{}", C::PROFILE)
 }
 
+/// The pre-composition base a chassis's builder carries before its own
+/// [`BootableChassis::compose`] delta runs. The framework mints the builder
+/// (in [`composed`]) and installs the aborter; the base — a value that crosses
+/// crate layers as [`BootableChassis::Base`] — then extends it with the shared
+/// stratum (`aether-chassis`'s `ChassisBase`: config sources, the non-cap
+/// members, `TraceDispatchCapability`). It is a value rather than a substrate
+/// method because that stratum reaches above `aether-substrate` (`aether-trace`
+/// sits higher), so a substrate-minted builder cannot install it itself.
+///
+/// A chassis with no shared base (bloomery composes no config sources) uses the
+/// unit no-op impl below — it still routes through [`composed`], so it gets the
+/// framework-minted aborter by construction.
+#[cfg(feature = "wasm")]
+pub trait ComposeBase<C: Chassis> {
+    /// Extend the framework-minted builder with this base's stratum, returning
+    /// the based builder the chassis's own `compose` delta then extends.
+    #[must_use]
+    fn install(self, builder: Builder<C>) -> Builder<C>;
+}
+
+/// The no-op base: installs nothing. A chassis whose `Base` is `()` (bloomery)
+/// still mints its builder through [`composed`], so it inherits the aborter
+/// without a shared config stratum of its own.
+#[cfg(feature = "wasm")]
+impl<C: Chassis> ComposeBase<C> for () {
+    fn install(self, builder: Builder<C>) -> Builder<C> {
+        builder
+    }
+}
+
+/// The single builder-minting point (ADR-0155 strengthened): construct the
+/// substrate [`Builder`], install the fatal-abort aborter, apply the chassis's
+/// [`ComposeBase`], then run its [`BootableChassis::compose`] delta. Every
+/// chassis's [`Chassis::build`] and the describe / config helpers route through
+/// here, so an un-based builder cannot be minted on the boot path — the
+/// composition invariant moves from "the same function is called everywhere" to
+/// "the builder can only be minted in one place".
+///
+/// The aborter is [`OutboundFatalAborter`] on every chassis (ADR-0063): a wasm
+/// guest trap exits the substrate via `lifecycle::fatal_abort` instead of
+/// unwinding. It is supplied here so no chassis hand-constructs it.
+#[cfg(feature = "wasm")]
+#[must_use]
+pub fn composed<C: BootableChassis>(boot: &SubstrateBoot, base: C::Base, env: C::Env) -> Builder<C> {
+    // The sole sanctioned `Builder::new` on the boot path: `composed` is the one
+    // minting point the `clippy.toml` `disallowed-methods` entry funnels every
+    // chassis through, so a `compose` delta can only extend a based builder.
+    #[allow(clippy::disallowed_methods)]
+    let builder = Builder::<C>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+        .with_aborter(Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound))));
+    C::compose(base.install(builder), boot, env)
+}
+
 /// The boot-ceremony contract shared by every chassis binary that resolves
 /// config and composes a capability chain (desktop, headless, hub, bloomery).
 /// Layered over [`Chassis`] so passive / test chassis (substrate-harness and
@@ -135,23 +192,36 @@ pub fn engine_name<C: Chassis>() -> String {
 /// from it and can no longer drift (the parallel-edit hazard of #3859).
 #[cfg(feature = "wasm")]
 pub trait BootableChassis: Chassis {
-    /// Resolve this chassis's env — the config *data* a real boot takes — off
-    /// the argv/env/file source stack. The single env-reading edge (ADR-0070);
-    /// `--describe` and `--print-config` resolve it exactly as `build` does, so
-    /// the manifests reflect the same config a boot would see.
+    /// The pre-composition base this chassis's builder carries — the shared
+    /// stratum [`composed`] installs before the chassis's own [`Self::compose`]
+    /// delta runs. Full-stack chassis and the hub use `aether-chassis`'s
+    /// `ChassisBase`; bloomery, which stages no config sources, uses the unit
+    /// no-op base. The base crosses crate layers as a value because its stratum
+    /// (`TraceDispatchCapability`, `aether-trace`) sits above `aether-substrate`.
+    type Base: ComposeBase<Self>;
+
+    /// Resolve this chassis's base + env — the config *data* a real boot takes —
+    /// off the argv/env/file source stack. The single env-reading edge
+    /// (ADR-0070); `--describe` and `--print-config` resolve it exactly as
+    /// `build` does, so the manifests reflect the same config a boot would see.
+    /// Returns the pair [`composed`] takes: the base to install and the env the
+    /// chassis's own `compose` delta consumes.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when a known `AETHER_*` var (or argv overlay
     /// value) fails its parser (ADR-0090 §4).
-    fn resolve_env() -> Result<Self::Env, ConfigError>;
+    fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError>;
 
-    /// Compose the capability chain — the single claim/build declaration
+    /// The chassis's composition delta — the per-chassis caps it adds on top of
+    /// the framework-minted, based builder [`composed`] hands it. Never mints a
+    /// builder: the one it receives already carries the aborter, the config
+    /// sources, and the base stratum. This is the single claim/build declaration
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster and config aggregate can never drift from what
     /// boots. Takes the boot handle by reference; `build` moves the same `boot`
     /// into the driver afterward, while the describe / config helpers drop it.
-    fn compose(boot: &SubstrateBoot, env: Self::Env) -> Builder<Self>;
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: Self::Env) -> Builder<Self>;
 
     /// The residual hand-registered knobs the composition-derived
     /// [`ConfigManifest`] can't own, folded into the known-keys sweep and the
@@ -176,9 +246,9 @@ pub trait BootableChassis: Chassis {
 /// fails.
 #[cfg(feature = "wasm")]
 pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError> {
-    let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
+    let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
-    C::compose(&boot, env).claim_namespaces()
+    composed::<C>(&boot, base, env).claim_namespaces()
 }
 
 /// The ADR-0156 §4 composition-derived config aggregate: resolve the env,
@@ -192,9 +262,9 @@ pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError
 /// Returns [`BootError`] when env resolution or substrate boot fails.
 #[cfg(feature = "wasm")]
 pub fn config_manifest<C: BootableChassis>() -> Result<ConfigManifest, BootError> {
-    let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
+    let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
-    Ok(C::compose(&boot, env).config_manifest())
+    Ok(composed::<C>(&boot, base, env).config_manifest())
 }
 
 /// A chassis binary's build provenance — the `build.rs`-baked facts a
@@ -248,9 +318,9 @@ pub struct BuildProvenance {
 /// fails.
 #[cfg(feature = "wasm")]
 pub fn describe_manifest<C: BootableChassis>(provenance: &BuildProvenance) -> Result<BinaryManifest, BootError> {
-    let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
+    let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
-    let builder = C::compose(&boot, env);
+    let builder = composed::<C>(&boot, base, env);
 
     let config = builder.config_manifest();
     let mut env_keys: Vec<String> = config.known_keys(&C::residual_knobs()).iter().map(str::to_owned).collect();
@@ -375,10 +445,11 @@ mod prelude_tests {
     }
 
     impl BootableChassis for PanicChassis {
-        fn resolve_env() -> Result<Self::Env, ConfigError> {
+        type Base = ();
+        fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
             panic!("prelude ran the config ceremony with no discovery flag set");
         }
-        fn compose(_boot: &SubstrateBoot, _env: Self::Env) -> Builder<Self> {
+        fn compose(_builder: Builder<Self>, _boot: &SubstrateBoot, _env: Self::Env) -> Builder<Self> {
             panic!("prelude composed the capability chain with no discovery flag set");
         }
     }

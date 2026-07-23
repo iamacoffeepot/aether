@@ -56,7 +56,7 @@ impl NativeActor for InventoryCapability {
     type Config = ();
 
     /// ADR-0088 §6 chassis-owned mailbox. Registered on the desktop +
-    /// headless chassis (via `with_common_caps`), matching `aether.fs`.
+    /// headless chassis (via `with_full_stack_caps`), matching `aether.fs`.
     const NAMESPACE: &'static str = "aether.inventory";
 
     fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<InventoryCapabilityState, BootError> {

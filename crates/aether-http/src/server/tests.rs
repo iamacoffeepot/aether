@@ -1,3 +1,7 @@
+// These tests are deliberate embedders: they build a bare `TestChassis` via
+// `Builder::new` rather than the `composed` boot seam production chassis use.
+#![allow(clippy::disallowed_methods)]
+
 use super::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 use crate::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
 use aether_actor::Addressable;

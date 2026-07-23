@@ -25,8 +25,8 @@ fn headless_describe_emits_manifest() {
     assert_eq!(manifest.chassis, "headless", "reports the headless profile");
     assert!(!manifest.caps.is_empty(), "the headless chassis links a non-empty cap set");
     // ADR-0155: the roster is claim-derived, so these assert the real claim
-    // path — not a hand list. `aether.fs` is a `with_common_caps` cap;
-    // `aether.game.gateway` pins that `with_common_caps` still composes the
+    // path — not a hand list. `aether.fs` is a `with_full_stack_caps` cap;
+    // `aether.game.gateway` pins that `with_full_stack_caps` still composes the
     // (inert-by-default) game gateway, which the claim reserves even though no
     // player listener opens — catches someone dropping it from the common
     // chain. `aether.audio` is the headless inline fail-fast sink, and

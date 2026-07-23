@@ -13,9 +13,8 @@ use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::{BootableChassis, BuildProvenance};
+use aether_substrate::chassis::{BootableChassis, BuildProvenance, composed};
 use aether_substrate::config::ConfigError;
-use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
@@ -144,7 +143,11 @@ impl Chassis for BloomeryChassis {
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::build()?;
-        let builder = Self::compose(&boot, env);
+        // Bloomery's base is the unit no-op — it stages no config sources — but it
+        // still routes through `composed`, so it gets the framework-minted
+        // `OutboundFatalAborter` by construction (previously the implicit
+        // `PanicAborter`).
+        let builder = composed::<Self>(&boot, (), env);
         // The driver owns the boot and drops it on the shutdown signal — it
         // moves in here, after `compose` finished borrowing it.
         let driver = BloomeryDriverCapability { boot };
@@ -177,25 +180,25 @@ impl BloomeryChassis {
 }
 
 impl BootableChassis for BloomeryChassis {
-    fn resolve_env() -> Result<Self::Env, ConfigError> {
-        BloomeryEnv::from_env()
+    type Base = ();
+
+    fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
+        Ok(((), BloomeryEnv::from_env()?))
     }
 
-    /// Compose the bloomery capability chain — the single claim/build path
+    /// Compose the bloomery capability delta on top of the framework-minted,
+    /// based builder [`composed`] hands it — the single claim/build path
     /// (ADR-0155) both [`Chassis::build`] and the shared describe prelude run,
-    /// so the manifest roster can never drift from what boots. Returns the
-    /// composed builder before the driver is installed: [`Chassis::build`] adds
-    /// the signal-blocking driver and starts, while the prelude's claim ceremony
-    /// (`describe_caps`) reads the claim terminal off it. Takes the boot handle
-    /// by reference so [`Chassis::build`] can move the same `boot` into the
-    /// driver afterward.
-    fn compose(boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
+    /// so the manifest roster can never drift from what boots. Bloomery's base is
+    /// the unit no-op (it stages no config sources), so it keeps
+    /// `TraceDispatchCapability` in this delta; the aborter is supplied by
+    /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
+    /// move the same `boot` into the driver afterward.
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
         let approval_policy_file = github.approval_policy_file.clone();
-        let registry = Arc::clone(&boot.registry);
-        let mailer = Arc::clone(&boot.queue);
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -207,12 +210,12 @@ impl BootableChassis for BloomeryChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
 
-        Builder::<Self>::new(registry, mailer)
-            // ADR-0063: production chassis configures the fatal-abort aborter so a
-            // wasm guest trap exits the substrate via `lifecycle::fatal_abort`
-            // instead of unwinding. Bloomery hosts wasm (`ComponentHostCapability`
-            // below), so it needs the aborter the desktop/headless composes install.
-            .with_aborter(Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound))))
+        // #3947's explicit `with_aborter` is superseded by the seam inversion:
+        // `composed` (which `build` routes through) installs `OutboundFatalAborter`
+        // on every chassis, so bloomery gets the aborter by construction. The
+        // aborter behavior #3947 guards (control-core boot replay fatal-aborting on
+        // a bad journal record) is preserved — see `tests/recovery.rs`.
+        builder
             .with_actor::<TraceDispatchCapability>(())
             .with_actor_configured::<StoreCapability>((), store)
             // The single-writer control core (ADR-0149 §The control core): owns the
