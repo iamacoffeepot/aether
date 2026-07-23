@@ -14,9 +14,11 @@
 //!   composition (ADR-0090 unit d).
 //! - [`autoload`] — boot-time component autoload shared by the
 //!   full-stack chassis (issue #1529).
-//! - [`bundle_pack`] — the embedded component-pack format the
-//!   standalone bundle binaries decode (their build script compiles
-//!   this file in via `#[path]` so encoder and decoder share source).
+//! - [`boot_manifest`] — the JSON boot-manifest format the hub's
+//!   `spawn_substrate` injection describes a component set with, plus the
+//!   [`PackedComponent`](boot_manifest::PackedComponent) /
+//!   [`ChassisSettings`](boot_manifest::ChassisSettings) autoload types the
+//!   package depot ([`package`]) shares.
 //! - [`WindowConfig`] / [`TickConfig`] — the desktop window and headless tick boot
 //!   knobs, declared here because the fleet-wide registry and the CLI
 //!   roots name their derived layers/overlays.
@@ -29,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod autoload;
 pub mod boot;
-pub mod bundle_pack;
+pub mod boot_manifest;
 pub mod cli;
 pub mod package;
 pub mod tick;

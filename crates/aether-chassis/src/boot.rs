@@ -43,7 +43,7 @@ use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
-use crate::bundle_pack::ChassisSettings;
+use crate::boot_manifest::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
 use crate::package::package_autoload;
 

@@ -36,7 +36,7 @@ use aether_chassis::autoload::AutoloadComponent;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
 };
-use aether_chassis::bundle_pack::ChassisSettings;
+use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
 use aether_component::WasmTrampoline;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};

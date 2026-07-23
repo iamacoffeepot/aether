@@ -1,21 +1,22 @@
-//! Boot manifest format: the JSON [`BundleManifest`] of component file paths
-//! (iamacoffeepot/aether#1529) plus the [`PackedComponent`] / [`ChassisSettings`]
-//! types the boot autoload path shares.
+//! Boot manifest format: the JSON [`BootManifest`] of component file paths
+//! plus the [`PackedComponent`] / [`ChassisSettings`] types the boot autoload
+//! path shares.
 //!
-//! `cargo xtask bundle` and the hub's `spawn_substrate` boot-manifest
-//! injection both describe a component set as a JSON [`BundleManifest`] — an
-//! ordered list of wasm + optional config file *paths* plus the three chassis
-//! knobs (title / window mode / tick rate). [`pack_from_manifest`] reads that
-//! manifest and the files it names into a [`Pack`], which the chassis autoload
-//! (`crate::autoload::boot_manifest_autoload`, reached for `AETHER_BOOT_MANIFEST`
-//! / `--boot-manifest`) drains into `aether.component.load` mail.
+//! The hub's `spawn_substrate` boot-manifest injection describes a component
+//! set as a JSON [`BootManifest`] — an ordered list of wasm + optional config
+//! file *paths* plus the three chassis knobs (title / window mode / tick
+//! rate). It reaches the spawned chassis through `AETHER_BOOT_MANIFEST`
+//! (`--boot-manifest`); the substrate-boot and autoload tests write the same
+//! shape directly. [`pack_from_manifest`] reads that manifest and the files it
+//! names into a [`Pack`], which the chassis autoload
+//! (`crate::autoload::boot_manifest_autoload`) drains into
+//! `aether.component.load` mail.
 //!
-//! The persisted, content-addressed twin of this path — the standalone bundle
-//! bins and the Steam depot — lives in [`crate::package`] (ADR-0163 §1): a
-//! versioned `pack/manifest` referencing objects by hash rather than inline
-//! bytes. This module's own inline-bytes blob form (the retired `AEBNDLP1`
-//! pack) was replaced by that package artifact; only the JSON boot-manifest
-//! schema and the shared autoload types remain here.
+//! The persisted, content-addressed shipping channel — the package depot
+//! `cargo xtask package` emits — lives in [`crate::package`] (ADR-0163 §1): a
+//! versioned `pack/manifest` referencing objects by hash rather than naming
+//! them by path. That channel and this one share the [`PackedComponent`] and
+//! [`ChassisSettings`] autoload types defined here.
 
 use std::error::Error;
 use std::fmt;
@@ -42,14 +43,13 @@ pub struct PackedComponent {
     pub replicas: Option<u32>,
 }
 
-/// Chassis settings a package applies at boot. The standalone-bundle bins
-/// overlay them at top priority (the binary *is* the product); the depot
-/// boot path (`--package` / `AETHER_PACKAGE`) overlays them BELOW argv/env,
-/// ABOVE the compiled defaults (issue 4001), so an operator can still
-/// override a shipped package. All optional — an unset field keeps the
-/// chassis env's own resolution (env vars / defaults). Fields a chassis
-/// doesn't support (desktop has no `tick_hz`; headless has no window) are
-/// warn-ignored by the non-matching chassis.
+/// Chassis settings a package applies at boot. The depot boot path
+/// (`--package` / `AETHER_PACKAGE`) overlays them BELOW argv/env, ABOVE the
+/// compiled defaults (issue 4001), so an operator can still override a
+/// shipped package. All optional — an unset field keeps the chassis env's own
+/// resolution (env vars / defaults). Fields a chassis doesn't support
+/// (desktop has no `tick_hz`; headless has no window) are warn-ignored by the
+/// non-matching chassis.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChassisSettings {
     /// Desktop window title.
@@ -69,16 +69,16 @@ pub struct Pack {
     pub components: Vec<PackedComponent>,
 }
 
-/// The JSON manifest `cargo xtask bundle` writes and the chassis boot path
-/// reads via `AETHER_BOOT_MANIFEST` / `--boot-manifest`. Paths are resolved
-/// as-is, so the writer uses absolute paths. The xtask side serializes this
-/// shape with `serde_json::json!` (xtask doesn't depend on this crate); keep
-/// the two in sync.
+/// The JSON manifest the hub's `spawn_substrate` boot-manifest injection
+/// writes and the chassis boot path reads via `AETHER_BOOT_MANIFEST` /
+/// `--boot-manifest`. Paths are resolved as-is, so the writer uses absolute
+/// paths. The hub serializes this shape with `serde_json::json!` (it doesn't
+/// depend on this crate); keep the two in sync.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct BundleManifest {
-    /// Which chassis bin the pack targets (`desktop` / `headless`).
-    /// Bookkeeping for the writer; `build.rs` packs the same blob
-    /// either way (the chassis choice selects the bin to build).
+pub struct BootManifest {
+    /// Which chassis the manifest targets (`desktop` / `headless`).
+    /// Bookkeeping for the writer; the reader drains the same component
+    /// list either way (the chassis choice selects which bin was spawned).
     #[serde(default)]
     pub chassis: Option<String>,
     #[serde(default)]
@@ -91,7 +91,7 @@ pub struct BundleManifest {
     pub components: Vec<ManifestComponent>,
 }
 
-/// One component entry in a [`BundleManifest`].
+/// One component entry in a [`BootManifest`].
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ManifestComponent {
     /// Path to the built wasm artifact.
@@ -110,7 +110,7 @@ pub struct ManifestComponent {
     pub replicas: Option<u32>,
 }
 
-/// A failure reading a [`BundleManifest`] (or a file it names) into a
+/// A failure reading a [`BootManifest`] (or a file it names) into a
 /// [`Pack`]. Surfaces from the chassis runtime boot-manifest reader, which
 /// maps it to a hard config fault (ADR-0090 §4). Each variant carries the
 /// offending path so the message names the file, not just the fault.
@@ -118,7 +118,7 @@ pub struct ManifestComponent {
 pub enum ManifestError {
     /// The manifest JSON file could not be read off disk.
     ReadManifest { path: PathBuf, source: io::Error },
-    /// The manifest JSON did not parse into a [`BundleManifest`].
+    /// The manifest JSON did not parse into a [`BootManifest`].
     ParseManifest { path: PathBuf, source: serde_json::Error },
     /// A component's wasm artifact could not be read.
     ReadWasm { path: PathBuf, source: io::Error },
@@ -130,10 +130,10 @@ impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadManifest { path, source } => {
-                write!(f, "read bundle manifest from {}: {source}", path.display())
+                write!(f, "read boot manifest from {}: {source}", path.display())
             }
             Self::ParseManifest { path, source } => {
-                write!(f, "parse bundle manifest at {}: {source}", path.display())
+                write!(f, "parse boot manifest at {}: {source}", path.display())
             }
             Self::ReadWasm { path, source } => {
                 write!(f, "read component wasm from {}: {source}", path.display())
@@ -156,7 +156,7 @@ impl Error for ManifestError {
     }
 }
 
-/// Read and parse the JSON [`BundleManifest`] at `manifest_path`. Split out
+/// Read and parse the JSON [`BootManifest`] at `manifest_path`. Split out
 /// from [`pack_from_manifest`] so a caller can inspect the parsed component
 /// list before the wasm / config bytes are read.
 ///
@@ -164,7 +164,7 @@ impl Error for ManifestError {
 ///
 /// Returns [`ManifestError::ReadManifest`] / [`ManifestError::ParseManifest`]
 /// when the file is unreadable or its JSON doesn't match the schema.
-pub fn read_manifest(manifest_path: &Path) -> Result<BundleManifest, ManifestError> {
+pub fn read_manifest(manifest_path: &Path) -> Result<BootManifest, ManifestError> {
     let json = fs::read_to_string(manifest_path)
         .map_err(|source| ManifestError::ReadManifest { path: manifest_path.to_path_buf(), source })?;
     serde_json::from_str(&json)
@@ -215,8 +215,9 @@ mod tests {
 
     #[test]
     fn manifest_json_round_trips() {
-        // The schema `cargo xtask bundle` writes with `serde_json::json!`
-        // — field names here are the contract the xtask side mirrors.
+        // The schema the hub's `spawn_substrate` boot-manifest injection writes
+        // with `serde_json::json!` — field names here are the contract the hub
+        // side mirrors.
         let json = r#"{
             "chassis": "headless",
             "tick_hz": 30,
@@ -225,7 +226,7 @@ mod tests {
                 {"wasm": "/abs/b.wasm"}
             ]
         }"#;
-        let manifest: BundleManifest = serde_json::from_str(json).expect("parse manifest");
+        let manifest: BootManifest = serde_json::from_str(json).expect("parse manifest");
         assert_eq!(manifest.chassis.as_deref(), Some("headless"));
         assert_eq!(manifest.title, None);
         assert_eq!(manifest.tick_hz, Some(30));
@@ -246,7 +247,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = env::temp_dir().join(format!("aether-bundle-pack-{tag}-{}-{seq}", process::id()));
+        let dir = env::temp_dir().join(format!("aether-boot-manifest-{tag}-{}-{seq}", process::id()));
         fs::create_dir_all(&dir).expect("create scratch dir");
         dir
     }

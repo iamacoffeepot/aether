@@ -189,11 +189,11 @@ Keep these concepts separate:
 - full CI build and test proof;
 - automated review and dogfood QA;
 - landing a pull request;
-- packaging with `cargo xtask dist` or `cargo xtask bundle`;
+- packaging with `cargo xtask dist` or `cargo xtask package`;
 - publishing a versioned release.
 
 The checked-in [Release workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/release.yml)
-currently builds a manually dispatched Windows `loco-motion` bundle artifact.
+currently builds a manually dispatched Windows `loco-motion` package artifact.
 The `release-init` skill initializes lifecycle labels; it does not publish a
 release. Do not infer an undocumented tag, version, or release-branch procedure
 from either name.

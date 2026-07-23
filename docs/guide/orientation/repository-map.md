@@ -53,9 +53,8 @@ compares these with native capabilities.
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
 | `aether-anthropic`, `aether-gemini` | the two content-gen provider components (loaded on demand, not chassis fixtures), each a self-contained guest carrying its own pure DTO/string helpers |
-| `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, bundle-pack format |
+| `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
 | `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` | one crate per chassis binary |
-| `aether-chassis-bundle` | standalone bundle binaries with the component pack embedded at build time |
 | `aether-harness-perf` | performance trial / compare / plot binaries |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches |
 

@@ -221,18 +221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-chassis-bundle"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-chassis",
- "aether-chassis-desktop",
- "aether-chassis-headless",
- "aether-substrate",
- "anyhow",
- "tracing",
-]
-
-[[package]]
 name = "aether-chassis-desktop"
 version = "0.3.0-alpha"
 dependencies = [

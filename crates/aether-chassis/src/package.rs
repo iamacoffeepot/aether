@@ -10,23 +10,22 @@
 //!   pack/objects/<sha256>       # component wasm + config bytes, immutable
 //! ```
 //!
-//! [`PackageManifest`] supersedes the inline-bytes `bundle_pack` blob as a
-//! *persisted, versioned* artifact — the "revisit if it ever becomes a
-//! persisted artifact" the bundle-pack module doc named. Where the pack
-//! carries wasm + config bytes inline, the manifest references them by
-//! content hash into `pack/objects/`; identity is the hash everywhere and a
+//! [`PackageManifest`] is the *persisted, versioned* shipping artifact: where
+//! the JSON boot-manifest ([`crate::boot_manifest`]) names component files by
+//! path, the package manifest references wasm + config bytes by content hash
+//! into `pack/objects/`; identity is the hash everywhere and a
 //! [`name`](PackageEntry::name) is a label, never a key. The chassis boots
 //! by resolving those references against the local object store rather than
 //! receiving inline bytes.
 //!
 //! ## Encoding
 //!
-//! The manifest is a hand-rolled little-endian binary format, mirroring the
-//! `bundle_pack` discipline (magic, iterative bounds-checked decode, no new
-//! serialization dependency — the workspace owns its wire format, ADR-0118)
-//! but adding an explicit [`MANIFEST_VERSION`] byte after the magic so a
-//! future layout change is detectable at decode rather than misread. The
-//! layout, all integers little-endian:
+//! The manifest is a hand-rolled little-endian binary format (magic,
+//! iterative bounds-checked decode, no new serialization dependency — the
+//! workspace owns its wire format, ADR-0118), with an explicit
+//! [`MANIFEST_VERSION`] byte after the magic so a future layout change is
+//! detectable at decode rather than misread. The layout, all integers
+//! little-endian:
 //!
 //! - the 8-byte magic [`MANIFEST_MAGIC`];
 //! - the one-byte [`MANIFEST_VERSION`];
@@ -44,9 +43,10 @@
 //!
 //! Boot resolves each hash against an [`ObjectStores`] — an ordered walk
 //! over a list of `pack/objects` layers that holds exactly one entry in
-//! this slice (ADR-0163 §1 is single-channel). A later overlay channel
-//! (mods, server-pushed content) is a list append resolved first-hit in
-//! order, so the walk shape is here but no layering machinery is built now.
+//! this slice (ADR-0163 §1 is single-channel; the overlay-channel seam is
+//! this ordered store list). A later overlay channel (mods, server-pushed
+//! content) is a list append resolved first-hit in order, so the walk shape
+//! is here but no layering machinery is built now.
 //! Object integrity (does the file's content match its hash name) is the
 //! platform's job — the store converges the disk toward the manifest by
 //! hash — so boot reads the named file without re-hashing it.
@@ -61,7 +61,7 @@ use std::str;
 use aether_substrate::config::ConfigError;
 
 use crate::autoload::{AutoloadComponent, expand_replicas};
-use crate::bundle_pack::{ChassisSettings, PackedComponent};
+use crate::boot_manifest::{ChassisSettings, PackedComponent};
 
 /// The 8-byte magic opening every persisted package manifest.
 pub const MANIFEST_MAGIC: &[u8; 8] = b"AEPKGMAN";
@@ -165,13 +165,12 @@ impl Error for Sha256ParseError {}
 /// A persisted package manifest: the chassis settings the package applies
 /// plus its hash-referenced component entries, in autoload order (ADR-0163
 /// §1). Reuses [`ChassisSettings`] (title / window mode / tick rate) so a
-/// package carries the same three knobs the bundle pack does.
+/// package carries the same three knobs the JSON boot manifest does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageManifest {
     /// Chassis settings (title / window mode / tick rate) the depot boot path
-    /// and the standalone-bundle path apply BELOW argv/env, ABOVE the compiled
-    /// defaults (issue 4001); surfaced alongside [`entries`](Self::entries) by
-    /// [`package_autoload`] / [`embedded_autoload`].
+    /// applies BELOW argv/env, ABOVE the compiled defaults (issue 4001);
+    /// surfaced alongside [`entries`](Self::entries) by [`package_autoload`].
     pub settings: ChassisSettings,
     /// The component entries, in autoload order.
     pub entries: Vec<PackageEntry>,
@@ -369,22 +368,6 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<PackageManifest, ManifestDecodeEr
     Ok(PackageManifest { settings: ChassisSettings { title, window_mode, tick_hz }, entries })
 }
 
-/// A source of package objects addressed by content hash. The disk-backed
-/// [`ObjectStores`] walk (the store-backed package boot) and the in-memory
-/// [`EmbeddedObjectStore`] (the standalone-bundle embed) both implement it, so
-/// one [`resolve_entries`] loop resolves a manifest's entries against either
-/// source — the bundle bin and the package boot share one decode-and-resolve
-/// path over two object sources.
-pub trait ObjectSource {
-    /// Resolve `hash` to its object bytes.
-    ///
-    /// # Errors
-    ///
-    /// [`ObjectError::Missing`] when the source holds no object with this hash;
-    /// [`ObjectError::Io`] when reading it fails.
-    fn read(&self, hash: &Sha256) -> Result<Vec<u8>, ObjectError>;
-}
-
 /// One package object source: the `pack/objects` directory of one package
 /// layer. Objects are immutable, hash-named files read straight off disk.
 pub struct ObjectStore {
@@ -430,19 +413,22 @@ impl ObjectStores {
         Self { layers: vec![ObjectStore::new(objects_dir)] }
     }
 
-    /// Append a layer. [`ObjectSource::read`] walks in list order, so an
+    /// Append a layer. [`read`](Self::read) walks in list order, so an
     /// appended layer is searched after the ones already present. Provided
     /// so a future overlay channel is a list append, not a redesign — no
     /// caller appends in this slice.
     pub fn push(&mut self, store: ObjectStore) {
         self.layers.push(store);
     }
-}
 
-impl ObjectSource for ObjectStores {
     /// Resolve `hash` by walking the layers in order and returning the first
     /// that holds it.
-    fn read(&self, hash: &Sha256) -> Result<Vec<u8>, ObjectError> {
+    ///
+    /// # Errors
+    ///
+    /// [`ObjectError::Missing`] when no layer holds the object with this hash;
+    /// [`ObjectError::Io`] when a layer errors reading it.
+    pub fn read(&self, hash: &Sha256) -> Result<Vec<u8>, ObjectError> {
         for layer in &self.layers {
             match layer.read(hash) {
                 Ok(Some(bytes)) => return Ok(bytes),
@@ -451,35 +437,6 @@ impl ObjectSource for ObjectStores {
             }
         }
         Err(ObjectError::Missing(*hash))
-    }
-}
-
-/// The in-memory object source backing the standalone-bundle embed path
-/// (ADR-0163 §1): the objects the bundle bin `include_bytes!`es, each keyed by
-/// its lowercase-hex hash filename. Resolving through the same
-/// [`ObjectSource`] the disk [`ObjectStores`] implements is what lets the
-/// bundle bin reuse the package boot's decode-and-resolve path rather than
-/// carrying its own inline-bytes format.
-pub struct EmbeddedObjectStore<'a> {
-    objects: &'a [(&'a str, &'a [u8])],
-}
-
-impl<'a> EmbeddedObjectStore<'a> {
-    /// An embedded store over the generated `(hex, bytes)` object table.
-    #[must_use]
-    pub fn new(objects: &'a [(&'a str, &'a [u8])]) -> Self {
-        Self { objects }
-    }
-}
-
-impl ObjectSource for EmbeddedObjectStore<'_> {
-    fn read(&self, hash: &Sha256) -> Result<Vec<u8>, ObjectError> {
-        let hex = hash.to_hex();
-        self.objects
-            .iter()
-            .find(|(name, _)| *name == hex)
-            .map(|(_, bytes)| bytes.to_vec())
-            .ok_or(ObjectError::Missing(*hash))
     }
 }
 
@@ -549,8 +506,7 @@ impl Error for PackageError {
 
 /// Read the persisted manifest of the package rooted at `package_root`
 /// (`<package_root>/pack/manifest`) into a [`PackageManifest`] — the
-/// object-resolving [`package_autoload`] and the settings-carrying
-/// standalone-bundle path (a later slice) both start here.
+/// object-resolving [`package_autoload`] starts here.
 ///
 /// # Errors
 ///
@@ -563,20 +519,18 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest, PackageErro
 }
 
 /// Read the package rooted at `package_root` into its [`ChassisSettings`]
-/// plus the boot autoload component list — the store-backed twin of
-/// [`embedded_autoload`] (ADR-0163 §1). Decodes `pack/manifest`, resolves
-/// each entry's object (and optional config) bytes against the package's
-/// `pack/objects` store, then fans out replicas through the shared
-/// [`expand_replicas`].
+/// plus the boot autoload component list (ADR-0163 §1). Decodes
+/// `pack/manifest`, resolves each entry's object (and optional config) bytes
+/// against the package's `pack/objects` store, then fans out replicas through
+/// the shared [`expand_replicas`].
 ///
 /// Returns the manifest's [`ChassisSettings`] alongside the autoload list
 /// (issue 4001): the depot boot path (`--package` / `AETHER_PACKAGE`) applies
 /// title / window mode / tick rate BELOW argv/env, ABOVE the compiled defaults,
 /// so a shipped package comes up titled and in its window mode while an
-/// operator's `AETHER_WINDOW_*` / `--window-*` still overrides it. This is the
-/// disk twin of `embedded_autoload` (which surfaces the same settings for the
-/// standalone-bundle bins); `boot_manifest_autoload` — the hub-driven JSON
-/// channel — deliberately keeps dropping its manifest's settings.
+/// operator's `AETHER_WINDOW_*` / `--window-*` still overrides it.
+/// `boot_manifest_autoload` — the hub-driven JSON channel — deliberately keeps
+/// dropping its manifest's settings.
 ///
 /// # Errors
 ///
@@ -606,18 +560,17 @@ fn read_and_resolve(package_root: &Path) -> Result<(ChassisSettings, Vec<PackedC
     Ok((settings, packed))
 }
 
-/// Resolve a decoded manifest's `entries` against an [`ObjectSource`] into the
-/// loaded [`PackedComponent`]s (object + config bytes pulled from the source),
-/// preserving entry order — the shared step of the disk-backed
-/// [`package_autoload`] and the embedded [`embedded_autoload`].
+/// Resolve a decoded manifest's `entries` against an [`ObjectStores`] into the
+/// loaded [`PackedComponent`]s (object + config bytes pulled from the store),
+/// preserving entry order — the object-reading step of [`package_autoload`].
 ///
 /// # Errors
 ///
 /// [`PackageError::Object`] when an entry's object or config object can't be
-/// resolved against the source.
+/// resolved against the store.
 pub fn resolve_entries(
     entries: Vec<PackageEntry>,
-    objects: &impl ObjectSource,
+    objects: &ObjectStores,
 ) -> Result<Vec<PackedComponent>, PackageError> {
     let mut packed = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -629,39 +582,6 @@ pub fn resolve_entries(
         packed.push(PackedComponent { wasm, config, name: entry.name, export: entry.export, replicas: entry.replicas });
     }
     Ok(packed)
-}
-
-/// Decode an embedded package manifest and resolve its entries against an
-/// embedded object source into the chassis settings plus the boot autoload
-/// list (replicas fanned out) — the standalone-bundle twin of
-/// [`package_autoload`] (ADR-0163 §1). The bundle bins call this on the
-/// `include_bytes!`'d `pack/manifest` bytes and their embedded object table.
-///
-/// Unlike [`package_autoload`], this returns the manifest's [`ChassisSettings`]
-/// alongside the autoload list: the standalone bundle bins apply title / window
-/// mode / tick rate before booting (the hub-driven runtime autoload path drops
-/// them). An empty `manifest_bytes` is a caller error, not "no package" — the
-/// bundle bin guards the empty-embed placeholder before calling.
-///
-/// # Errors
-///
-/// A hard [`ConfigError`] (ADR-0090 §4: a known knob with a bad value aborts
-/// boot loudly) when the manifest doesn't decode, an object is missing, or a
-/// `replicas` fan-out is invalid.
-pub fn embedded_autoload(
-    manifest_bytes: &[u8],
-    objects: &impl ObjectSource,
-) -> Result<(ChassisSettings, Vec<AutoloadComponent>), ConfigError> {
-    let manifest = decode_manifest(manifest_bytes)
-        .map_err(|e| ConfigError::unparseable("embedded package manifest", "<embedded>", e))?;
-    let settings = manifest.settings.clone();
-    let packed = resolve_entries(manifest.entries, objects)
-        .map_err(|e| ConfigError::unparseable("embedded package manifest", "<embedded>", e))?;
-    let mut components = Vec::new();
-    for entry in packed {
-        components.extend(expand_replicas(entry)?);
-    }
-    Ok((settings, components))
 }
 
 #[cfg(test)]
@@ -850,61 +770,6 @@ mod tests {
         }
 
         fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn embedded_autoload_resolves_in_memory_objects_and_settings() {
-        // The standalone-bundle embed path: `decode_manifest` over the
-        // `include_bytes!`'d manifest, entries resolved against the in-memory
-        // `EmbeddedObjectStore` (not disk), settings surfaced, replicas fanned
-        // out. The bug this catches is the embed path resolving an entry
-        // against the wrong hash, dropping the manifest's chassis settings, or
-        // losing a replica instance — the object source is in memory here, so
-        // it exercises exactly what the bundle bin runs with no disk store.
-        let wasm = Sha256([0x77; 32]);
-        let cfg = Sha256([0x88; 32]);
-        let manifest = PackageManifest {
-            settings: ChassisSettings { title: Some("bundle".to_owned()), window_mode: None, tick_hz: Some(30) },
-            entries: vec![PackageEntry {
-                object: wasm,
-                config: Some(cfg),
-                name: Some("probe".to_owned()),
-                export: None,
-                replicas: Some(2),
-            }],
-        };
-        let manifest_bytes = encode_manifest(&manifest);
-        let (wasm_hex, cfg_hex) = (wasm.to_hex(), cfg.to_hex());
-        let objects: &[(&str, &[u8])] =
-            &[(wasm_hex.as_str(), &[0x00, 0x61, 0x73, 0x6d]), (cfg_hex.as_str(), &[1, 2, 3])];
-        let store = EmbeddedObjectStore::new(objects);
-
-        let (settings, components) = embedded_autoload(&manifest_bytes, &store).expect("embedded autoload");
-        assert_eq!(settings, manifest.settings, "the manifest's chassis settings surface to the bundle bin");
-        assert_eq!(components.len(), 2, "replicas: 2 fans out to two components");
-        for (index, component) in components.iter().enumerate() {
-            assert_eq!(component.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
-            assert_eq!(component.config, vec![1, 2, 3]);
-            assert_eq!(component.name.as_deref(), Some(format!("probe-{index}").as_str()));
-        }
-    }
-
-    #[test]
-    fn embedded_autoload_errors_on_missing_object() {
-        // A manifest referencing an object the embedded table doesn't hold is a
-        // hard boot fault, exactly as the disk path is (ADR-0090 §4).
-        let manifest = PackageManifest {
-            settings: ChassisSettings::default(),
-            entries: vec![PackageEntry {
-                object: Sha256([0x99; 32]),
-                config: None,
-                name: Some("gone".to_owned()),
-                export: None,
-                replicas: None,
-            }],
-        };
-        let store = EmbeddedObjectStore::new(&[]);
-        assert!(embedded_autoload(&encode_manifest(&manifest), &store).is_err(), "missing object must abort boot");
     }
 
     #[test]

@@ -189,12 +189,12 @@ Packaging commands have distinct outputs:
 
 ```sh
 cargo xtask dist      # component wasm + chassis artifacts + dist/manifest.json
-cargo xtask bundle --chassis desktop --components aether-kit-commons
-                      # one standalone executable with an explicit component set
+cargo xtask package --chassis desktop --components aether-kit-commons
+                      # a shippable depot: chassis binary + content-addressed pack/
 ```
 
 They are not the same operation as landing a PR or publishing a versioned
-release. Read [Distribution and bundles](docs/guide/building/distribution.md).
+release. Read [Distribution and packaging](docs/guide/building/distribution.md).
 
 ## Contributing
 

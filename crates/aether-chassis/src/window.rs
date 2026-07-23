@@ -10,7 +10,7 @@ use std::io;
 use aether_kinds::WindowMode;
 use aether_substrate::config::{ConfigError, ConfigSources};
 
-use crate::bundle_pack::ChassisSettings;
+use crate::boot_manifest::ChassisSettings;
 
 /// Desktop window boot knobs (ADR-0090 §1/§2 applied to the chassis's
 /// own window knobs). The `#[derive(aether_substrate::Config)]` emits

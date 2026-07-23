@@ -117,13 +117,13 @@ path as a component identity. Upload first, select second. See
 
 ## Distribution is a different topology
 
-`cargo xtask bundle` produces a standalone product bundle with a selected
-desktop or headless launcher and embedded component/config material. It is not
-the same thing as the development hub fleet. The bundle's autoload path builds
-the component set at process boot without requiring an MCP coordinator or hub
-artifact store.
+`cargo xtask package` produces a shippable package depot: a selected desktop or
+headless chassis binary alongside a content-addressed `pack/` of the chosen
+components and their config. It is not the same thing as the development hub
+fleet. The depot's autoload path builds the component set at process boot
+without requiring an MCP coordinator or hub artifact store.
 
-Read [Distribution and bundles](../building/distribution.md) before changing
+Read [Distribution and packaging](../building/distribution.md) before changing
 autoload or packaging behavior.
 
 ## Implementation and decisions
