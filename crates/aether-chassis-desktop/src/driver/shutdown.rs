@@ -1,36 +1,27 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use winit::event_loop::EventLoopProxy;
 
 use crate::chassis::UserEvent;
 
 /// Install a SIGINT/SIGTERM → graceful-shutdown bridge for the desktop
-/// chassis (iamacoffeepot/aether#1489). On the first delivered signal it
-/// flips `shutdown` (the flag `App::about_to_wait` polls) and sends
-/// [`UserEvent::Quit`] through `proxy` to wake a parked
-/// (`ControlFlow::Wait`, occluded) loop — the loop then runs
-/// `about_to_wait`, observes the flag, and drives the lifecycle to
-/// `Shutdown` (the desktop analogue of headless's tick-loop flag poll).
+/// chassis (iamacoffeepot/aether#1489). On the first delivered signal it sends
+/// [`UserEvent::Quit`] through `proxy`; the window-owned application turns
+/// that event directly into graceful lifecycle shutdown.
 ///
 /// Unlike headless's `signal_hook::flag::register` — which is
 /// async-signal-safe but can only flip a bool — the desktop loop must be
 /// *woken*, and `EventLoopProxy::send_event` is not async-signal-safe.
-/// So a dedicated watcher thread blocks on the signal stream and does
-/// both the flag flip and the proxy wake; it doesn't freeze the winit
-/// loop (a separate thread), so the constraint that ruled this out for
-/// the single-threaded headless tick loop doesn't apply here. SIGTERM
-/// joins SIGINT so supervisors / `kill` (no `-9`) / CI cancellation also
-/// run teardown. Best-effort: a failed install warn-logs and leaves
-/// shutdown to `WindowEvent::CloseRequested` only.
+/// So a dedicated watcher thread blocks on the signal stream and sends the
+/// proxy event; it doesn't freeze the winit loop. SIGTERM joins SIGINT so
+/// supervisors / `kill` (no `-9`) / CI cancellation also run teardown.
+/// Best-effort: a failed install warn-logs and leaves shutdown to native
+/// window close.
 #[cfg(unix)]
-pub(super) fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
+pub(super) fn install_shutdown_handler(proxy: EventLoopProxy<UserEvent>) {
     use std::thread;
 
     use signal_hook::consts::{SIGINT, SIGTERM};
     use signal_hook::iterator::Signals;
 
-    let shutdown = Arc::clone(shutdown);
     let mut signals = match Signals::new([SIGINT, SIGTERM]) {
         Ok(s) => s,
         Err(e) => {
@@ -54,7 +45,6 @@ pub(super) fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventL
         // only ends if the underlying fd closes (it doesn't for the
         // thread's lifetime), so a single `next()` is the whole job.
         if signals.forever().next().is_some() {
-            shutdown.store(true, Ordering::SeqCst);
             let _ = proxy.send_event(UserEvent::Quit);
         }
     });
@@ -69,10 +59,8 @@ pub(super) fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventL
 }
 
 #[cfg(not(unix))]
-pub(super) fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
-    let shutdown = Arc::clone(shutdown);
+pub(super) fn install_shutdown_handler(proxy: EventLoopProxy<UserEvent>) {
     if let Err(e) = ctrlc::set_handler(move || {
-        shutdown.store(true, Ordering::SeqCst);
         let _ = proxy.send_event(UserEvent::Quit);
     }) {
         tracing::error!(

@@ -184,7 +184,7 @@ mod desktop;
 #[cfg(feature = "desktop")]
 pub use desktop::{
     DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
-    DesktopWindowUserEvent, WindowCell, WindowHostAction, WindowHostEffect, resolve_fullscreen,
+    DesktopWindowUserEvent, WindowHostAction, WindowHostEffect, resolve_fullscreen,
 };
 
 #[cfg(feature = "synthetic")]

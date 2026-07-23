@@ -11,7 +11,7 @@ mod application;
 mod input;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual, actor};
 use aether_data::Kind;
@@ -40,10 +40,6 @@ use super::{
 use crate::subscribers::WindowSubscribers;
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
-
-/// Temporary single-render-target cell retained only for the desktop
-/// compatibility bridge. Window-manager state does not read or write it.
-pub type WindowCell = Arc<OnceLock<Arc<Window>>>;
 
 /// Construction input for the application-scoped desktop window manager.
 ///
