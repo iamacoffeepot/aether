@@ -379,9 +379,12 @@ impl WasmActor for ScrollWidget {
 
 #[cfg(test)]
 mod tests {
+    use aether_kinds::WindowId;
+
     use super::*;
     use crate::WidgetKind;
 
+    const TEST_WINDOW_ID: WindowId = WindowId(1);
     const VIEWPORT: ScrollExtent = ScrollExtent { width_pixels: 40.0, height_pixels: 30.0 };
     const CONTENT: ScrollExtent = ScrollExtent { width_pixels: 70.0, height_pixels: 80.0 };
 
@@ -487,7 +490,7 @@ mod tests {
     #[test]
     fn wheel_is_converted_once_and_axes_remain_independent() {
         assert_eq!(
-            wheel_delta(MouseWheel { delta_x: 5.0, delta_y: -7.0, x: 100.0, y: 200.0 }),
+            wheel_delta(MouseWheel { window: TEST_WINDOW_ID, delta_x: 5.0, delta_y: -7.0, x: 100.0, y: 200.0 }),
             ScrollDelta { x_pixels: -5.0, y_pixels: 7.0 }
         );
         let outcome = apply_scroll(

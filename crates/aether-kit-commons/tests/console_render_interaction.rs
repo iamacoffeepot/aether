@@ -27,7 +27,7 @@ use aether_input::InputCapability;
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
-    LoadResult, NamedMail, Tick, WindowSize,
+    LoadResult, NamedMail, Tick, WindowId, WindowSize,
 };
 use aether_kit_commons::{ConsoleCommandOutput, ConsoleConfig};
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
@@ -36,6 +36,7 @@ use aether_text::TextCapability;
 
 const WINDOW_WIDTH: u32 = 320;
 const WINDOW_HEIGHT: u32 = 200;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
 const PARTITION_TOLERANCE: u8 = 8;
 
@@ -245,7 +246,10 @@ fn backquote_key_opens_console_overlay() {
     harness
         .execute(vec![(
             "size",
-            HarnessOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+            HarnessOp::send_mail(
+                console_address(),
+                &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+            ),
         )])
         .expect("window size");
 
@@ -253,7 +257,10 @@ fn backquote_key_opens_console_overlay() {
     assert!(closed < 0.01, "closed console should leave the top band at clear color; coverage={closed:.3}");
 
     harness
-        .execute(vec![("toggle", HarnessOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE }))])
+        .execute(vec![(
+            "toggle",
+            HarnessOp::send_mail(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+        )])
         .expect("toggle key");
 
     let open = top_band_coverage(&mut harness, "open");
@@ -280,9 +287,15 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
         .execute(vec![
             (
                 "size-direct-fanout",
-                HarnessOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
-            ("unrouted-toggle", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
+            (
+                "unrouted-toggle",
+                HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+            ),
         ])
         .expect("direct fanout before editor shell");
     let closed = top_band_coverage(&mut harness, "owns-input-disabled");
@@ -290,7 +303,10 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
 
     load_editor_shell(&mut harness, &widget_wasm, console);
     harness
-        .execute(vec![("routed-toggle", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE }))])
+        .execute(vec![(
+            "routed-toggle",
+            HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+        )])
         .expect("toggle through editor shell");
     let open = top_band_coverage(&mut harness, "editor-routed");
     assert!(open > 0.90, "editor shell should forward backquote exactly once; coverage={open:.3}");
@@ -309,10 +325,13 @@ fn markdown_command_output_renders_into_history_band() {
         .execute(vec![
             (
                 "size",
-                HarnessOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail(
+                    console_address(),
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
             ("settle", HarnessOp::advance(8)),
-            ("toggle", HarnessOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
+            ("toggle", HarnessOp::send_mail(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
         ])
         .expect("open console");
 
@@ -355,10 +374,13 @@ fn configured_font_override_renders_into_history_band() {
         .execute(vec![
             (
                 "size",
-                HarnessOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail(
+                    console_address(),
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
             ("settle", HarnessOp::advance(8)),
-            ("toggle", HarnessOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
+            ("toggle", HarnessOp::send_mail(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
             (
                 "output",
                 HarnessOp::send_mail(

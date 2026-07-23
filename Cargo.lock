@@ -1081,6 +1081,7 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "inventory",
+ "serde",
  "winit",
 ]
 

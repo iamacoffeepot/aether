@@ -25,11 +25,11 @@ use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_data::Kind;
-use aether_data::{encode, encode_empty, mailbox_id_from_name};
+use aether_data::{encode_empty, mailbox_id_from_name};
 use aether_input::InputCapability;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, TextInput,
-    Tick, WindowMode, WindowSize,
+    Tick, WindowId as EngineWindowId, WindowMode, WindowSize,
 };
 use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
@@ -49,7 +49,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowId as WinitWindowId};
 
 use super::chassis::UserEvent;
 use input::{TextSource, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
@@ -66,6 +66,10 @@ mod shutdown;
 /// (the log cadence); a starved-but-healthy chain resolves before this
 /// cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
+
+/// Transitional identity for the single chassis-owned boot window. The
+/// manager slice replaces this constant with allocator-owned ids.
+const BOOT_WINDOW_ID: EngineWindowId = EngineWindowId(1);
 
 pub struct App {
     queue: Arc<Mailer>,
@@ -316,7 +320,7 @@ impl App {
     }
 
     fn publish_window_size(&self, width: u32, height: u32) {
-        let payload = encode(&WindowSize { width, height });
+        let payload = WindowSize { window: BOOT_WINDOW_ID, width, height }.encode_into_bytes();
         self.push_chassis_root(self.input_mailbox, self.kind_window_size, payload, 1);
     }
 
@@ -514,7 +518,7 @@ impl ApplicationHandler<UserEvent> for App {
     // variant; we route every variant through this single fn so the
     // event-to-engine bridging lives in one place.
     #[allow(clippy::too_many_lines)]
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WinitWindowId, event: WindowEvent) {
         match event {
             // iamacoffeepot/aether#1489: route OS-close through `Quit`
             // mail rather than tearing winit down directly, so the
@@ -589,11 +593,11 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(text) = &key_event.text
                     && let Some(committed) = text_input_gate(&mut self.composing, TextSource::KeyText(text.to_string()))
                 {
-                    let payload = TextInput { text: committed }.encode_into_bytes();
+                    let payload = TextInput { window: BOOT_WINDOW_ID, text: committed }.encode_into_bytes();
                     self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
                 }
                 // Named-key edge path: `Key` / `KeyRelease` keep their
-                // no-repeat contract and their `#[repr(C)]` cast payload.
+                // no-repeat contract and carry the boot window identity.
                 if !key_event.repeat
                     && let Some(code) = (match key_event.physical_key {
                         PhysicalKey::Code(k) => map_winit_keycode(k),
@@ -602,13 +606,18 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     match key_event.state {
                         ElementState::Pressed => {
-                            self.push_chassis_root(self.input_mailbox, self.kind_key, encode(&Key { code }), 1);
+                            self.push_chassis_root(
+                                self.input_mailbox,
+                                self.kind_key,
+                                Key { window: BOOT_WINDOW_ID, code }.encode_into_bytes(),
+                                1,
+                            );
                         }
                         ElementState::Released => {
                             self.push_chassis_root(
                                 self.input_mailbox,
                                 self.kind_key_release,
-                                encode(&KeyRelease { code }),
+                                KeyRelease { window: BOOT_WINDOW_ID, code }.encode_into_bytes(),
                                 1,
                             );
                         }
@@ -627,12 +636,13 @@ impl ApplicationHandler<UserEvent> for App {
                         Some((begin, end)) => (Some(begin as u32), Some(end as u32)),
                         None => (None, None),
                     };
-                    let payload = ImePreedit { text, cursor_begin, cursor_end }.encode_into_bytes();
+                    let payload =
+                        ImePreedit { window: BOOT_WINDOW_ID, text, cursor_begin, cursor_end }.encode_into_bytes();
                     self.push_chassis_root(self.input_mailbox, self.kind_ime_preedit, payload, 1);
                 }
                 Ime::Commit(text) => {
                     if let Some(committed) = text_input_gate(&mut self.composing, TextSource::Commit(text)) {
-                        let payload = TextInput { text: committed }.encode_into_bytes();
+                        let payload = TextInput { window: BOOT_WINDOW_ID, text: committed }.encode_into_bytes();
                         self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
                     }
                 }
@@ -644,6 +654,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
                 let payload = Modifiers {
+                    window: BOOT_WINDOW_ID,
                     shift: state.shift_key(),
                     ctrl: state.control_key(),
                     alt: state.alt_key(),
@@ -662,7 +673,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.push_chassis_root(
                                 self.input_mailbox,
                                 self.kind_mouse_button,
-                                encode(&MouseButton { button, x, y }),
+                                MouseButton { window: BOOT_WINDOW_ID, button, x, y }.encode_into_bytes(),
                                 1,
                             );
                         }
@@ -670,7 +681,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.push_chassis_root(
                                 self.input_mailbox,
                                 self.kind_mouse_button_release,
-                                encode(&MouseButtonRelease { button, x, y }),
+                                MouseButtonRelease { window: BOOT_WINDOW_ID, button, x, y }.encode_into_bytes(),
                                 1,
                             );
                         }
@@ -680,7 +691,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let (delta_x, delta_y) = normalize_wheel(delta);
                 let (x, y) = self.last_cursor;
-                let payload = encode(&MouseWheel { delta_x, delta_y, x, y });
+                let payload = MouseWheel { window: BOOT_WINDOW_ID, delta_x, delta_y, x, y }.encode_into_bytes();
                 self.push_chassis_root(self.input_mailbox, self.kind_mouse_wheel, payload, 1);
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -690,7 +701,7 @@ impl ApplicationHandler<UserEvent> for App {
                 #[allow(clippy::cast_possible_truncation)]
                 let (x, y) = (position.x as f32, position.y as f32);
                 self.last_cursor = (x, y);
-                let payload = encode(&MouseMove { x, y });
+                let payload = MouseMove { window: BOOT_WINDOW_ID, x, y }.encode_into_bytes();
                 self.push_chassis_root(self.input_mailbox, self.kind_mouse_move, payload, 1);
             }
             _ => {}
@@ -838,7 +849,7 @@ impl DriverCapability for DesktopDriverCapability {
         let window_cell = WindowCell::default();
         let (window_slot, window_wake_slot) = ctx.boot_pumped_actor::<DesktopWindowCapability>(
             (),
-            DesktopWindowParams { window: window_cell.clone(), initial_mode: window.mode.clone() },
+            DesktopWindowParams { id: BOOT_WINDOW_ID, window: window_cell.clone(), initial_mode: window.mode.clone() },
         )?;
 
         // iamacoffeepot/aether#1318: install an `EventLoopProxy` wake on the

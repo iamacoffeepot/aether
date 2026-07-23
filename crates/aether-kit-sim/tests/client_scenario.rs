@@ -24,7 +24,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
 use aether_input::InputCapability;
-use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
+use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, WindowId, keycode};
 use aether_kit_commons::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit_sim::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
@@ -40,6 +40,7 @@ const INTERVAL_NANOS: u64 = 20_000_000;
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_WIDTH: u32 = 192;
 const FRAME_HEIGHT: u32 = 144;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 const ENTITY_SRGB: [u8; 3] = [255, 0, 255];
 const ENTITY_COLOR_TOLERANCE: u8 = 4;
 
@@ -311,9 +312,12 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
 
     harness
         .execute(vec![
-            ("press-east", HarnessOp::send_mail("aether.input", &Key { code: keycode::KEY_D })),
+            ("press-east", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: keycode::KEY_D })),
             ("emit-move", HarnessOp::advance(1)),
-            ("release-east", HarnessOp::send_mail("aether.input", &KeyRelease { code: keycode::KEY_D })),
+            (
+                "release-east",
+                HarnessOp::send_mail("aether.input", &KeyRelease { window: TEST_WINDOW_ID, code: keycode::KEY_D }),
+            ),
         ])
         .expect("drive held east input through aether.input");
     let ControlledEvent::Move(intent) = event_rx.recv_timeout(TCP_TIMEOUT).expect("controlled MoveIntent arrives")
@@ -410,9 +414,12 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
 
     harness
         .execute(vec![
-            ("press-west", HarnessOp::send_mail("aether.input", &Key { code: keycode::KEY_A })),
+            ("press-west", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: keycode::KEY_A })),
             ("emit-west", HarnessOp::advance(1)),
-            ("release-west", HarnessOp::send_mail("aether.input", &KeyRelease { code: keycode::KEY_A })),
+            (
+                "release-west",
+                HarnessOp::send_mail("aether.input", &KeyRelease { window: TEST_WINDOW_ID, code: keycode::KEY_A }),
+            ),
         ])
         .expect("drive west input through active gateway");
 

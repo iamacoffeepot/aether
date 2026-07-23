@@ -34,7 +34,7 @@ pub use text_metrics::{CachedFontMetrics, scale_units};
 pub use diagnostics::{MonitorNotice, UnresolvedMail};
 pub use input::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowSize,
+    WindowId, WindowSize,
 };
 pub use lifecycle::{
     InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, LifecycleSubscribe, LifecycleSubscribeResult,
@@ -1159,87 +1159,6 @@ mod control_plane {
         Windowed,
         FullscreenBorderless,
         FullscreenExclusive { width: u32, height: u32, refresh_mhz: u32 },
-    }
-
-    /// `aether.window.set_mode` — switch the substrate's
-    /// window presentation mode. `width` / `height` apply only when
-    /// `mode == Windowed`; fullscreen modes size themselves from the
-    /// monitor / requested video mode. Reply carries the new state
-    /// so callers don't have to follow up with a `platform_info`
-    /// query.
-    ///
-    /// Fullscreen-exclusive requests fail with `Err` if no
-    /// `VideoMode` on the current monitor matches the `(width,
-    /// height, refresh_mhz)` triple exactly. Use `platform_info`
-    /// first to enumerate supported modes.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.window.set_mode")]
-    pub struct SetWindowMode {
-        pub mode: WindowMode,
-        pub width: Option<u32>,
-        pub height: Option<u32>,
-    }
-
-    /// Reply to `SetWindowMode`. `Ok` carries the resolved state
-    /// after the mode change applied; `Err` carries the reason the
-    /// request was rejected (unknown video mode, window not ready,
-    /// etc.) with no state change.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.window.set_mode_result")]
-    pub enum SetWindowModeResult {
-        Ok { mode: WindowMode, width: u32, height: u32 },
-        Err { error: String },
-    }
-
-    /// `aether.window.set_title` — update the substrate
-    /// window's title at runtime. `winit::Window::set_title` is
-    /// infallible on every supported platform, so the desktop reply
-    /// always echoes the applied title back on `Ok`. Headless and hub
-    /// chassis reply `Err { error: "unsupported on headless..." }`.
-    /// Boot-time default comes from `AETHER_WINDOW_TITLE`; unset falls
-    /// back to the substrate's name.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.window.set_title")]
-    pub struct SetWindowTitle {
-        pub title: String,
-    }
-
-    /// Reply to `SetWindowTitle`. `Ok` echoes the applied title — same
-    /// value the caller sent, returned so MCP logs and agent memory
-    /// see the resulting state in one place. `Err` is reserved for
-    /// chassis that don't own a window (headless, hub) or for a
-    /// pre-window-ready request.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.window.set_title_result")]
-    pub enum SetWindowTitleResult {
-        Ok { title: String },
-        Err { error: String },
-    }
-
-    /// `aether.window.focus` — bring the substrate window to the
-    /// foreground (un-minimize, show if hidden, raise + focus). Takes
-    /// no fields: focus is a single imperative with no parameters.
-    ///
-    /// Motivating use (iamacoffeepot/aether#1318): an MCP-driven
-    /// session that wants to `capture_frame` against a backgrounded /
-    /// minimized / hidden window has no programmatic lever to raise it
-    /// otherwise. The desktop driver applies `set_minimized(false)` +
-    /// `set_visible(true)` + `focus_window()`. Headless / hub chassis
-    /// reply `Err` (no window peripheral).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.window.focus")]
-    pub struct FocusWindow {}
-
-    /// Reply to `FocusWindow`. `Ok` confirms the window was raised
-    /// (winit's `focus_window` is best-effort per the platform docs,
-    /// but the substrate has applied the three calls). `Err` carries
-    /// the reason — a pre-window-ready request, or a chassis without a
-    /// window peripheral (headless, hub).
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.window.focus_result")]
-    pub enum FocusWindowResult {
-        Ok,
-        Err { error: String },
     }
 
     // ADR-0088 §6 reverse-lookup inventory actor. The `aether.inventory`

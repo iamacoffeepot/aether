@@ -62,7 +62,7 @@ use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
     FrameReduction, FrameVerdict, ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers,
-    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
+    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick, WindowId,
 };
 use aether_kit_widget::{
     ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
@@ -75,6 +75,8 @@ use aether_render::RenderCapability;
 use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
+
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point), matching `widget_set` / `widget_text_alignment`.
@@ -387,12 +389,12 @@ fn tick_to_panel() -> NamedMail {
 
 /// A left mouse-button press at `(x, y)`.
 fn press(x: f32, y: f32) -> MouseButton {
-    MouseButton { button: LEFT, x, y }
+    MouseButton { window: TEST_WINDOW_ID, button: LEFT, x, y }
 }
 
 /// A left mouse-button release at `(x, y)`.
 fn release(x: f32, y: f32) -> MouseButtonRelease {
-    MouseButtonRelease { button: LEFT, x, y }
+    MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
 }
 
 fn button_child(subname: &str, label: &str, state: WidgetControlState) -> WidgetChildSpec {
@@ -750,8 +752,8 @@ fn assert_stationary_hover_survives_focus_traversal(harness: &mut SubstrateHarne
     // only a root-issued HoverLost may clear that fact.
     harness
         .execute(vec![
-            ("focus_hovered_button", HarnessOp::send_mail(panel, &Key { code: KEY_TAB })),
-            ("focus_away_without_motion", HarnessOp::send_mail(panel, &Key { code: KEY_TAB })),
+            ("focus_hovered_button", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("focus_away_without_motion", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             ("capture_stationary_hover", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("stationary hover survives focus traversal");
@@ -1072,7 +1074,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
     harness
         .execute(vec![
             ("drag_press", HarnessOp::send_mail(&panel, &press(110.0, 52.0))),
-            ("drag_move", HarnessOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("drag_move", HarnessOp::send_mail(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
             ("drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider drag");
@@ -1132,10 +1134,19 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     harness
         .execute(vec![
             ("press", HarnessOp::send_mail("aether.input", &press(PANEL_X + PAD, PANEL_Y + 12.0))),
-            ("cross-region-drag", HarnessOp::send_mail("aether.input", &MouseMove { x: 150.0, y: PANEL_Y + 12.0 })),
+            (
+                "cross-region-drag",
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: PANEL_Y + 12.0 },
+                ),
+            ),
             ("cross-region-release", HarnessOp::send_mail("aether.input", &release(150.0, PANEL_Y + 12.0))),
-            ("replace-selection", HarnessOp::send_mail("aether.input", &TextInput { text: "Z".to_owned() })),
-            ("commit", HarnessOp::send_mail("aether.input", &Key { code: KEY_ENTER })),
+            (
+                "replace-selection",
+                HarnessOp::send_mail("aether.input", &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
+            ),
+            ("commit", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
         .expect("route real panel drag through editor shell");
 
@@ -1249,7 +1260,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
         .execute(vec![
             ("focus", HarnessOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
             ("focus_up", HarnessOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
-            ("type", HarnessOp::send_mail(&panel, &TextInput { text: "hix".to_owned() })),
+            ("type", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hix".to_owned() })),
             ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
             ("settle", HarnessOp::advance(2)),
         ])
@@ -1260,7 +1271,10 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     let typed_right = typed_box.max_x as f32;
 
     harness
-        .execute(vec![("backspace", HarnessOp::send_mail(&panel, &Key { code: KEY_BACKSPACE }))])
+        .execute(vec![(
+            "backspace",
+            HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_BACKSPACE }),
+        )])
         .expect("backspace");
 
     let deleted = capture(&mut harness, glyph_check());
@@ -1283,7 +1297,9 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
          — the neutralized-editing-key class",
     );
 
-    harness.execute(vec![("commit", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
+    harness
+        .execute(vec![("commit", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }))])
+        .expect("commit");
 
     let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
@@ -1381,11 +1397,15 @@ fn focus_ring_follows_tab() {
 
     let panel = panel_address();
     // Tab from no focus lands on the first focusable widget — the slider.
-    harness.execute(vec![("tab1", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("first tab");
+    harness
+        .execute(vec![("tab1", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
+        .expect("first tab");
     let on_slider = coverage(&capture(&mut harness, slider_edge()).results[0]);
 
     // Tab again advances focus to the radio group.
-    harness.execute(vec![("tab2", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("second tab");
+    harness
+        .execute(vec![("tab2", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
+        .expect("second tab");
     let verdict = capture(
         &mut harness,
         vec![
@@ -1456,7 +1476,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         .execute(vec![
             ("focus", HarnessOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
             ("focus_up", HarnessOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
-            ("type", HarnessOp::send_mail(&panel, &TextInput { text: typed_text.to_owned() })),
+            ("type", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: typed_text.to_owned() })),
             ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
             ("settle", HarnessOp::advance(2)),
         ])
@@ -1498,9 +1518,15 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         .execute(vec![
             ("place", HarnessOp::send_mail(&panel, &press(boundary_x, click_y))),
             ("place_up", HarnessOp::send_mail(&panel, &release(boundary_x, click_y))),
-            ("shift", HarnessOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
-            ("extend1", HarnessOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
-            ("extend2", HarnessOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
+            (
+                "shift",
+                HarnessOp::send_mail(
+                    &panel,
+                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                ),
+            ),
+            ("extend1", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("extend2", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
         ])
         .expect("measured place + Shift-extend");
 
@@ -1532,7 +1558,12 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "preedit",
                 HarnessOp::send_mail(
                     &panel,
-                    &ImePreedit { text: "üx".to_owned(), cursor_begin: Some(0), cursor_end: Some(2) },
+                    &ImePreedit {
+                        window: TEST_WINDOW_ID,
+                        text: "üx".to_owned(),
+                        cursor_begin: Some(0),
+                        cursor_end: Some(2),
+                    },
                 ),
             ),
             ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
@@ -1576,7 +1607,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // measure the caret at the end of the non-ASCII result `abéZ`.
     harness
         .execute(vec![
-            ("commit_text", HarnessOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
+            ("commit_text", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() })),
             ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
             ("settle", HarnessOp::advance(2)),
         ])
@@ -1606,7 +1637,9 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
          {caret_coverage:.3}, neighboring coverage was {caret_exclusion:.3}",
     );
 
-    harness.execute(vec![("commit", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
+    harness
+        .execute(vec![("commit", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }))])
+        .expect("commit");
 
     let log = panel_log_messages(&mut harness);
     let joined = log.join("\n");
@@ -1657,15 +1690,15 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         .execute(vec![
             ("focus", HarnessOp::send_mail(&panel, &press(content_x, PANEL_Y + 10.0))),
             ("focus_up", HarnessOp::send_mail(&panel, &release(content_x, PANEL_Y + 10.0))),
-            ("line0", HarnessOp::send_mail(&panel, &TextInput { text: "imx".to_owned() })),
-            ("enter0", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line1", HarnessOp::send_mail(&panel, &TextInput { text: "é".to_owned() })),
-            ("enter1", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line2", HarnessOp::send_mail(&panel, &TextInput { text: "short".to_owned() })),
-            ("enter2", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line3", HarnessOp::send_mail(&panel, &TextInput { text: "last".to_owned() })),
-            ("enter3", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
-            ("line4", HarnessOp::send_mail(&panel, &TextInput { text: "tail".to_owned() })),
+            ("line0", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "imx".to_owned() })),
+            ("enter0", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("line1", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "é".to_owned() })),
+            ("enter1", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("line2", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "short".to_owned() })),
+            ("enter2", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("line3", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "last".to_owned() })),
+            ("enter3", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("line4", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "tail".to_owned() })),
             ("rasterize", HarnessOp::send_mail(&panel, &Tick)),
             ("settle_glyphs", HarnessOp::advance(2)),
         ])
@@ -1679,10 +1712,16 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         .execute(vec![
             ("place", HarnessOp::send_mail(&panel, &press(after_three_x, PANEL_Y + row_height + 10.0))),
             ("place_up", HarnessOp::send_mail(&panel, &release(after_three_x, PANEL_Y + row_height + 10.0))),
-            ("shift", HarnessOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
-            ("up", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
-            ("down", HarnessOp::send_mail(&panel, &Key { code: KEY_DOWN })),
-            ("up_again", HarnessOp::send_mail(&panel, &Key { code: KEY_UP })),
+            (
+                "shift",
+                HarnessOp::send_mail(
+                    &panel,
+                    &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
+                ),
+            ),
+            ("up", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("down", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("up_again", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
         ])
         .expect("measured multiline selection");
 
@@ -1781,7 +1820,12 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                 "preedit",
                 HarnessOp::send_mail(
                     &panel,
-                    &ImePreedit { text: "üx".to_owned(), cursor_begin: Some(0), cursor_end: Some(2) },
+                    &ImePreedit {
+                        window: TEST_WINDOW_ID,
+                        text: "üx".to_owned(),
+                        cursor_begin: Some(0),
+                        cursor_end: Some(2),
+                    },
                 ),
             ),
             ("rasterize_preedit", HarnessOp::send_mail(&panel, &Tick)),
@@ -1848,9 +1892,15 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     // value upward without inserting another newline.
     harness
         .execute(vec![
-            ("commit_preedit", HarnessOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
-            ("ctrl", HarnessOp::send_mail(&panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("commit_area", HarnessOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            (
+                "commit_preedit",
+                HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
+            ),
+            (
+                "ctrl",
+                HarnessOp::send_mail(&panel, &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() }),
+            ),
+            ("commit_area", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
         .expect("commit multiline replacement");
 
@@ -1881,15 +1931,21 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     harness
         .execute(vec![
             // Focus skips hidden + disabled and lands on the invalid slider.
-            ("focus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("focus", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             // Exercise sibling→sibling hover before settling on the button.
             (
                 "hover_slider",
-                HarnessOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseMove { window: TEST_WINDOW_ID, x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 },
+                ),
             ),
             (
                 "hover_button",
-                HarnessOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseMove { window: TEST_WINDOW_ID, x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 },
+                ),
             ),
             ("capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
@@ -1910,7 +1966,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
                 "hover_empty",
                 HarnessOp::send_mail(
                     &panel,
-                    &MouseMove { x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 },
+                    &MouseMove { window: TEST_WINDOW_ID, x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 },
                 ),
             ),
             (
@@ -1934,10 +1990,10 @@ fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: &str) {
         .execute(vec![
             ("toggle_press", HarnessOp::send_mail(panel, &press(PANEL_X + 12.0, toggle_y))),
             ("toggle_release", HarnessOp::send_mail(panel, &release(PANEL_X + 12.0, toggle_y))),
-            ("space_press", HarnessOp::send_mail(panel, &Key { code: KEY_SPACE })),
-            ("space_release", HarnessOp::send_mail(panel, &KeyRelease { code: KEY_SPACE })),
-            ("enter_press", HarnessOp::send_mail(panel, &Key { code: KEY_ENTER })),
-            ("enter_release", HarnessOp::send_mail(panel, &KeyRelease { code: KEY_ENTER })),
+            ("space_press", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            ("space_release", HarnessOp::send_mail(panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            ("enter_press", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter_release", HarnessOp::send_mail(panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
         .expect("toggle pointer and keyboard activation");
     let middle_x = PANEL_X + segment_width * 1.5;
@@ -1945,8 +2001,8 @@ fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: &str) {
         .execute(vec![
             ("segment_press", HarnessOp::send_mail(panel, &press(middle_x, segment_y))),
             ("segment_release", HarnessOp::send_mail(panel, &release(middle_x, segment_y))),
-            ("segment_right", HarnessOp::send_mail(panel, &Key { code: KEY_RIGHT })),
-            ("segment_left", HarnessOp::send_mail(panel, &Key { code: KEY_LEFT })),
+            ("segment_right", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("segment_left", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
         ])
         .expect("segmented pointer and arrow selection");
 }
@@ -1957,27 +2013,42 @@ fn drive_numeric_lifecycle(harness: &mut SubstrateHarness, panel: &str) {
         .execute(vec![
             ("numeric_press", HarnessOp::send_mail(panel, &press(PANEL_X + PAD + 4.0, numeric_y))),
             ("numeric_release", HarnessOp::send_mail(panel, &release(PANEL_X + PAD + 4.0, numeric_y))),
-            ("ctrl_on", HarnessOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("select_all", HarnessOp::send_mail(panel, &Key { code: KEY_A })),
-            ("ctrl_off", HarnessOp::send_mail(panel, &Modifiers::default())),
-            ("type_numeric", HarnessOp::send_mail(panel, &TextInput { text: "12.4".to_owned() })),
-            ("move_left", HarnessOp::send_mail(panel, &Key { code: KEY_LEFT })),
-            ("backspace", HarnessOp::send_mail(panel, &Key { code: KEY_BACKSPACE })),
-            ("replace_decimal", HarnessOp::send_mail(panel, &TextInput { text: ".".to_owned() })),
-            ("commit_numeric", HarnessOp::send_mail(panel, &Key { code: KEY_ENTER })),
-            ("step_up", HarnessOp::send_mail(panel, &Key { code: KEY_UP })),
-            ("step_down", HarnessOp::send_mail(panel, &Key { code: KEY_DOWN })),
-            ("clipboard_ctrl_on", HarnessOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("clipboard_select", HarnessOp::send_mail(panel, &Key { code: KEY_A })),
-            ("copy", HarnessOp::send_mail(panel, &Key { code: KEY_C })),
+            (
+                "ctrl_on",
+                HarnessOp::send_mail(panel, &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() }),
+            ),
+            ("select_all", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("ctrl_off", HarnessOp::send_mail(panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() })),
+            (
+                "type_numeric",
+                HarnessOp::send_mail(panel, &TextInput { window: TEST_WINDOW_ID, text: "12.4".to_owned() }),
+            ),
+            ("move_left", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
+            ("backspace", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_BACKSPACE })),
+            (
+                "replace_decimal",
+                HarnessOp::send_mail(panel, &TextInput { window: TEST_WINDOW_ID, text: ".".to_owned() }),
+            ),
+            ("commit_numeric", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("step_up", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("step_down", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            (
+                "clipboard_ctrl_on",
+                HarnessOp::send_mail(panel, &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() }),
+            ),
+            ("clipboard_select", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("copy", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_C })),
         ])
         .expect("numeric typed, step, and copy lifecycle");
     assert_eq!(clipboard_text(harness), "12.5", "Ctrl+C copies the selected canonical buffer");
     harness
         .execute(vec![
-            ("cut", HarnessOp::send_mail(panel, &Key { code: KEY_X })),
-            ("paste", HarnessOp::send_mail(panel, &Key { code: KEY_V })),
-            ("clipboard_ctrl_off", HarnessOp::send_mail(panel, &Modifiers::default())),
+            ("cut", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_X })),
+            ("paste", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_V })),
+            (
+                "clipboard_ctrl_off",
+                HarnessOp::send_mail(panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+            ),
         ])
         .expect("numeric cut and paste lifecycle");
 }
@@ -1988,10 +2059,16 @@ fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: &str) {
     let readonly_y = PANEL_Y + (ROW_HEIGHT + GAP) * 4.0 + ROW_HEIGHT * 0.5;
     harness
         .execute(vec![
-            ("invalid_ctrl_on", HarnessOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
-            ("invalid_select", HarnessOp::send_mail(panel, &Key { code: KEY_A })),
-            ("invalid_ctrl_off", HarnessOp::send_mail(panel, &Modifiers::default())),
-            ("invalid_text", HarnessOp::send_mail(panel, &TextInput { text: "-".to_owned() })),
+            (
+                "invalid_ctrl_on",
+                HarnessOp::send_mail(panel, &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() }),
+            ),
+            ("invalid_select", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            (
+                "invalid_ctrl_off",
+                HarnessOp::send_mail(panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+            ),
+            ("invalid_text", HarnessOp::send_mail(panel, &TextInput { window: TEST_WINDOW_ID, text: "-".to_owned() })),
             ("blur_press", HarnessOp::send_mail(panel, &press(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0))),
             (
                 "blur_release",
@@ -2001,7 +2078,7 @@ fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: &str) {
             ("disabled_release", HarnessOp::send_mail(panel, &release(PANEL_X + 12.0, disabled_y))),
             ("readonly_press", HarnessOp::send_mail(panel, &press(PANEL_X + segment_width * 2.5, readonly_y))),
             ("readonly_release", HarnessOp::send_mail(panel, &release(PANEL_X + segment_width * 2.5, readonly_y))),
-            ("readonly_right", HarnessOp::send_mail(panel, &Key { code: KEY_RIGHT })),
+            ("readonly_right", HarnessOp::send_mail(panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
         ])
         .expect("blur and blocked state mutations");
 }
@@ -2295,15 +2372,24 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
             ("capture_button", HarnessOp::send_mail(&panel, &press(20.0, 55.0))),
             (
                 "inner_only",
-                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 },
+                ),
             ),
             (
                 "split_inner_outer",
-                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 },
+                ),
             ),
             (
                 "terminal_residual",
-                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 },
+                ),
             ),
         ])
         .expect("nested wheel routing while button capture is held");
@@ -2369,15 +2455,24 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
         .execute(vec![
             (
                 "reverse_both",
-                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 },
+                ),
             ),
             (
                 "horizontal_independent",
-                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 },
+                ),
             ),
             (
                 "sibling_viewport",
-                HarnessOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 },
+                ),
             ),
         ])
         .expect("reverse, independent axis, and sibling scroll routing");
@@ -2437,11 +2532,14 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     };
     harness
         .execute(vec![
-            ("focus", HarnessOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            ("page", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("focus", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("page", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
             (
                 "hover_selected",
-                HarnessOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 }),
+                HarnessOp::send_mail(
+                    &panel,
+                    &MouseMove { window: TEST_WINDOW_ID, x: PANEL_X + 20.0, y: PANEL_Y + ROW_HEIGHT * 4.5 },
+                ),
             ),
             ("warn", HarnessOp::send_mail(&list, &SetWidgetState { state: warning })),
         ])
@@ -2486,7 +2584,10 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
 
     for _ in 0..45 {
         harness
-            .execute(vec![("tail_page", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN }))])
+            .execute(vec![(
+                "tail_page",
+                HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
+            )])
             .expect("page toward virtual-list tail");
     }
     let selection_events_before_noop = panel_log_messages(&mut harness)
@@ -2495,8 +2596,8 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
         .count();
     harness
         .execute(vec![
-            ("tail_noop_one", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
-            ("tail_noop_two", HarnessOp::send_mail(&panel, &Key { code: KEY_PAGE_DOWN })),
+            ("tail_noop_one", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
+            ("tail_noop_two", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
             ("tail_capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("tail clamp and capture");

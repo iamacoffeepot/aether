@@ -1,67 +1,197 @@
-//! `aether.window` cap surface (issue 603 Phase 3).
+//! Public `aether.window` actor identity, wire vocabulary, and sender facade.
 //!
-//! One crate owns every runtime of the `aether.window` mailbox (ADR-0121/
-//! ADR-0122): the [`HeadlessWindowCapability`] companion that headless and
-//! substrate-harness compose to fail-fast with `Err`-replies on
-//! `set_mode` / `set_title` / `focus`, and — behind the `desktop` feature —
-//! the [`DesktopWindowCapability`] runtime (ADR-0160 §Decision 2) that
-//! mutates a real winit window on the desktop chassis. Window mutations
-//! require the chassis main thread (winit / macOS); the desktop cap is
-//! pumped on that thread by the chassis driver.
+//! [`WindowCapability`] is the platform-neutral address callers use. A
+//! chassis installs either its fail-fast headless runtime or, behind the
+//! `desktop` feature, the distinct [`DesktopWindowCapability`] implementation.
+//! Both claim the same `aether.window` mailbox.
 
-// Handler-signature kinds must be importable at module root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers always-on,
-// outside the `feature = "runtime"` gate.
-use aether_kinds::{FocusWindow, SetWindowMode, SetWindowTitle};
+// Handler methods take decoded request payloads by value as part of the
+// actor dispatch ABI; the facade also consumes owned request values.
+#![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::actor;
+pub mod kinds;
 
-/// `aether.window` headless-companion cap **identity** (ADR-0122
-/// identity/runtime split). A ZST carrying only the addressing — the
-/// `Addressable` / `HandlesKind` markers and the name-inventory entry,
-/// all emitted always-on by `#[actor]`. The state-bearing runtime
-/// (`HeadlessWindowCapabilityState`) lives behind the one
-/// `feature = "runtime"` gate, so a transport-only build never names it
-/// nor pulls `aether_substrate` through this cap.
+pub use aether_kinds::{WindowId, WindowMode};
+pub use kinds::*;
+
+use aether_actor::{WasmActorMailbox, actor};
+use aether_data::{Kind, MailboxId};
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+use aether_substrate::actor::native::NativeActorMailbox;
+
+/// Platform-neutral addressing identity for the `aether.window` actor.
 ///
-/// Chassis-without-window companion to the desktop driver's
-/// driver-as-actor `aether.window` claim. Mirrors
-/// `HeadlessRenderCapability`: same mailbox the desktop
-/// owner claims, `Err`-replying handlers so MCP `set_window_mode`
-/// / `set_window_title` fail fast on chassis without a window
-/// (headless and substrate-harness).
-///
-/// Each chassis composes one of {desktop driver, this cap}, never
-/// both — the chassis builder rejects double-claiming a mailbox.
+/// Consumers use `ctx.actor::<WindowCapability>()` regardless of which
+/// chassis-specific runtime owns the mailbox.
 #[actor(singleton)]
-pub struct HeadlessWindowCapability;
+pub struct WindowCapability;
 
-// The reply kinds ride the native gate (not `runtime`): the `#[actor]`
-// macro's ADR-0109 `HandlerEntry` inventory submission — emitted on every
-// native build, runtime or not — names each handler's reply kind `::ID`,
-// so a transport-only build must still see them. The `aether_substrate`-
-// typed ctx imports and the empty state struct sit behind the one
-// `feature = "runtime"` gate; the macro gates everything it emits for the
-// runtime half, so this cap's identity compiles transport-only.
-#[cfg(not(target_family = "wasm"))]
-use aether_kinds::{FocusWindowResult, SetWindowModeResult, SetWindowTitleResult};
+/// Compatibility name for chassis code that installs the fail-fast
+/// no-window runtime.
+pub use WindowCapability as HeadlessWindowCapability;
 
-// The runtime half — the `aether_substrate`-typed ctx imports, the empty
-// state struct, and the `#[runtime] impl` — lives in `runtime.rs`, gated
-// once here. Nothing in this file names a runtime type directly, so there
-// is no `use runtime::*` glob (matching `fs/mod.rs`).
+/// Sender-side convenience methods for the multi-window request surface.
+pub trait WindowMailboxExt {
+    /// Request every live window in ascending id order.
+    fn list(&self);
+
+    /// Request creation of a new window.
+    fn create(&self, spec: WindowSpec);
+
+    /// Request closure of one explicit window.
+    fn close(&self, window: WindowId);
+
+    /// Change one window's presentation mode.
+    fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>);
+
+    /// Change one window's title.
+    fn set_title(&self, window: WindowId, title: &str);
+
+    /// Bring one window to the foreground.
+    fn focus(&self, window: WindowId);
+
+    /// Ask the platform to schedule one window for redraw.
+    fn request_redraw(&self, window: WindowId);
+
+    /// Subscribe the calling actor to kind `K` for `selector`.
+    fn subscribe<K: Kind>(&self, selector: WindowSelector);
+
+    /// Subscribe an explicit mailbox to kind `K` for `selector`.
+    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId);
+
+    /// Remove the calling actor's kind-`K` subscription for `selector`.
+    fn unsubscribe<K: Kind>(&self, selector: WindowSelector);
+
+    /// Remove an explicit mailbox's kind-`K` subscription for `selector`.
+    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId);
+
+    /// Remove an explicit mailbox from every window-event subscription.
+    fn unsubscribe_all(&self, mailbox: MailboxId);
+}
+
+impl WindowMailboxExt for WasmActorMailbox<'_, WindowCapability> {
+    fn list(&self) {
+        self.send(&ListWindows);
+    }
+
+    fn create(&self, spec: WindowSpec) {
+        self.send(&CreateWindow { spec });
+    }
+
+    fn close(&self, window: WindowId) {
+        self.send(&CloseWindow { window });
+    }
+
+    fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
+        self.send(&SetWindowMode { window, mode, width, height });
+    }
+
+    fn set_title(&self, window: WindowId, title: &str) {
+        self.send(&SetWindowTitle { window, title: title.to_owned() });
+    }
+
+    fn focus(&self, window: WindowId) {
+        self.send(&FocusWindow { window });
+    }
+
+    fn request_redraw(&self, window: WindowId) {
+        self.send(&RequestWindowRedraw { window });
+    }
+
+    fn subscribe<K: Kind>(&self, selector: WindowSelector) {
+        self.send(&SubscribeWindowSelf { selector, kind: K::ID });
+    }
+
+    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
+        self.send(&SubscribeWindow { selector, kind: K::ID, mailbox });
+    }
+
+    fn unsubscribe<K: Kind>(&self, selector: WindowSelector) {
+        self.send(&UnsubscribeWindowSelf { selector, kind: K::ID });
+    }
+
+    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
+        self.send(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
+    }
+
+    fn unsubscribe_all(&self, mailbox: MailboxId) {
+        self.send(&UnsubscribeAllWindows { mailbox });
+    }
+}
+
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+impl WindowMailboxExt for NativeActorMailbox<'_, WindowCapability> {
+    fn list(&self) {
+        self.send(&ListWindows);
+    }
+
+    fn create(&self, spec: WindowSpec) {
+        self.send(&CreateWindow { spec });
+    }
+
+    fn close(&self, window: WindowId) {
+        self.send(&CloseWindow { window });
+    }
+
+    fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
+        self.send(&SetWindowMode { window, mode, width, height });
+    }
+
+    fn set_title(&self, window: WindowId, title: &str) {
+        self.send(&SetWindowTitle { window, title: title.to_owned() });
+    }
+
+    fn focus(&self, window: WindowId) {
+        self.send(&FocusWindow { window });
+    }
+
+    fn request_redraw(&self, window: WindowId) {
+        self.send(&RequestWindowRedraw { window });
+    }
+
+    fn subscribe<K: Kind>(&self, selector: WindowSelector) {
+        self.send(&SubscribeWindowSelf { selector, kind: K::ID });
+    }
+
+    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
+        self.send(&SubscribeWindow { selector, kind: K::ID, mailbox });
+    }
+
+    fn unsubscribe<K: Kind>(&self, selector: WindowSelector) {
+        self.send(&UnsubscribeWindowSelf { selector, kind: K::ID });
+    }
+
+    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
+        self.send(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
+    }
+
+    fn unsubscribe_all(&self, mailbox: MailboxId) {
+        self.send(&UnsubscribeAllWindows { mailbox });
+    }
+}
+
 #[cfg(feature = "runtime")]
 mod runtime;
 
-// The desktop runtime (ADR-0160 §Decision 2) — the state-bearing
-// `DesktopWindowCapability` that drives a real winit window — lives in
-// `desktop.rs` behind the `desktop` feature (`runtime` + winit). It carries
-// its own identity ZST + state struct (an impl-hosted ADR-0122 split, since
-// the always-runtime desktop build has no marker-only half to protect), so
-// the re-export is the crate's window-driving surface: the identity the
-// chassis pumps, the `WindowCell` it fills, the `Params` it constructs, and
-// the `resolve_fullscreen` its boot-time window creation shares with the cap.
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]
 pub use desktop::{DesktopWindowCapability, DesktopWindowParams, WindowCell, resolve_fullscreen};
+
+#[cfg(test)]
+mod tests {
+    use super::{WasmActorMailbox, WindowCapability, WindowMailboxExt};
+
+    fn assert_facade<T: WindowMailboxExt>() {}
+
+    #[test]
+    fn neutral_facade_is_available_to_wasm_senders() {
+        assert_facade::<WasmActorMailbox<'static, WindowCapability>>();
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    #[test]
+    fn neutral_facade_is_available_to_native_senders() {
+        assert_facade::<super::NativeActorMailbox<'static, WindowCapability>>();
+    }
+}
