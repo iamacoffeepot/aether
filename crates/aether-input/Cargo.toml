@@ -60,11 +60,11 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-component = { path = "../aether-component" }
 # The probe's re-broadcast kinds (`KeyObserved`, `TextInputObserved`) the
 # test counts at the harness observer mailbox.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # The probe wasm the test loads by stem (`aether_test_fixtures_bundle.wasm`,
 # issue #3766): declared so the wasm coupling is cargo-visible even though
 # nothing links the host rlib.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
 # The probe wasm coupling above is load-by-stem only — no source import —
 # so the source-scanning unused-deps gate cannot see it.

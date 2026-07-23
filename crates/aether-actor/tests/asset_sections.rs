@@ -65,10 +65,8 @@ fn locate_fixture_wasm() -> Option<PathBuf> {
 /// The source asset, read at compile time so the assertion compares
 /// against the exact bytes the macro embedded. Lives in the fixture
 /// crate next to the `export_asset!` that embeds it.
-const ASSET: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../aether-test-fixtures/aether-test-fixtures-bundle/src/asset_fixture.txt"
-));
+const ASSET: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../aether-test-fixtures-bundle/src/asset_fixture.txt"));
 
 /// The custom section `export_asset!("asset_fixture.txt")` emits.
 const SECTION_NAME: &str = "aether.asset.asset_fixture.txt";

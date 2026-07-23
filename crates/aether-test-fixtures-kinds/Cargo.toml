@@ -15,7 +15,7 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
-aether-data = { path = "../../aether-data", features = ["derive"] }
+aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 

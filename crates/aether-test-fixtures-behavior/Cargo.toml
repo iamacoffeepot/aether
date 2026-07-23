@@ -38,11 +38,11 @@ crate-type = ["cdylib"]
 # widget/child/panel handles, and the `Behavior` lifecycle trait the scripts
 # target. Never `aether-actor` — the crate-boundary invariant that keeps a
 # behavior cdylib from classifying as a component.
-aether-behavior = { path = "../../aether-behavior" }
+aether-behavior = { path = "../aether-behavior" }
 # The `#[behavior]` attribute macro. `aether-behavior` re-exports it on its
 # runtime face, but the scripts name it directly, so it is a direct dep.
-aether-behavior-derive = { path = "../../aether-behavior-derive" }
-aether-data = { path = "../../aether-data", default-features = false, features = ["derive"] }
+aether-behavior-derive = { path = "../aether-behavior-derive" }
+aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
 
 # The `Kind` derive on the twins emits a `cfg(not(target_arch = "wasm32"))`

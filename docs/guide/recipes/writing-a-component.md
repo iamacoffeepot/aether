@@ -9,7 +9,7 @@ builds a minimal ping/pong actor, uploads its bytes to the hub registry, loads
 an instance, sends one request, then replaces it without changing its mailbox.
 
 Use `crates/aether-actor/examples/hello.rs` as the current in-tree exemplar and
-`crates/aether-test-fixtures/` for load/replace edge cases.
+`crates/aether-test-fixtures-*/` for load/replace edge cases.
 
 ## 1. Create a dual-purpose crate
 

@@ -71,11 +71,11 @@ aether-harness-fleet = { path = "../aether-harness-fleet" }
 aether-fs = { path = "../aether-fs" }
 # The ping-pong row's typed-config kinds (`ProbeConfig` / `ConfigQuery` /
 # `ConfigEcho`) the test encodes + decodes against the probe fixture.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # The probe wasm `fleetharness_mail` loads by stem
 # (`aether_test_fixtures_bundle.wasm`, issue #3766): declared so the wasm
 # coupling is cargo-visible even though nothing links the host rlib.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
 # The probe wasm coupling above is load-by-stem only — no source import —
 # so the source-scanning unused-deps gate cannot see it. `clap` / `confique`

@@ -14,8 +14,8 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-aether-actor = { path = "../../aether-actor" }
-aether-data = { path = "../../aether-data", features = ["derive"] }
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data", features = ["derive"] }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 

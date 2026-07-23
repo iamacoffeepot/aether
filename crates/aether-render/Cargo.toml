@@ -123,12 +123,12 @@ aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture
 # The wasm-loading scenarios mail the probe/cube fixtures with the shared
 # fixture kinds; the rlib pin also keeps their `KindDescriptor` inventory
 # entries linked into the test binary.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # Cargo-invisible wasm coupling made visible (issue #3617): the scenario
 # tests execute this crate's pre-built component wasm, and this dev-dep is
 # the edge `cargo xtask affected` derives `wasm_needed` from so the
 # `cargo xtask dist` pre-build runs before these tests in CI.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 # The artifact-guard scenario decodes the persisted `measurements.json`.
 serde_json = { workspace = true }
 

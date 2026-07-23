@@ -79,14 +79,14 @@ aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The shared `Kind` definitions the fleet tests decode + assert against;
 # also pinned (`use … as _`) so the fixture kinds' `inventory::submit!`
 # descriptor entries land in each test binary.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # iamacoffeepot/aether#3766: the fixture crate whose wasm the fleet tests
 # load (`test.inline.*` / `test.matrix.*` / `test.source_observer`
 # exports), declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when the fixture changes, and xtask's
 # wasm-consumer rule fires the dist pre-build. The tests locate the built
 # wasm by stem, so the code never imports the crate.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
 # ADR-0021 input subscriptions smoke. Resolves all four substrate input
 # kinds and broadcasts a `demo.input_observed` per event so

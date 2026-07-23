@@ -87,8 +87,8 @@ aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture
 # fixtures kinds rlib, and the wasm-body dependency below keeps `xtask affected`
 # selecting these tests (this crate executes that wasm at test time) when the
 # fixture bundle changes — cargo's graph cannot see a runtime wasm load.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 
 # `aether-test-fixtures-bundle` is a runtime wasm coupling (loaded by stem at
 # test time), never a source-level import, so the source-only scan cannot see

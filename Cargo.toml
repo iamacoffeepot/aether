@@ -52,21 +52,19 @@ members = [
     "crates/aether-process",
     "crates/aether-mcp",
     "crates/aether-context-canary",
-    # Test fixtures — a container dir of single-output crates: one shared
-    # `kinds` rlib plus the component cdylibs (the main bundle, the
-    # typed↔reshaped replace-pair satellites, the ADR-0138 defaultless
-    # multi-actor fixture, and the ADR-0147 boot-slot fixture) and the
-    # split-cap native lib. Listed explicitly (not a
-    # `crates/aether-test-fixtures/*` glob); the glob form would resolve
-    # now, but the explicit list documents each fixture crate.
-    "crates/aether-test-fixtures/aether-test-fixtures-kinds",
-    "crates/aether-test-fixtures/aether-test-fixtures-bundle",
-    "crates/aether-test-fixtures/aether-test-fixtures-stateful-typed",
-    "crates/aether-test-fixtures/aether-test-fixtures-stateful-reshaped",
-    "crates/aether-test-fixtures/aether-test-fixtures-split-cap",
-    "crates/aether-test-fixtures/aether-test-fixtures-defaultless",
-    "crates/aether-test-fixtures/aether-test-fixtures-boot",
-    "crates/aether-test-fixtures/aether-test-fixtures-behavior",
+    # Test fixtures — single-output crates sitting alongside every other
+    # member: one shared `kinds` rlib plus the component cdylibs (the main
+    # bundle, the typed↔reshaped replace-pair satellites, the ADR-0138
+    # defaultless multi-actor fixture, and the ADR-0147 boot-slot fixture)
+    # and the split-cap native lib.
+    "crates/aether-test-fixtures-kinds",
+    "crates/aether-test-fixtures-bundle",
+    "crates/aether-test-fixtures-stateful-typed",
+    "crates/aether-test-fixtures-stateful-reshaped",
+    "crates/aether-test-fixtures-split-cap",
+    "crates/aether-test-fixtures-defaultless",
+    "crates/aether-test-fixtures-boot",
+    "crates/aether-test-fixtures-behavior",
     "xtask",
 ]
 exclude = [

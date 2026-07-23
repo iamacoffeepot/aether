@@ -19,11 +19,11 @@ runtime = ["dep:aether-substrate"]
 
 [dependencies]
 # Always-on identity deps — these compile feature-off and carry the markers.
-aether-actor = { path = "../../aether-actor" }
-aether-data = { path = "../../aether-data", features = ["derive"] }
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { workspace = true, features = ["derive"] }
 # Native runtime half — pulled in only under `feature = "runtime"`.
-aether-substrate = { path = "../../aether-substrate", optional = true }
+aether-substrate = { path = "../aether-substrate", optional = true }
 
 # The `Kind` derive + the `#[actor]`-lifted handler inventory emit
 # `cfg(not(wasm32))`-gated `inventory::submit!`s, so a native (host) build needs

@@ -60,10 +60,8 @@ mod tests {
     /// length assertion below is a computed tripwire against the exact
     /// bytes the indexer sees in the `aether.asset.asset_fixture.txt`
     /// section.
-    const ASSET_FIXTURE: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../aether-test-fixtures/aether-test-fixtures-bundle/src/asset_fixture.txt"
-    ));
+    const ASSET_FIXTURE: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../aether-test-fixtures-bundle/src/asset_fixture.txt"));
 
     /// ADR-0163 §3: the asset catalog the load-time indexer built from the
     /// module's `aether.asset.*` custom sections surfaces through

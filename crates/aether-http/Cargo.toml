@@ -142,7 +142,7 @@ aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture
 # test when the fixture changes, and xtask's wasm-consumer rule fires the
 # dist pre-build. The test locates the built wasm by stem, so the code
 # never imports the crate.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
 [lints]
 workspace = true
