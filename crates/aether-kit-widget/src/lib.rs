@@ -67,13 +67,12 @@ pub use theme::{SetTheme, Theme, ThemeState};
 // tag; the two invocations are cfg-exclusive, keeping the ordinary build's
 // exported set (and its `aether.kinds` section) unchanged.
 //
-// `export!` rides the `runtime` feature so a consuming cdylib (aether-kit's
-// workbench) can depend on this crate with `default-features = false` and link
-// the widget `WasmActor` impls for inline-spawn without inheriting a second copy
-// of the `receive_p32` / `init` FFI shims — which would collide with its own
-// `export!` at the wasm link step. `runtime` is default-on, so the standalone
-// `cargo xtask dist` build still emits the loadable wasm.
-#[cfg(all(feature = "runtime", not(feature = "behavior")))]
+// The `export!` macro itself gates its emitted entry surface behind the invoking
+// crate's `library` feature, so a consuming cdylib (aether-kit's workbench) links
+// the widget `WasmActor` impls for inline-spawn — enabling `library` — without
+// inheriting a second copy of the `receive_p32` / `init` FFI shims that would
+// collide with its own `export!`. The call sites stay bare.
+#[cfg(not(feature = "behavior"))]
 aether_actor::export!(
     Widget,
     ScrollWidget,
@@ -92,7 +91,7 @@ aether_actor::export!(
     WidgetPanel
 );
 
-#[cfg(all(feature = "runtime", feature = "behavior"))]
+#[cfg(feature = "behavior")]
 aether_actor::export!(
     Widget,
     ScrollWidget,
