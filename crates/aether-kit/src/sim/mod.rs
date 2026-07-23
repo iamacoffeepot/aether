@@ -176,10 +176,12 @@ impl MoveDirectionExt for MoveDirection {
     }
 }
 
-impl From<CellPos> for CellPosition {
-    fn from(position: CellPos) -> Self {
-        Self { cell_x: position.x, cell_z: position.z }
-    }
+/// Project a terrain [`CellPos`] into the game-layer [`CellPosition`]. Kit owns
+/// neither type — `CellPos` lives in `aether-kit-terrain`, `CellPosition` in
+/// `aether-game` — so the bridge is a free function, not a `From` impl the
+/// orphan rule would reject.
+fn cell_position(position: CellPos) -> CellPosition {
+    CellPosition { cell_x: position.x, cell_z: position.z }
 }
 
 fn step_turn(
@@ -218,7 +220,7 @@ fn step_turn(
                 trajectory.push(TrajectoryEvent {
                     tick,
                     entity_id,
-                    kind: TrajectoryKind::Moved { from: from.into(), to: to.into() },
+                    kind: TrajectoryKind::Moved { from: cell_position(from), to: cell_position(to) },
                 });
             }
         }
