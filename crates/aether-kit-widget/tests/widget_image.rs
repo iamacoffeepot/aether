@@ -17,7 +17,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{Image, Rect, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
-use aether_kit::{
+use aether_kit_widget::{
     ImageConfig, ImageFit, PanelConfig, SetWidgetState, Theme, WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 use aether_math::Rgba;
@@ -143,7 +143,7 @@ fn assert_image_batch(snapshot: &[DrawTexturedQuads], texture_id: u32, expected_
 #[test]
 #[allow(clippy::too_many_lines)] // one sequential public fit/state/replacement scenario
 fn image_fit_state_and_replacement_hold_through_real_wasm() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

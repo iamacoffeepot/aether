@@ -16,20 +16,15 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[features]
-# ADR-0137 / issue 2687: wrap a stock widget slot in a behavior script host.
-# Forwards to `aether-behavior/host` and lights up the `WidgetKind::BehaviorHost`
-# spawn arm + the host's presence in the module's `export!` set. Non-default so
-# the ordinary kit build links neither `wasmi` nor the host, and is compiled in
-# a separate cargo invocation from behavior-script wasm (issue 2688).
-behavior = ["dep:aether-behavior", "aether-behavior/host"]
-
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-# `behavior`-only: the script host actor + its config vocabulary. Its own
-# marker face is off (`default-features = false`); the `host` feature the kit
-# forwards to turns on exactly the host surface, not the guest `runtime` SDK.
-aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
+# iamacoffeepot/aether#3950: the widget set + its `EditorShell` arbiter and the
+# `behavior` feature were extracted to `aether-kit-widget`. kit keeps an rlib
+# dependency on it so `workbench` can inline-spawn `EditorShell` and the
+# `set::*` widgets: the generic `spawn_inline_child::<A>` constructs the child
+# in-guest through the `ErasedWasmActor` bound, so the type only needs linking
+# into the spawning cdylib, not listing in kit's own `export!`.
+aether-kit-widget = { path = "../aether-kit-widget" }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`. kit is a wasm guest, so it takes the marker-only
 # identity face — it addresses `ComponentHostCapability`, resolves loaded
@@ -59,7 +54,6 @@ aether-tcp = { path = "../aether-tcp", default-features = false }
 # iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-text = { path = "../aether-text", default-features = false }
-aether-clipboard = { path = "../aether-clipboard", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — kit loads meshes / worlds
 # through it. Marker face only (kit is a wasm component addressing fs by mail).
 aether-fs = { path = "../aether-fs", default-features = false }
@@ -88,7 +82,6 @@ inventory = { workspace = true }
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
-aether-clipboard = { path = "../aether-clipboard" }
 aether-game = { path = "../aether-game" }
 aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
@@ -96,19 +89,6 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 aether-tcp = { path = "../aether-tcp" }
 aether-text = { path = "../aether-text" }
-# The widget/editor scenarios load the `test.editor_region_probe` /
-# `test.ui_widget` fixture actors: the typed request/reply kinds come from the
-# fixtures kinds rlib, and the wasm-body dependency below keeps `xtask
-# affected` selecting these tests (kit executes that wasm at test time) when
-# the fixture bundle changes — cargo's graph cannot see a runtime wasm load.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
-
-# `aether-test-fixtures-bundle` is a runtime wasm coupling (loaded by stem at
-# test time), never a source-level import, so the source-only scan cannot see
-# it.
-[package.metadata.cargo-machete]
-ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true

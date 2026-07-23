@@ -17,12 +17,10 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{
-    clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
-};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
+use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, RadioConfig, RadioSelected, SetWidgetState,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
@@ -229,7 +227,7 @@ impl WasmActor for RadioGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::WidgetControlState;
+    use crate::WidgetControlState;
     use alloc::vec;
 
     fn group(options: &[&str], selected: usize) -> RadioGroupWidget {

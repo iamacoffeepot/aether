@@ -8,8 +8,8 @@
 use aether_actor::WasmCtx;
 use aether_math::Rgba;
 
-use crate::widget::theme::{Theme, ThemeState};
-use crate::widget::{WidgetControlState, WidgetStateChanged, WidgetValidation};
+use crate::theme::{Theme, ThemeState};
+use crate::{WidgetControlState, WidgetStateChanged, WidgetValidation};
 
 #[derive(Debug, Clone)]
 pub(super) struct InteractionState {
@@ -62,7 +62,7 @@ impl InteractionState {
     }
 
     /// Losing focus clears only the focus fact. Hover remains root-owned and
-    /// survives until the panel sends [`crate::widget::HoverLost`].
+    /// survives until the panel sends [`crate::HoverLost`].
     pub(super) fn lose_focus(&mut self) {
         self.focused = false;
     }

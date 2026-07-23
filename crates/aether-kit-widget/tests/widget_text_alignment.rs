@@ -21,7 +21,7 @@
 //! The slider draws no text; the text field is empty at rest (no glyphs to
 //! score) and is left to `widget_set`.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit_widget` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
 
@@ -50,7 +50,7 @@ use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
     LoadResult, NamedMail, Tick,
 };
-use aether_kit::{PanelConfig, Theme};
+use aether_kit_widget::{PanelConfig, Theme};
 use aether_render::RenderCapability;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 
@@ -225,7 +225,7 @@ fn row_checks() -> Vec<RowCheck> {
 /// this is the tripwire that would have caught the bug.
 #[test]
 fn panel_glyphs_sit_inside_their_row_frames() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

@@ -17,20 +17,20 @@ use aether_math::Vec2;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 use serde::{Deserialize, Serialize};
 
-use crate::widget::composite::Composite;
-use crate::widget::focus::{
+use crate::world::AutomatonRule;
+use aether_kit_widget::composite::Composite;
+use aether_kit_widget::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
-use crate::widget::set::{ButtonWidget, LabelWidget, NumericWidget, SegmentedWidget, TextFieldWidget};
-use crate::widget::theme::SetTheme;
-use crate::widget::theme::Theme;
-use crate::widget::{
+use aether_kit_widget::set::{ButtonWidget, LabelWidget, NumericWidget, SegmentedWidget, TextFieldWidget};
+use aether_kit_widget::theme::SetTheme;
+use aether_kit_widget::theme::Theme;
+use aether_kit_widget::{
     ButtonClicked, ButtonConfig, Collect, EditorRegionRect, FocusGained, FocusLost, HoverGained, HoverLost,
     LabelConfig, NumericChanged, NumericConfig, SegmentedConfig, SegmentedSelected, SetWidgetState, TextCommitted,
     TextFieldConfig, WidgetClipRect, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
     WidgetStateChanged, emit,
 };
-use crate::world::AutomatonRule;
 
 use super::{
     WorkbenchControl, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchMarkMode, WorkbenchOperator,

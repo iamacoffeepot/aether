@@ -17,7 +17,7 @@
 //!
 //! Everything observable here is typed mail + the log ring, so the harness
 //! composes only the component host — no render target, hence no wgpu gate:
-//! the scenario skips only when the `aether_kit` wasm has not been pre-built
+//! the scenario skips only when the `aether_kit_widget` wasm has not been pre-built
 //! (`require_wasm`). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip
 //! into a hard failure.
 
@@ -39,7 +39,7 @@ use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
     TextInput, Tick,
 };
-use aether_kit::{
+use aether_kit_widget::{
     ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, VirtualListConfig,
     WidgetChildSpec, WidgetControlState, WidgetKind,
 };
@@ -119,7 +119,7 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 ///   text    y 148..172 button  y 178..202
 #[test]
 fn panel_routes_input_to_widgets_and_reports_values_up() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -193,7 +193,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
 /// warn-dropped at an unknown name.
 #[test]
 fn load_result_lineage_reaches_builtin_button_state_externally() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -365,7 +365,7 @@ fn virtual_list_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpe
 /// drop one.
 #[test]
 fn panel_stacks_declared_children_in_order() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -408,7 +408,7 @@ fn panel_stacks_declared_children_in_order() {
 /// is relative to the realized window rather than the full item vector.
 #[test]
 fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -503,7 +503,7 @@ fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness) {
 /// activation fires Button exactly once per key pair.
 #[test]
 fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -549,7 +549,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
 /// phase was neither unrouted input nor an unobserved child event.
 #[test]
 fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -632,7 +632,7 @@ fn drive_slider_cancellation_session(harness: &mut SubstrateHarness) {
 /// to clear its internal arm/drag would create an observable extra event.
 #[test]
 fn live_state_changes_cancel_button_arm_and_slider_drag() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -677,7 +677,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
 /// is not an input-routing or log-observation false positive.
 #[test]
 fn read_only_text_field_blocks_activation_until_enabled() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

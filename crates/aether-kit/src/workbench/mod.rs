@@ -22,12 +22,12 @@ use serde::{Deserialize, Serialize};
 use crate::console::{ConsoleCommandOutput, ConsoleOverlay};
 use crate::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult, MarkRef};
 use crate::terra::{CreateTerraMark, RelabelTerraSelection, TerraCommandResult, TerraError};
-use crate::widget::{EditorConfig, EditorKeyChord, EditorShell, RegionInputLanes, RegionSpec};
 use crate::world::{
     ApplyBrush, AutomatonRule, CellPos, CommitProposal, DiscardProposal, OperatorCell, PickTerrain, PickTerrainResult,
     ProposalId, ProposalOperation, ProposalResult, Propose, RunAutomaton, SetMarkOverlaySelection,
     SetMarkOverlaySelectionResult, SetMarkOverlayVisibility, SetProposalPreview,
 };
+use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorShell, RegionInputLanes, RegionSpec};
 
 use self::panel::{TerrainToolPanelState, WorkbenchIntent};
 use self::viewport::{
@@ -904,12 +904,12 @@ fn intent_control(intent: &WorkbenchIntent) -> WorkbenchControl {
 mod tests {
     use crate::console::{ConsoleConfig, ConsoleTheme};
     use crate::mark::{MarkId, MarkRef};
-    use crate::widget::EditorRegionRect;
-    use crate::widget::theme::Theme;
     use crate::world::{
         AutomatonRule, BrushParameters, OperatorBudget, OperatorChunk, ProposalDigest, ProposalError, ProposalId,
         ProposalOperationResult, WorldPoint,
     };
+    use aether_kit_widget::EditorRegionRect;
+    use aether_kit_widget::theme::Theme;
 
     use super::*;
 

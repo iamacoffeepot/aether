@@ -34,9 +34,8 @@ use aether_kinds::{
     LoadResult, NamedMail, Render, WindowSize,
 };
 use aether_kit::world::{Material, SetChunk, SetRegion};
-use aether_kit::{
-    EditorConfig, EditorKeyChord, EditorRegionRect, MoverConfig, MoverTeleport, RegionInputLanes, RegionSpec,
-};
+use aether_kit::{MoverConfig, MoverTeleport};
+use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
@@ -252,7 +251,13 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
+    // The `EditorShell` arbiter now ships in the `aether-kit-widget` wasm
+    // (iamacoffeepot/aether#3950); world + mover still ship in the kit wasm.
+    let Some(widget_wasm_path) = require_runtime("aether_kit_widget") else {
+        return;
+    };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let widget_wasm = fs::read(&widget_wasm_path).expect("read kit-widget wasm");
     let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
@@ -304,7 +309,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .expect("unrouted input window");
     let blocked = capture_scene(&mut harness, &mover_address, &world, "opt-out-blocked");
 
-    load_mover_editor_shell(&mut harness, &wasm, mover_mailbox);
+    load_mover_editor_shell(&mut harness, &widget_wasm, mover_mailbox);
     harness
         .execute(vec![
             ("routed-w", HarnessOp::send_mail("aether.input", &Key { code: KEY_W })),

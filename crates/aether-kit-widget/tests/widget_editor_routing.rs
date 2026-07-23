@@ -12,7 +12,7 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
     MouseWheel, TextInput,
 };
-use aether_kit::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
+use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -79,7 +79,7 @@ fn drain(harness: &mut SubstrateHarness, actor: &LoadedActor, label: &'static st
 #[test]
 fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     let (Some(kit_wasm), Some(fixtures_wasm)) =
-        (require_wasm("aether_kit"), require_wasm("aether_test_fixtures_bundle"))
+        (require_wasm("aether_kit_widget"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
     };
@@ -154,7 +154,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 #[test]
 fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     let (Some(kit_wasm), Some(fixtures_wasm)) =
-        (require_wasm("aether_kit"), require_wasm("aether_test_fixtures_bundle"))
+        (require_wasm("aether_kit_widget"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
     };

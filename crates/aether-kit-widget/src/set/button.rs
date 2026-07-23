@@ -16,10 +16,10 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{ActivationArms, push_border, quad, reply_if_hidden, text_origin_y};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
+use crate::set::{ActivationArms, push_border, quad, reply_if_hidden, text_origin_y};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
@@ -222,8 +222,8 @@ mod tests {
     use super::*;
     use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 
-    use crate::widget::WidgetControlState;
-    use crate::widget::set::KeyboardArm;
+    use crate::WidgetControlState;
+    use crate::set::KeyboardArm;
 
     fn button() -> ButtonWidget {
         ButtonWidget {

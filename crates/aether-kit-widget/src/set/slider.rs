@@ -18,10 +18,10 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
-use crate::widget::set::{push_control_outlines, quad, reply_if_hidden};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
+use crate::set::{push_control_outlines, quad, reply_if_hidden};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, SliderChanged, SliderConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
@@ -270,7 +270,7 @@ impl WasmActor for SliderWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::WidgetControlState;
+    use crate::WidgetControlState;
 
     fn slider(min: f32, max: f32, step: f32, initial: f32) -> SliderWidget {
         SliderWidget {

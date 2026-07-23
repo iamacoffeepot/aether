@@ -16,15 +16,15 @@ use aether_data::MailboxId;
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
 
-use crate::widget::composite::Composite;
-use crate::widget::focus::{Focus, FocusEligibility, FocusRect};
-use crate::widget::panel::{ChildLayout, spawn_widget_child};
-use crate::widget::theme::SetTheme;
-use crate::widget::{
+use crate::composite::Composite;
+use crate::focus::{Focus, FocusEligibility, FocusRect};
+use crate::panel::{ChildLayout, spawn_widget_child};
+use crate::theme::SetTheme;
+use crate::{
     Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, WidgetChildSpec,
     WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
 };
-use crate::widget::{FrameDischarge, accept_open_child_list, flush_membership};
+use crate::{FrameDischarge, accept_open_child_list, flush_membership};
 
 struct ScrollContent {
     id: MailboxId,
@@ -256,7 +256,7 @@ impl ScrollWidget {
         if let Some(parent) = ctx.parent() {
             parent.send(&list);
         } else {
-            tracing::warn!(target: "aether_kit", "scroll widget finished without a parent; draw list dropped");
+            tracing::warn!(target: "aether_kit_widget", "scroll widget finished without a parent; draw list dropped");
         }
         let closed = self.frame_discharge.close_frame();
         debug_assert!(closed, "an open scroll frame closes exactly once");
@@ -359,7 +359,7 @@ impl WasmActor for ScrollWidget {
     #[handler::manual]
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Manual>, outcome: ScrollOutcome) {
         if !self.nested_source(ctx.source_mailbox()) {
-            tracing::warn!(target: "aether_kit", "ignored scroll outcome from non-child source");
+            tracing::warn!(target: "aether_kit_widget", "ignored scroll outcome from non-child source");
             return;
         }
         if let Some(parent) = ctx.parent() {
@@ -370,7 +370,7 @@ impl WasmActor for ScrollWidget {
     #[handler::manual]
     fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Manual>, residual: ScrollResidual) {
         if !self.nested_source(ctx.source_mailbox()) {
-            tracing::warn!(target: "aether_kit", "ignored scroll residual from non-child source");
+            tracing::warn!(target: "aether_kit_widget", "ignored scroll residual from non-child source");
             return;
         }
         self.apply_delta(ctx, ScrollDelta { x_pixels: residual.x_pixels, y_pixels: residual.y_pixels });
@@ -380,7 +380,7 @@ impl WasmActor for ScrollWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::WidgetKind;
+    use crate::WidgetKind;
 
     const VIEWPORT: ScrollExtent = ScrollExtent { width_pixels: 40.0, height_pixels: 30.0 };
     const CONTENT: ScrollExtent = ScrollExtent { width_pixels: 70.0, height_pixels: 80.0 };

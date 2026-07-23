@@ -1,0 +1,94 @@
+[package]
+name = "aether-kit-widget"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The widget-compositing layer (ADR-0117), split out of `aether-kit` as its
+# own cdylib. One `#[actor(instanced)]` node realizes every role in a widget
+# tree, with the reference `WidgetPanel`, the concrete `set::*` widgets, and
+# the input-only `EditorShell` arbiter (ADR-0141). The crate is guest code
+# throughout; `export!(...)` packs the actors into a single cdylib (ADR-0096
+# multi-actor module) whose wasm32-only FFI shims stay inert in a host rlib, so
+# the integration tests link the same artifact and `aether-kit` can inline-spawn
+# these actors through an rlib dependency.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# ADR-0137 / issue 2687: wrap a stock widget slot in a behavior script host.
+# Forwards to `aether-behavior/host` and lights up the `WidgetKind::BehaviorHost`
+# spawn arm + the host's presence in the module's `export!` set. Non-default so
+# the ordinary widget build links neither `wasmi` nor the host, and is compiled
+# in a separate cargo invocation from behavior-script wasm (issue 2688).
+behavior = ["dep:aether-behavior", "aether-behavior/host"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# `behavior`-only: the script host actor + its config vocabulary. Its own
+# marker face is off (`default-features = false`); the `host` feature forwards
+# to turns on exactly the host surface, not the guest `runtime` SDK.
+aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
+# iamacoffeepot/aether#3749: the lifecycle cap. The widget root subscribes the
+# frame stage through it; the crate is a wasm guest, so it takes the
+# marker-only identity face.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# iamacoffeepot/aether#3747: the input cap. Widgets read typed input; wasm
+# guest, marker-only identity face.
+aether-input = { path = "../aether-input", default-features = false }
+# iamacoffeepot/aether#3721: the render cap. The cluster root emits solid /
+# textured quads through it; wasm guest, marker-only identity face.
+aether-render = { path = "../aether-render", default-features = false }
+# iamacoffeepot/aether#3727: the text cap. The root emits the glyph batch
+# through it; wasm guest, marker-only identity face.
+aether-text = { path = "../aether-text", default-features = false }
+# The clipboard cap: the text-editing widgets cut / copy / paste through it;
+# wasm guest, marker-only identity face.
+aether-clipboard = { path = "../aether-clipboard", default-features = false }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail. Default
+# features off per the SDK pattern.
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native builds
+# so the `aether.kinds` descriptor list picks up its types. Wasm guests skip
+# the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+# Integration tests boot a `SubstrateHarness`, load this crate's own wasm
+# artifact, and assert mail-flow + render properties. Tests run host-side; the
+# wasm is built separately for `wasm32-unknown-unknown` and discovered at
+# runtime under `target/wasm32-unknown-unknown/{debug,release}/`. Each scenario
+# states its minimal cap composition on the `SubstrateHarnessBuilder`, so the
+# cap crates appear here with their default `runtime` feature on — dev-only, the
+# wasm lib build keeps the marker-only face above.
+[dev-dependencies]
+aether-clipboard = { path = "../aether-clipboard" }
+aether-input = { path = "../aether-input" }
+aether-render = { path = "../aether-render" }
+aether-text = { path = "../aether-text" }
+aether-component = { path = "../aether-component" }
+aether-fs = { path = "../aether-fs" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+# The widget/editor scenarios load the `test.editor_region_probe` /
+# `test.ui_widget` fixture actors: the typed request/reply kinds come from the
+# fixtures kinds rlib, and the wasm-body dependency below keeps `xtask affected`
+# selecting these tests (this crate executes that wasm at test time) when the
+# fixture bundle changes — cargo's graph cannot see a runtime wasm load.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+
+# `aether-test-fixtures-bundle` is a runtime wasm coupling (loaded by stem at
+# test time), never a source-level import, so the source-only scan cannot see
+# it.
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-bundle"]
+
+[lints]
+workspace = true

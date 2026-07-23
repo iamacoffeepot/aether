@@ -22,13 +22,13 @@ use aether_kinds::{
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 use alloc::string::{String, ToString};
 
-use crate::widget::set::{
+use crate::set::{
     arm_text_drag, release_left, reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte,
 };
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::text_edit::{EditPolicy, TextEditState, TextSpan};
-use crate::widget::theme::{SetTheme, Theme, ThemeState};
-use crate::widget::{
+use crate::state::{InteractionState, emit_state_changed};
+use crate::text_edit::{EditPolicy, TextEditState, TextSpan};
+use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, NumericChanged, NumericConfig, SetWidgetState,
     WidgetControlState, WidgetFrame,
 };
@@ -517,7 +517,7 @@ impl WasmActor for NumericWidget {
             }
             GetClipboardTextResult::Ok { .. } => {}
             GetClipboardTextResult::Err { error } => {
-                tracing::warn!(target: "aether_kit", %error, "numeric clipboard paste failed");
+                tracing::warn!(target: "aether_kit_widget", %error, "numeric clipboard paste failed");
             }
         }
     }
@@ -526,7 +526,7 @@ impl WasmActor for NumericWidget {
     #[allow(clippy::unused_self)]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
         if let SetClipboardTextResult::Err { error } = result {
-            tracing::warn!(target: "aether_kit", %error, "numeric clipboard copy failed");
+            tracing::warn!(target: "aether_kit_widget", %error, "numeric clipboard copy failed");
         }
     }
 
@@ -535,7 +535,7 @@ impl WasmActor for NumericWidget {
         let pump_deferred = match result {
             FontMetricsResult::Ok { metrics } => self.accept_reply(Some(CachedFontMetrics::new(&metrics))),
             FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit", %error, "numeric font metrics failed");
+                tracing::warn!(target: "aether_kit_widget", %error, "numeric font metrics failed");
                 self.accept_reply(None)
             }
         };

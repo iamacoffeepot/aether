@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use aether_data::MailboxId;
 use aether_math::{Aabb, Vec3};
 
-use crate::widget::WidgetControlState;
+use crate::WidgetControlState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusDirection {

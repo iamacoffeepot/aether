@@ -15,10 +15,10 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
+use crate::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, ToggleChanged, ToggleConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };

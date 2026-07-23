@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use aether_data::MailboxId;
 use aether_math::Vec2;
 
-use crate::widget::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList};
+use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList};
 
 /// One child's place in a compositing node's layout. `child` is the
 /// inline-child alias the reply is attributed to; `subname` is the child's
