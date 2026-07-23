@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use aether_chassis::autoload::AutoloadComponent;
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
 };
 use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
 use aether_component::WasmTrampoline;
@@ -357,14 +357,16 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving");
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
+            base: ChassisBase {
                 sources: base_sources(server_config),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -466,14 +468,16 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving-stream");
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
+            base: ChassisBase {
                 sources: base_sources(server_config),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -570,14 +574,16 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving-stream-route");
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
+            base: ChassisBase {
                 sources: base_sources(server_config),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -679,14 +685,16 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-serving-websocket");
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
+            base: ChassisBase {
                 sources: base_sources(server_config),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![AutoloadComponent {
@@ -902,14 +910,16 @@ mod tests {
 
         let sandbox = init_save_sandbox("http-route-drop");
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
+            base: ChassisBase {
                 sources: base_sources(server_config),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(100),
             autoload: vec![

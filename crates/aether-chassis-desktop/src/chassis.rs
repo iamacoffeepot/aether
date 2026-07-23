@@ -24,9 +24,9 @@ use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
 use aether_render::RenderTuningConfig;
-use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use winit::event_loop::EventLoop;
@@ -35,11 +35,11 @@ use aether_chassis::{WindowConfig, WindowSettings};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
-use aether_chassis::boot::{CommonEnv, chassis_residual_knobs, load_chassis_config, with_common_caps, with_rpc_server};
+use aether_chassis::boot::{
+    ChassisBase, CommonEnv, chassis_residual_knobs, load_chassis_config, with_full_stack_caps, with_rpc_server,
+};
 use aether_chassis::cli::DesktopCli;
 use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
-use aether_substrate::runtime::lifecycle::FatalAborter;
-use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use winit::event_loop::ControlFlow;
 
 /// Event the event-loop thread consumes from the desktop chassis. Both
@@ -123,6 +123,11 @@ impl Chassis for DesktopChassis {
         let render_config = env.render.clone();
         let assets_dir = env.common.namespace_roots.assets.clone();
         let autoload = mem::take(&mut env.autoload);
+        // Lift the base stratum out of the env; the framework mints the builder
+        // and installs the aborter + base ahead of `compose` (the leftover
+        // default `env.base` is never re-read — `compose` consumes only the
+        // full-stack remainder).
+        let base = mem::take(&mut env.base);
 
         tracing::info!(
             target: "aether_substrate::boot",
@@ -130,7 +135,7 @@ impl Chassis for DesktopChassis {
             "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
-        let builder = Self::compose(&boot, env);
+        let builder = composed::<Self>(&boot, base, env);
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `from_env`) because the
@@ -154,8 +159,12 @@ impl Chassis for DesktopChassis {
 }
 
 impl BootableChassis for DesktopChassis {
-    fn resolve_env() -> Result<Self::Env, ConfigError> {
-        DesktopEnv::from_env()
+    type Base = ChassisBase;
+
+    fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
+        let mut env = DesktopEnv::from_env()?;
+        let base = mem::take(&mut env.base);
+        Ok((base, env))
     }
 
     fn residual_knobs() -> Vec<KnobRecord> {
@@ -176,8 +185,10 @@ impl BootableChassis for DesktopChassis {
     /// `boot` into the driver afterward. The window boot knobs (mode / size /
     /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
     /// no part in the claim chain, so they are ignored here.
-    fn compose(boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
-        let DesktopEnv { common, window: _, render: _, autoload: _ } = env;
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
+        // `base` is installed by `composed` before this delta runs; the leftover
+        // default here is unused.
+        let DesktopEnv { base: _, common, window: _, render: _, autoload: _ } = env;
 
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -191,36 +202,18 @@ impl BootableChassis for DesktopChassis {
         // root ride `DesktopEnv` → `DesktopDriverCapability` instead of a
         // `RenderParams` handoff here.
 
-        let registry = Arc::clone(&boot.registry);
-        let mailer = Arc::clone(&boot.queue);
-        // ADR-0063: production chassis configures the fatal-abort
-        // aborter so a wasm guest trap exits the substrate via
-        // `lifecycle::fatal_abort` instead of unwinding.
-        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
-
-        // Boot order is declaration order — `with_common_caps` runs
-        // log first so other capabilities' boot tracing routes
-        // through the log capture; render last so it claims its
-        // mailboxes after every other chassis cap. `into_common_boot` reads the
-        // six env-sourced `CommonBoot` fields off the shared env in one place
-        // (the teardown budget honors the same `AETHER_SETTLEMENT_CAP_SECS` knob,
-        // `0 → wait forever` sentinel and all, as the settlement gates) and
-        // threads the source stack back out for the builder.
-        let (common, sources) =
-            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
+        // Boot order is declaration order — `with_full_stack_caps` runs the base
+        // app caps first, render last so it claims its mailboxes after every
+        // other chassis cap. `into_common_boot` reads the env-sourced
+        // `CommonBoot` fields off the shared remainder in one place; the aborter
+        // and source stack are supplied earlier by `composed` / `ChassisBase`.
+        let common = common.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`
         // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
         // in-flight frame before shutting down (see the driver's
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
-        //
-        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
-        // so it resolves each composed cap's `Config` (audio / lifecycle /
-        // http-server) off it; the caps compose with `with_actor(params)`
-        // alone. The render tuning `Config` is resolved off the same stack in
-        // `DesktopEnv::from_env_with_argv` and threaded to the driver, which
-        // boots the pumped render actor (ADR-0161 R3).
-        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
+        let builder = with_full_stack_caps(builder, common)
             .with_actor::<AudioCapability>(())
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
@@ -240,8 +233,12 @@ impl BootableChassis for DesktopChassis {
 /// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
 /// thread, so it stays local to the boot call `main()` makes).
 pub struct DesktopEnv {
-    /// The config fields every full-stack chassis shares (source stack, fs roots,
-    /// content-gen staging, runtime knobs, pool / ring / scheduler / teardown
+    /// The universal base stratum (config source stack + the non-cap ring /
+    /// scheduler / settlement members) `composed` installs ahead of `compose`.
+    /// Lifted out with `mem::take` on the boot and describe paths; the leftover
+    /// default is never re-read.
+    pub base: ChassisBase,
+    /// The full-stack config remainder (fs roots, runtime knobs, worker/boot
     /// knobs). Resolved by [`CommonEnv::resolve`] — the single declaration, so a
     /// shared knob can't exist on one chassis and silently not the other.
     pub common: CommonEnv,
@@ -327,12 +324,12 @@ impl DesktopEnv {
         // relative to the window read is arbitrary.
         let render = sources.resolve::<RenderTuningConfig>()?;
 
-        // The shared block (fs roots, content-gen, runtime, pool / ring /
-        // scheduler / teardown knobs) plus the boot-manifest autoload list, both
-        // resolved by the single common resolver off the same stack.
-        let (common, autoload) = CommonEnv::resolve(sources)?;
+        // The shared block (base stratum + fs roots / runtime / worker knobs)
+        // plus the boot-manifest autoload list, all resolved by the single common
+        // resolver off the same stack.
+        let (base, common, autoload) = CommonEnv::resolve(sources)?;
 
-        Ok(Self { common, window, render, autoload })
+        Ok(Self { base, common, window, render, autoload })
     }
 }
 

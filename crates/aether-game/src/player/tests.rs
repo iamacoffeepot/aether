@@ -1,6 +1,9 @@
 //! Real loopback and addressing coverage for the player-session tier.
 
 #![allow(clippy::needless_pass_by_value)]
+// These tests are deliberate embedders: they build a bare `TestChassis` via
+// `Builder::new` rather than the `composed` boot seam production chassis use.
+#![allow(clippy::disallowed_methods)]
 
 use std::io;
 use std::net::{Ipv4Addr, TcpStream};
