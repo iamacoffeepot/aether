@@ -12,7 +12,6 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Manual, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::MailboxId;
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
@@ -23,6 +22,7 @@ use aether_text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
     MEMORY_FONT_NAMESPACE, TextCapability,
 };
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 
 use self::markdown::{MarkdownLine, MarkdownTone};
@@ -422,14 +422,14 @@ impl WasmActor for ConsoleOverlay {
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
-        let input = ctx.actor::<InputCapability>();
+        let window = ctx.actor::<WindowCapability>();
         if self.config.owns_input {
-            input.subscribe::<Key>();
-            input.subscribe::<KeyRelease>();
-            input.subscribe::<TextInput>();
-            input.subscribe::<MouseWheel>();
+            window.subscribe::<Key>(WindowSelector::All);
+            window.subscribe::<KeyRelease>(WindowSelector::All);
+            window.subscribe::<TextInput>(WindowSelector::All);
+            window.subscribe::<MouseWheel>(WindowSelector::All);
         }
-        input.subscribe::<WindowSize>();
+        window.subscribe::<WindowSize>(WindowSelector::All);
 
         self.request_initial_font(ctx);
     }

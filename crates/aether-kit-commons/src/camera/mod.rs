@@ -51,12 +51,12 @@ pub use kinds::*;
 use std::collections::HashMap;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 use aether_render::{RenderCapability, ViewProjection};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;
@@ -270,14 +270,14 @@ impl WasmActor for CameraComponent {
     }
 
     /// Subscribe the lifecycle stages the camera advances against
-    /// (`Tick`, `Render`) on `aether.lifecycle`, plus the `WindowSize`
-    /// input interrupt on `aether.input`. `wire` (post-init,
+    /// (`Tick`, `Render`) on `aether.lifecycle`, plus all-window
+    /// `WindowSize` events on `aether.window`. `wire` (post-init,
     /// mail-allowed) is the placement — `init`'s ctx has no send surface
     /// and can't mail.
     ///
     /// `Tick` and `Render` are frame-lifecycle stages (ADR-0082), so they
-    /// ride `aether.lifecycle`; `WindowSize` is a genuine input interrupt
-    /// (ADR-0021), so it stays on `aether.input`.
+    /// ride `aether.lifecycle`; `WindowSize` originates at a window and
+    /// rides the selector-aware window actor (ADR-0164).
     ///
     /// On a chassis whose lifecycle graph omits `Render` (headless), the
     /// cap replies `Err(UnsupportedStage)` to that fire-and-forget
@@ -285,7 +285,7 @@ impl WasmActor for CameraComponent {
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<InputCapability>().subscribe::<WindowSize>();
+        ctx.actor::<WindowCapability>().subscribe::<WindowSize>(WindowSelector::All);
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();
         lifecycle.subscribe::<Render>();

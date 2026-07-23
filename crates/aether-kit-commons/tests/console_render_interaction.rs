@@ -23,7 +23,6 @@ use aether_data::{Kind, MailboxId};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime};
-use aether_input::InputCapability;
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
@@ -62,14 +61,13 @@ fn build_bench_without_assets_root() -> SubstrateHarness {
 /// Composition: GPU captures + kit wasm loads; the console rasterizes its
 /// overlay text through `aether.text` (fonts fetched via `aether.fs`, which
 /// composes from the namespace roots); one scenario drives the toggle key
-/// through the real `aether.input` fan-out.
+/// through the harness's synthetic window fan-out.
 fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateHarness {
     let sandbox = init_save_sandbox(sandbox_name);
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets, config: sandbox.to_path_buf() };
     SubstrateHarness::builder()
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(())
         .with_actor::<TextCapability>(())
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .namespace_roots(roots)
@@ -289,14 +287,14 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
         .execute(vec![
             (
                 "size-direct-fanout",
-                HarnessOp::send_mail(
-                    "aether.input",
+                HarnessOp::window_event(
+                    TEST_WINDOW_ID,
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
             ),
             (
                 "unrouted-toggle",
-                HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+                HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
             ),
         ])
         .expect("direct fanout before editor shell");
@@ -307,7 +305,7 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
     harness
         .execute(vec![(
             "routed-toggle",
-            HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+            HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
         )])
         .expect("toggle through editor shell");
     let open = top_band_coverage(&mut harness, "editor-routed");

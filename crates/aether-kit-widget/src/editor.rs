@@ -2,10 +2,10 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::{Kind, MailboxId};
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 use super::EditorConfig;
 use super::routing::{RegionFocusTransition, RegionInputLane, Routing};
@@ -48,19 +48,19 @@ impl WasmActor for EditorShell {
         Ok(Self { routing: Routing::new(&config.regions) })
     }
 
-    /// Subscribe only raw interactive input. The shell has no lifecycle,
-    /// render, or window-size role.
+    /// Subscribe to raw interactive input from every window. The shell has no
+    /// lifecycle, render, or window-size role.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let input = ctx.actor::<InputCapability>();
-        input.subscribe::<MouseButton>();
-        input.subscribe::<MouseButtonRelease>();
-        input.subscribe::<MouseMove>();
-        input.subscribe::<MouseWheel>();
-        input.subscribe::<Key>();
-        input.subscribe::<KeyRelease>();
-        input.subscribe::<TextInput>();
-        input.subscribe::<ImePreedit>();
-        input.subscribe::<Modifiers>();
+        let window = ctx.actor::<WindowCapability>();
+        window.subscribe::<MouseButton>(WindowSelector::All);
+        window.subscribe::<MouseButtonRelease>(WindowSelector::All);
+        window.subscribe::<MouseMove>(WindowSelector::All);
+        window.subscribe::<MouseWheel>(WindowSelector::All);
+        window.subscribe::<Key>(WindowSelector::All);
+        window.subscribe::<KeyRelease>(WindowSelector::All);
+        window.subscribe::<TextInput>(WindowSelector::All);
+        window.subscribe::<ImePreedit>(WindowSelector::All);
+        window.subscribe::<Modifiers>(WindowSelector::All);
     }
 
     #[handler::single]

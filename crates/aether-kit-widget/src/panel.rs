@@ -24,8 +24,8 @@
 //!   `load_font_result` arrives, stamps the session-scoped `font_id` into its
 //!   [`Theme`] and re-fans it — the inline responsibility the theme module
 //!   hands the panel root.
-//! - **Input.** It subscribes the pointer / keyboard streams once (the input
-//!   cap) and the frame stage once (the lifecycle cap), then routes each event
+//! - **Input.** It subscribes to pointer / keyboard streams from every window
+//!   and the frame stage once (the lifecycle cap), then routes each event
 //!   through [`Focus`]: keyboard to the focused child, pointer to the hit or
 //!   drag-captured child, Tab to cycle focus, a left press to set focus + drag
 //!   capture. Focus transitions fan `FocusGained` / `FocusLost` down.
@@ -44,7 +44,6 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::{Kind, MailboxId};
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::keycode::KEY_TAB;
 use aether_kinds::mouse_button;
 use aether_kinds::{
@@ -54,6 +53,7 @@ use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 use crate::composite::Composite;
 use crate::focus::{
@@ -892,21 +892,21 @@ impl WasmActor for WidgetPanel {
         })
     }
 
-    /// Subscribe the pointer / keyboard streams (input cap) and the frame
-    /// stage (lifecycle cap) once, and kick off the font load. Widgets never
-    /// subscribe — the root forwards everything.
+    /// Subscribe to pointer / keyboard streams from every window and the frame
+    /// stage once, then kick off the font load. Widgets never subscribe — the
+    /// root forwards everything.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.owns_input {
-            let input = ctx.actor::<InputCapability>();
-            input.subscribe::<MouseButton>();
-            input.subscribe::<MouseButtonRelease>();
-            input.subscribe::<MouseMove>();
-            input.subscribe::<MouseWheel>();
-            input.subscribe::<Key>();
-            input.subscribe::<KeyRelease>();
-            input.subscribe::<TextInput>();
-            input.subscribe::<ImePreedit>();
-            input.subscribe::<Modifiers>();
+            let window = ctx.actor::<WindowCapability>();
+            window.subscribe::<MouseButton>(WindowSelector::All);
+            window.subscribe::<MouseButtonRelease>(WindowSelector::All);
+            window.subscribe::<MouseMove>(WindowSelector::All);
+            window.subscribe::<MouseWheel>(WindowSelector::All);
+            window.subscribe::<Key>(WindowSelector::All);
+            window.subscribe::<KeyRelease>(WindowSelector::All);
+            window.subscribe::<TextInput>(WindowSelector::All);
+            window.subscribe::<ImePreedit>(WindowSelector::All);
+            window.subscribe::<Modifiers>(WindowSelector::All);
         }
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         if !self.config.font_path.is_empty() {
