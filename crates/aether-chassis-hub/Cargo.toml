@@ -36,8 +36,6 @@ aether-kinds = { path = "../aether-kinds" }
 # The bin parses `HubCli` (ADR-0090 unit d) and bridges boot faults.
 clap = { workspace = true }
 anyhow = { workspace = true }
-# `--describe` prints the BinaryManifest as JSON (ADR-0115).
-serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
 # The hub blocks on a SIGINT/SIGTERM signal in

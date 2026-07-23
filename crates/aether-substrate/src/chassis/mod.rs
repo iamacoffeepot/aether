@@ -41,6 +41,9 @@ use crate::chassis::error::BootError;
 use std::collections::BTreeSet;
 
 #[cfg(feature = "wasm")]
+use aether_kinds::BinaryManifest;
+
+#[cfg(feature = "wasm")]
 use crate::SubstrateBoot;
 #[cfg(feature = "wasm")]
 use crate::chassis::builder::Builder;
@@ -192,4 +195,183 @@ pub fn config_manifest<C: BootableChassis>() -> Result<ConfigManifest, BootError
     let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
     Ok(C::compose(&boot, env).config_manifest())
+}
+
+/// A chassis binary's build provenance — the `build.rs`-baked facts a
+/// `--describe` [`BinaryManifest`] reports (ADR-0115): the source revision,
+/// build profile, and target triple.
+///
+/// These are crate-local: each binary's `build.rs` bakes them, and `env!`
+/// resolves only in the crate whose build script set them (ADR-0155). The
+/// shared prelude therefore takes provenance as a value the binary constructs
+/// with its own `env!`s rather than reading `env!` itself — this is what lets
+/// the bloomery chassis, which does not depend on the `aether-chassis`
+/// aggregate, route through the same prelude flow (ADR-0162): it fills a
+/// `BuildProvenance` from its own crate's `build.rs` and hands it over.
+#[derive(Debug, Clone)]
+pub struct BuildProvenance {
+    /// `git rev-parse --short HEAD`, or `"unknown"` outside a git checkout.
+    pub git_sha: String,
+    /// Cargo's build profile (`debug` / `release`).
+    pub profile: String,
+    /// Cargo's target triple (e.g. `aarch64-apple-darwin`).
+    pub target: String,
+}
+
+/// Assemble a chassis binary's `--describe` [`BinaryManifest`] (ADR-0115,
+/// amended by ADR-0155): the chassis profile, the mailbox namespaces it claims,
+/// and the caller-supplied [`BuildProvenance`].
+///
+/// The `caps` roster is derived from [`describe_caps`] — the same claim code a
+/// real boot runs over the composed `with_actor` chain, driver claims, and
+/// inline sinks — so there is no hand-maintained list to drift. The
+/// [`BTreeSet`] arrives sorted; the manifest's `caps` field preserves that
+/// order.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when env resolution, substrate boot, or the claim pass
+/// fails.
+#[cfg(feature = "wasm")]
+pub fn describe_manifest<C: BootableChassis>(provenance: &BuildProvenance) -> Result<BinaryManifest, BootError> {
+    Ok(BinaryManifest {
+        chassis: C::PROFILE.to_owned(),
+        caps: describe_caps::<C>()?.into_iter().collect(),
+        git_sha: provenance.git_sha.clone(),
+        profile: provenance.profile.clone(),
+        target: provenance.target.clone(),
+    })
+}
+
+/// The `--print-config` discovery dump for a chassis (ADR-0090 §4): the
+/// composition-derived config aggregate ([`config_manifest`]) plus the chassis's
+/// [`residual knobs`](BootableChassis::residual_knobs). The prelude prints this
+/// and exits before boot.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when env resolution or substrate boot fails.
+#[cfg(feature = "wasm")]
+pub fn config_dump<C: BootableChassis>() -> Result<String, BootError> {
+    Ok(config_manifest::<C>()?.dump(&C::residual_knobs()))
+}
+
+/// The prelude flags a chassis CLI root exposes before boot. Each names an
+/// exit-before-Init discovery mode; a chassis whose CLI lacks one (bloomery has
+/// no `--print-config`) passes `false` for it.
+#[derive(Debug, Clone, Copy)]
+pub struct PreludeFlags {
+    /// `--describe` (ADR-0115): print the [`BinaryManifest`] JSON and exit.
+    pub describe: bool,
+    /// `--print-config` (ADR-0090 §4): print the config discovery dump and exit.
+    pub print_config: bool,
+}
+
+/// Whether the prelude handled the invocation (it printed a discovery dump and
+/// the binary should exit) or the binary should proceed to boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum PreludeAction {
+    /// A prelude flag matched: the dump is printed, `main` should return.
+    Handled,
+    /// No prelude flag matched: `main` should resolve its env and boot.
+    Boot,
+}
+
+impl PreludeAction {
+    /// `true` when the binary should stop after the prelude rather than boot.
+    #[must_use]
+    pub fn is_handled(self) -> bool {
+        matches!(self, Self::Handled)
+    }
+}
+
+/// The shared chassis-main prelude (ADR-0162): the single flow every chassis
+/// binary runs ahead of boot. It dispatches the exit-before-Init discovery
+/// modes — `--print-config` (the ADR-0090 §4 config dump) and `--describe` (the
+/// ADR-0115 [`BinaryManifest`]) — off the parsed [`PreludeFlags`], prints the
+/// selected dump to stdout, and reports [`PreludeAction::Handled`] so the binary
+/// returns before Init. With no flag set it reports [`PreludeAction::Boot`] and
+/// the binary proceeds to resolve its env and run.
+///
+/// Both discovery modes run the same claim/compose ceremony a real boot runs
+/// (ADR-0155), stopping at Claim, so the manifest and config dump can never
+/// drift from what boots. `--describe` wraps the claim roster in the
+/// caller-supplied [`BuildProvenance`], which is why the flow is uniform across
+/// every chassis binary yet still reports each binary's own crate-local build
+/// facts (ADR-0162).
+///
+/// # Errors
+///
+/// Returns [`BootError`] when env resolution, substrate boot, the claim pass, or
+/// manifest serialization fails.
+#[cfg(feature = "wasm")]
+// The prelude owns the discovery-dump stdout every chassis bin previously
+// printed inline (ADR-0090 §4 / e2): the whole point is to move that print off
+// each bin, so it prints here, before the tracing subscriber is installed.
+#[allow(clippy::print_stdout)]
+pub fn run_chassis_prelude<C: BootableChassis>(
+    flags: PreludeFlags,
+    provenance: &BuildProvenance,
+) -> Result<PreludeAction, BootError> {
+    if flags.print_config {
+        print!("{}", config_dump::<C>()?);
+        return Ok(PreludeAction::Handled);
+    }
+    if flags.describe {
+        let manifest = describe_manifest::<C>(provenance)?;
+        let json = serde_json::to_string(&manifest).map_err(|e| BootError::Other(Box::new(e)))?;
+        println!("{json}");
+        return Ok(PreludeAction::Handled);
+    }
+    Ok(PreludeAction::Boot)
+}
+
+#[cfg(all(test, feature = "wasm"))]
+mod prelude_tests {
+    use super::{BootableChassis, BuildProvenance, Chassis, PreludeAction, PreludeFlags, run_chassis_prelude};
+    use crate::SubstrateBoot;
+    use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+    use crate::chassis::error::BootError;
+    use crate::config::ConfigError;
+
+    /// A chassis whose every boot-ceremony seam panics. The no-flag prelude
+    /// path must never reach `resolve_env` / `compose`, so a `run_chassis_prelude`
+    /// over this chassis is safe exactly when it short-circuits to `Boot`.
+    struct PanicChassis;
+
+    impl Chassis for PanicChassis {
+        const PROFILE: &'static str = "panic-test";
+        type Driver = NeverDriver;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("PanicChassis is a prelude-dispatch fixture, never built");
+        }
+    }
+
+    impl BootableChassis for PanicChassis {
+        fn resolve_env() -> Result<Self::Env, ConfigError> {
+            panic!("prelude ran the config ceremony with no discovery flag set");
+        }
+        fn compose(_boot: &SubstrateBoot, _env: Self::Env) -> Builder<Self> {
+            panic!("prelude composed the capability chain with no discovery flag set");
+        }
+    }
+
+    fn provenance() -> BuildProvenance {
+        BuildProvenance { git_sha: "sha".to_owned(), profile: "debug".to_owned(), target: "triple".to_owned() }
+    }
+
+    #[test]
+    fn no_flag_returns_boot_without_running_the_ceremony() {
+        // Tripwire: the prelude must stop before Init when neither discovery
+        // flag is set — it returns `Boot` and hands the boot back to the binary
+        // rather than resolving env / composing (both side-effectful). Reordering
+        // the ceremony ahead of the flag check fires `PanicChassis`'s seams.
+        let action =
+            run_chassis_prelude::<PanicChassis>(PreludeFlags { describe: false, print_config: false }, &provenance())
+                .expect("no-flag prelude is infallible — it touches no substrate");
+        assert_eq!(action, PreludeAction::Boot);
+        assert!(!action.is_handled(), "Boot is the not-handled action");
+    }
 }

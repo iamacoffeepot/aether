@@ -10,11 +10,10 @@ use std::sync::Arc;
 
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::{HttpServerCapability, HttpServerConfig};
-use aether_kinds::BinaryManifest;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::{BootableChassis, describe_caps};
+use aether_substrate::chassis::{BootableChassis, BuildProvenance};
 use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
@@ -153,33 +152,26 @@ impl Chassis for BloomeryChassis {
 }
 
 impl BloomeryChassis {
-    /// The `--describe` manifest (ADR-0115, amended by ADR-0155): the chassis
-    /// profile, the mailbox namespaces this binary claims, and the `build.rs`
-    /// provenance. Runs the shared ADR-0155 claim ceremony
-    /// ([`aether_substrate::chassis::describe_caps`]) — resolve the bloomery
-    /// config the same argv/env way a real boot does, compose the exact chain
-    /// [`Chassis::build`] runs, claim, read the roster — so it can never drift from
-    /// what boots. Bloomery keeps its own manifest assembly here rather than
-    /// routing through `aether_chassis::describe_manifest`: it deliberately does
-    /// not depend on the `aether-chassis` aggregate, and the `build.rs`
-    /// provenance `env!`s must resolve in *this* crate, where its own
-    /// `build.rs` set them. `--describe` stops before Init, so it opens no
+    /// This crate's `build.rs`-baked build provenance (ADR-0115): the source
+    /// revision, build profile, and target triple, read back via `env!`, which
+    /// resolves in *this* crate — the one whose `build.rs` set them.
+    ///
+    /// Bloomery deliberately does not depend on the `aether-chassis` aggregate,
+    /// so it cannot reuse that crate's `build_provenance`. ADR-0162's prelude
+    /// takes provenance as a value for exactly this reason: the bloomery binary
+    /// fills a [`BuildProvenance`] here and hands it to the shared
+    /// [`run_chassis_prelude`](aether_substrate::chassis::run_chassis_prelude),
+    /// routing through the same `--describe` flow every chassis binary runs
+    /// without forking it. `--describe` stops before Init, so it opens no
     /// `SQLite` store / artifacts dir and binds no socket. The hub's binary
     /// store forks `<binary> --describe` once at upload time to capture this.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootError`] when config resolution ([`BloomeryEnv::from_env`]),
-    /// substrate boot, or the claim pass fails.
-    pub fn describe_manifest() -> Result<BinaryManifest, BootError> {
-        let caps = describe_caps::<Self>()?;
-        Ok(BinaryManifest {
-            chassis: Self::PROFILE.to_owned(),
-            caps: caps.into_iter().collect(),
+    #[must_use]
+    pub fn build_provenance() -> BuildProvenance {
+        BuildProvenance {
             git_sha: env!("AETHER_GIT_SHA").to_owned(),
             profile: env!("AETHER_BUILD_PROFILE").to_owned(),
             target: env!("AETHER_TARGET_TRIPLE").to_owned(),
-        })
+        }
     }
 }
 
@@ -189,12 +181,13 @@ impl BootableChassis for BloomeryChassis {
     }
 
     /// Compose the bloomery capability chain — the single claim/build path
-    /// (ADR-0155) both [`Chassis::build`] and [`Self::describe_manifest`] run,
+    /// (ADR-0155) both [`Chassis::build`] and the shared describe prelude run,
     /// so the manifest roster can never drift from what boots. Returns the
     /// composed builder before the driver is installed: [`Chassis::build`] adds
-    /// the signal-blocking driver and starts, while `describe_manifest` reads
-    /// the claim terminal off it. Takes the boot handle by reference so
-    /// [`Chassis::build`] can move the same `boot` into the driver afterward.
+    /// the signal-blocking driver and starts, while the prelude's claim ceremony
+    /// (`describe_caps`) reads the claim terminal off it. Takes the boot handle
+    /// by reference so [`Chassis::build`] can move the same `boot` into the
+    /// driver afterward.
     fn compose(boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source

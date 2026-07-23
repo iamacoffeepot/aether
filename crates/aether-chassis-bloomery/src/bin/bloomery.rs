@@ -4,19 +4,23 @@
 //! `AETHER_RPC_PORT` (the engines cap injects it when it forks a bloomery),
 //! `--store-path` shadows `AETHER_STORE_PATH` (the durable database file).
 
-// `--describe` prints the binary manifest to stdout before the tracing
-// subscriber is installed, then exits — the ADR-0115 provenance probe.
-#![allow(clippy::print_stdout)]
-
 use aether_chassis_bloomery::bloomery::{BloomeryChassis, BloomeryCli, BloomeryEnv, Chassis};
+use aether_substrate::chassis::{PreludeFlags, run_chassis_prelude};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
     let cli = BloomeryCli::parse();
-    // `--describe` (ADR-0115): print this binary's manifest — chassis kind,
-    // linked caps, build provenance — as JSON, then exit before boot.
-    if cli.describe {
-        println!("{}", serde_json::to_string(&BloomeryChassis::describe_manifest()?)?);
+    // ADR-0162 shared prelude: `--describe` (ADR-0115 manifest) prints and exits
+    // before Init; a plain invocation falls through to boot. Bloomery does not
+    // depend on the `aether-chassis` aggregate, so it hands its own crate's
+    // `build.rs` provenance to the shared prelude directly, and it has no
+    // `--print-config` flag (no chassis config file), so that mode is `false`.
+    if run_chassis_prelude::<BloomeryChassis>(
+        PreludeFlags { describe: cli.describe, print_config: false },
+        &BloomeryChassis::build_provenance(),
+    )?
+    .is_handled()
+    {
         return Ok(());
     }
     let env = BloomeryEnv::from_env_with_argv(&cli)?;

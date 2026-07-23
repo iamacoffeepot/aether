@@ -1,7 +1,7 @@
 //! Bake build provenance into the chassis layer so each chassis bin's
 //! `--describe` manifest (ADR-0115, issue 1953) can report the source
 //! revision, build profile, and target triple without a runtime git /
-//! cargo probe. `boot::binary_manifest` reads these back via `env!`,
+//! cargo probe. `boot::build_provenance` reads these back via `env!`,
 //! which resolves in this crate — the one whose build script set them:
 //!
 //! - `AETHER_GIT_SHA` — `git rev-parse --short HEAD`, or `"unknown"`

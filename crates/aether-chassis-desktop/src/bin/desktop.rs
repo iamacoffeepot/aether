@@ -5,29 +5,20 @@
 //! each per-cap overlay shadows its `AETHER_*` env var, unset flags
 //! fall through to env-only resolution.
 
-// `--print-config` prints the discovery dump to stdout before boot
-// (ADR-0090 §4 / e2).
-#![allow(clippy::print_stdout)]
-
 use aether_chassis::cli::DesktopCli;
+use aether_chassis::{PreludeFlags, run_describe_prelude};
 use aether_chassis_desktop::{DesktopChassis, DesktopEnv};
 use aether_substrate::Chassis;
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
     let cli = DesktopCli::parse();
-    if cli.print_config {
-        // ADR-0156 §4: the dump is the composition-derived aggregate plus the
-        // residual hand records, so it resolves the chassis config the same
-        // way a boot does (a garbage known value surfaces as a `ConfigError`).
-        print!("{}", aether_chassis::config_dump::<DesktopChassis>()?);
-        return Ok(());
-    }
-    // `--describe` (ADR-0115, issue 1953): print this binary's manifest —
-    // chassis kind, linked caps, build provenance — as JSON, then exit
-    // before boot (no winit event loop opened).
-    if cli.describe {
-        println!("{}", serde_json::to_string(&aether_chassis::describe_manifest::<DesktopChassis>()?)?);
+    // ADR-0162 shared prelude: `--print-config` (ADR-0090 §4 dump) and
+    // `--describe` (ADR-0115 manifest) print and exit before Init; a plain
+    // invocation falls through to boot (no winit event loop opened until then).
+    if run_describe_prelude::<DesktopChassis>(PreludeFlags { describe: cli.describe, print_config: cli.print_config })?
+        .is_handled()
+    {
         return Ok(());
     }
     let env = DesktopEnv::from_env_with_argv(cli)?;
