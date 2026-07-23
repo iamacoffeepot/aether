@@ -15,6 +15,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, BuildProvenance};
 use aether_substrate::config::ConfigError;
+use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
@@ -207,6 +208,11 @@ impl BootableChassis for BloomeryChassis {
         };
 
         Builder::<Self>::new(registry, mailer)
+            // ADR-0063: production chassis configures the fatal-abort aborter so a
+            // wasm guest trap exits the substrate via `lifecycle::fatal_abort`
+            // instead of unwinding. Bloomery hosts wasm (`ComponentHostCapability`
+            // below), so it needs the aborter the desktop/headless composes install.
+            .with_aborter(Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound))))
             .with_actor::<TraceDispatchCapability>(())
             .with_actor_configured::<StoreCapability>((), store)
             // The single-writer control core (ADR-0149 §The control core): owns the

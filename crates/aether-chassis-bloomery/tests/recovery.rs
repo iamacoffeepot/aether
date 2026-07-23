@@ -19,11 +19,13 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey};
 use aether_chassis_bloomery::store::{
     AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox,
     EnqueueOutboxResult, ReplayJournal, ReplayJournalResult,
 };
 use aether_codec::frame::{read_frame, write_frame};
+use aether_data::wire::to_vec;
 use aether_data::{Kind, mailbox_id_from_path};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
@@ -135,8 +137,20 @@ fn kill_and_restart_converges_over_rpc() {
     let mut stream = connect(port);
     handshake(&mut stream);
 
+    // A real, wire-encoded bloom-protocol event — the shape the host journals.
+    // The control core replays this journal at boot and decodes each record as an
+    // `Event`; a non-`Event` record trips its fail-fast boot-replay abort
+    // (ADR-0063), so the synthetic seed must be a valid encoded event, not opaque
+    // bytes. `Fact::Land` on an orphan bloom reduces to a clean rejection, so the
+    // replay rebuilds without incident.
+    let event = Event {
+        idempotency_key: IdempotencyKey("seal-1".to_owned()),
+        fact: Fact::Land { bloom: BloomId(Digest::from_bytes([7; 32])), new_head: Digest::from_bytes([9; 32]) },
+    };
+    let event_bytes = to_vec(&event).unwrap();
+
     let append: AppendEventResult =
-        call(&mut stream, 1, &AppendEvent { idempotency_key: "seal-1".into(), event: b"seal-event".to_vec() });
+        call(&mut stream, 1, &AppendEvent { idempotency_key: "seal-1".into(), event: event_bytes.clone() });
     assert_eq!(append, AppendEventResult::Applied { sequence: 1 });
 
     let seal: ClaimSealResult = call(&mut stream, 2, &ClaimSeal { bloom: vec![1; 32], members: vec!["wp".into()] });
@@ -162,7 +176,7 @@ fn kill_and_restart_converges_over_rpc() {
         ReplayJournalResult::Ok { records } => {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].idempotency_key, "seal-1");
-            assert_eq!(records[0].event, b"seal-event");
+            assert_eq!(records[0].event, event_bytes);
         }
         ReplayJournalResult::Err { error } => panic!("journal replay failed: {error}"),
     }
