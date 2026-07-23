@@ -74,6 +74,7 @@
 //! `false` / `no` spellings (case-insensitive, trimmed).
 
 use std::any::{Any, TypeId, type_name};
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -555,6 +556,15 @@ pub struct ConfigMemberRecord {
     /// config `TypeId` — so the manifest can report which layer supplied each
     /// resolved member.
     pub type_id: TypeId,
+    /// The member's derive-emitted argv overlay long flags (ADR-0162), one per
+    /// `#[derive(Config)]` field — the exact `--flags` the sibling `*Overlay`
+    /// accepts, without leading dashes (`"http-timeout-ms"`). The
+    /// `#[derive(Config)]` machinery computes this from the same `cli_long`
+    /// resolution it stamps onto the overlay's `#[arg(long = …)]`, so the
+    /// reported argv surface can never drift from the accepted flags. The
+    /// composition-derived [`ConfigManifest::argv_flags`] unions these across
+    /// every composed member; the hand `()` member contributes none.
+    pub cli_flags: &'static [&'static str],
 }
 
 /// ADR-0156 §4 member trait: a config type's contribution to the
@@ -697,6 +707,24 @@ impl ConfigManifest {
     #[must_use]
     pub fn known_keys(&self, records: &[KnobRecord]) -> KnownKeys {
         known_keys(&self.metas(), records)
+    }
+
+    /// The composition-derived argv overlay surface (ADR-0162): every composed
+    /// member's derive-emitted long flags, deduped and sorted. The
+    /// [`BinaryManifest`](aether_kinds::BinaryManifest)'s `argv_flags` reports
+    /// this — the machine-channel flags a spawn-side validator checks an
+    /// injected `--flag` against — read from the same composition a real boot
+    /// runs, never a parallel hand list. Residual hand-registered knobs
+    /// ([`KnobRecord`]) carry env keys but no derive-emitted flag, so they
+    /// contribute nothing here (they fold into [`known_keys`](Self::known_keys)
+    /// alone).
+    #[must_use]
+    pub fn argv_flags(&self) -> Vec<&'static str> {
+        let mut flags: BTreeSet<&'static str> = BTreeSet::new();
+        for member in &self.members {
+            flags.extend(member.cli_flags.iter().copied());
+        }
+        flags.into_iter().collect()
     }
 
     /// Render the `--print-config` discovery dump from this walk plus the

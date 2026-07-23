@@ -102,6 +102,12 @@ struct FieldInfo {
     /// `into_layer` body fragment that pushes this overlay field into
     /// the partial layer (`if let Some(v) = self.foo { layer.bar = Some(v); }`).
     into_layer_stmt: TokenStream2,
+    /// The overlay's long flag for this field (`http-timeout-ms`, no
+    /// leading dashes) — the exact `#[arg(long = …)]` the overlay emits.
+    /// Surfaced through the `ConfigMember` record (ADR-0162) so a chassis's
+    /// composition-derived argv surface is introspectable at runtime, from
+    /// the same machinery that emits the flag, never a parallel hand list.
+    cli_long: String,
 }
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -138,7 +144,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // an explicit `#[config(section = "...")]` pins a historical section
     // name that differs from the CLI prefix.
     let section = container.section.clone().unwrap_or_else(|| container.cli_prefix.clone());
-    let member_impl = emit_member_impl(domain_ident, &layer_ident, &section);
+    let member_impl = emit_member_impl(domain_ident, &layer_ident, &section, &fields);
     // ADR-0156 §5 (issue 3872): the leaf `StageArgv` impl on the overlay, so a
     // chassis CLI root's derived container `StageArgv` can stage this cap by
     // delegating to the field rather than the chassis hand-writing
@@ -404,6 +410,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
         layer_attrs,
         overlay_attrs,
         into_layer_stmt,
+        cli_long,
     })
 }
 
@@ -679,12 +686,19 @@ fn emit_trait_impl(domain_ident: &Ident, layer_ident: &Ident, fields: &[FieldInf
 }
 
 /// ADR-0156 §4/§5: emit the `ConfigMember` impl carrying this config's TOML
-/// section name, its confique layer `Meta`, and its `TypeId`, plus the §5
-/// `resolve` body that resolves off the builder's source stack at its own
-/// section. `Builder::config_manifest` walks the declarations off the composed
-/// `with_actor` chain (known-keys sweep + `--print-config` + provenance) and
-/// the composition boundary calls `resolve` once per member ahead of `init`.
-fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str) -> TokenStream2 {
+/// section name, its confique layer `Meta`, its `TypeId`, and its derive-emitted
+/// argv overlay long flags (ADR-0162), plus the §5 `resolve` body that resolves
+/// off the builder's source stack at its own section. `Builder::config_manifest`
+/// walks the declarations off the composed `with_actor` chain (known-keys sweep +
+/// argv-flag surface + `--print-config` + provenance) and the composition
+/// boundary calls `resolve` once per member ahead of `init`.
+///
+/// The `cli_flags` slice is the exact per-field `#[arg(long = …)]` set the
+/// sibling overlay emits — both are computed from the one `cli_long` resolution
+/// in [`field_info`], so the member's reported argv surface can never drift from
+/// the flags the overlay actually accepts (ADR-0162).
+fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str, fields: &[FieldInfo]) -> TokenStream2 {
+    let cli_flags = fields.iter().map(|f| f.cli_long.as_str());
     quote! {
         impl ::aether_substrate::config::ConfigMember for #domain_ident {
             fn members() -> ::std::vec::Vec<::aether_substrate::config::ConfigMemberRecord> {
@@ -692,6 +706,7 @@ fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str) ->
                     section: #section,
                     meta: &<#layer_ident as ::confique::Config>::META,
                     type_id: ::core::any::TypeId::of::<Self>(),
+                    cli_flags: &[#(#cli_flags),*],
                 }]
             }
 

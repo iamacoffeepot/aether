@@ -279,6 +279,24 @@ mod engine {
     ///   bundle's `build.rs` (`git rev-parse --short HEAD`, the cargo
     ///   build profile, the target triple); `git_sha` is `"unknown"` when
     ///   the binary was built outside a git checkout.
+    /// - `env_keys` — the composition-derived known `AETHER_*` (and
+    ///   registered bare) env keys this binary accepts (ADR-0162): the
+    ///   union of every composed config member's env keys plus the
+    ///   chassis's residual hand-registered knobs, sorted. The same set the
+    ///   binary's own unknown-`AETHER_*` sweep accepts at boot, so a spawn
+    ///   observer knows exactly which env vars address a real knob.
+    /// - `argv_flags` — the derive-emitted argv overlay `--flags` this
+    ///   binary accepts (ADR-0162): the union of every composed config
+    ///   member's `#[derive(Config)]` overlay long flags, sorted. Argv is
+    ///   the machine channel (ADR-0162), so this is what a spawn-side
+    ///   validator checks an injected `--flag` against.
+    ///
+    /// `env_keys` / `argv_flags` are `#[serde(default)]` so a manifest
+    /// captured before ADR-0162 (an old content hash whose sidecar JSON
+    /// predates the fields) still parses — it reads back with empty sets
+    /// rather than failing the store. Strict-required rejection of a
+    /// nonconforming *new* upload is the upload gate's job (#3936), not a
+    /// retroactive parse policy.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct BinaryManifest {
         pub chassis: String,
@@ -286,6 +304,10 @@ mod engine {
         pub git_sha: String,
         pub profile: String,
         pub target: String,
+        #[serde(default)]
+        pub env_keys: Vec<String>,
+        #[serde(default)]
+        pub argv_flags: Vec<String>,
     }
 
     /// One stored binary in a [`ListEngineBinariesResult`] (ADR-0115, issue

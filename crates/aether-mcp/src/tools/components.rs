@@ -193,6 +193,32 @@ pub(super) struct StoreListingResponse<T> {
 }
 
 #[derive(Serialize)]
+pub(super) struct BinaryStoreEntry {
+    hash: String,
+    name: Option<String>,
+    manifest: BinaryStoreManifest,
+}
+
+/// The `list_binaries` projection of a stored `BinaryManifest` (ADR-0162).
+/// The config surface — `env_keys` / `argv_flags` — is rendered as counts, not
+/// full lists: a full-stack chassis carries dozens of each, so inlining them per
+/// entry across a listing would bloat the tool output without a caller need. The
+/// full sets live in the hub's store, captured under the content hash; a
+/// consumer that needs them (spawn-side validation) reads the store directly.
+/// `chassis` / `caps` / build provenance stay full — they are small and the
+/// existing listing already surfaced them.
+#[derive(Serialize)]
+struct BinaryStoreManifest {
+    chassis: String,
+    caps: Vec<String>,
+    git_sha: String,
+    profile: String,
+    target: String,
+    env_key_count: usize,
+    argv_flag_count: usize,
+}
+
+#[derive(Serialize)]
 pub(super) struct ComponentStoreEntry {
     hash: String,
     name: Option<String>,
@@ -226,8 +252,24 @@ pub(super) fn store_listing_response<T>(entries: Vec<T>, total_matched: u32) -> 
     StoreListingResponse { entries, total_matched, shown, truncated, notice }
 }
 
-pub(super) fn binary_listing_response(result: ListEngineBinariesResult) -> StoreListingResponse<BinaryEntry> {
-    store_listing_response(result.binaries, result.total_matched)
+pub(super) fn binary_listing_response(result: ListEngineBinariesResult) -> StoreListingResponse<BinaryStoreEntry> {
+    store_listing_response(result.binaries.into_iter().map(project_binary_store_entry).collect(), result.total_matched)
+}
+
+fn project_binary_store_entry(entry: BinaryEntry) -> BinaryStoreEntry {
+    BinaryStoreEntry {
+        hash: entry.hash,
+        name: entry.name,
+        manifest: BinaryStoreManifest {
+            chassis: entry.manifest.chassis,
+            caps: entry.manifest.caps,
+            git_sha: entry.manifest.git_sha,
+            profile: entry.manifest.profile,
+            target: entry.manifest.target,
+            env_key_count: entry.manifest.env_keys.len(),
+            argv_flag_count: entry.manifest.argv_flags.len(),
+        },
+    }
 }
 
 pub(super) fn component_listing_response(

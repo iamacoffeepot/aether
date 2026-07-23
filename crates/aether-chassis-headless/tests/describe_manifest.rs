@@ -46,4 +46,75 @@ fn headless_describe_emits_manifest() {
     assert!(!manifest.git_sha.is_empty(), "git_sha is baked");
     assert!(!manifest.profile.is_empty(), "build profile is baked");
     assert!(!manifest.target.is_empty(), "target triple is baked");
+
+    // ADR-0162: the manifest self-reports its config surface, and — like the
+    // cap roster — that surface is derived from the real headless composition,
+    // never a hand list. These assertions pin that it is *this* profile's
+    // surface, not a fleet-wide union:
+    //   - the headless timer driver composes the tick knob, so `AETHER_TICK_HZ`
+    //     / `--tick-hz` are present, as are the always-composed RPC-port knobs;
+    //   - the window / wireframe knobs live on the *desktop* driver, so a
+    //     composition-derived headless surface must exclude them. A regression
+    //     that reverted to a hand-maintained union (the ADR-0162 drift class)
+    //     would wrongly leak `AETHER_WINDOW_MODE` / `--window-mode` in here.
+    assert!(
+        manifest.env_keys.contains(&"AETHER_TICK_HZ".to_owned()),
+        "headless composes the tick knob: {:?}",
+        manifest.env_keys
+    );
+    assert!(
+        manifest.env_keys.contains(&"AETHER_RPC_PORT".to_owned()),
+        "headless composes the RPC server: {:?}",
+        manifest.env_keys
+    );
+    assert!(
+        !manifest.env_keys.contains(&"AETHER_WINDOW_MODE".to_owned()),
+        "the window knob is desktop-only; a composition-derived headless surface excludes it: {:?}",
+        manifest.env_keys
+    );
+    assert!(manifest.env_keys.windows(2).all(|w| w[0] <= w[1]), "env_keys are sorted, got {:?}", manifest.env_keys);
+
+    assert!(
+        manifest.argv_flags.contains(&"tick-hz".to_owned()),
+        "headless argv surface carries the tick flag: {:?}",
+        manifest.argv_flags
+    );
+    assert!(
+        manifest.argv_flags.contains(&"rpc-port".to_owned()),
+        "headless argv surface carries the RPC-port flag: {:?}",
+        manifest.argv_flags
+    );
+    assert!(
+        !manifest.argv_flags.contains(&"window-mode".to_owned()),
+        "the window flag is desktop-only; the headless argv surface excludes it: {:?}",
+        manifest.argv_flags
+    );
+    assert!(
+        manifest.argv_flags.windows(2).all(|w| w[0] <= w[1]),
+        "argv_flags are sorted, got {:?}",
+        manifest.argv_flags
+    );
+}
+
+/// ADR-0162 backward compatibility: a `BinaryManifest` JSON captured before the
+/// config-surface fields existed (an old content hash's stored sidecar) still
+/// parses — `env_keys` / `argv_flags` are `#[serde(default)]`, so an old-shape
+/// manifest reads back with empty sets rather than failing the store. This is
+/// the read policy stated in ADR-0162; strict-required rejection of a
+/// nonconforming *new* upload is the upload gate's job (#3936), not a
+/// retroactive parse failure.
+#[test]
+fn pre_config_surface_manifest_json_still_parses() {
+    let legacy = r#"{
+        "chassis": "headless",
+        "caps": ["aether.fs"],
+        "git_sha": "deadbee",
+        "profile": "debug",
+        "target": "x86_64-unknown-linux-gnu"
+    }"#;
+    let manifest: BinaryManifest =
+        serde_json::from_str(legacy).expect("an old-shape manifest lacking the config-surface fields still parses");
+    assert_eq!(manifest.chassis, "headless");
+    assert!(manifest.env_keys.is_empty(), "an absent env_keys field defaults to empty");
+    assert!(manifest.argv_flags.is_empty(), "an absent argv_flags field defaults to empty");
 }

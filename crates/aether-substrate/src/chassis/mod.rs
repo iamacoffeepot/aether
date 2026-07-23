@@ -219,14 +219,28 @@ pub struct BuildProvenance {
 }
 
 /// Assemble a chassis binary's `--describe` [`BinaryManifest`] (ADR-0115,
-/// amended by ADR-0155): the chassis profile, the mailbox namespaces it claims,
-/// and the caller-supplied [`BuildProvenance`].
+/// amended by ADR-0155 and ADR-0162): the chassis profile, the mailbox
+/// namespaces it claims, the config surface it accepts (composition-derived env
+/// keys + derive-emitted argv overlay flags), and the caller-supplied
+/// [`BuildProvenance`].
 ///
-/// The `caps` roster is derived from [`describe_caps`] — the same claim code a
-/// real boot runs over the composed `with_actor` chain, driver claims, and
-/// inline sinks — so there is no hand-maintained list to drift. The
-/// [`BTreeSet`] arrives sorted; the manifest's `caps` field preserves that
-/// order.
+/// Composes the chain **once** and reads every derived field off that one
+/// builder — the config aggregate ([`Builder::config_manifest`]) for the config
+/// surface, then the claim terminal ([`Builder::claim_namespaces`]) for the cap
+/// roster. Every set is therefore the same composition a real boot runs, so no
+/// hand-maintained list can drift (ADR-0162):
+///
+/// - `caps` — the claim roster over the composed `with_actor` chain, driver
+///   claims, and inline sinks. The [`BTreeSet`] arrives sorted; the field
+///   preserves that order.
+/// - `env_keys` — the composition-derived known-key set
+///   ([`ConfigManifest::known_keys`]) folded with the chassis's
+///   [`residual knobs`](BootableChassis::residual_knobs), sorted — exactly the
+///   keys this binary's own unknown-`AETHER_*` sweep accepts.
+/// - `argv_flags` — the composition-derived argv overlay surface
+///   ([`ConfigManifest::argv_flags`]), already sorted — the derive-emitted
+///   `--flags` this binary accepts, from the same machinery that stamps them
+///   onto each overlay.
 ///
 /// # Errors
 ///
@@ -234,12 +248,23 @@ pub struct BuildProvenance {
 /// fails.
 #[cfg(feature = "wasm")]
 pub fn describe_manifest<C: BootableChassis>(provenance: &BuildProvenance) -> Result<BinaryManifest, BootError> {
+    let env = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
+    let boot = SubstrateBoot::build()?;
+    let builder = C::compose(&boot, env);
+
+    let config = builder.config_manifest();
+    let mut env_keys: Vec<String> = config.known_keys(&C::residual_knobs()).iter().map(str::to_owned).collect();
+    env_keys.sort();
+    let argv_flags: Vec<String> = config.argv_flags().into_iter().map(str::to_owned).collect();
+
     Ok(BinaryManifest {
         chassis: C::PROFILE.to_owned(),
-        caps: describe_caps::<C>()?.into_iter().collect(),
+        caps: builder.claim_namespaces()?.into_iter().collect(),
         git_sha: provenance.git_sha.clone(),
         profile: provenance.profile.clone(),
         target: provenance.target.clone(),
+        env_keys,
+        argv_flags,
     })
 }
 
