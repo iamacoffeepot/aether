@@ -725,12 +725,12 @@ fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str, fi
 /// chassis used to hand-maintain per cap. A chassis CLI root's container
 /// `StageArgv` (the sibling `#[derive(aether_substrate::StageArgv)]`) delegates
 /// to this per field, so the whole staging block collapses to one
-/// `cli.stage(&mut sources)` call and a forgotten cap is a compile error rather
-/// than a silently-dropped flag.
+/// `cli.stage_argv(&mut sources)` call and a forgotten cap is a compile error
+/// rather than a silently-dropped flag.
 fn emit_stage_argv_impl(domain_ident: &Ident, overlay_ident: &Ident) -> TokenStream2 {
     quote! {
         impl ::aether_substrate::config::StageArgv for #overlay_ident {
-            fn stage(self, sources: &mut ::aether_substrate::config::ConfigSources) {
+            fn stage_argv(self, sources: &mut ::aether_substrate::config::ConfigSources) {
                 sources.set_argv::<#domain_ident>(self.into_layer());
             }
         }

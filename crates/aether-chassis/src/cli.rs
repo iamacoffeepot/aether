@@ -1,6 +1,6 @@
 //! Per-chassis clap CLI roots (ADR-0090 unit d, issue 1258). Each
 //! chassis bin calls `<Cli>::parse()` and threads the resolved
-//! overlays through `*Env::from_env_with_argv(cli)`; each overlay's
+//! overlays through `*Env::resolve(cli)`; each overlay's
 //! `into_layer()` writes argv-set fields into a partial
 //! `<*ConfigLayer as confique::Config>::Layer`, which the cap's
 //! `from_argv_then_env(...)` then preloads ahead of `.env()` so argv
@@ -12,8 +12,8 @@
 //! **derived**, not hand-maintained. `#[derive(aether_substrate::Config)]` emits
 //! a leaf `StageArgv` on every `*Overlay`, and each root here carries
 //! `#[derive(aether_substrate::StageArgv)]` — the container half that delegates
-//! to every field's `stage`. A chassis then stages its whole CLI in one
-//! `cli.stage(&mut sources)` call, so adding an overlay field to a root IS
+//! to every field's `stage_argv`. A chassis then stages its whole CLI in one
+//! `cli.stage_argv(&mut sources)` call, so adding an overlay field to a root IS
 //! staging it. Non-overlay meta fields (`config` / `print_config` / `describe`)
 //! carry `#[stage(skip)]`; an unannotated non-overlay field fails to compile,
 //! and a staged-but-never-composed overlay fails boot loudly
@@ -56,7 +56,10 @@
 //! chassis-shape (cross-cap) composition the derive deliberately
 //! doesn't try to model.
 
+use aether_substrate::config::{ConfigError, ConfigSources, StageArgv};
 use clap::{Args, Parser};
+
+use crate::boot::load_chassis_config;
 
 // Per-cap overlays are emitted by `#[derive(aether_substrate::Config)]`
 // next to the domain struct in each cap's own crate. Re-exporting them
@@ -79,6 +82,53 @@ pub use aether_rpc::RpcServerOverlay;
 pub use crate::boot::{ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, env_only_after_help};
 pub use crate::tick::TickOverlay;
 pub use crate::window::WindowOverlay;
+
+/// The three source-selecting meta flags every chassis root carries. They name
+/// the file source and the print/describe exits, so they belong to no cap
+/// member and take no part in argv staging (`#[stage(skip)]` where flattened).
+#[derive(Args, Debug, Default, Clone)]
+pub struct ChassisMeta {
+    /// Sectioned TOML chassis config file. Values from this file sit below env
+    /// and argv in the source stack.
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<String>,
+
+    /// Print every config knob (source-resolved value, default, doc) and exit
+    /// before boot (ADR-0090 §4 discovery dump).
+    #[arg(long = "print-config")]
+    pub print_config: bool,
+
+    /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
+    /// provenance) as JSON and exit before boot (ADR-0115, issue 1953). The
+    /// hub's binary store forks `<binary> --describe` once at upload time to
+    /// capture what a stored binary is.
+    #[arg(long = "describe")]
+    pub describe: bool,
+}
+
+/// A chassis CLI root: a derived [`StageArgv`] over its per-cap overlay fields
+/// plus the shared [`ChassisMeta`] flags. [`into_sources`](Self::into_sources)
+/// is the whole file+argv source-stack assembly every resolver opens with —
+/// load the `--config` file into a [`ConfigSources`], then stage the root's
+/// derived argv layers onto it (argv > env > file > default).
+pub trait ChassisCli: StageArgv + Sized {
+    /// The root's flattened [`ChassisMeta`] — the file source and print/describe
+    /// exits.
+    fn meta(&self) -> &ChassisMeta;
+
+    /// Assemble the source stack: the loaded `--config` file plus every cap
+    /// member's typed argv overlay, staged in one derived [`StageArgv`] call off
+    /// the CLI declaration itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the `--config` file fails to load or parse.
+    fn into_sources(self) -> Result<ConfigSources, ConfigError> {
+        let mut sources = ConfigSources::new(load_chassis_config(self.meta().config.clone())?);
+        self.stage_argv(&mut sources);
+        Ok(sources)
+    }
+}
 
 /// Argv overlay shared by every full-stack chassis (desktop +
 /// headless). Captures every cap whose config layer is the same on
@@ -157,25 +207,17 @@ pub struct DesktopCli {
     #[command(flatten)]
     pub window: WindowOverlay,
 
-    /// Sectioned TOML chassis config file. Values from this file sit
-    /// below env and argv in the source stack.
-    #[arg(long = "config", value_name = "PATH")]
+    /// The source-selecting meta flags (`--config` / `--print-config` /
+    /// `--describe`); see [`ChassisMeta`].
+    #[command(flatten)]
     #[stage(skip)]
-    pub config: Option<String>,
+    pub meta: ChassisMeta,
+}
 
-    /// Print every config knob (source-resolved value, default, doc)
-    /// and exit before boot (ADR-0090 §4 discovery dump).
-    #[arg(long = "print-config")]
-    #[stage(skip)]
-    pub print_config: bool,
-
-    /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
-    /// build provenance) as JSON and exit before boot (ADR-0115, issue
-    /// 1953). The hub's binary store forks `<binary> --describe` once at
-    /// upload time to capture what a stored binary is.
-    #[arg(long = "describe")]
-    #[stage(skip)]
-    pub describe: bool,
+impl ChassisCli for DesktopCli {
+    fn meta(&self) -> &ChassisMeta {
+        &self.meta
+    }
 }
 
 /// Headless chassis CLI root.
@@ -196,25 +238,17 @@ pub struct HeadlessCli {
     #[command(flatten)]
     pub tick: TickOverlay,
 
-    /// Sectioned TOML chassis config file. Values from this file sit
-    /// below env and argv in the source stack.
-    #[arg(long = "config", value_name = "PATH")]
+    /// The source-selecting meta flags (`--config` / `--print-config` /
+    /// `--describe`); see [`ChassisMeta`].
+    #[command(flatten)]
     #[stage(skip)]
-    pub config: Option<String>,
+    pub meta: ChassisMeta,
+}
 
-    /// Print every config knob (source-resolved value, default, doc)
-    /// and exit before boot (ADR-0090 §4 discovery dump).
-    #[arg(long = "print-config")]
-    #[stage(skip)]
-    pub print_config: bool,
-
-    /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
-    /// build provenance) as JSON and exit before boot (ADR-0115, issue
-    /// 1953). The hub's binary store forks `<binary> --describe` once at
-    /// upload time to capture what a stored binary is.
-    #[arg(long = "describe")]
-    #[stage(skip)]
-    pub describe: bool,
+impl ChassisCli for HeadlessCli {
+    fn meta(&self) -> &ChassisMeta {
+        &self.meta
+    }
 }
 
 /// Hub chassis CLI root — coordinator-only, no full-stack caps.
@@ -254,25 +288,17 @@ pub struct HubCli {
     #[command(flatten)]
     pub settlement: SettlementOverlay,
 
-    /// Sectioned TOML chassis config file. Values from this file sit
-    /// below env and argv in the source stack.
-    #[arg(long = "config", value_name = "PATH")]
+    /// The source-selecting meta flags (`--config` / `--print-config` /
+    /// `--describe`); see [`ChassisMeta`].
+    #[command(flatten)]
     #[stage(skip)]
-    pub config: Option<String>,
+    pub meta: ChassisMeta,
+}
 
-    /// Print every config knob (source-resolved value, default, doc)
-    /// and exit before boot (ADR-0090 §4 discovery dump).
-    #[arg(long = "print-config")]
-    #[stage(skip)]
-    pub print_config: bool,
-
-    /// Print this binary's `BinaryManifest` (chassis kind, linked caps,
-    /// build provenance) as JSON and exit before boot (ADR-0115, issue
-    /// 1953). The hub's binary store forks `<binary> --describe` once at
-    /// upload time to capture what a stored binary is.
-    #[arg(long = "describe")]
-    #[stage(skip)]
-    pub describe: bool,
+impl ChassisCli for HubCli {
+    fn meta(&self) -> &ChassisMeta {
+        &self.meta
+    }
 }
 
 #[cfg(test)]
@@ -286,7 +312,7 @@ mod checkability_tests {
     //! (or a stale flag left in the root) fails the assertion honestly.
 
     use super::{
-        ActorRingOverlay, CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli,
+        ActorRingOverlay, ChassisMeta, CommonOverlay, DesktopCli, FleetOverlay, HeadlessCli, HttpOverlay, HubCli,
         RenderTuningOverlay, RpcServerOverlay, SchedulerTuningOverlay, SettlementOverlay, TickOverlay,
     };
     use crate::window::WindowOverlay;
@@ -308,9 +334,11 @@ mod checkability_tests {
 
     /// The source-selecting meta flags every chassis root carries directly
     /// (they name the file source and the print/describe exits, so they belong
-    /// to no cap member).
+    /// to no cap member). Derived from the [`ChassisMeta`] Args group itself,
+    /// the same flatten a root gets, so the expected set cannot drift from the
+    /// declaration.
     fn meta_flags() -> BTreeSet<String> {
-        ["config", "print-config", "describe"].into_iter().map(str::to_owned).collect()
+        overlay_flags::<ChassisMeta>()
     }
 
     #[test]
