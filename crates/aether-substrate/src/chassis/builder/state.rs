@@ -329,12 +329,11 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     /// installing any value — purely type-level (`M::members()`), so the section
     /// and `META` fold into the same walk but no builder seam is touched. After the
     /// chassis-member fuse, a declaration with no matching value install is
-    /// legitimate only where value-free is the truth: the hub's fleet pass-through
-    /// superset (which declares cap members it never composes, hence the
-    /// unqualified [`ConfigMember`] bound) and the process-global members whose
-    /// value applies off the builder entirely — `FrameSizeConfig` (pushed into
-    /// the codec at env time) and `RuntimeConfig` (log filter applied in
-    /// `Chassis::build`). A member with a builder seam pairs its install with this
+    /// legitimate only where value-free is the truth: the process-global members
+    /// whose value applies off the builder entirely — `FrameSizeConfig` (pushed
+    /// into the codec at env time) and `RuntimeConfig` (log filter applied in
+    /// `Chassis::build`) — which take the unqualified [`ConfigMember`] bound
+    /// because they touch no builder seam. A member with a builder seam pairs its install with this
     /// declaration through `with_chassis_config_member` instead, so the two halves
     /// cannot drift.
     #[must_use]
