@@ -50,7 +50,7 @@
 //! header — the reference pattern is bytes→engine-resident, not format
 //! parsing, so the actor never links an image decoder.
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::Rgba;
@@ -76,10 +76,10 @@ const TILE_ASSET_NAME: &str = "tile.rgba";
 /// samples its full `[0,1]²` uv range, magnified.
 const DRAW_SIZE_PIXELS: f32 = 128.0;
 
-/// ADR-0163 §2: embed the tile in the `aether.asset.tile.rgba` custom
-/// section. The path resolves relative to this source file, so the bytes
-/// are `src/bundle/tile.rgba`. Emitted on the wasm build; on the host
-/// rlib build it reduces to a compile-checked `include_bytes!` const.
+// ADR-0163 §2: embed the tile in the `aether.asset.tile.rgba` custom
+// section. The path resolves relative to this source file, so the bytes
+// are `src/bundle/tile.rgba`. Emitted on the wasm build; on the host
+// rlib build it reduces to a compile-checked `include_bytes!` const.
 aether_actor::export_asset!("tile.rgba");
 
 /// The warm-tier state a resident tile survives the load window as: the
@@ -143,7 +143,7 @@ impl WasmActor for BundleComponent {
             );
             return;
         };
-        let expected = (TILE_WIDTH * TILE_HEIGHT * TextureFormat::Rgba8.bytes_per_pixel() as u32) as usize;
+        let expected = TILE_WIDTH as usize * TILE_HEIGHT as usize * TextureFormat::Rgba8.bytes_per_pixel();
         if pixels.len() != expected {
             tracing::warn!(
                 target: "aether_kit_commons",
