@@ -314,8 +314,9 @@ impl FleetHarness {
         self.spawn_headless_inner(None)
     }
 
-    /// Fork a real `aether-substrate-headless` with an `AETHER_BOOT_MANIFEST`
-    /// pointing at `boot_manifest_path` (ADR-0116, issue 1956), so the
+    /// Fork a real `aether-substrate-headless` with a `--boot-manifest`
+    /// pointing at `boot_manifest_path` (ADR-0116, issue 1956; the hub
+    /// addresses it via argv per ADR-0162), so the
     /// engine comes up with the manifest's components already loading — the
     /// path a `spawn_substrate` carrying a component list drives. Records
     /// the engine for teardown.

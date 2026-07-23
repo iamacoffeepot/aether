@@ -285,7 +285,8 @@ mod tests {
 
         // A stand-in chassis bin that ingests cleanly (prints a headless
         // manifest on `--describe`) but, when forked normally, `exec`s a
-        // sleep instead of binding its `AETHER_RPC_PORT`. The proxy's
+        // sleep instead of binding the RPC port the hub hands it via
+        // `--rpc-port` (ADR-0162 argv injection). The proxy's
         // dial refuses for the whole (short) connect budget, so the
         // spawn fails after the substrate forked but never connected —
         // the post-allocation failure this test pins. `exec` makes the
