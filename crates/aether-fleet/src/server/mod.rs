@@ -6,8 +6,9 @@
 //!
 //! - **`on_spawn`** ([`SpawnEngine`]) picks a free localhost port,
 //!   fork+execs the substrate binary with the port addressed as
-//!   `--rpc-port` argv (ADR-0162; inherited `AETHER_*` env scrubbed at
-//!   fork), then boots an `aether.fleet.proxy:<id>` child actor that dials
+//!   `--rpc-port` argv (ADR-0162; the child's environment is constructed
+//!   from an allowlist at fork, never inherited, so no `AETHER_*` key
+//!   crosses), then boots an `aether.fleet.proxy:<id>` child actor that dials
 //!   it. The proxy owns the forked child from there — startup-dial
 //!   retry, kill-on-failed-boot, kill-on-drop. Reply:
 //!   `SpawnEngineResult`.

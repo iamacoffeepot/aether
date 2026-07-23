@@ -6,6 +6,7 @@
 //! single `use runtime::*` glob in the parent.
 
 use super::{FleetConfig, FleetServer};
+use crate::child_env::isolate_child_environment;
 pub use crate::kinds::ForwardEnvelope;
 use crate::kinds::{EngineAlive, EngineDied};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
@@ -30,8 +31,6 @@ pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
-use std::env;
-use std::ffi::OsString;
 pub use std::path::PathBuf;
 pub use std::process::{Command, Stdio};
 pub use std::sync::Arc;
@@ -154,39 +153,6 @@ impl FleetServerState {
     fn fail_spawn(&mut self, engine_id: EngineId, rpc_port: u16, error: String) -> SpawnEngineResult {
         self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error.clone() });
         SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
-    }
-}
-
-/// Remove every `AETHER_*` key the parent exported from `command`'s child
-/// environment (ADR-0162). Config never crosses a process boundary
-/// ambiently: a stale or typo'd operator export on the hub must not reach a
-/// spawned engine, where it would either misconfigure it silently or trip
-/// the child's own unknown-key sweep. Non-`AETHER_` env passes through by
-/// inheritance untouched. Addressed config rides argv instead, so this is
-/// pure enforcement — the injected values are appended as flags at the call
-/// site.
-fn scrub_ambient_aether_env(command: &mut Command) {
-    // Process-level env *enumeration* to enforce the ambient-config scrub —
-    // not a capability reading its own config. Only the keys matter (the
-    // values are discarded), so this is the sanctioned process-wiring read
-    // the clippy disallow-list carves out, not an `AETHER_*` config pull.
-    #[allow(clippy::disallowed_methods)]
-    let keys: Vec<OsString> = env::vars_os().map(|(key, _)| key).collect();
-    scrub_aether_keys(command, keys);
-}
-
-/// Mark every `AETHER_*`-prefixed key in `env_keys` for removal on
-/// `command`. Split from [`scrub_ambient_aether_env`] so the prefix rule is
-/// exercised against a synthetic key set without touching the process
-/// environment.
-fn scrub_aether_keys<I>(command: &mut Command, env_keys: I)
-where
-    I: IntoIterator<Item = OsString>,
-{
-    for key in env_keys {
-        if key.as_encoded_bytes().starts_with(b"AETHER_") {
-            command.env_remove(&key);
-        }
     }
 }
 
@@ -346,15 +312,14 @@ impl NativeActor for FleetServer {
 
             let mut command = Command::new(&exec_path);
             command.stdin(Stdio::null());
-            // ADR-0162: config never crosses a process boundary ambiently.
-            // Scrub every inherited `AETHER_*` key so a stale operator
-            // export on the hub can't silently reconfigure a spawned
-            // engine; non-`AETHER_` env (`PATH`, `HOME`, GPU driver vars,
-            // secrets) passes through untouched. The child's addressed
-            // config rides argv below, and argv does not inherit — so a
-            // substrate that forks its own subprocess isolates by
-            // construction, no scrub needed a generation down.
-            scrub_ambient_aether_env(&mut command);
+            // ADR-0162: a spawned engine's environment is constructed, never
+            // inherited. Clear it and copy only the platform/third-party
+            // allowlist (locale, proxy, driver vars, `PATH` / `HOME`, …); no
+            // `AETHER_*` key survives, so aether config can't ride the ambient
+            // channel. The child's addressed config rides argv below, and
+            // argv does not inherit — so a substrate that forks its own
+            // subprocess isolates by construction a generation down.
+            isolate_child_environment(&mut command);
             // argv is the machine channel: the caller's per-spawn `args`
             // first, then the hub's injections as the child's own
             // derive-emitted overlay flags (ADR-0156). `--rpc-port`
@@ -687,39 +652,5 @@ impl NativeActor for FleetServer {
         mail: ListComponentBinaries,
     ) -> ListComponentBinariesResult {
         state.store.list_components_page(&mail)
-    }
-}
-
-#[cfg(test)]
-mod scrub_tests {
-    use super::{Command, scrub_aether_keys};
-    use std::collections::HashMap;
-    use std::ffi::{OsStr, OsString};
-
-    /// Tripwire (ADR-0162): the fork scrub removes exactly the `AETHER_*`
-    /// keys and nothing else. Drifts if the prefix rule regresses — a
-    /// dropped `AETHER_*` key would let an ambient hub export reach a
-    /// spawned engine (the leak the ADR closes), and an over-broad match
-    /// (`PATH`, `HOME`, GPU driver vars, or a bare `AETHER…` without the
-    /// `_` boundary) would strip environment the child legitimately
-    /// inherits. Asserted against `Command::get_envs`, whose `None` value
-    /// is the pending `env_remove`.
-    #[test]
-    fn scrub_marks_only_aether_prefixed_keys_for_removal() {
-        let mut command = Command::new("true");
-        let keys = ["AETHER_RPC_PORT", "AETHER_TICK_HZ", "PATH", "HOME", "AETHERISH"].into_iter().map(OsString::from);
-        scrub_aether_keys(&mut command, keys);
-
-        let ops: HashMap<OsString, Option<OsString>> =
-            command.get_envs().map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned))).collect();
-
-        // The two `AETHER_*` keys are marked for removal (value `None`).
-        assert_eq!(ops.get(OsStr::new("AETHER_RPC_PORT")), Some(&None), "AETHER_RPC_PORT must be scrubbed");
-        assert_eq!(ops.get(OsStr::new("AETHER_TICK_HZ")), Some(&None), "AETHER_TICK_HZ must be scrubbed");
-        // Non-`AETHER_` keys record no op at all — they inherit untouched.
-        assert!(!ops.contains_key(OsStr::new("PATH")), "PATH must pass through untouched");
-        assert!(!ops.contains_key(OsStr::new("HOME")), "HOME must pass through untouched");
-        // `AETHERISH` lacks the `_` boundary, so it is not an `AETHER_*` key.
-        assert!(!ops.contains_key(OsStr::new("AETHERISH")), "a non-boundary AETHER prefix must not be scrubbed");
     }
 }
