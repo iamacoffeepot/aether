@@ -24,7 +24,7 @@ aether-substrate = { path = "../aether-substrate", features = ["render"] }
 # boots it and owns the surface on the winit thread), plus the
 # window/audio/clipboard caps and the common-cap configs the env threads
 # through `with_common_caps`. `aether-render/desktop` pulls the pumped
-# runtime (`PumpedRenderCapability` + winit-typed `WindowCell`).
+# runtime and its per-window surface support.
 aether-render = { path = "../aether-render", features = ["desktop"] }
 aether-window = { path = "../aether-window", features = ["desktop"] }
 aether-audio = { path = "../aether-audio", features = ["runtime"] }

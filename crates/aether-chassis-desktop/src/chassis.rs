@@ -1,5 +1,4 @@
-//! Desktop chassis: `DesktopChassis` (ADR-0035 / ADR-0071), the
-//! `UserEvent` enum the winit event loop consumes, and the
+//! Desktop chassis: `DesktopChassis` (ADR-0035 / ADR-0071) and the
 //! [`DesktopChassis::build`] entry point that assembles the substrate
 //! + driver into a [`BuiltChassis`] for `main()` to drive.
 //!
@@ -7,11 +6,9 @@
 //! driver-as-actor on `aether.window` (Phase 3), and `platform_info` was
 //! deleted as a kind (Phase 4) along with the closure-fallback that served
 //! it. ADR-0161 R3 made capture a mail-driven state machine inside the pumped
-//! `aether.render` actor (deleting `UserEvent::Capture`), so the sole proxy
-//! event is `UserEvent::WindowMail` — the generic "a pumped slot took mail,
-//! wake the loop" signal both the window and render slots poke, so
-//! `about_to_wait` drains them even under `ControlFlow::Wait`
-//! (iamacoffeepot/aether#1318).
+//! `aether.render` actor. ADR-0164 places the winit handler and its user-event
+//! vocabulary in `aether-window`; the chassis only constructs and runs that
+//! application.
 
 use std::io;
 use std::mem;
@@ -41,29 +38,7 @@ use crate::cli::DesktopCli;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 use winit::event_loop::ControlFlow;
 
-/// Event the event-loop thread consumes from the desktop chassis. Both
-/// variants are wake-only — they turn the loop so a handler runs, never
-/// carrying work themselves.
-#[derive(Debug, Clone)]
-pub enum UserEvent {
-    /// A pumped slot (`aether.window` or, since ADR-0161 R3, `aether.render`)
-    /// took mail; wake the loop so `about_to_wait` drains it even under
-    /// `ControlFlow::Wait` (iamacoffeepot/aether#1318). Without this a
-    /// window-control mail (`aether.window.focus` / `set_mode` / `set_title`)
-    /// or a `capture_frame` sent to an occluded window sits undrained until an
-    /// unrelated winit event nudges the loop. ADR-0161 generalized the
-    /// ADR-0160 window rule (and deleted the render-specific `Capture` wake) —
-    /// every pumped slot's wake pokes this.
-    WindowMail,
-    /// A SIGINT/SIGTERM was observed by the signal-watcher thread
-    /// (iamacoffeepot/aether#1489). Carries no work itself — it only
-    /// wakes the loop so `about_to_wait` observes the shutdown flag and
-    /// runs the `Quit`-push path, mirroring `WindowMail`. Needed because
-    /// an async-signal-safe handler can't poke winit, and a parked
-    /// (`ControlFlow::Wait`, occluded) loop otherwise never runs
-    /// `about_to_wait` to see the flag.
-    Quit,
-}
+pub use aether_window::DesktopWindowUserEvent as UserEvent;
 
 /// Marker type for the desktop chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<DesktopChassis>`] returned
