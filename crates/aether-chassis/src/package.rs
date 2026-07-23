@@ -168,8 +168,10 @@ impl Error for Sha256ParseError {}
 /// package carries the same three knobs the bundle pack does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageManifest {
-    /// Chassis settings applied by the standalone-bundle path (a later
-    /// slice); this runtime autoload path consumes only [`entries`](Self::entries).
+    /// Chassis settings (title / window mode / tick rate) the depot boot path
+    /// and the standalone-bundle path apply BELOW argv/env, ABOVE the compiled
+    /// defaults (issue 4001); surfaced alongside [`entries`](Self::entries) by
+    /// [`package_autoload`] / [`embedded_autoload`].
     pub settings: ChassisSettings,
     /// The component entries, in autoload order.
     pub entries: Vec<PackageEntry>,
@@ -560,42 +562,48 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest, PackageErro
     decode_manifest(&bytes).map_err(|source| PackageError::Decode { path, source })
 }
 
-/// Read the package rooted at `package_root` into the boot autoload
-/// component list — the store-backed twin of
-/// [`crate::autoload::boot_manifest_autoload`] (ADR-0163 §1). Decodes
-/// `pack/manifest`, resolves each entry's object (and optional config)
-/// bytes against the package's `pack/objects` store, then fans out replicas
-/// through the shared [`expand_replicas`].
+/// Read the package rooted at `package_root` into its [`ChassisSettings`]
+/// plus the boot autoload component list — the store-backed twin of
+/// [`embedded_autoload`] (ADR-0163 §1). Decodes `pack/manifest`, resolves
+/// each entry's object (and optional config) bytes against the package's
+/// `pack/objects` store, then fans out replicas through the shared
+/// [`expand_replicas`].
 ///
-/// The manifest's [`ChassisSettings`] are carried by the persisted artifact
-/// for the standalone-bundle path (a later slice); this runtime autoload
-/// path consumes only the entries, exactly as `boot_manifest_autoload`
-/// drops the boot manifest's own chassis settings.
+/// Returns the manifest's [`ChassisSettings`] alongside the autoload list
+/// (issue 4001): the depot boot path (`--package` / `AETHER_PACKAGE`) applies
+/// title / window mode / tick rate BELOW argv/env, ABOVE the compiled defaults,
+/// so a shipped package comes up titled and in its window mode while an
+/// operator's `AETHER_WINDOW_*` / `--window-*` still overrides it. This is the
+/// disk twin of `embedded_autoload` (which surfaces the same settings for the
+/// standalone-bundle bins); `boot_manifest_autoload` — the hub-driven JSON
+/// channel — deliberately keeps dropping its manifest's settings.
 ///
 /// # Errors
 ///
 /// A hard [`ConfigError`] (ADR-0090 §4: a known knob with a bad value
 /// aborts boot loudly) when the manifest is unreadable, doesn't decode, an
 /// object is missing, or a `replicas` fan-out is invalid.
-pub fn package_autoload(package_root: &Path) -> Result<Vec<AutoloadComponent>, ConfigError> {
+pub fn package_autoload(package_root: &Path) -> Result<(ChassisSettings, Vec<AutoloadComponent>), ConfigError> {
     // Two error domains: `PackageError` (file / decode / object resolution)
     // and `ConfigError` (the replica fan-out). Resolve the packs first, map
     // that domain onto the boot fault, then expand replicas.
-    let packed = read_and_resolve(package_root)
+    let (settings, packed) = read_and_resolve(package_root)
         .map_err(|e| ConfigError::unparseable("AETHER_PACKAGE", package_root.display().to_string(), e))?;
     let mut components = Vec::new();
     for entry in packed {
         components.extend(expand_replicas(entry)?);
     }
-    Ok(components)
+    Ok((settings, components))
 }
 
-/// Resolve the package's entries to their loaded [`PackedComponent`]s
-/// (object + config bytes pulled from the store), before replica fan-out.
-fn read_and_resolve(package_root: &Path) -> Result<Vec<PackedComponent>, PackageError> {
-    let manifest = read_manifest(package_root)?;
+/// Resolve the package's chassis settings + entries to their loaded
+/// [`PackedComponent`]s (object + config bytes pulled from the store), before
+/// replica fan-out.
+fn read_and_resolve(package_root: &Path) -> Result<(ChassisSettings, Vec<PackedComponent>), PackageError> {
+    let PackageManifest { settings, entries } = read_manifest(package_root)?;
     let stores = ObjectStores::single(package_root.join(PACK_DIR).join(OBJECTS_DIR));
-    resolve_entries(manifest.entries, &stores)
+    let packed = resolve_entries(entries, &stores)?;
+    Ok((settings, packed))
 }
 
 /// Resolve a decoded manifest's `entries` against an [`ObjectSource`] into the
@@ -799,12 +807,15 @@ mod tests {
     }
 
     #[test]
-    fn package_autoload_resolves_objects_into_components() {
+    fn package_autoload_resolves_objects_and_surfaces_settings() {
         // The end-to-end store-backed boot path: write a package directory
         // (manifest + hash-named objects), then prove `package_autoload`
-        // decodes the manifest, pulls each object's bytes from the store,
-        // and fans out replicas — the bug this catches is an entry resolved
-        // against the wrong hash or a replica fan-out that drops an instance.
+        // decodes the manifest, surfaces its chassis settings, pulls each
+        // object's bytes from the store, and fans out replicas. Two bugs this
+        // catches: an entry resolved against the wrong hash or a replica
+        // fan-out that drops an instance, AND the depot boot path dropping the
+        // manifest's chassis settings (issue 4001 — the settings must reach the
+        // caller so the chassis can apply title / window mode / tick rate).
         let root = scratch_dir("package");
         let objects = root.join(PACK_DIR).join(OBJECTS_DIR);
         fs::create_dir_all(&objects).expect("objects dir");
@@ -812,8 +823,13 @@ mod tests {
         let cfg = Sha256([0x55; 32]);
         fs::write(objects.join(wasm.to_hex()), [0x00, 0x61, 0x73, 0x6d]).expect("write wasm");
         fs::write(objects.join(cfg.to_hex()), [7, 8, 9]).expect("write cfg");
+        let settings = ChassisSettings {
+            title: Some("depot".to_owned()),
+            window_mode: Some("windowed:640x480".to_owned()),
+            tick_hz: Some(120),
+        };
         let manifest = PackageManifest {
-            settings: ChassisSettings::default(),
+            settings: settings.clone(),
             entries: vec![PackageEntry {
                 object: wasm,
                 config: Some(cfg),
@@ -824,7 +840,8 @@ mod tests {
         };
         fs::write(root.join(PACK_DIR).join(MANIFEST_FILE), encode_manifest(&manifest)).expect("write manifest");
 
-        let components = package_autoload(&root).expect("autoload");
+        let (returned_settings, components) = package_autoload(&root).expect("autoload");
+        assert_eq!(returned_settings, settings, "the manifest's chassis settings surface to the depot boot path");
         assert_eq!(components.len(), 2, "replicas: 2 fans out to two components");
         for (index, component) in components.iter().enumerate() {
             assert_eq!(component.wasm, vec![0x00, 0x61, 0x73, 0x6d]);

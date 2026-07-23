@@ -6,6 +6,10 @@
 
 use std::time::Duration;
 
+use aether_substrate::config::{ConfigError, ConfigSources};
+
+use crate::bundle_pack::ChassisSettings;
+
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
 /// Headless tick-cadence knob (ADR-0090 §1/§2 applied to the chassis's
@@ -45,10 +49,67 @@ impl TickConfig {
     }
 }
 
+/// Overlay a depot package manifest's tick cadence onto `sources` BELOW
+/// argv/env/file, ABOVE the compiled default (issue 4001) — the headless
+/// half of applying a `--package` / `AETHER_PACKAGE` manifest's
+/// [`ChassisSettings`].
+///
+/// The standalone-bundle bin overlays `tick_hz` as a top-priority
+/// `set_override` (the binary *is* the product, ADR-0163 §1); on the shared
+/// headless chassis an operator must keep the ability to override a shipped
+/// package with `AETHER_TICK_HZ` / `--tick-hz`, so the manifest slots in one
+/// layer lower. The mechanism: resolve [`TickConfig`] off the stack (folding
+/// any argv / env / file value), and only when it resolved to the compiled
+/// default ([`DEFAULT_TICK_HZ`] — i.e. no higher source supplied a non-default
+/// cadence) substitute the manifest's value, re-staging the result as the
+/// programmatic override the headless `Chassis::build` resolves. A higher
+/// source that pins a value equal to the default is indistinguishable from an
+/// unset knob, so the manifest wins that degenerate case — pinning a knob to
+/// its own default is a semantic no-op.
+///
+/// A `title` / `window_mode` in the manifest is a desktop knob the headless
+/// chassis has no window for, so it is warn-ignored here (mirroring the bundle
+/// bins).
+///
+/// # Errors
+///
+/// Propagates the [`ConfigError`] from resolving [`TickConfig`] off the stack
+/// when a known `AETHER_TICK_*` value is malformed (ADR-0090 §4).
+pub fn apply_manifest_tick_settings(
+    sources: &mut ConfigSources,
+    settings: &ChassisSettings,
+) -> Result<(), ConfigError> {
+    if settings.title.is_some() || settings.window_mode.is_some() {
+        tracing::warn!(
+            target: "aether_substrate::boot",
+            "depot package sets title/window_mode, which the headless chassis ignores (no window)",
+        );
+    }
+    // A `0` cadence is the unset sentinel (`nonzero` maps it to the default), so
+    // treat a manifest `Some(0)` as "no cadence carried" and leave the stack's
+    // own resolution untouched.
+    let Some(manifest_hz) = settings.tick_hz.filter(|hz| *hz > 0) else {
+        return Ok(());
+    };
+
+    let resolved = sources.resolve::<TickConfig>()?;
+    let hz = if resolved.hz == DEFAULT_TICK_HZ {
+        manifest_hz
+    } else {
+        resolved.hz
+    };
+    sources.set_override(TickConfig { hz });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_TICK_HZ, TickConfig, TickConfigLayer};
+    use super::{
+        ChassisSettings, ConfigSources, DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, apply_manifest_tick_settings,
+    };
     use confique::Config as _;
+    use std::env;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     #[test]
@@ -67,5 +128,44 @@ mod tests {
         // The only lowering logic this crate owns: hz → Duration.
         assert_eq!(TickConfig { hz: 60 }.to_tick_period(), Duration::from_nanos(1_000_000_000 / 60),);
         assert_eq!(TickConfig { hz: 120 }.to_tick_period(), Duration::from_nanos(1_000_000_000 / 120),);
+    }
+
+    /// Serializes the env-mutating tests in this module (the process
+    /// environment is global): every test that sets `AETHER_TICK_HZ` holds
+    /// this so a concurrent tick resolve never observes a half-set key.
+    static TICK_ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn apply_manifest_tick_beats_default() {
+        // Manifest beats default (issue 4001): with no higher source supplying
+        // the cadence, a depot package manifest's tick_hz reaches the resolved
+        // `TickConfig`. Hermetic sources so the resolve reads no env — the "no
+        // higher source" case is deterministic.
+        let mut sources = ConfigSources::hermetic();
+        let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
+        apply_manifest_tick_settings(&mut sources, &settings).expect("apply tick settings");
+        let resolved = sources.resolve::<TickConfig>().expect("resolve tick config");
+        assert_eq!(resolved.hz, 30, "manifest tick_hz fills the default cadence");
+    }
+
+    #[test]
+    fn apply_manifest_tick_yields_to_env() {
+        // Env beats manifest (issue 4001 precedence): an operator's
+        // `AETHER_TICK_HZ` overrides a shipped package's tick_hz, so the shared
+        // headless binary stays tunable. The bug this catches is the manifest
+        // overlaying at top priority (like the bundle bins) and shadowing the
+        // operator's env override. `120` differs from the compiled default so
+        // the env value is distinguishable from an unset knob.
+        let _guard = TICK_ENV_GUARD.lock().expect("env guard");
+        // SAFETY: the guard serializes every env-touching test in this module,
+        // and the key is removed before the guard drops.
+        unsafe { env::set_var("AETHER_TICK_HZ", "120") };
+        let mut sources = ConfigSources::new(None);
+        let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
+        let resolved =
+            apply_manifest_tick_settings(&mut sources, &settings).and_then(|()| sources.resolve::<TickConfig>());
+        // SAFETY: same guarded scope.
+        unsafe { env::remove_var("AETHER_TICK_HZ") };
+        assert_eq!(resolved.expect("apply + resolve").hz, 120, "env AETHER_TICK_HZ overrides the manifest tick_hz");
     }
 }

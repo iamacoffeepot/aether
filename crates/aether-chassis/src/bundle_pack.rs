@@ -42,11 +42,14 @@ pub struct PackedComponent {
     pub replicas: Option<u32>,
 }
 
-/// Chassis settings the bundle bins apply before `run()`. All
-/// optional — an unset field keeps the chassis env's own resolution
-/// (env vars / defaults). Fields a chassis doesn't support (desktop
-/// has no `tick_hz`; headless has no window) are warn-ignored by the
-/// non-matching bin.
+/// Chassis settings a package applies at boot. The standalone-bundle bins
+/// overlay them at top priority (the binary *is* the product); the depot
+/// boot path (`--package` / `AETHER_PACKAGE`) overlays them BELOW argv/env,
+/// ABOVE the compiled defaults (issue 4001), so an operator can still
+/// override a shipped package. All optional — an unset field keeps the
+/// chassis env's own resolution (env vars / defaults). Fields a chassis
+/// doesn't support (desktop has no `tick_hz`; headless has no window) are
+/// warn-ignored by the non-matching chassis.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChassisSettings {
     /// Desktop window title.

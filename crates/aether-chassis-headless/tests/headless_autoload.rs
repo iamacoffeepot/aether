@@ -111,6 +111,7 @@ mod tests {
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             autoload,
+            package_settings: ChassisSettings::default(),
         };
 
         // `build` queues the autoload mail; the worker pool (up after
@@ -178,6 +179,7 @@ mod tests {
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             autoload,
+            package_settings: ChassisSettings::default(),
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis");

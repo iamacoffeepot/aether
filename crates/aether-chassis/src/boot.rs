@@ -43,6 +43,7 @@ use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
+use crate::bundle_pack::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
 use crate::package::package_autoload;
 
@@ -825,6 +826,14 @@ pub struct CommonEnv {
     /// `Chassis::build` drains it into `aether.component.load` after the pool is
     /// up.
     pub autoload: Vec<AutoloadComponent>,
+    /// The chassis settings carried by a depot package (`--package` /
+    /// `AETHER_PACKAGE`) manifest (issue 4001). Default (all-`None`) for the
+    /// hub-driven `boot_manifest` channel and a no-boot-source boot. Each
+    /// chassis's `Chassis::build` applies the subset it supports — title /
+    /// window mode on desktop, tick rate on headless — BELOW argv/env, ABOVE the
+    /// compiled defaults, via [`apply_manifest_window_settings`](crate::apply_manifest_window_settings)
+    /// / [`apply_manifest_tick_settings`](crate::apply_manifest_tick_settings).
+    pub package_settings: ChassisSettings,
 }
 
 impl CommonEnv {
@@ -879,10 +888,16 @@ impl CommonEnv {
         // the local object store); either fills the autoload list `Chassis::build`
         // drains into `aether.component.load`. An unreadable/undecodable source
         // aborts boot (ADR-0090 §4) via `ConfigError`.
-        let autoload = match (chassis_boot.boot_manifest.clone(), chassis_boot.package.clone()) {
-            (Some(path), _) => boot_manifest_autoload(Path::new(&path))?,
+        // A `boot_manifest` (JSON) drops its own chassis settings — hub-driven
+        // engines are runtime-managed, not products — so only the `package`
+        // (depot) source carries settings to the chassis (issue 4001). Deciding
+        // the winning boot source here keeps the manifest-vs-package precedence in
+        // one place; each chassis applies the subset it supports (title /
+        // window_mode on desktop, tick_hz on headless).
+        let (package_settings, autoload) = match (chassis_boot.boot_manifest.clone(), chassis_boot.package.clone()) {
+            (Some(path), _) => (ChassisSettings::default(), boot_manifest_autoload(Path::new(&path))?),
             (None, Some(root)) => package_autoload(Path::new(&root))?,
-            (None, None) => Vec::new(),
+            (None, None) => (ChassisSettings::default(), Vec::new()),
         };
 
         // The base stratum (`ChassisBase`) carries the source stack and the three
@@ -890,7 +905,7 @@ impl CommonEnv {
         // embedded here so each `Chassis::build` can resolve its driver knobs off
         // `base.sources` before lifting the base out.
         let base = ChassisBase { sources, actor_ring, scheduler_tuning, settlement };
-        Ok(Self { base, namespace_roots, runtime, chassis_boot, autoload })
+        Ok(Self { base, namespace_roots, runtime, chassis_boot, autoload, package_settings })
     }
 
     /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
@@ -909,7 +924,7 @@ impl CommonEnv {
         component_host_params: ComponentHostParams,
         game_gateway_params: GameGatewayParams,
     ) -> CommonBoot {
-        let Self { base: _, namespace_roots, runtime: _, chassis_boot, autoload: _ } = self;
+        let Self { base: _, namespace_roots, runtime: _, chassis_boot, autoload: _, package_settings: _ } = self;
         CommonBoot { chassis_boot, component_host_params, namespace_roots, game_gateway_params }
     }
 }

@@ -32,7 +32,7 @@ use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_window::HeadlessWindowCapability;
 
-use aether_chassis::TickConfig;
+use aether_chassis::{TickConfig, apply_manifest_tick_settings};
 
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::autoload_mail;
@@ -75,6 +75,13 @@ impl Chassis for HeadlessChassis {
         // it resolves HERE, off the base's source stack, at the seam that
         // constructs the timer driver rather than pre-resolved into a per-chassis
         // env bag. `TickConfig`'s `nonzero` lowering maps 0 to the default (60 Hz).
+        //
+        // Issue 4001: a depot package (`--package`) manifest's tick cadence
+        // overlays onto the stack BELOW argv/env, ABOVE the compiled default,
+        // before the resolve — so a shipped package runs at its cadence while an
+        // operator's `AETHER_TICK_HZ` / `--tick-hz` still wins.
+        let package_settings = env.package_settings.clone();
+        apply_manifest_tick_settings(&mut env.base.sources, &package_settings)?;
         let tick_period = env.base.sources.resolve::<TickConfig>()?.to_tick_period();
         // #3930: the non-cap members ride as resolved structs now; lower the two
         // the boot log line reports (the same lowered values as before). The fused

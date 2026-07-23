@@ -31,7 +31,7 @@ use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use winit::event_loop::EventLoop;
 
-use aether_chassis::WindowConfig;
+use aether_chassis::{WindowConfig, apply_manifest_window_settings};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::autoload_mail;
@@ -114,6 +114,13 @@ impl Chassis for DesktopChassis {
         // per-chassis env bag. `lower` delegates the window mode to
         // `parse_window_mode_env`: a present-but-bad `AETHER_WINDOW_MODE` aborts
         // boot (ADR-0090 §4), an absent value resolves to `Windowed`.
+        //
+        // Issue 4001: a depot package (`--package`) manifest's title / window
+        // mode overlay onto the stack BELOW argv/env, ABOVE the compiled
+        // defaults, before the resolve — so a shipped package comes up titled and
+        // in its window mode while an operator's `AETHER_WINDOW_*` still wins.
+        let package_settings = env.package_settings.clone();
+        apply_manifest_window_settings(&mut env.base.sources, &package_settings)?;
         let window = env.base.sources.resolve::<WindowConfig>()?.lower()?;
         // ADR-0161 R3: the render tuning `Config` (vertex-buffer cap) resolves off
         // the same stack the pooled `with_actor::<RenderCapability>` path resolved

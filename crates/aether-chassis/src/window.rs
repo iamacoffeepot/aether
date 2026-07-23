@@ -8,7 +8,9 @@
 use std::io;
 
 use aether_kinds::WindowMode;
-use aether_substrate::config::ConfigError;
+use aether_substrate::config::{ConfigError, ConfigSources};
+
+use crate::bundle_pack::ChassisSettings;
 
 /// Desktop window boot knobs (ADR-0090 §1/§2 applied to the chassis's
 /// own window knobs). The `#[derive(aether_substrate::Config)]` emits
@@ -132,8 +134,59 @@ fn parse_wxh(s: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
+/// Overlay a depot package manifest's window settings onto `sources` BELOW
+/// argv/env/file, ABOVE the compiled defaults (issue 4001) — the desktop
+/// half of applying a `--package` / `AETHER_PACKAGE` manifest's
+/// [`ChassisSettings`].
+///
+/// The standalone-bundle bin overlays the same settings as a top-priority
+/// `set_override` (the binary *is* the product, ADR-0163 §1); on the shared
+/// desktop chassis an operator must keep the ability to override a shipped
+/// package with `AETHER_WINDOW_MODE` / `--window-mode` for debugging, so the
+/// manifest slots in one layer lower. The mechanism: resolve [`WindowConfig`]
+/// off the stack (folding any argv / env / file value), fill each field the
+/// manifest carries that no higher source set, then re-stage the merged value
+/// as the programmatic override the desktop `Chassis::build` resolves — so
+/// argv/env/file win per field and the manifest fills only the fields left at
+/// their default.
+///
+/// A `tick_hz` in the manifest is a headless knob the desktop chassis has no
+/// window for, so it is warn-ignored here (mirroring the bundle bins).
+///
+/// # Errors
+///
+/// Propagates the [`ConfigError`] from resolving [`WindowConfig`] off the stack
+/// when a known `AETHER_WINDOW_*` value is malformed (ADR-0090 §4).
+pub fn apply_manifest_window_settings(
+    sources: &mut ConfigSources,
+    settings: &ChassisSettings,
+) -> Result<(), ConfigError> {
+    if settings.tick_hz.is_some() {
+        tracing::warn!(
+            target: "aether_substrate::boot",
+            "depot package sets tick_hz, which the desktop chassis ignores (frame-driven ticks)",
+        );
+    }
+    if settings.title.is_none() && settings.window_mode.is_none() {
+        return Ok(());
+    }
+
+    let mut window = sources.resolve::<WindowConfig>()?;
+    if window.title.is_none() {
+        window.title.clone_from(&settings.title);
+    }
+    if window.mode.is_none() {
+        window.mode.clone_from(&settings.window_mode);
+    }
+    sources.set_override(window);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::sync::Mutex;
+
     use super::*;
 
     #[test]
@@ -205,5 +258,54 @@ mod tests {
     fn parse_ignores_whitespace() {
         let (m, _) = parse_window_mode_env("  windowed  ").expect("test setup: surrounding whitespace is trimmed");
         assert!(matches!(m, WindowMode::Windowed));
+    }
+
+    /// Serializes the env-mutating tests in this module (the process
+    /// environment is global): every test that sets `AETHER_WINDOW_*` holds
+    /// this so a concurrent window resolve never observes a half-set key.
+    static WINDOW_ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn apply_manifest_window_fills_unset_fields() {
+        // Manifest beats default (issue 4001): with no higher source supplying
+        // the window knobs, a depot package manifest's title + mode fill the
+        // unset fields and reach the resolved `WindowConfig`. The bug this
+        // catches is the depot boot path leaving a shipped package untitled and
+        // in the wrong window mode. Hermetic sources so the resolve reads no env
+        // — the "no higher source" case is deterministic.
+        let mut sources = ConfigSources::hermetic();
+        let settings = ChassisSettings {
+            title: Some("depot".to_owned()),
+            window_mode: Some("windowed:640x480".to_owned()),
+            tick_hz: None,
+        };
+        apply_manifest_window_settings(&mut sources, &settings).expect("apply window settings");
+        let resolved = sources.resolve::<WindowConfig>().expect("resolve window config");
+        assert_eq!(resolved.title.as_deref(), Some("depot"), "manifest title fills the unset field");
+        assert_eq!(resolved.mode.as_deref(), Some("windowed:640x480"), "manifest window_mode fills the unset field");
+    }
+
+    #[test]
+    fn apply_manifest_window_yields_to_env() {
+        // Env beats manifest (issue 4001 precedence): an operator's
+        // `AETHER_WINDOW_MODE` overrides a shipped package's window_mode, so the
+        // shared desktop binary stays debuggable. The bug this catches is the
+        // manifest overlaying at top priority (like the bundle bins) and
+        // shadowing the operator's env override.
+        let _guard = WINDOW_ENV_GUARD.lock().expect("env guard");
+        // SAFETY: the guard serializes every env-touching test in this module,
+        // and the key is removed before the guard drops.
+        unsafe { env::set_var("AETHER_WINDOW_MODE", "fullscreen-borderless") };
+        let mut sources = ConfigSources::new(None);
+        let settings = ChassisSettings { title: None, window_mode: Some("windowed:640x480".to_owned()), tick_hz: None };
+        let resolved =
+            apply_manifest_window_settings(&mut sources, &settings).and_then(|()| sources.resolve::<WindowConfig>());
+        // SAFETY: same guarded scope.
+        unsafe { env::remove_var("AETHER_WINDOW_MODE") };
+        assert_eq!(
+            resolved.expect("apply + resolve").mode.as_deref(),
+            Some("fullscreen-borderless"),
+            "env AETHER_WINDOW_MODE overrides the manifest window_mode",
+        );
     }
 }
