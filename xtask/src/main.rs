@@ -217,7 +217,7 @@ impl BundleChassis {
 
     /// The chassis substrate `(package, bin)` pair a `cargo xtask package`
     /// depot ships for this chassis — the real host binary from the chassis
-    /// inventory (not the standalone-bundle bin [`bin_name`] returns).
+    /// inventory (not the standalone-bundle bin [`Self::bin_name`] returns).
     fn package_chassis(self) -> (&'static str, &'static str) {
         match self {
             Self::Desktop => PACKAGE_CHASSIS,
