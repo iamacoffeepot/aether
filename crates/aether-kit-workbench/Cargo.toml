@@ -65,15 +65,15 @@ tracing = { workspace = true, default-features = false }
 inventory = { workspace = true }
 
 # The integration scenario boots a `SubstrateHarness`, runtime-loads the
-# terrain and workbench wasm artifacts, and asserts the full raw-input proposal
-# loop. Tests run host-side; the wasm is built separately for
+# terrain and workbench wasm artifacts, and asserts the full window-routed
+# proposal loop through the harness's built-in synthetic window runtime. Tests
+# run host-side; the wasm is built separately for
 # `wasm32-unknown-unknown` and discovered at runtime under
 # `target/wasm32-unknown-unknown/{debug,release}/`. The caps the scenario
 # composes on the `SubstrateHarnessBuilder` appear here with their default
 # `runtime` feature on — dev-only, the wasm lib build keeps the marker-only
 # faces above.
 [dev-dependencies]
-aether-input = { path = "../aether-input" }
 aether-text = { path = "../aether-text" }
 aether-component = { path = "../aether-component", default-features = false }
 aether-harness-substrate = { path = "../aether-harness-substrate" }

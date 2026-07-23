@@ -738,7 +738,6 @@ dependencies = [
  "aether-data",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
- "aether-input",
  "aether-kinds",
  "aether-kit-commons",
  "aether-kit-terrain",
