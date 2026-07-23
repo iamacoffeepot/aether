@@ -1,6 +1,6 @@
 # ADR-0162: Config Channels Are Addressed, Never Ambient
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-22
 
 ## Context
