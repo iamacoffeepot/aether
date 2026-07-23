@@ -64,7 +64,7 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             if opts.runtime_module.is_some() {
                 return Err(meta.error("duplicate runtime module path in #[actor] — name it at most once"));
             }
-            opts.runtime_module = Some(meta.path.clone());
+            opts.runtime_module = Some(meta.path);
             Ok(())
         } else {
             Err(meta.error(
