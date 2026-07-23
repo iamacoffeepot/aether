@@ -28,7 +28,6 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 # The caps the harness bin composes beyond the harness basics.
 aether-render = { path = "../aether-render", features = ["runtime"] }
 aether-lifecycle = { path = "../aether-lifecycle" }
-aether-input = { path = "../aether-input" }
 aether-game = { path = "../aether-game" }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-tcp = { path = "../aether-tcp" }

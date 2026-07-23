@@ -28,7 +28,6 @@ aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-http = { path = "../aether-http" }
 aether-component = { path = "../aether-component" }
 aether-lifecycle = { path = "../aether-lifecycle" }
-aether-input = { path = "../aether-input" }
 aether-rpc = { path = "../aether-rpc" }
 # The frame-size push (ADR-0156 §6): `install_frame_size` lowers the
 # `FrameSizeConfig` member (aether-rpc) and installs it into the codec.

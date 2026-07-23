@@ -172,7 +172,6 @@ dependencies = [
  "aether-game",
  "aether-harness-substrate",
  "aether-http",
- "aether-input",
  "aether-inventory",
  "aether-kinds",
  "aether-lifecycle",
@@ -258,7 +257,6 @@ dependencies = [
  "aether-fs",
  "aether-game",
  "aether-harness-substrate",
- "aether-input",
  "aether-kinds",
  "aether-lifecycle",
  "aether-render",
@@ -596,19 +594,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "aether-input"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "aether-kinds",
- "aether-substrate",
- "bytemuck",
- "inventory",
- "serde",
 ]
 
 [[package]]
@@ -1062,7 +1047,6 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-harness-substrate",
- "aether-input",
  "aether-kinds",
  "aether-substrate",
  "aether-test-fixtures-bundle",
