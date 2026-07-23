@@ -37,11 +37,10 @@ use aether_chassis::TickConfig;
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, chassis_residual_knobs, load_chassis_config, tick_only_lifecycle_params,
-    with_full_stack_caps, with_rpc_server,
+    ChassisBase, CommonEnv, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps, with_rpc_server,
 };
-use aether_chassis::cli::HeadlessCli;
-use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
+use aether_chassis::cli::{ChassisCli, HeadlessCli};
+use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::runtime::log_install::apply_filter;
 
@@ -251,7 +250,7 @@ impl HeadlessEnv {
     /// an unparseable value (ADR-0090 §4); an unknown `AETHER_*` var
     /// only warns (non-fatal).
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with_argv(HeadlessCli::default())
+        Self::resolve(HeadlessCli::default())
     }
 
     /// ADR-0090 unit d (issue 1258): resolve every cap config through
@@ -264,26 +263,18 @@ impl HeadlessEnv {
     ///
     /// Returns [`ConfigError`] when a known `AETHER_*` env var (or an
     /// argv overlay value) holds an unparseable value (ADR-0090 §4).
-    pub fn from_env_with_argv(cli: HeadlessCli) -> Result<Self, ConfigError> {
+    pub fn resolve(cli: HeadlessCli) -> Result<Self, ConfigError> {
         // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
         // where the composed builder's `config_manifest` supplies the
         // per-chassis known-key set (headless no longer "knows" the window /
         // audio / render knobs it never composes).
-        // The bin handles `--print-config` / `--describe` (print + exit) before
-        // this resolver runs; `config` names the file source and takes no part
-        // in staging.
-        let config_file = load_chassis_config(cli.config.clone())?;
-
-        // ADR-0156 §5 (issue 3872): assemble the source stack — the loaded
-        // config file plus every cap member's typed argv overlay, staged in one
-        // derived `StageArgv` call off the CLI declaration itself (each `*Overlay`
-        // carries a leaf `StageArgv` and each root delegates to its fields). No
-        // hand-maintained per-cap `set_argv` block to forget, and a
-        // staged-but-never-composed overlay fails boot loudly. Section identity
-        // comes from each member's `ConfigMember` declaration, so no chassis-side
-        // section string survives.
-        let mut sources = ConfigSources::new(config_file);
-        cli.stage(&mut sources);
+        //
+        // `ChassisCli::into_sources` opens the source stack: it loads the
+        // `--config` file and stages every cap member's typed argv overlay in
+        // one derived `StageArgv` call off the CLI declaration itself. The bin
+        // handles `--print-config` / `--describe` (print + exit) before this
+        // resolver runs.
+        let mut sources = cli.into_sources()?;
 
         // Headless-only tick cadence: resolved through `TickConfig` (argv > env >
         // default) off the shared stack. `nonzero` maps 0 to the default (60 Hz);

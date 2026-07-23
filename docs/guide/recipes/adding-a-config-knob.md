@@ -176,7 +176,7 @@ pub http: HttpOverlay,
 `CommonOverlay` is in turn flattened into `DesktopCli` and `HeadlessCli`, so both
 full-stack chassis expose the flag. Each chassis loads its sectioned TOML file once,
 then resolves the overlay against the subsystem's explicit section in
-`from_env_with_argv` (`crates/aether-chassis-{desktop,headless}/src/chassis.rs`):
+`resolve` (`crates/aether-chassis-{desktop,headless}/src/chassis.rs`):
 
 ```rust
 let config_file = load_chassis_config(config)?;

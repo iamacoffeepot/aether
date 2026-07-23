@@ -5,7 +5,7 @@
 //! `HeadlessCli`, `HubCli`) stay static clap structs — they model cross-cap
 //! chassis shape the `Config` derive deliberately doesn't try to express — but
 //! their argv staging is now derived rather than hand-maintained. This derive
-//! emits a `StageArgv` impl that delegates to every field's own `stage`:
+//! emits a `StageArgv` impl that delegates to every field's own `stage_argv`:
 //!
 //! - A cap overlay field (`http: HttpOverlay`) forwards to the leaf `StageArgv`
 //!   the `Config` derive emitted on it.
@@ -44,17 +44,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             continue;
         }
         let field_ident = field.ident.as_ref().expect("named field checked above");
-        // Delegate to the field's own `StageArgv::stage`. A field whose type
+        // Delegate to the field's own `StageArgv::stage_argv`. A field whose type
         // does not implement `StageArgv` (and carries no `#[stage(skip)]`) fails
         // to compile here — never a silent skip.
         stmts.push(quote! {
-            ::aether_substrate::config::StageArgv::stage(self.#field_ident, sources);
+            ::aether_substrate::config::StageArgv::stage_argv(self.#field_ident, sources);
         });
     }
 
     Ok(quote! {
         impl ::aether_substrate::config::StageArgv for #ident {
-            fn stage(self, sources: &mut ::aether_substrate::config::ConfigSources) {
+            fn stage_argv(self, sources: &mut ::aether_substrate::config::ConfigSources) {
                 #( #stmts )*
             }
         }

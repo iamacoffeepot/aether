@@ -43,6 +43,7 @@ use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
+use crate::cli::ChassisMeta;
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -939,7 +940,8 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
 /// resolves in this crate — the one whose build script set them.
 ///
 /// The chassis binaries that depend on `aether-chassis` (desktop / headless /
-/// hub) hand this to [`run_describe_prelude`] as their `--describe` provenance.
+/// hub) hand their [`ChassisMeta`] to [`run_describe_prelude`], which reads
+/// this crate's build provenance for the `--describe` manifest.
 /// The bloomery chassis, which does not depend on this aggregate, fills a
 /// [`BuildProvenance`] from its own crate's `build.rs` instead (ADR-0162).
 #[must_use]
@@ -953,16 +955,19 @@ pub fn build_provenance() -> BuildProvenance {
 
 /// The shared chassis-main prelude for the binaries that depend on
 /// `aether-chassis` (desktop / headless / hub): run [`run_chassis_prelude`]
-/// with this crate's [`build_provenance`]. A binary calls this straight after
-/// parsing its CLI; [`PreludeAction::Handled`] means it printed a discovery
-/// dump and `main` should return, [`PreludeAction::Boot`] means it should
-/// resolve its env and run (ADR-0162).
+/// with this crate's [`build_provenance`], reading the `--describe` /
+/// `--print-config` selectors off the root's [`ChassisMeta`]. A binary calls
+/// this straight after parsing its CLI, passing `&cli.meta`;
+/// [`PreludeAction::Handled`] means it printed a discovery dump and `main`
+/// should return, [`PreludeAction::Boot`] means it should resolve its env and
+/// run (ADR-0162).
 ///
 /// # Errors
 ///
 /// Returns [`BootError`] when env resolution, substrate boot, the claim pass, or
 /// manifest serialization fails.
-pub fn run_describe_prelude<C: BootableChassis>(flags: PreludeFlags) -> Result<PreludeAction, BootError> {
+pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<PreludeAction, BootError> {
+    let flags = PreludeFlags { describe: meta.describe, print_config: meta.print_config };
     run_chassis_prelude::<C>(flags, &build_provenance())
 }
 

@@ -1,7 +1,7 @@
 //! The `bloomery` chassis CLI root (ADR-0090 unit d): argv overlays that
 //! shadow `AETHER_*` env, mirroring the hub's `HubCli`. Each overlay's
 //! `into_layer()` feeds the argv > env > default resolution in
-//! [`BloomeryEnv::from_env_with_argv`](super::BloomeryEnv::from_env_with_argv);
+//! [`BloomeryEnv::resolve`](super::BloomeryEnv::resolve);
 //! an absent flag resolves `None` and falls through to env-only resolution, so
 //! boot is byte-identical when argv is empty.
 

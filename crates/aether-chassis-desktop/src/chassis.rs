@@ -35,11 +35,9 @@ use aether_chassis::{WindowConfig, WindowSettings};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
-use aether_chassis::boot::{
-    ChassisBase, CommonEnv, chassis_residual_knobs, load_chassis_config, with_full_stack_caps, with_rpc_server,
-};
-use aether_chassis::cli::DesktopCli;
-use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
+use aether_chassis::boot::{ChassisBase, CommonEnv, chassis_residual_knobs, with_full_stack_caps, with_rpc_server};
+use aether_chassis::cli::{ChassisCli, DesktopCli};
+use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 use winit::event_loop::ControlFlow;
 
 /// Event the event-loop thread consumes from the desktop chassis. Both
@@ -276,7 +274,7 @@ impl DesktopEnv {
     /// Returns [`ConfigError`] when a known `AETHER_*` env var (or argv
     /// overlay value) holds an unparseable value.
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with_argv(DesktopCli::default())
+        Self::resolve(DesktopCli::default())
     }
 
     /// ADR-0090 unit d (issue 1258): resolve every cap config through
@@ -288,26 +286,18 @@ impl DesktopEnv {
     /// # Errors
     ///
     /// See [`Self::from_env`].
-    pub fn from_env_with_argv(cli: DesktopCli) -> Result<Self, ConfigError> {
+    pub fn resolve(cli: DesktopCli) -> Result<Self, ConfigError> {
         // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
         // where the composed builder's `config_manifest` supplies the
         // per-chassis known-key set (desktop no longer "knows" the headless
         // tick knob).
-        // The bin handles `--print-config` / `--describe` (print + exit) before
-        // this resolver runs; `config` names the file source and takes no part
-        // in staging.
-        let config_file = load_chassis_config(cli.config.clone())?;
-
-        // ADR-0156 §5 (issue 3872): assemble the source stack — the loaded
-        // config file plus every cap member's typed argv overlay, staged in one
-        // derived `StageArgv` call off the CLI declaration itself (each `*Overlay`
-        // carries a leaf `StageArgv` and each root delegates to its fields). No
-        // hand-maintained per-cap `set_argv` block to forget, and a
-        // staged-but-never-composed overlay fails boot loudly. Section identity
-        // comes from each member's `ConfigMember` declaration, so no chassis-side
-        // section string survives.
-        let mut sources = ConfigSources::new(config_file);
-        cli.stage(&mut sources);
+        //
+        // `ChassisCli::into_sources` opens the source stack: it loads the
+        // `--config` file and stages every cap member's typed argv overlay in
+        // one derived `StageArgv` call off the CLI declaration itself. The bin
+        // handles `--print-config` / `--describe` (print + exit) before this
+        // resolver runs.
+        let mut sources = cli.into_sources()?;
 
         // Desktop-only window boot knobs: resolved through `WindowConfig` (argv >
         // env > default) and lowered as a unit off the shared stack. `lower`

@@ -645,19 +645,19 @@ impl ConfigMember for () {
 ///   `*Overlay`, calling [`ConfigSources::set_argv`] with the domain type.
 /// - `#[derive(aether_substrate::StageArgv)]` emits the **container** impl on
 ///   each hand-written chassis CLI root ([`crate::config`] docs), delegating to
-///   every field's [`stage`](Self::stage). A field that is not stageable must
-///   carry an explicit `#[stage(skip)]` or fail to compile — the hole cannot
-///   reopen through the derive itself.
+///   every field's [`stage_argv`](Self::stage_argv). A field that is not
+///   stageable must carry an explicit `#[stage(skip)]` or fail to compile — the
+///   hole cannot reopen through the derive itself.
 ///
-/// A chassis then stages its whole CLI in one `cli.stage(&mut sources)` call:
-/// adding an overlay field to a root IS staging it, and the converse
+/// A chassis then stages its whole CLI in one `cli.stage_argv(&mut sources)`
+/// call: adding an overlay field to a root IS staging it, and the converse
 /// [`ConfigSources::validate_no_orphan_argv`] tripwire makes a
 /// staged-but-never-composed layer a hard boot error.
 pub trait StageArgv {
     /// Stage this overlay's argv layer(s) onto `sources`. A leaf overlay stages
     /// its own member (`sources.set_argv::<Domain>(self.into_layer())`); a
-    /// container delegates to each of its fields' `stage`.
-    fn stage(self, sources: &mut ConfigSources);
+    /// container delegates to each of its fields' `stage_argv`.
+    fn stage_argv(self, sources: &mut ConfigSources);
 }
 
 /// The composition-derived chassis config aggregate (ADR-0156 §4): the
