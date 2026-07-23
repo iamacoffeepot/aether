@@ -55,6 +55,55 @@ mod tests {
         );
     }
 
+    /// The source bytes of the asset the fixture bundle embeds via
+    /// `export_asset!("asset_fixture.txt")`, read at compile time so the
+    /// length assertion below is a computed tripwire against the exact
+    /// bytes the indexer sees in the `aether.asset.asset_fixture.txt`
+    /// section.
+    const ASSET_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../aether-test-fixtures/aether-test-fixtures-bundle/src/asset_fixture.txt"
+    ));
+
+    /// ADR-0163 §3: the asset catalog the load-time indexer built from the
+    /// module's `aether.asset.*` custom sections surfaces through
+    /// `describe_component`, so tooling reads what a bundle carries without
+    /// executing it. Loads the fixture bundle (which `export_asset!`s
+    /// `asset_fixture.txt`) and asserts the described caps list that asset
+    /// with its byte length.
+    #[test]
+    fn fleetharness_describe_surfaces_asset_catalog() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let addr = harness.load(engine, "aether_test_fixtures_bundle");
+
+        let replies = harness.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
+        let reply = match replies.as_slice() {
+            [one] => one,
+            other => panic!("describe expected exactly one reply event, got {}", other.len()),
+        };
+        let capabilities = match DescribeComponentResult::decode_from_bytes(&reply.payload)
+            .expect("the reply payload decodes as DescribeComponentResult")
+        {
+            DescribeComponentResult::Ok { capabilities } => capabilities,
+            DescribeComponentResult::Err { error } => {
+                panic!("describe by lineage name {addr} should resolve, got Err: {error}")
+            }
+        };
+
+        let asset = capabilities.assets.iter().find(|a| a.name == "asset_fixture.txt").unwrap_or_else(|| {
+            panic!("the described caps should list the export_asset! catalog, got {:?}", capabilities.assets)
+        });
+        assert_eq!(
+            asset.len,
+            ASSET_FIXTURE.len() as u64,
+            "the indexed asset length should match the embedded source bytes",
+        );
+    }
+
     /// Describing an unregistered lineage name is a definitive
     /// `DescribeComponentResult::Err`, not a hang or a panic — the
     /// fail-fast negative path.

@@ -895,7 +895,7 @@ impl WasmActor for WidgetPanel {
     /// Subscribe the pointer / keyboard streams (input cap) and the frame
     /// stage (lifecycle cap) once, and kick off the font load. Widgets never
     /// subscribe — the root forwards everything.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.owns_input {
             let input = ctx.actor::<InputCapability>();
             input.subscribe::<MouseButton>();

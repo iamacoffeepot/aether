@@ -206,7 +206,7 @@ impl WasmActor for TerrainViewport {
         Ok(Self { config, pending: None, next_sequence: 1 })
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Render>();
     }
 

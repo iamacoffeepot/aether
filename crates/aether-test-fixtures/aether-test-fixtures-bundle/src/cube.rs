@@ -124,7 +124,7 @@ impl WasmActor for Cube {
     /// Subscribe `Tick` so the chassis tick fanout drives `on_tick`.
     /// `init` can't mail (its ctx has no send surface), so the subscribe
     /// lands here in `wire` (mirrors the probe and the reference camera).
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 

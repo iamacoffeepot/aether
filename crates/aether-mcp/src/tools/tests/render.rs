@@ -65,6 +65,7 @@ fn project_capabilities_trims_docs_unless_full() {
         fallback: Some(FallbackCapability { doc: Some(leading_blank.to_owned()) }),
         doc: Some(multi.to_owned()),
         config: None,
+        assets: Vec::new(),
     };
 
     let summary = project_capabilities(&caps, false);

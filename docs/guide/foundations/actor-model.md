@@ -132,7 +132,7 @@ impl WasmActor for Hello {
         Ok(Hello)
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
     }
 

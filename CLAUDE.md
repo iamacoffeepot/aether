@@ -127,7 +127,7 @@ impl WasmActor for CameraComponent {
 
     fn init<C: Resolver>(ctx: &mut C) -> Result<Self, ActorInitError> { /* build state */ }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {              // post-init, mail allowed
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {          // post-init, mail allowed; asset load window
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>(); // subscribe the calling actor
     }
 

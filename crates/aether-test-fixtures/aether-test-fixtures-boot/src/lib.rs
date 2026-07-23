@@ -49,7 +49,7 @@ impl WasmActor for Boot {
     /// Broadcast [`BootObserved`] once, so a scenario counting it can assert the
     /// boot singleton was instantiated exactly once no matter how many selector
     /// loads of the module happened.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.send_to_named::<BootObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &BootObserved { marker: 0 });
     }
 

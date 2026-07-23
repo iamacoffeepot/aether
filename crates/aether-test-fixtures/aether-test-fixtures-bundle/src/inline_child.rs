@@ -124,7 +124,7 @@ impl WasmActor for InlineParent {
     /// ADR-0114: co-locate an `InlineChild` under the `Named` subname
     /// `widget`. The returned alias `MailboxId` is fire-and-forget here —
     /// the `FleetHarness` addresses the child by its rendered lineage name.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let _ = ctx.spawn_inline_child::<InlineChild>(Subname::Named("widget"), &());
     }
 
@@ -176,7 +176,7 @@ impl WasmActor for InlineStatefulParent {
     /// subname `widget`. The child is addressed by its rendered lineage
     /// name (`{parent}/aether.embedded:widget`); the membrane demuxes
     /// the `Bump` / `CountQuery` mail to it.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let _ = ctx.spawn_inline_child::<InlineStatefulChild>(Subname::Named("widget"), &());
     }
 
@@ -259,7 +259,7 @@ impl WasmActor for InlineDespawnParent {
     /// ADR-0114: co-locate an `InlineDespawnChild` under the `Named` subname
     /// `widget` and store the returned alias so the `DespawnChild` handler
     /// can tear it down.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if let Ok(alias) = ctx.spawn_inline_child::<InlineDespawnChild>(Subname::Named("widget"), &()) {
             self.child = Some(alias);
         }
@@ -331,7 +331,7 @@ impl WasmActor for InlineConfiguredParent {
     /// ADR-0114: co-locate an `InlineConfiguredChild` under the `Named`
     /// subname `widget`, spawned with a non-default config so the child's
     /// durable counter starts from `CONFIGURED_CHILD_INITIAL`, not `0`.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let _ = ctx.spawn_inline_child::<InlineConfiguredChild>(
             Subname::Named("widget"),
             &InlineConfiguredChildConfig { initial: CONFIGURED_CHILD_INITIAL },
@@ -426,7 +426,7 @@ impl WasmActor for InlineTagParent {
     /// generic parameter names the child type here. Then attempt a
     /// deliberately-bogus tag and record that the generated resolver rejects
     /// it with `UnknownActorTag` rather than spawning or panicking.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if let Ok(alias) =
             ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<InlineStatefulChild>(), Subname::Named("tagged"), &[])
         {

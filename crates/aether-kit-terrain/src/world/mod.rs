@@ -426,7 +426,7 @@ impl WasmActor for WorldView {
     /// chassis whose lifecycle graph omits `Render` (headless), the
     /// fire-and-forget subscribe warn-drops and the view simply never
     /// submits.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Render>();
     }
 

@@ -647,6 +647,15 @@ mod control_plane {
         /// retention static for the config kind on load, exactly as for
         /// handler kinds.
         pub config: Option<ConfigCapability>,
+        /// ADR-0163 §3: the component's asset catalog — one [`AssetInfo`]
+        /// per `aether.asset.<path>` custom section, indexed at load
+        /// without instantiating the bytes. Empty for a component that
+        /// carries no assets. Surfaces through `describe_component` so
+        /// tooling reads what a bundle carries without executing it;
+        /// payload bytes are reachable only through the load-window
+        /// `AssetWindow` ctx surface (`init` + `wire`), never this list.
+        #[serde(default)]
+        pub assets: Vec<AssetInfo>,
     }
 
     /// One `#[handler]` method's advertised capability. `id` is the
@@ -676,6 +685,28 @@ mod control_plane {
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct FallbackCapability {
         pub doc: Option<String>,
+    }
+
+    /// One asset a component carries in an `aether.asset.<path>` wasm
+    /// custom section (ADR-0163 §2/§3). The load-time indexer records
+    /// each asset's catalog entry — the path it was declared under, its
+    /// byte length, and the sha256 of its bytes — by walking the custom
+    /// sections host-side, without instantiating the component. The
+    /// catalog rides [`ComponentCapabilities::assets`] so
+    /// `describe_component` answers "what does this bundle carry" without
+    /// executing it; payload access is the separate load-window surface
+    /// (the `AssetWindow` ctx trait in `aether-actor`), never through this
+    /// metadata.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct AssetInfo {
+        /// The asset path — the section name with the `aether.asset.`
+        /// prefix stripped, the key the load window's `asset(name)`
+        /// resolves against.
+        pub name: String,
+        /// The asset's byte length.
+        pub len: u64,
+        /// sha256 over the asset's bytes.
+        pub sha256: [u8; 32],
     }
 
     /// ADR-0090 (issue 1257) the component's declared boot-config kind.

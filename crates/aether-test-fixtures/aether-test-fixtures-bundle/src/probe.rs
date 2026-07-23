@@ -91,7 +91,7 @@ impl WasmActor for Probe {
     /// `aether.lifecycle` (ADR-0082); `Key` is a genuine input interrupt,
     /// so it subscribes on `aether.input` (ADR-0021) — the input-stream
     /// path the round-trip scenarios exercise (issue 1490).
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         ctx.actor::<InputCapability>().subscribe::<Key>();
         ctx.actor::<InputCapability>().subscribe::<TextInput>();

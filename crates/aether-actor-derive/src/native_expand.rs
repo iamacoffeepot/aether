@@ -564,6 +564,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 // ADR-0090 (issue 1257): native chassis caps don't carry
                 // a describe-surfaced boot-config kind.
                 config: ::core::option::Option::None,
+                // ADR-0163 §3: assets ride wasm custom sections, so a
+                // native cap always has an empty catalog.
+                assets: ::std::vec![],
             }
         }
     };

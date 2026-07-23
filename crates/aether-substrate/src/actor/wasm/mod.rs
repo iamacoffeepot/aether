@@ -29,6 +29,7 @@
 //! spawn primitives, the `Component`/`ComponentCtx` types, and the
 //! host-fn linker; only the actor wrapper moved.
 
+pub mod asset_manifest;
 pub mod component;
 pub mod host_fns;
 pub mod kind_manifest;

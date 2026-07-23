@@ -1069,6 +1069,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
                 fallback: None,
                 doc: None,
                 config: None,
+                assets: Vec::new(),
             }
         }
     }

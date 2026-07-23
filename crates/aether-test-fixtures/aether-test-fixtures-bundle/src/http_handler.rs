@@ -59,7 +59,7 @@ impl WasmActor for HttpHandler {
         Ok(HttpHandler)
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         bind_catch_all(ctx);
     }
 
@@ -179,7 +179,7 @@ impl WasmActor for StreamingHttpHandler {
 
     /// The cap reads this actor's accept-set off the catch-all binding to
     /// take the streaming path.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         bind_catch_all(ctx);
     }
 
@@ -240,7 +240,7 @@ impl WasmActor for WebSocketHandler {
         Ok(WebSocketHandler { connections: BTreeMap::new() })
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         bind_catch_all(ctx);
     }
 
@@ -407,7 +407,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// common "route to me" case; `ctx` resolves the `aether.http.server`
     /// cap by type, so the send reads exactly as the `#[http::route]` macro's
     /// injected registration does.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
             prefix: "/routed-stream".to_string(),
             method: None,

@@ -153,7 +153,7 @@ impl WasmActor for CameraController {
     /// Subscribe the key streams and the tick stage, then seed the target
     /// camera so the shadow is authoritative from frame one. `wire` is the
     /// placement for the seed — `init`'s ctx can't mail.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let input = ctx.actor::<InputCapability>();
         input.subscribe::<Key>();
         input.subscribe::<KeyRelease>();

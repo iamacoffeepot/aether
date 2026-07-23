@@ -50,6 +50,7 @@ extern crate alloc;
 // Outside callers don't need this; it's a no-op for them.
 extern crate self as aether_actor;
 
+pub mod asset;
 pub mod local;
 pub mod log;
 pub mod mail;
@@ -58,6 +59,7 @@ pub mod request_context;
 pub mod trace;
 pub mod wasm;
 
+pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 pub use local::Local;
 pub use model::ctx::{Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
@@ -82,7 +84,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 // an extra `wasm::` segment.
 pub use wasm::{
     ActorInitError, ActorTypeTag, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox, WasmCtx,
-    WasmDispatch, WasmDropCtx, WasmInitCtx,
+    WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

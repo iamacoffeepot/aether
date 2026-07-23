@@ -1030,6 +1030,22 @@ fn base_ctx_type(ty: &Type) -> Type {
     ty
 }
 
+/// The ctx type a router-synthesized `wire` takes (ADR-0163 §3). On the
+/// wasm transport `wire` receives the window-bearing `WireCtx` — the
+/// `#[actor]` macro wraps the `WasmCtx` it builds into one before invoking
+/// the lifecycle body — so a synthesized `wire` must name `WireCtx` to
+/// unify with that call; the native transport keeps its own ctx unchanged.
+/// Route registration reaches its verbs through `WireCtx`'s `Deref` to
+/// `WasmCtx`, so the appended sends are unaffected.
+fn synthesized_wire_ctx_type(base: Type) -> Type {
+    if let Type::Path(TypePath { path, .. }) = &base
+        && path.segments.last().is_some_and(|seg| seg.ident == "WasmCtx")
+    {
+        return parse_quote!(::aether_actor::WireCtx<'_, '_>);
+    }
+    base
+}
+
 /// Inject the per-group `RegisterRouteSelf` registrations into `wire` —
 /// appended to an author-written `wire` body, or synthesized as a new
 /// `wire` when the impl has none. Receiver and ctx shapes are copied
@@ -1058,7 +1074,7 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) 
     // (`NativeCtx<'_, Manual>` → `NativeCtx<'_>`).
     let template = &groups[0];
     let first_arg = &template.first_arg;
-    let ctx_c = base_ctx_type(&template.ctx_c);
+    let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&template.ctx_c));
     let ctx = format_ident!("__aether_ctx");
     let sends = groups.iter().map(|group| registration_send(group, &ctx, shared)).collect::<Vec<_>>();
     let wire: ImplItemFn = parse_quote! {
