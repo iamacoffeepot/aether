@@ -31,6 +31,7 @@ pub mod autoload;
 pub mod boot;
 pub mod bundle_pack;
 pub mod cli;
+pub mod package;
 pub mod tick;
 pub mod window;
 
