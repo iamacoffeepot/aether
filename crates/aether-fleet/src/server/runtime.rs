@@ -6,6 +6,7 @@
 //! single `use runtime::*` glob in the parent.
 
 use super::{FleetConfig, FleetServer};
+use crate::child_env::isolate_child_environment;
 pub use crate::kinds::ForwardEnvelope;
 use crate::kinds::{EngineAlive, EngineDied};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
@@ -233,9 +234,11 @@ impl NativeActor for FleetServer {
     /// resolves `selector` against its content-addressed binary store
     /// (ADR-0115), materializes the resolved bytes to an executable
     /// temp file, assigns a free localhost port for the substrate's
-    /// RPC server, injects it as `AETHER_RPC_PORT`, forks the realized
-    /// binary, then boots an `aether.fleet.proxy:<id>` actor that
-    /// dials it. Reply: `SpawnEngineResult::Ok { engine_id, rpc_port }`
+    /// RPC server, appends it as the `--rpc-port` argv overlay flag
+    /// (ADR-0162: config is addressed via argv, never ambient env),
+    /// forks the realized binary, then boots an
+    /// `aether.fleet.proxy:<id>` actor that dials it. Reply:
+    /// `SpawnEngineResult::Ok { engine_id, rpc_port }`
     /// on success, or `Err { engine_id, error }` if the selector
     /// resolves to no stored binary, the fork fails, or the substrate
     /// never comes up. A post-allocation failure carries the allocated
@@ -308,14 +311,28 @@ impl NativeActor for FleetServer {
             }
 
             let mut command = Command::new(&exec_path);
-            command.args(&mail.args).env("AETHER_RPC_PORT", rpc_port.to_string()).stdin(Stdio::null());
-            // A spawn carrying a component list rides in as a
-            // boot-manifest path; inject it the same way as the RPC port
-            // so the spawned chassis reads the listed wasm itself and
-            // comes up with those components already loading (issue
-            // 1776).
+            command.stdin(Stdio::null());
+            // ADR-0162: a spawned engine's environment is constructed, never
+            // inherited. Clear it and copy only the platform/third-party
+            // allowlist (locale, proxy, driver vars, `PATH` / `HOME`, …); no
+            // `AETHER_*` key survives, so aether config can't ride the ambient
+            // channel. The child's addressed config rides argv below, and
+            // argv does not inherit — so a substrate that forks its own
+            // subprocess isolates by construction a generation down.
+            isolate_child_environment(&mut command);
+            // argv is the machine channel: the caller's per-spawn `args`
+            // first, then the hub's injections as the child's own
+            // derive-emitted overlay flags (ADR-0156). `--rpc-port`
+            // assigns the substrate's RPC bind port; a boot-manifest path
+            // (a spawn carrying a component list, issue 1776) rides
+            // `--boot-manifest` so the chassis reads the listed wasm
+            // itself. A binary lacking these flags fails at spawn, and the
+            // failure carries the engine id through the `spawn_failed`
+            // path below.
+            command.args(&mail.args);
+            command.arg("--rpc-port").arg(rpc_port.to_string());
             if let Some(boot_manifest) = &mail.boot_manifest {
-                command.env("AETHER_BOOT_MANIFEST", boot_manifest);
+                command.arg("--boot-manifest").arg(boot_manifest);
             }
             let child = match command.spawn() {
                 Ok(child) => child,

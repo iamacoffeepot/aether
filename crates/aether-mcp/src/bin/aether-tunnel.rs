@@ -27,14 +27,23 @@
 //! ## Ports (additive — merging this changes nothing live until PR 3)
 //!
 //! The tunnel binds `:8890` and *injects* the internal ports into the
-//! children it forks, rather than moving any default:
+//! children it forks, rather than moving any default. Per ADR-0162 the
+//! machine channel is argv, so each child's config is addressed on its
+//! command line where the child has an overlay flag, and the fork constructs
+//! each child's environment (clear + copy only the shared platform allowlist)
+//! so no `AETHER_*` key is inherited:
 //!
-//! - hub child: `AETHER_RPC_PORT=8901`
+//! - hub child: `--rpc-port 8901` (plus `--hub-binary-bootstrap <bins>`
+//!   re-addressed from `AETHER_BINARY_BOOTSTRAP` when the launch script
+//!   exports it) — `aether-substrate-hub` accepts both derive-emitted flags.
 //! - `aether-mcp` child: `AETHER_MCP_PORT=8891`, `AETHER_HUB_RPC_ADDR=127.0.0.1:8901`
+//!   stay on env — `aether-mcp` has no argv/config surface, so these are
+//!   explicit per-fork injections applied on top of the cleared base, not
+//!   inherited.
 //!
 //! `aether-mcp`'s own `DEFAULT_MCP_PORT` stays `8890`, so a standalone
 //! `aether-mcp` keeps working exactly as before. The bootstrap hook
-//! (PR 3) is what actually launches this tunnel.
+//! launches this tunnel.
 
 use std::collections::HashMap;
 use std::env;
@@ -48,6 +57,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use aether_fleet::child_env::isolate_child_environment;
 use anyhow::Context as _;
 use futures_util::TryStreamExt as _;
 
@@ -69,9 +79,9 @@ const DEFAULT_TUNNEL_PORT: u16 = 8890;
 /// `AETHER_MCP_PORT` when the tunnel forks it.
 const DEFAULT_MCP_PORT: u16 = 8891;
 
-/// Default RPC port the hub child binds, injected as `AETHER_RPC_PORT`
-/// when the tunnel forks it (and echoed into the `aether-mcp` child's
-/// `AETHER_HUB_RPC_ADDR`).
+/// Default RPC port the hub child binds, addressed to it as `--rpc-port`
+/// argv when the tunnel forks it (ADR-0162; echoed into the `aether-mcp`
+/// child's `AETHER_HUB_RPC_ADDR`).
 const DEFAULT_HUB_RPC_PORT: u16 = 8901;
 
 /// Backoff applied between a child's exit and its re-fork, so a child
@@ -117,6 +127,12 @@ impl ChildSpec {
     fn spawn(&self) -> anyhow::Result<Child> {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args).stdin(Stdio::null());
+        // ADR-0162: construct the child's environment rather than inherit it —
+        // clear it and copy only the shared platform/third-party allowlist, so
+        // no `AETHER_*` key survives. This child's addressed config then rides
+        // argv (the hub) or these explicit `env` injections applied on top of
+        // the cleared base (`aether-mcp`, which has no argv surface).
+        isolate_child_environment(&mut cmd);
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -270,15 +286,32 @@ fn resolve_specs(ports: Ports) -> anyhow::Result<(ChildSpec, ChildSpec)> {
     let hub_cmd = env::var("AETHER_TUNNEL_HUB_CMD").unwrap_or_else(|_| default_bin("aether-substrate-hub"));
     let mcp_cmd = env::var("AETHER_TUNNEL_MCP_CMD").unwrap_or_else(|_| default_bin("aether-mcp"));
 
-    let (hub_program, hub_args) = split_cmd(&hub_cmd)?;
+    let (hub_program, mut hub_args) = split_cmd(&hub_cmd)?;
     let (mcp_program, mcp_args) = split_cmd(&mcp_cmd)?;
 
-    let hub = ChildSpec {
-        kind: ChildKind::Hub,
-        program: hub_program,
-        args: hub_args,
-        env: vec![("AETHER_RPC_PORT".to_owned(), ports.hub.to_string())],
-    };
+    // ADR-0162: the hub child's config rides argv (the machine channel),
+    // not ambient env. `aether-substrate-hub` accepts `--rpc-port` (the
+    // derive-emitted `RpcServerOverlay` flag) for its RPC bind port. The
+    // constructed-environment fork (`ChildSpec::spawn`) admits no `AETHER_*`
+    // key, so nothing ambient survives to shadow this.
+    hub_args.push("--rpc-port".to_owned());
+    hub_args.push(ports.hub.to_string());
+    // `ensure-tunnel.sh` exports the freshly-built chassis bins as
+    // `AETHER_BINARY_BOOTSTRAP` for the hub to ingest into its binary
+    // store (so `spawn_substrate default` resolves). The constructed-env fork
+    // admits no `AETHER_*` key, so re-address it to the hub as the
+    // `--hub-binary-bootstrap` overlay flag (the derive-emitted `FleetOverlay`
+    // flag, CSV-valued like its env layer). Absent → the hub's own default.
+    if let Some(bootstrap) = read_bootstrap() {
+        hub_args.push("--hub-binary-bootstrap".to_owned());
+        hub_args.push(bootstrap);
+    }
+
+    let hub = ChildSpec { kind: ChildKind::Hub, program: hub_program, args: hub_args, env: vec![] };
+    // `aether-mcp` has no argv/config-derive surface — it reads its bind
+    // port and hub address from env directly — so its addressed config
+    // stays on `env`. These are explicit per-fork injections applied on top
+    // of the cleared base, not inherited ambient config.
     let mcp = ChildSpec {
         kind: ChildKind::Mcp,
         program: mcp_program,
@@ -305,6 +338,17 @@ fn split_cmd(cmd: &str) -> anyhow::Result<(String, Vec<String>)> {
 #[allow(clippy::disallowed_methods)]
 fn read_port(var: &str, default: u16) -> u16 {
     env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+/// The hub's binary-store bootstrap list (`ensure-tunnel.sh` exports it),
+/// re-addressed to the hub child as `--hub-binary-bootstrap` argv rather
+/// than left to ambient inheritance (ADR-0162). `None` when unset/empty so
+/// the hub falls back to its own default.
+// Reading `AETHER_BINARY_BOOTSTRAP` here to re-deliver it as an addressed
+// argv flag is top-level process wiring, not a capability config pull.
+#[allow(clippy::disallowed_methods)]
+fn read_bootstrap() -> Option<String> {
+    env::var("AETHER_BINARY_BOOTSTRAP").ok().filter(|s| !s.is_empty())
 }
 
 #[tokio::main]
@@ -651,6 +695,38 @@ mod tests {
     /// is genuinely alive until terminated. Spawned in its own group.
     fn sleep_hub_spec() -> ChildSpec {
         ChildSpec { kind: ChildKind::Hub, program: "sleep".to_owned(), args: vec!["300".to_owned()], env: vec![] }
+    }
+
+    /// ADR-0162: the hub child's RPC port is addressed on argv (`--rpc-port`),
+    /// not env, so it survives the fork's constructed environment (which admits
+    /// no `AETHER_*` key); `aether-mcp` (no argv surface) keeps its port/addr on
+    /// env as explicit injections applied on top of the cleared base. Drifts if
+    /// the hub reverts to env injection — where the clear would then drop it and
+    /// the hub would boot without its assigned port — or if the mcp addressing
+    /// moves off env with no flag to catch it.
+    #[test]
+    fn resolve_specs_addresses_the_hub_on_argv_and_keeps_mcp_on_env() {
+        let ports = Ports { tunnel: 8890, mcp: 8891, hub: 8901 };
+        let (hub, mcp) = resolve_specs(ports).expect("resolve default specs");
+
+        // The hub's RPC port rides `--rpc-port <port>` on argv, and no
+        // `AETHER_RPC_PORT` is left on its env for the clear to drop.
+        let rpc_flag = hub.args.iter().position(|a| a == "--rpc-port").expect("hub carries --rpc-port on argv");
+        assert_eq!(hub.args.get(rpc_flag + 1), Some(&"8901".to_owned()), "the --rpc-port value is the hub port");
+        assert!(!hub.env.iter().any(|(k, _)| k == "AETHER_RPC_PORT"), "the hub port must not ride ambient env");
+
+        // aether-mcp has no argv surface, so its bind port and hub address
+        // stay explicit env injections (applied on top of the cleared base).
+        assert!(
+            mcp.env.iter().any(|(k, v)| k == "AETHER_MCP_PORT" && v == "8891"),
+            "mcp port stays on env: {:?}",
+            mcp.env
+        );
+        assert!(
+            mcp.env.iter().any(|(k, v)| k == "AETHER_HUB_RPC_ADDR" && v == "127.0.0.1:8901"),
+            "mcp hub address stays on env: {:?}",
+            mcp.env,
+        );
     }
 
     #[tokio::test]

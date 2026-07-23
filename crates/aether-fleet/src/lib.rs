@@ -14,6 +14,7 @@
 //!
 //! See issue 763 for the full design.
 
+pub mod child_env;
 pub mod kinds;
 mod proxy;
 mod server;
