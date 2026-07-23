@@ -6,7 +6,7 @@
 //! remeshing; this test proves a compact `stamp_hexagon` mail reaches the
 //! handler and produces the expected smooth scalar-contour silhouette.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit_terrain` wasm has not
 //! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1` so either condition is a
 //! hard failure there.
 
@@ -22,8 +22,8 @@ use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
 use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
-use aether_kit::mark::{MarkId, MarkRef};
-use aether_kit::world::{
+use aether_kit_terrain::mark::{MarkId, MarkRef};
+use aether_kit_terrain::world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, OperatorCell,
     OperatorChunk, OperatorError, OperatorResult, OperatorStats, RunAutomaton, SetChunk, StampHexagon, WorldPoint,
 };
@@ -130,7 +130,7 @@ fn pixel_differs(image: &Image, background: [u8; 3], x: i32, y: i32) -> bool {
 
 #[test]
 fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let mut harness =
@@ -214,7 +214,7 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive brush + automaton + partial-budget acceptance proof
 fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let mut harness =
@@ -435,7 +435,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
 
 #[test]
 fn rounded_cliff_renders_without_a_convex_corner_seam() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let mut harness =

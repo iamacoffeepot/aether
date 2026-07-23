@@ -15,7 +15,7 @@ use aether_render::{RenderCapability, ViewProjection};
 use serde::{Deserialize, Serialize};
 
 use crate::widget::EditorRegionRect;
-use crate::world::{
+use aether_kit_terrain::world::{
     MAX_TERRAIN_PICK_DISTANCE_METERS, PickTerrain, PickTerrainResult, TerrainRay, TerrainSurfaceHit, WorldDirection,
     WorldPositionMeters,
 };

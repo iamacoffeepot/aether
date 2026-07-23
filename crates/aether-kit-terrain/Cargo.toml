@@ -1,0 +1,64 @@
+[package]
+name = "aether-kit-terrain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The terrain stack extracted from `aether-kit` (iamacoffeepot/aether#3951):
+# the mark / world / terra / mover actors and their shared position
+# vocabulary. mark and world are mutually entangled (overlay renders `Mark`
+# geometry, `MarkBook` addresses world points), terra sits on both, and mover
+# walks the world lattice, so the four move as one crate. Guest code
+# throughout — no data/runtime split — so `export!` emits the wasm32-only FFI
+# shims that stay inert in a host rlib and integration tests link the same
+# artifact.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# Marker-only identity faces: this crate is a wasm guest, so it addresses each
+# cap by mail rather than linking its runtime. The `runtime` feature is turned
+# on for the host-side test build through the dev-dependency entries below.
+aether-component = { path = "../aether-component", default-features = false }
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+aether-input = { path = "../aether-input", default-features = false }
+aether-render = { path = "../aether-render", default-features = false }
+# The `aether.fs` cap — the world actor loads worlds through it. Marker face
+# only (terrain addresses fs by mail).
+aether-fs = { path = "../aether-fs", default-features = false }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail
+# (out-of-bounds teleport, uncorrelated reply, etc.). Default-features-off per
+# the SDK pattern.
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native builds
+# so the `aether.kinds` descriptor list picks up its types. Wasm guests skip
+# the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+# Integration tests boot a `SubstrateHarness`, load this crate's own wasm
+# artifact, and assert mail-flow + render properties. Tests run host-side; the
+# wasm is built separately for `wasm32-unknown-unknown` and discovered at
+# runtime under `target/wasm32-unknown-unknown/{debug,release}/`. The cap
+# crates a scenario composes appear here with their default `runtime` feature
+# on — dev-only, the wasm lib build keeps the marker-only face above.
+[dev-dependencies]
+aether-input = { path = "../aether-input" }
+aether-render = { path = "../aether-render" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+# `mover_walks_the_world` runtime-loads the widget editor shell that still
+# lives in `aether-kit` and imports its `EditorConfig` vocabulary. kit takes an
+# rlib dependency on this crate, so the edge back is a dev-only cycle cargo
+# permits (tests, not the library build).
+aether-kit = { path = "../aether-kit" }
+
+[lints]
+workspace = true

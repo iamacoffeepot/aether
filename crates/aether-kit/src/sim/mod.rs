@@ -26,7 +26,7 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 
-use crate::world::CellPos;
+use aether_kit_terrain::world::CellPos;
 
 const MAX_RENDER_GRID_EDGE: i64 = 32;
 const MAX_RING_DEPTH: u32 = 1024;

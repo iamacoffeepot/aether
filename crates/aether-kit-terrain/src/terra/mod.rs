@@ -30,7 +30,7 @@ use self::selection::{
 /// Selection-and-command facade over a standalone terrain mark book.
 ///
 /// # Agent
-/// Load `aether_kit@aether.kit.terra` with a
+/// Load `aether_kit_terrain@aether.kit.terra` with a
 /// [`TerraConfig`] containing the mailbox id returned when the mark
 /// book was loaded. Send at most one mutation command at a time; queries stay
 /// available while that command is in flight.
@@ -251,19 +251,19 @@ impl TerraEditor {
         let source = ctx.source_mailbox();
         if !Self::reply_source_allowed(source) {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_terrain",
                 observed = source.map_or(MailboxId::NONE.0, |mailbox| mailbox.0),
                 "terra ignored correlated mail carrying an ordinary component source",
             );
             return None;
         }
         let Some(request) = ctx.in_reply_to() else {
-            tracing::warn!(target: "aether_kit", "terra ignored uncorrelated mark reply");
+            tracing::warn!(target: "aether_kit_terrain", "terra ignored uncorrelated mark reply");
             return None;
         };
         if self.pending_request != Some(request) {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_terrain",
                 observed = request.0,
                 "terra ignored unmatched or duplicate mark reply",
             );
@@ -271,7 +271,7 @@ impl TerraEditor {
         }
         let Some(context) = ctx.take_context::<MarkRequestContext>() else {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_terrain",
                 request = request.0,
                 "terra ignored mark reply with missing typed context",
             );
@@ -280,7 +280,7 @@ impl TerraEditor {
         let envelope = ReplyEnvelope { request, context };
         if !self.accepts_envelope(&envelope) {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_terrain",
                 request = request.0,
                 stage = ?context.stage,
                 index = context.index,

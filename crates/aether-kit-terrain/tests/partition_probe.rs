@@ -5,7 +5,7 @@
 //! Partition tiling and frame-budget tripwires over a demo-shaped world
 //! (a lake with a sand ring on a grass-default region, four chunks).
 
-use aether_kit::{
+use aether_kit_terrain::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, WaterPlane, World,
     world::{
         CellPos, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE,

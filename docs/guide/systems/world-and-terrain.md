@@ -24,10 +24,14 @@ arbiter.
 | `aether.kit.terra` | `TerraEditor` | ordered selection and one in-flight semantic command |
 | `aether.kit.workbench` | `TerrainWorkbench` | UI draft, peer coordination, one workbench request, current proposal |
 
-All four are guest actors exported from the multi-actor `aether-kit` module;
-they are not chassis capabilities. Load them by selector, for example
-`aether_kit@aether.kit.world`, rather than relying on the module's bare-load
-entry. See
+All four are guest actors, not chassis capabilities. The world, mark, and terra
+actors are exported from the multi-actor `aether-kit-terrain` module; the
+workbench is exported from `aether-kit`. Load each by selector —
+`aether_kit_terrain@aether.kit.world`, `aether_kit_terrain@aether.kit.mark`,
+`aether_kit_terrain@aether.kit.terra`, and `aether_kit@aether.kit.workbench` —
+rather than relying on a module's bare-load entry. See
+[`aether-kit-terrain/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/lib.rs)
+and
 [`aether-kit/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/lib.rs).
 
 ## The world plane stack
@@ -58,7 +62,7 @@ Material bytes are `0 Void`, `1 Grass`, `2 Dirt`, `3 Stone`, `4 Sand`, and
 truncate to their plane sizes, and region/water ids narrow to `u16`. These are
 format contracts, not schema enums. The complete model and versioned binary
 codec are in
-[`world/data.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/world/data.rs).
+[`world/data.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/data.rs).
 
 `WorldView` meshes each resident chunk to flat-color `DrawTriangle`s and keeps
 them in a sorted cache. Meshing reads a bounded neighbor apron, so a write
@@ -66,7 +70,7 @@ rebuilds the touched chunk and any already-cached neighbor in its 3 × 3 apron.
 Every `Render` stage resends the selected committed or preview cache. Despite
 ADR-0140's shipped generic material pass, the current world runtime still CPU
 marches coverage and emits triangles; it does not upload R8 coverage textures.
-See [`world/mesher/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-kit/src/world/mesher) and
+See [`world/mesher/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-kit-terrain/src/world/mesher) and
 [Rendering & camera](rendering.md).
 
 ## World mail surface
@@ -90,7 +94,7 @@ types, not aliases that can be sent on the wire.
 | `aether.kit.world.load` | `WorldLoad` | fs read + atomic decoded-world swap; errors only in logs |
 
 Exact fields, reply variants, and limits are in
-[`world/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/world/kinds.rs).
+[`world/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/kinds.rs).
 There is no public world-query mail. In automation, observe typed operation /
 proposal replies and rendering; `WorldLoad` and raw immediate mutations do not
 acknowledge success.
@@ -100,7 +104,7 @@ Polygon stamps accept at most 1,024 vertices, 4,096 subcells on either edge,
 scanline work. Degenerate, oversized, zero-radius, unknown-material, and
 `Void` stamps touch nothing and return no error. Concave polygon fill uses the
 even-odd rule. The bounds and composition rules are implemented in
-[`world/raster.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/world/raster.rs).
+[`world/raster.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/raster.rs).
 
 ## Bounded operators
 
@@ -116,7 +120,7 @@ but the already accepted prefix remains a consistent **committed** mutation and
 is remeshed. `OperatorResult::Failed` reports that prefix's exact steps,
 subcells, and sorted touched chunks. Invalid parameters report zero work. Code
 lives in
-[`world/operator.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/world/operator.rs).
+[`world/operator.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/operator.rs).
 
 ## Proposal lifecycle — Proposed ADR
 
@@ -138,8 +142,8 @@ Preview switches only rendering; committed `World` and its cache remain
 unchanged. Commit installs all staged boxes together and remeshes once. Unknown,
 stale, exhausted-id, at-capacity, and no-touch cases are typed
 `ProposalError`s. See
-[`world/proposal.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/world/proposal.rs) and
-[`world/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/world/mod.rs).
+[`world/proposal.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/proposal.rs) and
+[`world/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/mod.rs).
 
 ## Marks and semantic selection — Proposed ADR
 
@@ -161,8 +165,8 @@ world format.
 `MarkUpdate` names an id but carries no expected revision. The revision is a
 staleness signal for consumers; the store itself does not implement a
 compare-and-swap update. The store and validation are in
-[`mark/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/mark/mod.rs) and
-[`mark/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/mark/kinds.rs).
+[`mark/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/mark/mod.rs) and
+[`mark/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/mark/kinds.rs).
 
 `TerraEditor` validates exact `MarkRef`s and owns an ordered, duplicate-free
 selection. Its public commands are `set_selection`, `toggle_selection`,
@@ -175,9 +179,9 @@ Move/relabel/delete read-preflight the whole selection before the first write,
 then send mutations sequentially. A revision race or later peer failure can
 therefore yield `PartiallyApplied` with exact changed/deleted prefixes; the
 preflight is not a multi-actor transaction. See
-[`terra/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/terra/kinds.rs),
-[`terra/selection.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/terra/selection.rs), and
-[`terra/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/terra/mod.rs).
+[`terra/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/terra/kinds.rs),
+[`terra/selection.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/terra/selection.rs), and
+[`terra/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/terra/mod.rs).
 
 ## Workbench assembly and input
 

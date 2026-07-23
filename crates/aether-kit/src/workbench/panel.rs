@@ -30,7 +30,7 @@ use crate::widget::{
     TextFieldConfig, WidgetClipRect, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
     WidgetStateChanged, emit,
 };
-use crate::world::AutomatonRule;
+use aether_kit_terrain::world::AutomatonRule;
 
 use super::{
     WorkbenchControl, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchMarkMode, WorkbenchOperator,
@@ -783,8 +783,8 @@ fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effe
 
 #[cfg(test)]
 mod tests {
-    use crate::mark::{MarkId, MarkRef};
-    use crate::world::{OperatorChunk, ProposalDigest, ProposalId};
+    use aether_kit_terrain::mark::{MarkId, MarkRef};
+    use aether_kit_terrain::world::{OperatorChunk, ProposalDigest, ProposalId};
 
     use super::*;
 

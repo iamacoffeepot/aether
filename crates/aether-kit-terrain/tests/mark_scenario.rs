@@ -12,16 +12,16 @@ use std::path::Path;
 use aether_actor::Addressable;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
-use aether_kit::mark::{
+use aether_kit_terrain::mark::{
     Mark, MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGeometry, MarkGet, MarkGetResult, MarkId,
     MarkList, MarkListResult, MarkRef, MarkUpdate, MarkUpdateResult,
 };
-use aether_kit::world::WorldPoint;
+use aether_kit_terrain::world::WorldPoint;
 
 // Retain all of the kit's native inventory submissions in this integration
 // test binary, matching the other component scenarios.
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_terrain as _;
 
 const COMPONENT_NAME: &str = "marks";
 
@@ -56,7 +56,7 @@ fn load_mark_book(harness: &mut SubstrateHarness, wasm_path: &Path) -> aether_da
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive CRUD → replace → allocation-watermark proof
 fn mark_crud_and_allocation_survive_component_replace() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_terrain") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");

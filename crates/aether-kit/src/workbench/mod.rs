@@ -20,10 +20,10 @@ use aether_lifecycle::LifecycleMailboxExt;
 use serde::{Deserialize, Serialize};
 
 use crate::console::{ConsoleCommandOutput, ConsoleOverlay};
-use crate::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult, MarkRef};
-use crate::terra::{CreateTerraMark, RelabelTerraSelection, TerraCommandResult, TerraError};
 use crate::widget::{EditorConfig, EditorKeyChord, EditorShell, RegionInputLanes, RegionSpec};
-use crate::world::{
+use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult, MarkRef};
+use aether_kit_terrain::terra::{CreateTerraMark, RelabelTerraSelection, TerraCommandResult, TerraError};
+use aether_kit_terrain::world::{
     ApplyBrush, AutomatonRule, CellPos, CommitProposal, DiscardProposal, OperatorCell, PickTerrain, PickTerrainResult,
     ProposalId, ProposalOperation, ProposalResult, Propose, RunAutomaton, SetMarkOverlaySelection,
     SetMarkOverlaySelectionResult, SetMarkOverlayVisibility, SetProposalPreview,
@@ -903,10 +903,10 @@ fn intent_control(intent: &WorkbenchIntent) -> WorkbenchControl {
 #[cfg(test)]
 mod tests {
     use crate::console::{ConsoleConfig, ConsoleTheme};
-    use crate::mark::{MarkId, MarkRef};
     use crate::widget::EditorRegionRect;
     use crate::widget::theme::Theme;
-    use crate::world::{
+    use aether_kit_terrain::mark::{MarkId, MarkRef};
+    use aether_kit_terrain::world::{
         AutomatonRule, BrushParameters, OperatorBudget, OperatorChunk, ProposalDigest, ProposalError, ProposalId,
         ProposalOperationResult, WorldPoint,
     };

@@ -19,22 +19,19 @@ use aether_kinds::{
     MouseButtonRelease, NamedMail, Render, TextInput, Tick,
 };
 use aether_kit::console::ConsoleConfig;
-use aether_kit::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult};
-use aether_kit::terra::{TerraConfig, TerraQuery, TerraQueryResult};
 use aether_kit::widget::EditorRegionRect;
 use aether_kit::widget::theme::Theme;
 use aether_kit::workbench::{
     WorkbenchCamera, WorkbenchConfig, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchLayout, WorkbenchMarkMode,
     WorkbenchOperator, WorkbenchPanelSettings, WorkbenchQuery, WorkbenchQueryResult,
 };
-use aether_kit::world::{
+use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult};
+use aether_kit_terrain::terra::{TerraConfig, TerraQuery, TerraQueryResult};
+use aether_kit_terrain::world::{
     AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, ProposalError, SUBCELLS_PER_CELL,
     SetCellHeights, SetChunk, WorldPositionMeters,
 };
 use aether_text::{LoadFontBytes, LoadFontResult, TextCapability};
-
-#[allow(unused_imports)]
-use aether_kit as _;
 
 const MARK_COMPONENT_NAME: &str = "aether.kit.mark";
 const WORLD_COMPONENT_NAME: &str = "world";
@@ -198,7 +195,13 @@ fn replace_numeric_with_zero(harness: &mut SubstrateHarness) {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    // The mark / world / terra exports moved to the `aether-kit-terrain` wasm;
+    // the workbench export stays in the `aether-kit` wasm, so this scenario
+    // loads both.
+    let Some(terrain_wasm_path) = require_runtime("aether_kit_terrain") else {
+        return;
+    };
+    let Some(kit_wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let mut harness = SubstrateHarness::builder()
@@ -209,11 +212,13 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
         .with_actor::<TextCapability>(())
         .build()
         .expect("boot SubstrateHarness");
-    let mark_book_mailbox = load_export(&mut harness, &wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME, Vec::new());
-    let world_mailbox = load_export(&mut harness, &wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME, Vec::new());
+    let mark_book_mailbox =
+        load_export(&mut harness, &terrain_wasm_path, "aether.kit.mark", MARK_COMPONENT_NAME, Vec::new());
+    let world_mailbox =
+        load_export(&mut harness, &terrain_wasm_path, "aether.kit.world", WORLD_COMPONENT_NAME, Vec::new());
     let terra_mailbox = load_export(
         &mut harness,
-        &wasm_path,
+        &terrain_wasm_path,
         "aether.kit.terra",
         TERRA_COMPONENT_NAME,
         TerraConfig { mark_book_mailbox }.encode_into_bytes(),
@@ -252,7 +257,7 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
     };
     load_export(
         &mut harness,
-        &wasm_path,
+        &kit_wasm_path,
         "aether.kit.workbench",
         WORKBENCH_COMPONENT_NAME,
         workbench_config.encode_into_bytes(),
