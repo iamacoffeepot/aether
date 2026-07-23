@@ -6,9 +6,11 @@
 
 //! Proc-macro home for the actor SDK attributes: `#[actor]`,
 //! `#[runtime]`, `#[handler]`, `#[fallback]`, `#[capability]`, and
-//! `#[local]`. The data-layer `Kind` / `Schema` derives live in
-//! `aether-data-derive` and are re-exported by `aether-data`.
+//! `#[local]`, plus the `export_asset!` asset embed (ADR-0163). The
+//! data-layer `Kind` / `Schema` derives live in `aether-data-derive`
+//! and are re-exported by `aether-data`.
 
+mod asset;
 mod diagnostics;
 mod handler_parse;
 mod manifest;
@@ -314,5 +316,39 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
             &item.self_ty,
             "#[actor] expects `impl WasmActor for X`, `impl NativeActor for X`, or              `impl Component for X` (back-compat alias) — inherent `impl X { … }`              is no longer supported",
         ))
+    }
+}
+
+/// `export_asset!("path/to/file")` — embed an asset file in the
+/// component's wasm as a custom section named `aether.asset.<path>`
+/// (ADR-0163 §2).
+///
+/// The path is resolved relative to the invoking source file, exactly
+/// like `include_bytes!`, and the path string as written is the
+/// asset's name — the key the ADR-0163 load window
+/// (`AssetWindow::asset`) and catalog report.
+///
+/// ```ignore
+/// aether_actor::export_asset!("sprites/slime.png");
+/// ```
+///
+/// The bytes ride a custom section keyed by the asset path — the
+/// section the host-side load window and catalog index — and are not
+/// addressable from guest code. (Toolchain caveat: rustc currently also
+/// duplicates every `#[link_section]` static's bytes into the module's
+/// linear-memory data segment, the same as the `aether.kinds` sections;
+/// see `asset.rs`. Stripping that copy is a build-pipeline concern, not
+/// a macro one.) Asset names must be unique across the final component:
+/// a second `export_asset!` of the same path — anywhere in the crate
+/// graph — fails at link time with a duplicate-symbol error rather than
+/// silently concatenating sections. On non-wasm targets no section is
+/// emitted, but the file is still `include_bytes!`-checked so a bad
+/// path fails native builds too.
+#[proc_macro]
+pub fn export_asset(input: TokenStream) -> TokenStream {
+    let path_lit = parse_macro_input!(input as syn::LitStr);
+    match asset::expand_export_asset(&path_lit) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
     }
 }

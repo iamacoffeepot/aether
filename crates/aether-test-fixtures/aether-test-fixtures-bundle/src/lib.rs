@@ -80,3 +80,14 @@ aether_actor::export!(
     Sidecar,
     TcpLoadProbe,
 );
+
+// ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`
+// custom section of this bundle's wasm. This is the fixture the aether-actor
+// `asset_sections` integration test parses out of the built
+// `aether_test_fixtures_bundle.wasm` to pin `export_asset!`'s emission (the
+// section is present exactly once and byte-exact against the source file).
+// It rides this bundle rather than an aether-actor example because `cargo xtask
+// dist` cross-builds this crate's wasm (it deps `aether-actor` + is a cdylib),
+// whereas aether-actor's own examples are never discovered — the crate cannot
+// depend on itself, so they fail the actor-dep gate and no CI path emits them.
+aether_actor::export_asset!("asset_fixture.txt");

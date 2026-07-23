@@ -51,6 +51,7 @@ dependencies = [
  "inventory",
  "serde",
  "tracing",
+ "wasmparser 0.246.2",
 ]
 
 [[package]]

@@ -1,0 +1,6 @@
+AETHER-ASSET-PROBE-7f3c9a1e: this file is embedded by export_asset! into the
+aether.asset.asset_fixture.txt custom section of aether_test_fixtures_bundle.wasm.
+It must appear verbatim in that custom section and in no data segment — the
+ADR-0163 load-window design rests on asset bytes never entering linear memory.
+The first line's marker string is what the data-segment scan greps for, so keep
+it unique to this file.
