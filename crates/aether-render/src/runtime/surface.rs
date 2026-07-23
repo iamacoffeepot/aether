@@ -9,14 +9,13 @@ use std::sync::Arc;
 
 use aether_substrate::render::{DEPTH_FORMAT, vertex_buffer_layout};
 
-/// Resolved wgpu surface + device the pumped render runtime stands up from
-/// a window (ADR-0161). Extracted so the instance → surface → adapter →
-/// device → swapchain-config boot lives once; the runtime owns the
-/// resulting `RenderGpu` outright. winit-free — the caller passes the
-/// surface target and its pixel size — but only the windowed (`desktop`)
-/// path boots a surface, so it rides that feature.
+/// Resolved first wgpu surface + shared device context. The render runtime
+/// retains the instance and adapter so later windows can attach compatible
+/// surfaces to the same device and pipelines.
 #[cfg(feature = "desktop")]
 pub struct BootedSurface {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub surface: wgpu::Surface<'static>,
@@ -31,6 +30,13 @@ pub struct BootedSurface {
     /// supports `POLYGON_MODE_LINE` — the caller builds the wireframe
     /// overlay pipeline via [`build_wireframe_overlay_pipeline`].
     pub build_overlay: bool,
+}
+
+/// One additional surface attached to an already-booted render device.
+#[cfg(feature = "desktop")]
+pub struct AttachedSurface {
+    pub surface: wgpu::Surface<'static>,
+    pub config: wgpu::SurfaceConfiguration,
 }
 
 /// Resolved surfaceless wgpu device the offscreen pumped render runtime
@@ -146,35 +152,74 @@ pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
     }
 }
 
-/// Boot the wgpu instance, surface, adapter, device, and swapchain
-/// configuration for a windowed chassis. `target` is the window surface
-/// target (`Arc<winit::window::Window>` on desktop); `size` is its current
-/// inner pixel size; `wireframe` is the resolved `AETHER_WIREFRAME` value
-/// (argv > env > default) — `None` / `"" | "0" | "off"` is filled faces,
-/// `"line"` draws the main pipeline in `PolygonMode::Line`, anything else
-/// is filled faces plus a wireframe overlay.
-///
-/// # Panics
-/// Panics if surface creation, adapter selection, or device acquisition
-/// fail — fail-fast per ADR-0063: a windowed chassis can't proceed without
-/// a usable GPU pipeline.
 #[cfg(feature = "desktop")]
-#[must_use]
+fn surface_configuration(
+    surface: &wgpu::Surface<'_>,
+    adapter: &wgpu::Adapter,
+    size: (u32, u32),
+    required_format: Option<wgpu::TextureFormat>,
+) -> Result<(wgpu::SurfaceConfiguration, wgpu::TextureFormat), String> {
+    let caps = surface.get_capabilities(adapter);
+    if !caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
+        return Err("surface does not support COPY_DST presentation from the shared offscreen target".to_owned());
+    }
+    let format = match required_format {
+        Some(format) if caps.formats.contains(&format) => format,
+        Some(format) => {
+            return Err(format!(
+                "surface is incompatible with the shared render format {format:?}; supported formats: {:?}",
+                caps.formats
+            ));
+        }
+        None => caps
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| "surface reports no compatible formats".to_owned())?,
+    };
+    let present_mode = caps
+        .present_modes
+        .iter()
+        .copied()
+        .find(|mode| *mode == wgpu::PresentMode::Fifo)
+        .or_else(|| caps.present_modes.first().copied())
+        .ok_or_else(|| "surface reports no presentation modes".to_owned())?;
+    let alpha_mode = caps.alpha_modes.first().copied().ok_or_else(|| "surface reports no alpha modes".to_owned())?;
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+        format,
+        width: size.0.max(1),
+        height: size.1.max(1),
+        present_mode,
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    Ok((config, format))
+}
+
+/// Boot the first window surface and the shared wgpu device. Every failure is
+/// returned before the caller mutates its target map, so window creation can
+/// roll back transactionally.
+#[cfg(feature = "desktop")]
 pub fn boot_surface(
     target: impl Into<wgpu::SurfaceTarget<'static>>,
     size: (u32, u32),
     wireframe: Option<&str>,
-) -> BootedSurface {
+) -> Result<BootedSurface, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let surface = instance.create_surface(target).expect("create_surface");
+    let surface = instance.create_surface(target).map_err(|error| format!("create render surface: {error}"))?;
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
     }))
-    .expect("no compatible wgpu adapter");
+    .map_err(|error| format!("request compatible render adapter: {error}"))?;
     let adapter_info = adapter.get_info();
     let limits = wgpu::Limits::default();
+    let (config, format) = surface_configuration(&surface, &adapter, size, None)?;
 
     // Wireframe rendering is opt-in via `AETHER_WIREFRAME`; the line modes
     // need the adapter's `POLYGON_MODE_LINE` feature, so if unsupported we
@@ -189,29 +234,31 @@ pub fn boot_surface(
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::default(),
     }))
-    .expect("request_device");
+    .map_err(|error| format!("request render device: {error}"))?;
 
     let device = Arc::new(device);
     let queue = Arc::new(queue);
-
-    let caps = surface.get_capabilities(&adapter);
-    // Prefer sRGB so the clear color matches intuition.
-    let format = caps.formats.iter().copied().find(wgpu::TextureFormat::is_srgb).unwrap_or(caps.formats[0]);
-    let config = wgpu::SurfaceConfiguration {
-        // COPY_DST: the swapchain receives a texture-to-texture copy from
-        // the offscreen each frame. No draw pass writes to it directly.
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
-        format,
-        width: size.0.max(1),
-        height: size.1.max(1),
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: caps.alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
     surface.configure(&device, &config);
 
-    BootedSurface { device, queue, surface, config, format, polygon_mode, build_overlay }
+    Ok(BootedSurface { instance, adapter, device, queue, surface, config, format, polygon_mode, build_overlay })
+}
+
+/// Attach one later window to the already-selected adapter/device. The
+/// surface must support the exact shared color format and `COPY_DST`; failure
+/// leaves the caller's map untouched.
+#[cfg(feature = "desktop")]
+pub fn attach_surface(
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    target: impl Into<wgpu::SurfaceTarget<'static>>,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+) -> Result<AttachedSurface, String> {
+    let surface = instance.create_surface(target).map_err(|error| format!("create render surface: {error}"))?;
+    let (config, _) = surface_configuration(&surface, adapter, size, Some(format))?;
+    surface.configure(device, &config);
+    Ok(AttachedSurface { surface, config })
 }
 
 /// Wireframe-overlay shader: same vertex layout as the main shader so the

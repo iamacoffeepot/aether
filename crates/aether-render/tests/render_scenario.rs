@@ -1375,6 +1375,7 @@ fn capture_frame_checks_return_substrate_verdict() {
             HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
+                    window: None,
                     mails: vec![draw],
                     after_mails: vec![],
                     checks: vec![
@@ -1476,6 +1477,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
             HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
+                    window: None,
                     mails: vec![],
                     after_mails: vec![],
                     checks: vec![],
@@ -1563,6 +1565,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
             HarnessOp::send_and_await(
                 "aether.render",
                 &CaptureFrame {
+                    window: None,
                     mails: vec![draw],
                     after_mails: vec![],
                     checks: vec![region_check(FrameReduction::Coverage), region_check(FrameReduction::Centroid)],
@@ -1700,7 +1703,13 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
             "snap",
             HarnessOp::send_and_await(
                 "aether.render",
-                &CaptureFrame { mails: vec![draw], after_mails: vec![], checks: checks.clone(), similarity: None },
+                &CaptureFrame {
+                    window: None,
+                    mails: vec![draw],
+                    after_mails: vec![],
+                    checks: checks.clone(),
+                    similarity: None,
+                },
             ),
         )])
         .expect("send_and_await(CaptureFrame) with checks");

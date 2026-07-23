@@ -1,10 +1,11 @@
+use super::super::capture::capture_envelope;
 #[allow(clippy::wildcard_imports)]
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
 use std::io::Cursor;
 
-use aether_kinds::FrameVerdict;
+use aether_kinds::{CaptureFrame, FrameVerdict, WindowId};
 use base64::engine::general_purpose::STANDARD;
 
 fn image_dimensions(width: u32, height: u32) -> CaptureImageDimensions {
@@ -44,6 +45,18 @@ fn decode_synthetic_png(png: &[u8]) -> DecodedSyntheticPng {
     DecodedSyntheticPng { dimensions, rgba }
 }
 
+#[test]
+fn capture_frame_window_id_reaches_the_engine_envelope() {
+    let engine = EngineId(Uuid::from_u128(0x3990));
+    for window_id in [0, 73] {
+        let envelope = capture_envelope(engine, window_id, Vec::new(), Vec::new(), Vec::new(), None);
+        let request = CaptureFrame::decode_from_bytes(&envelope.payload).expect("capture request decodes");
+
+        assert_eq!(envelope.to.engine, Some(engine));
+        assert_eq!(request.window, Some(WindowId(window_id)), "the tool never converts a selected id to offscreen");
+    }
+}
+
 /// `capture_frame` with an unknown kind in the mails bundle is
 /// rejected up front — the bundle is encoded before any RPC.
 #[tokio::test]
@@ -53,6 +66,7 @@ async fn capture_frame_bad_bundle_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            window_id: 1,
             mails: vec![EngineMailSpec {
                 recipient_name: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
@@ -80,6 +94,7 @@ async fn capture_frame_relative_save_path_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            window_id: 1,
             mails: vec![],
             after_mails: vec![],
             checks: vec![],

@@ -1,23 +1,5 @@
 use std::path::PathBuf;
-#[cfg(feature = "desktop")]
-use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
-
-#[cfg(feature = "desktop")]
-use winit::window::Window;
-
-/// The late-bound winit window handle, shared between the desktop chassis's
-/// winit `resumed` handler (which fills it exactly once after
-/// `create_window`) and the pumped render runtime's state (ADR-0161 slice
-/// R2), which reads it in `on_frame` to boot wgpu lazily. Structurally the
-/// same one-shot `Arc<OnceLock<Arc<Window>>>` the `aether.window` desktop
-/// actor receives — the chassis mints one cell and clones it into both
-/// actors' params so they observe the same window (the task's local-alias
-/// option: the underlying type is identical to `aether_window`'s
-/// `WindowCell`, so a chassis can hand one cell to both without a crate
-/// edge). Behind the `desktop` feature: only a desktop chassis pulls winit.
-#[cfg(feature = "desktop")]
-pub type WindowCell = Arc<OnceLock<Arc<Window>>>;
 
 /// Boot knobs for `RenderCapability` (ADR-0090). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
@@ -45,12 +27,6 @@ pub struct RenderTuningConfig {
 /// (ADR-0156 §3): the non-knob wiring the chassis computes at boot, kept
 /// off the operator-resolvable [`RenderTuningConfig`] `Config`.
 ///
-/// The `WindowCell` is winit-typed and desktop-only, so its `window` field
-/// is gated inside the struct (mirroring aether-window's
-/// `DesktopWindowParams`); ADR-0161 slice R4 keeps the struct itself off the
-/// `desktop` gate so the substrate harness's offscreen pumped runtime can
-/// construct it without pulling winit.
-///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`
 /// methods — used by the in-process substrate-harness to assert what kinds
@@ -69,18 +45,11 @@ pub struct RenderParams {
     /// pending capture. `None` disables similarity checks with a
     /// descriptive `Err` reply.
     pub assets_dir: Option<PathBuf>,
-    /// The shared late-bound window handle the runtime boots wgpu against
-    /// on the first `on_frame` after the chassis's `resumed` fills the
-    /// cell. The chassis mints one [`WindowCell`] and clones it into both
-    /// this and the `aether.window` desktop actor's params, so both
-    /// observe the same window. `None` in tests, which never own a surface.
-    #[cfg(feature = "desktop")]
-    pub window: Option<WindowCell>,
     /// ADR-0161 slice R4: offscreen boot dimensions for a surfaceless
     /// runtime (the substrate harness). `Some((w, h))` makes the lazy
     /// `on_frame` boot stand up a surfaceless GPU at these dimensions when
-    /// no window cell is filled; `None` leaves the runtime windowed (or
-    /// never booted, in a no-GPU test).
+    /// no window target is requested; `None` leaves the runtime windowed
+    /// (or never booted, in a no-GPU test).
     pub offscreen_size: Option<(u32, u32)>,
     /// Resolved `AETHER_WIREFRAME` value (argv > env > default), threaded
     /// so the lazy wgpu boot picks the wireframe mode. `None` / `"off"` is

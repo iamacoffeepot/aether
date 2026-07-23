@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use aether_data::Kind;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, FrameVerdict, SimilarityCheck,
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, FrameVerdict, NamedMail, SimilarityCheck,
+    WindowId,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -15,9 +16,30 @@ use crate::args::{CaptureCheckSpec, CaptureFrameArgs};
 use super::envelope::engine_envelope;
 use super::ids::parse_engine_id;
 use super::render::{internal, internal_msg};
-use super::{Mcp, RENDER_CAP};
+use super::{MailEnvelope, Mcp, RENDER_CAP};
 
 const CAPTURE_IMAGE_DEFAULT_MAX_DIMENSION: u32 = 768;
+
+fn capture_request(
+    window_id: u64,
+    mails: Vec<NamedMail>,
+    after_mails: Vec<NamedMail>,
+    checks: Vec<FrameCheck>,
+    similarity: Option<SimilarityCheck>,
+) -> CaptureFrame {
+    CaptureFrame { window: Some(WindowId(window_id)), mails, after_mails, checks, similarity }
+}
+
+pub(super) fn capture_envelope(
+    engine: aether_data::EngineId,
+    window_id: u64,
+    mails: Vec<NamedMail>,
+    after_mails: Vec<NamedMail>,
+    checks: Vec<FrameCheck>,
+    similarity: Option<SimilarityCheck>,
+) -> MailEnvelope {
+    engine_envelope(engine, RENDER_CAP, &capture_request(window_id, mails, after_mails, checks, similarity))
+}
 
 /// Named image dimensions keep width and height unambiguous through the
 /// capture resize path without becoming a wire or public API.
@@ -408,7 +430,7 @@ pub(super) async fn capture_frame(mcp: &Mcp, args: CaptureFrameArgs) -> Result<C
     });
     let reply = mcp
         .session
-        .call_one(engine_envelope(engine, RENDER_CAP, &CaptureFrame { mails, after_mails, checks, similarity }))
+        .call_one(capture_envelope(engine, args.window_id, mails, after_mails, checks, similarity))
         .await
         .map_err(internal)?;
     match CaptureFrameResult::decode_from_bytes(&reply.payload) {

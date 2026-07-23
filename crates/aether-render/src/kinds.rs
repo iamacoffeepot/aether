@@ -13,7 +13,7 @@
 //! draw kinds below import them from there.
 
 use aether_data::MailId;
-use aether_kinds::{ClipRect, QuadSpace};
+use aether_kinds::{ClipRect, QuadSpace, WindowId};
 use aether_math::{Rgb, Rgba};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -25,12 +25,14 @@ use serde::{Deserialize, Serialize};
 /// harness captures replay the last committed accumulators when the producer
 /// was idle; desktop always commits current. Not addressed by wasm guests —
 /// the pumping chassis driver is its sole sender.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.render.frame")]
 pub struct Frame {
     pub replay_cache_when_idle: bool,
+    /// Engine window targets dirtied by this application turn. The render
+    /// actor deduplicates the list before presenting; an empty list is the
+    /// explicit surfaceless harness path.
+    pub windows: Vec<WindowId>,
 }
 
 /// Chassis-internal pre-mail-settlement notice (ADR-0161 §Decision 4). One
@@ -58,6 +60,7 @@ pub struct PreSettled {
 )]
 #[kind(name = "aether.render.occluded")]
 pub struct Occluded {
+    pub window: WindowId,
     pub occluded: bool,
 }
 

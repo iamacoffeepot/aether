@@ -1255,6 +1255,9 @@ pub struct CaptureSimilaritySpec {
 pub struct CaptureFrameArgs {
     /// Engine UUID to capture (from `list_engines`).
     pub engine_id: String,
+    /// Engine window id to capture. Desktop capture never guesses a primary,
+    /// focused, or current window.
+    pub window_id: u64,
     /// Mail dispatched *before* the frame is read back — state changes
     /// whose effects should appear in the image. Resolved atomically:
     /// any bad entry aborts the whole capture.

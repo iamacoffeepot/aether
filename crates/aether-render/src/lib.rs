@@ -1,18 +1,18 @@
 //! `aether.render` cap. [`RenderCapability`] is the pumped, driver-thread
-//! `aether.render` actor (ADR-0161): it owns the accumulators, the wgpu GPU
-//! and surface, and the pending capture as plain state, dispatched through a
-//! [`PumpedSlot`](aether_substrate::actor::native::PumpedSlot) on the chassis
-//! driver thread rather than the worker pool. Frame recording, capture
-//! readback, and present all run on the one thread that owns the surface, so
-//! the largest cross-thread shared-state seam in the codebase collapses to
-//! plain fields.
+//! `aether.render` actor (ADR-0161): it owns the accumulators, the wgpu GPU,
+//! its window-keyed surfaces, and the pending capture as plain state,
+//! dispatched through a [`PumpedSlot`](aether_substrate::actor::native::PumpedSlot)
+//! on the chassis driver thread rather than the worker pool. Frame recording,
+//! capture readback, and present all run on the one thread that owns the
+//! surfaces, so the largest cross-thread shared-state seam in the codebase
+//! collapses to plain fields.
 //!
 //! The driver requests a frame by mailing [`Frame`] each redraw after the
 //! advance chain settles; capture is a mail-driven state machine inside the
 //! actor ([`Frame`] / [`PreSettled`] / [`Occluded`] complete it), so every
-//! capture transition is a handler with trace brackets and a cost row. The
-//! GPU boots lazily on the first frame (against a shared window cell on
-//! desktop, or `offscreen_size` on the surfaceless harness path).
+//! capture transition is a handler with trace brackets and a cost row.
+//! Desktop surfaces attach explicitly by `WindowId`; the surfaceless harness
+//! GPU boots lazily from `offscreen_size`.
 //!
 //! The cap's drawing + texture mail kinds — and the three chassis-internal
 //! driver kinds — live in [`kinds`] (ADR-0121): they ride the always-on
@@ -64,10 +64,7 @@ use aether_kinds::CaptureFrame;
 // driver reads (`capture_deadline` / `triangles_rendered` /
 // `capture_ready`) through `PumpedSlot::read_state`; the three chassis-internal
 // driver kinds (`Frame` / `Occluded` / `PreSettled`) ride the always-on
-// `kinds` module (re-exported above). The `WindowCell` is winit-typed and
-// stays `desktop`-only.
-#[cfg(feature = "desktop")]
-pub use runtime::WindowCell;
+// `kinds` module (re-exported above).
 #[cfg(feature = "runtime")]
 pub use runtime::{
     RenderCapabilityState, RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
@@ -110,10 +107,10 @@ pub use headless::HeadlessRenderCapability;
 ///
 /// The state-bearing runtime is the pumped, driver-thread `aether.render`
 /// actor (ADR-0161): its [`RenderCapabilityState`] owns the accumulators, the
-/// wgpu GPU + surface, and the pending capture as plain state, dispatched
-/// through a [`PumpedSlot`](aether_substrate::actor::native::PumpedSlot) on
-/// the chassis driver thread rather than the worker pool. It lives behind the
-/// `render-runtime` gate in the `runtime` module, so a transport- or
+/// wgpu GPU + window-keyed surfaces, and the pending capture as plain state,
+/// dispatched through a [`PumpedSlot`](aether_substrate::actor::native::PumpedSlot)
+/// on the chassis driver thread rather than the worker pool. It lives behind
+/// the `render-runtime` gate in the `runtime` module, so a transport- or
 /// marker-only build never names it nor pulls `aether_substrate`/wgpu through
 /// this cap.
 #[actor(singleton)]

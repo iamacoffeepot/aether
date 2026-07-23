@@ -6,7 +6,7 @@
 //! pumped slots on the winit thread — `aether.window` (ADR-0160) and
 //! `aether.render` (this slice) — booting each via
 //! [`DriverCtx::boot_pumped_actor`] from a Claim-stage reservation, pushing
-//! them mail, and draining. There is no GPU code here: the wgpu surface,
+//! them mail, and draining. There is no GPU code here: the wgpu surfaces,
 //! accumulators, and pending capture are plain state on the pumped render
 //! actor (`aether-render`). `DesktopDriverCapability` composes one driver
 //! alongside the passive capabilities (`LogCapability`, `FsCapability`,
@@ -19,7 +19,7 @@
 //! exited cleanly; the `chassis_builder` then tears down every passive in
 //! reverse boot order via `BootedPassives::Drop`.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,8 +42,7 @@ use aether_substrate::{
     mail::{Mail, MailId, MailboxId},
 };
 use aether_window::{
-    DesktopWindowCapability, DesktopWindowParams, WindowCell, WindowHostAction, WindowHostEffect, WindowSizeRequest,
-    WindowSpec,
+    DesktopWindowCapability, DesktopWindowParams, WindowHostAction, WindowHostEffect, WindowSizeRequest, WindowSpec,
 };
 use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
@@ -64,9 +63,9 @@ mod shutdown;
 /// cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 
-/// Temporary adapter between the window-owned winit domain and the current
-/// single-target render/lifecycle path. Multi-target render replaces this
-/// bridge in issue #3990.
+/// Temporary adapter between the window-owned winit domain and the render /
+/// lifecycle pumps. The final chassis integration replaces this bridge in
+/// issue #3991.
 pub struct DesktopWindowCompatibilityBridge {
     queue: Arc<Mailer>,
     /// `aether.lifecycle` mailbox id, cached at boot. Each redraw
@@ -104,14 +103,13 @@ pub struct DesktopWindowCompatibilityBridge {
     /// mail so the RPC server's `on_any` lifts it into a `ReplyEvent`
     /// (iamacoffeepot/aether#1316).
     outbound: Arc<HubOutbound>,
-    window: Option<Arc<Window>>,
-    /// Engine identity of the one window the compatibility render target can
-    /// present. The window manager may own additional windows; #3990 gives
-    /// render a target map for them.
-    window_id: Option<EngineWindowId>,
+    /// Temporary redraw handles retained by this compatibility bridge until
+    /// the final chassis swap. Render owns its own target `Arc`s through
+    /// explicit host ingress, keyed by the same ids.
+    windows: BTreeMap<EngineWindowId, Arc<Window>>,
     /// The pumped `aether.render` runtime (ADR-0161 §Decision 1), dispatched
     /// on this winit thread through a [`PumpedSlot`] — the same pump home the
-    /// `aether.window` actor uses. It owns the wgpu surface, the accumulators,
+    /// `aether.window` actor uses. It owns the wgpu surfaces, the accumulators,
     /// and the pending capture outright; the driver only pushes it
     /// [`Frame`] / [`Occluded`] mail and drains. Booted from the driver's
     /// Claim-stage `aether.render` reservation via [`DriverCtx::boot_pumped_actor`].
@@ -130,7 +128,10 @@ pub struct DesktopWindowCompatibilityBridge {
     render_pump_rx: Receiver<PumpWake>,
     pub(crate) started: Option<Instant>,
     pub(crate) frame: u64,
-    occluded: bool,
+    /// Window ids currently occluded. Render tracks the same state per target;
+    /// this copy exists only to choose winit `Poll` versus `Wait` and redraw
+    /// visible windows until the final application swap.
+    occluded_windows: BTreeSet<EngineWindowId>,
     /// Lowered window boot knobs (mode / size / title / wireframe), parsed
     /// from `AETHER_WINDOW_MODE` / `AETHER_WINDOW_TITLE` / `AETHER_WIREFRAME`
     /// at boot and applied when `resumed` creates the window. Kept so the
@@ -156,10 +157,6 @@ pub struct DesktopWindowCompatibilityBridge {
     /// so `aether.window` reports identically to any pooled actor;
     /// [`PumpedSlot::shutdown`] runs the actor's `unwire` on loop exit.
     window_slot: PumpedSlot<DesktopWindowCapability>,
-    /// One-shot handle retained strictly for the current render actor: the
-    /// first successful compatibility attachment fills it, and render reads
-    /// the winit `Window` while #3990 replaces this single-target seam.
-    window_cell: WindowCell,
     /// ADR-0080 §6 chassis-root correlation counter (issue
     /// iamacoffeepot/aether#723). Bumped per chassis-source push so
     /// every chassis-owned render/lifecycle emission carries a fresh
@@ -226,8 +223,8 @@ impl DesktopWindowCompatibilityBridge {
         }
         self.quit_requested = true;
         self.push_chassis_root(self.lifecycle_mailbox, <Quit as Kind>::ID, encode_empty::<Quit>(), 1);
-        if let Some(w) = &self.window {
-            w.request_redraw();
+        for window in self.windows.values() {
+            window.request_redraw();
         }
     }
 
@@ -304,27 +301,75 @@ impl DesktopWindowCompatibilityBridge {
         self.render_slot.drain_available();
     }
 
-    /// Set the window's occlusion state (ADR-0161 §Decision 4). Forwards the
-    /// transition to the pumped render actor as [`Occluded`] mail — its
-    /// `on_occluded` handler fail-fasts any pending capture (issue 1317,
-    /// relocated into the actor) — and parks / unparks the loop. `Wait` when
-    /// occluded is the power-save; `Poll` + a redraw poke on un-occlude
-    /// resumes rendering.
-    fn set_occluded(&mut self, id: EngineWindowId, occluded: bool, event_loop: &ActiveEventLoop) {
-        if self.window_id != Some(id) {
-            return;
-        }
-        if self.occluded == occluded {
-            return;
-        }
-        self.occluded = occluded;
-        self.send_render_and_drain(&Occluded { occluded });
-        if occluded {
+    fn update_visibility_control_flow(&self, event_loop: &ActiveEventLoop) {
+        let all_occluded = !self.windows.is_empty() && self.windows.keys().all(|id| self.occluded_windows.contains(id));
+        if all_occluded && !self.quit_requested {
             event_loop.set_control_flow(ControlFlow::Wait);
         } else {
             event_loop.set_control_flow(ControlFlow::Poll);
-            if let Some(w) = &self.window {
-                w.request_redraw();
+        }
+    }
+
+    /// Forward one target's occlusion state to render and update the
+    /// application loop's aggregate visibility policy.
+    fn set_occluded(&mut self, id: EngineWindowId, occluded: bool, event_loop: &ActiveEventLoop) {
+        if !self.windows.contains_key(&id) {
+            return;
+        }
+        if self.occluded_windows.contains(&id) == occluded {
+            return;
+        }
+        if occluded {
+            self.occluded_windows.insert(id);
+        } else {
+            self.occluded_windows.remove(&id);
+        }
+        self.send_render_and_drain(&Occluded { window: id, occluded });
+        self.update_visibility_control_flow(event_loop);
+        if !occluded && let Some(window) = self.windows.get(&id) {
+            window.request_redraw();
+        }
+    }
+
+    fn attach_render_window(
+        &mut self,
+        id: EngineWindowId,
+        window: Arc<Window>,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), String> {
+        let attachment = self
+            .render_slot
+            .host_turn(|state, _ctx| state.attach_window(id, Arc::clone(&window)))
+            .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
+        attachment?;
+        self.windows.insert(id, window);
+        self.started.get_or_insert_with(Instant::now);
+        self.update_visibility_control_flow(event_loop);
+        Ok(())
+    }
+
+    fn detach_render_window(&mut self, id: EngineWindowId, event_loop: &ActiveEventLoop) {
+        let detached = self.render_slot.host_turn(|state, _ctx| state.detach_window(id));
+        if detached == Some(false) {
+            tracing::warn!(
+                target: "aether_substrate::render",
+                window_id = id.0,
+                "window manager detached an unknown render target",
+            );
+        }
+        self.windows.remove(&id);
+        self.occluded_windows.remove(&id);
+        self.update_visibility_control_flow(event_loop);
+    }
+
+    fn visible_dirty_window(&self, dirty: &BTreeSet<EngineWindowId>) -> bool {
+        dirty.iter().any(|id| self.windows.contains_key(id) && !self.occluded_windows.contains(id))
+    }
+
+    fn request_visible_redraws(&self) {
+        for (id, window) in &self.windows {
+            if !self.occluded_windows.contains(id) {
+                window.request_redraw();
             }
         }
     }
@@ -402,11 +447,7 @@ impl DesktopWindowCompatibilityBridge {
     /// `WaitUntil`, so continuous rendering is unaffected; the deadline only
     /// bites once the loop would otherwise sit idle.
     fn park_after_drain(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.occluded
-            && let Some(w) = &self.window
-        {
-            w.request_redraw();
-        }
+        self.request_visible_redraws();
         if let Some(Some(deadline)) = self.render_slot.read_state(RenderCapabilityState::capture_deadline) {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
@@ -488,17 +529,15 @@ impl DesktopWindowCompatibilityBridge {
         while let Some(effect) = effects.pop_front() {
             match effect {
                 WindowHostEffect::Created { id, window } => {
-                    let attachment = self.attach_compatibility_window(id, window);
+                    let attachment = self.attach_render_window(id, window, event_loop);
                     let follow_up = self
                         .window_slot
                         .host_turn(|state, ctx| state.finish_window_attachment(id, attachment, ctx))
                         .unwrap_or_default();
                     effects.extend(follow_up);
                 }
-                WindowHostEffect::Closing { .. } => {
-                    // The current render actor has no target-keyed detach
-                    // ingress. #3990 replaces this no-op with an explicit
-                    // detach before manager removal.
+                WindowHostEffect::Closing { id } => {
+                    self.detach_render_window(id, event_loop);
                 }
                 WindowHostEffect::Dirty { id } => {
                     dirty.insert(id);
@@ -508,45 +547,18 @@ impl DesktopWindowCompatibilityBridge {
                 }
                 WindowHostEffect::LastWindowClosed => {
                     self.request_quit();
-                    if let Some(id) = self.window_id {
-                        dirty.insert(id);
-                    } else {
-                        // A boot-window creation/attachment failure leaves no
-                        // render target that could advance lifecycle to its
-                        // terminal. Exit instead of parking before frame one.
-                        event_loop.exit();
-                    }
                 }
             }
         }
     }
 
-    fn attach_compatibility_window(&mut self, id: EngineWindowId, window: Arc<Window>) -> Result<(), String> {
-        if self.window.is_some() {
-            // Until #3990, additional windows participate in manager identity,
-            // controls, and input routing but share no render target.
-            return Ok(());
-        }
-        if let Some(existing) = self.window_cell.get() {
-            if !Arc::ptr_eq(existing, &window) {
-                return Err("compatibility WindowCell already contains a different window".to_owned());
-            }
-        } else {
-            let _ = self.window_cell.set(Arc::clone(&window));
-        }
-        self.window = Some(window);
-        self.window_id = Some(id);
-        self.started.get_or_insert_with(Instant::now);
-        Ok(())
-    }
-
     fn render_dirty_windows(&mut self, event_loop: &ActiveEventLoop, dirty: &BTreeSet<EngineWindowId>) {
-        if self.window_id.is_none_or(|id| !dirty.contains(&id)) || (self.occluded && !self.quit_requested) {
+        if !self.visible_dirty_window(dirty) && !self.quit_requested {
             return;
         }
 
         let reached_terminal = self.run_frame_advance();
-        self.send_render_and_drain(&Frame { replay_cache_when_idle: false });
+        self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows: dirty.iter().copied().collect() });
         self.frame += 1;
         if reached_terminal {
             event_loop.exit();
@@ -583,9 +595,7 @@ impl ApplicationHandler<UserEvent> for DesktopWindowCompatibilityBridge {
                 // (`ControlFlow::Wait`, occluded) loop. The flag-poll in
                 // `about_to_wait` does the actual `Quit`-push; this arm is
                 // the wake only, mirroring `WindowMail`.
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.request_visible_redraws();
             }
         }
     }
@@ -714,7 +724,7 @@ impl DriverCapability for DesktopDriverCapability {
 
         // ADR-0161: the desktop driver boots the pumped `aether.render` actor
         // itself (below). There is no cross-thread render seam — the pumped
-        // actor owns the surface, accumulators, and pending capture as plain
+        // actor owns the surfaces, accumulators, and pending capture as plain
         // state on this thread.
 
         // Issue 603 Phase 3 / ADR-0160 §Decision 3: the desktop driver is the
@@ -726,7 +736,6 @@ impl DriverCapability for DesktopDriverCapability {
         // `init` / `wire`, and hands back the claim's wake slot. The manager
         // owns native window creation, identity, controls, and event routing;
         // `about_to_wait` drains it inline between frames.
-        let window_cell = WindowCell::default();
         let (window_slot, window_wake_slot) =
             ctx.boot_pumped_actor::<DesktopWindowCapability>((), DesktopWindowParams)?;
 
@@ -744,18 +753,14 @@ impl DriverCapability for DesktopDriverCapability {
             let _ = window_mail_proxy.send_event(UserEvent::WindowMail);
         }));
 
-        // ADR-0161 §Decision 1/3: boot the pumped `aether.render` actor from
-        // the driver's Claim-stage `aether.render` reservation. The one-shot
-        // `WindowCell` is now strictly a compatibility seam between this
-        // bridge and the still-single-target render actor; #3990 replaces it
-        // with explicit attach/detach host ingress.
+        // Boot the pumped `aether.render` actor from the driver's Claim-stage
+        // reservation. Native windows attach later through same-thread host
+        // ingress as the window manager realizes them.
         let (render_slot, render_wake_slot) = ctx.boot_pumped_actor::<RenderCapability>(
             render_config,
             RenderParams {
                 observed_kinds: None,
                 assets_dir: Some(assets_dir),
-                window: Some(window_cell.clone()),
-                // ADR-0161 R4: the desktop chassis boots windowed, not offscreen.
                 offscreen_size: None,
                 wireframe: window.wireframe.clone(),
             },
@@ -813,18 +818,16 @@ impl DriverCapability for DesktopDriverCapability {
             lifecycle_reply_inbox: lifecycle_reply_claim.inbox,
             lifecycle_reply_mailbox: lifecycle_reply_claim.id,
             outbound: Arc::clone(&boot.outbound),
-            window: None,
-            window_id: None,
+            windows: BTreeMap::new(),
             render_slot,
             render_mailbox,
             render_pump_tx,
             render_pump_rx,
             started: None,
             frame: 0,
-            occluded: false,
+            occluded_windows: BTreeSet::new(),
             window_settings: window,
             window_slot,
-            window_cell,
             // 0 is the "no correlation" sentinel; mirror NativeBinding's
             // start-at-1 convention.
             chassis_correlation: AtomicU64::new(1),
