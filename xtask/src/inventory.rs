@@ -54,6 +54,12 @@ pub const CHASSIS_BINS: &[(&str, &str)] = &[
 /// component objects it boots.
 pub const PACKAGE_CHASSIS: (&str, &str) = CHASSIS_BINS[0];
 
+/// The chassis binary a `cargo xtask package --chassis headless` depot
+/// carries: the headless substrate's own `(package, bin)` pair, the second
+/// [`CHASSIS_BINS`] entry (issue #4002). The desktop default is
+/// [`PACKAGE_CHASSIS`]; the two are distinct link sets.
+pub const PACKAGE_CHASSIS_HEADLESS: (&str, &str) = CHASSIS_BINS[1];
+
 /// One discovered wasm component artifact.
 #[derive(Debug, Clone)]
 pub struct Component {
