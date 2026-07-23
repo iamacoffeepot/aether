@@ -16,11 +16,14 @@ pub struct ActorOpts {
     /// names it here so the runtime impls gate on that feature rather than the
     /// generic `runtime`. `None` ⇒ the default `feature = "runtime"`.
     pub runtime_feature: Option<String>,
-    /// ADR-0123: the runtime module name the struct-hosted `#[actor]` reads off
-    /// disk, from a bare positional ident — `#[actor(singleton, other)]` reads
-    /// `other.rs`. `None` ⇒ the conventional sibling `runtime`. Only consulted
-    /// on the struct-hosted path; the impl-hosted path ignores it.
-    pub runtime_module: Option<syn::Ident>,
+    /// ADR-0123: the runtime module the struct-hosted `#[actor]` reads off
+    /// disk, from a bare positional module path — `#[actor(singleton, other)]`
+    /// reads `other.rs`; `#[actor(singleton, runtime::headless)]` reads
+    /// `runtime/headless.rs`, the headless-companion convention. Resolved
+    /// relative to the invoking file. `None` ⇒ the conventional sibling
+    /// `runtime`. Only consulted on the struct-hosted path; the impl-hosted
+    /// path ignores it.
+    pub runtime_module: Option<syn::Path>,
 }
 
 pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -48,19 +51,25 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             let lit: syn::LitStr = value.parse()?;
             opts.runtime_feature = Some(lit.value());
             Ok(())
-        } else if meta.path.get_ident().is_some() && !meta.input.peek(syn::Token![=]) {
-            // ADR-0123: a bare positional ident names the runtime module the
-            // struct-hosted `#[actor]` reads off disk (default `runtime`).
-            let id = meta.path.get_ident().expect("checked is_some above").clone();
-            if opts.runtime_module.is_some() {
-                return Err(meta.error("duplicate runtime module name in #[actor] — name it at most once"));
+        } else if !meta.input.peek(syn::Token![=]) {
+            // ADR-0123: a bare positional module path names the runtime module
+            // the struct-hosted `#[actor]` reads off disk (default `runtime`) —
+            // a lone ident for a sibling file, `runtime::headless` for a nested
+            // one. The path locates a file relative to the invocation, so a
+            // leading `::` (crate-absolute) has no meaning here.
+            if meta.path.leading_colon.is_some() {
+                return Err(meta
+                    .error("#[actor] runtime module path is resolved relative to this file — drop the leading `::`"));
             }
-            opts.runtime_module = Some(id);
+            if opts.runtime_module.is_some() {
+                return Err(meta.error("duplicate runtime module path in #[actor] — name it at most once"));
+            }
+            opts.runtime_module = Some(meta.path.clone());
             Ok(())
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `runtime_feature = \"name\"`, or a bare runtime module name",
+                 `runtime_feature = \"name\"`, or a bare runtime module path",
             ))
         }
     });

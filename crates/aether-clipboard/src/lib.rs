@@ -22,10 +22,6 @@ use aether_substrate::actor::native::NativeActorMailbox;
 #[actor(singleton)]
 pub struct ClipboardCapability;
 
-/// Fail-fast `aether.clipboard` companion for chassis without a clipboard.
-#[actor(singleton, headless_runtime)]
-pub struct HeadlessClipboardCapability;
-
 /// Sender-side convenience methods for the text clipboard requests.
 pub trait ClipboardMailboxExt {
     /// Request the current clipboard text.
@@ -56,7 +52,11 @@ impl ClipboardMailboxExt for NativeActorMailbox<'_, ClipboardCapability> {
     }
 }
 
-#[cfg(feature = "runtime")]
-mod headless_runtime;
+// The headless companion's identity lives in `headless.rs` (always-on, like
+// the [`ClipboardCapability`] ZST above); its runtime half is the nested
+// `runtime::headless` module, covered by the `mod runtime;` gate.
+mod headless;
+pub use headless::HeadlessClipboardCapability;
+
 #[cfg(feature = "runtime")]
 mod runtime;

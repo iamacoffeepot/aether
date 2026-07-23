@@ -1,29 +1,15 @@
-//! The `HeadlessRenderCapability` runtime half (ADR-0122 identity/runtime
-//! split). Compiled under the default `feature = "runtime"` gate (the
-//! `mod headless_runtime;` declaration in the parent carries it) — unlike
-//! the GPU-bound [`super::RenderCapability`], the headless companion has no
-//! `render-runtime` dep, so its runtime half must compile on a no-GPU
-//! headless `runtime` build. The substrate-typed imports are gated once by
-//! this module; the `#[actor] impl` reaches the state + ctx types through
-//! the single `use headless_runtime::*` glob in the parent.
+//! The [`HeadlessRenderCapability`] runtime half (ADR-0122 identity/runtime
+//! split). Nested under the `runtime` directory so the one `mod runtime;`
+//! gate in the crate root covers it; the identity ZST lives in the
+//! crate-root `headless` module, always-on. Unlike the GPU-bound
+//! [`crate::RenderCapability`], the headless companion never names wgpu, so
+//! this module compiles on a no-GPU headless `runtime` build.
 
-// `io` is named by the parent's `init` body (`io::Error::other`); `Arc` and
-// `HubOutbound` only by the state struct's field. The substrate ctx types
-// the `#[actor] impl` names (`NativeActor` / `NativeCtx` / `NativeInitCtx` /
-// `BootError` / `Manual` / `CaptureFrameResult`) come from the shared
-// `any(render-runtime, runtime)` seam in `mod.rs`, not from here, so a
-// desktop build doesn't re-export them through two globs.
-pub use std::io;
-
+use std::io;
 use std::sync::Arc;
 
 use aether_substrate::mail::outbound::HubOutbound;
 
-// The moved `#[runtime] impl NativeActor for HeadlessRenderCapability` body
-// names the `#[runtime]` attribute, the cap kinds (the drawing kinds via the
-// parent's `kinds` re-export, `CaptureFrame` / `CaptureFrameResult` from
-// `aether_kinds`), and the substrate ctx types it previously reached through
-// the parent's shared `any(render-runtime, runtime)` seam — now sourced here.
 use aether_actor::runtime;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
@@ -32,16 +18,17 @@ use aether_substrate::Manual;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
-use super::{
+use crate::headless::HeadlessRenderCapability;
+use crate::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, HeadlessRenderCapability, UpdateTexture, ViewProjection,
+    DrawTexturedQuads, DrawTriangle, UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state. Holds only the [`HubOutbound`]
 /// captured at init — the headless cap replies `Err` to the GPU-bound
 /// kinds (`CaptureFrame` / `CreateTexture`) and no-ops the accumulator
 /// kinds, so it needs no handles. The addressing identity is the distinct
-/// ZST [`super::HeadlessRenderCapability`]. Living in this private module
+/// ZST [`HeadlessRenderCapability`]. Living in this private module
 /// keeps it `pub`-enough to satisfy the `NativeActor::State` interface
 /// without exposing it as crate-public API.
 pub struct HeadlessRenderCapabilityState {

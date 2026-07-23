@@ -858,8 +858,10 @@ fn emit_native_identity_markers(
 }
 
 /// ADR-0123 struct-hosted `#[actor]`: `#[actor(<cardinality>[, <module>])]` on
-/// the capability *struct*. It reads the sibling runtime module off disk
-/// (default `runtime`), lifts the native cap's identity out of the
+/// the capability *struct*. It reads the runtime module off disk — a module
+/// path resolved relative to the invoking file, default the sibling `runtime`,
+/// nested for a headless companion (`runtime::headless`) — lifts the native
+/// cap's identity out of the
 /// `#[handler]`-bearing `impl NativeActor` there, and emits the always-on
 /// addressing markers against the struct — passing the struct itself through
 /// unchanged. The behaviour + state stay in the runtime module (under
@@ -871,16 +873,19 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     let (_impl_generics, ty_generics, _where_clause) = item.generics.split_for_impl();
     let self_ty: Type = syn::parse_quote!(#ident #ty_generics);
 
-    // The runtime module name (default `runtime`) plus a span in the invoking
-    // file to resolve it from. A defaulted module has no ident of its own, so
-    // borrow the struct ident's span — it lives in the same file.
-    let (module_name, module_span) = match &opts.runtime_module {
-        Some(id) => (id.to_string(), id.span()),
-        None => ("runtime".to_string(), ident.span()),
+    // The runtime module path segments (default `runtime`) plus a span in the
+    // invoking file to resolve them from. A defaulted module has no ident of
+    // its own, so borrow the struct ident's span — it lives in the same file.
+    let (module_segments, module_span) = match &opts.runtime_module {
+        Some(path) => (
+            path.segments.iter().map(|seg| seg.ident.to_string()).collect::<Vec<_>>(),
+            path.segments.last().expect("syn::Path has at least one segment").ident.span(),
+        ),
+        None => (vec!["runtime".to_string()], ident.span()),
     };
 
     let (namespace_expr, handler_kinds, has_fallback, runtime_path) =
-        harvest_runtime_identity(&module_name, module_span)?;
+        harvest_runtime_identity(&module_segments, module_span)?;
 
     let markers = emit_native_identity_markers(
         &self_ty,
@@ -911,16 +916,20 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     })
 }
 
-/// Read the sibling runtime module file off disk and lift the native cap's
+/// Read the runtime module file off disk and lift the native cap's
 /// identity out of its `#[handler]`-bearing `impl NativeActor` block: the
 /// `NAMESPACE` const expression, each *mail* handler's `(kind, reply)`, and
 /// whether a `#[fallback]` is present. The read is cfg-blind — `syn` does not
 /// evaluate `cfg`, so the identity is harvested even when `mod runtime` is
-/// stripped from the build. `module_span` both resolves the on-disk path
-/// (`Span::local_file`) and anchors every diagnostic back at the `#[actor]`
-/// invocation rather than into the parsed (span-less) runtime file.
+/// stripped from the build. `module_segments` is the `::`-split module path
+/// resolved relative to the invoking file — `["runtime"]` reads the sibling
+/// `runtime.rs` / `runtime/mod.rs`, `["runtime", "headless"]` reads
+/// `runtime/headless.rs` / `runtime/headless/mod.rs`. `module_span` both
+/// resolves the on-disk path (`Span::local_file`) and anchors every diagnostic
+/// back at the `#[actor]` invocation rather than into the parsed (span-less)
+/// runtime file.
 fn harvest_runtime_identity(
-    module_name: &str,
+    module_segments: &[String],
     module_span: proc_macro2::Span,
 ) -> syn::Result<(Expr, Vec<HandlerMarker>, bool, String)> {
     // `Span::local_file()` (stable since 1.88) → the on-disk path of the file
@@ -936,8 +945,11 @@ fn harvest_runtime_identity(
         ));
     };
     let dir = decl_path.parent().unwrap_or_else(|| Path::new("."));
-    let flat = dir.join(format!("{module_name}.rs"));
-    let nested = dir.join(module_name).join("mod.rs");
+    let module_name = module_segments.join("::");
+    let (leaf, parents) = module_segments.split_last().expect("runtime module path has at least one segment");
+    let base = parents.iter().fold(dir.to_path_buf(), |acc, seg| acc.join(seg));
+    let flat = base.join(format!("{leaf}.rs"));
+    let nested = base.join(leaf).join("mod.rs");
     let target = if flat.exists() {
         flat
     } else {
@@ -949,7 +961,9 @@ fn harvest_runtime_identity(
             module_span,
             format!(
                 "#[actor]: cannot read runtime module `{module_name}` (expected \
-                 `{module_name}.rs` or `{module_name}/mod.rs` beside this file): {e}"
+                 `{}.rs` or `{}/mod.rs` relative to this file): {e}",
+                module_segments.join("/"),
+                module_segments.join("/"),
             ),
         )
     })?;
@@ -983,7 +997,7 @@ fn harvest_runtime_identity(
         if !is_native_actor {
             continue;
         }
-        if let Some(identity) = harvest_native_actor_impl(imp, module_name, module_span)? {
+        if let Some(identity) = harvest_native_actor_impl(imp, &module_name, module_span)? {
             qualifying.push(identity);
         }
     }

@@ -10,7 +10,8 @@ license.workspace = true
 # request/reply mail kinds (`kinds`), the `ClipboardConfig` backend
 # selector (`config`), the `ClipboardCapability` identity + system /
 # in-memory runtime (`runtime`), and the fail-fast
-# `HeadlessClipboardCapability` companion (`headless_runtime`). It is a
+# `HeadlessClipboardCapability` companion (`headless` +
+# `runtime::headless`). It is a
 # pure leaf — no other capability depends on it, so capabilities keeps no
 # `aether-clipboard` dependency (no facade).
 #

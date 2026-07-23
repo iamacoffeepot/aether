@@ -1,8 +1,10 @@
 //! Fail-fast runtime companion for chassis without a clipboard peripheral.
+//! Nested under `runtime` so the one `mod runtime;` gate covers it; the
+//! identity ZST lives in the crate-root `headless` module, always-on.
 
-use super::{
-    GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability, SetClipboardText, SetClipboardTextResult,
-};
+use crate::headless::HeadlessClipboardCapability;
+use crate::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
+
 use aether_actor::runtime;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};

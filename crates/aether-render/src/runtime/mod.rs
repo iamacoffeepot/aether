@@ -67,6 +67,10 @@ use aether_substrate::render::{
 // and `config` (the `RenderTuningConfig` knobs + `RenderParams`).
 mod capture;
 mod config;
+// The `HeadlessRenderCapability` companion's runtime half (identity in the
+// crate-root `headless` module) — a nested child so the same `mod runtime;`
+// gate covers it.
+mod headless;
 mod material;
 mod pipeline;
 mod quad;
