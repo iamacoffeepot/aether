@@ -33,7 +33,7 @@ workbench is exported from `aether-kit-workbench`. Load each by selector —
 bare-load entry. See
 [`aether-kit-terrain/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/lib.rs)
 and
-[`aether-kit/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/lib.rs).
+[`aether-kit-commons/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/lib.rs).
 
 ## The world plane stack
 

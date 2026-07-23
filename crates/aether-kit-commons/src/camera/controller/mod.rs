@@ -59,7 +59,7 @@ use aether_math::{TAU, Vec2, Vec3};
 use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
 
 /// Load name of the camera component instance the controller drives — the
-/// `aether_kit@aether.kit.camera` export's default load name (ADR-0096), the
+/// `aether_kit_commons@aether.kit.camera` export's default load name (ADR-0096), the
 /// address `.loaded::<CameraComponent>(_)` resolves. Distinct from
 /// [`ControllerConfig::camera`], which names a camera *within* that component.
 const CAMERA_COMPONENT: &str = "aether.kit.camera";
@@ -122,7 +122,7 @@ enum Shadow {
 }
 
 /// Keyboard driver for a peer camera component. Singleton, like the camera it
-/// drives; loaded as a non-entry export of `aether_kit.wasm`.
+/// drives; loaded as a non-entry export of `aether_kit_commons.wasm`.
 pub struct CameraController {
     config: ControllerConfig,
     held: Held,

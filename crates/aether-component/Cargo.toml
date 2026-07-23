@@ -76,10 +76,10 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 aether-rpc = { path = "../aether-rpc" }
 # `fleetharness_replace` swaps the probe for the kit camera export,
-# drives it with `CameraCreate`, and cold-loads `aether_kit.wasm`, so
+# drives it with `CameraCreate`, and cold-loads `aether_kit_commons.wasm`, so
 # the dep is both a real import and the #3766 source→consumer coupling
 # that keeps determinator and the dist pre-build honest.
-aether-kit = { path = "../aether-kit" }
+aether-kit-commons = { path = "../aether-kit-commons" }
 # `fleetharness_component_store` assembles a boot-manifest JSON file for
 # the spawn-with-manifest path (called fully-qualified, no `use`).
 serde_json = { workspace = true }

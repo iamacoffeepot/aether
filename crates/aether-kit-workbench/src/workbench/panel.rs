@@ -701,7 +701,7 @@ impl WasmActor for TerrainToolPanel {
             }
             LoadFontResult::Err { namespace, path, error } => {
                 tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_workbench",
                     %namespace,
                     %path,
                     %error,

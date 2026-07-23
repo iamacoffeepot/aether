@@ -47,10 +47,10 @@ Keep the layers distinct:
    resends them to `aether.render` each frame.
 
 The library has no renderer or mailbox dependency. The viewer is guest code in
-the multi-actor `aether-kit` wasm module. Its selector is
-`aether_kit@aether.kit.mesh`; a bare `aether-kit` load selects the console, not
+the multi-actor `aether-kit-commons` wasm module. Its selector is
+`aether_kit_commons@aether.kit.mesh`; a bare `aether-kit-commons` load selects the console, not
 the mesh actor. Export membership is in
-[`aether-kit/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/lib.rs).
+[`aether-kit-commons/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/lib.rs).
 
 ## DSL vocabulary
 
@@ -130,7 +130,7 @@ The request and result intentionally use different kind prefixes:
 
 | Mail kind | Rust payload | Meaning |
 |---|---|---|
-| `aether.kit.mesh.load` | `aether_kit::mesh::LoadMesh` | read and load `namespace` + relative `path` |
+| `aether.kit.mesh.load` | `aether_kit_commons::mesh::LoadMesh` | read and load `namespace` + relative `path` |
 | `aether.mesh.load_result` | `aether_kinds::MeshLoadResult` | echoes path, `ok`, optional error, and warnings |
 
 Send the request to the loaded actor mailbox `aether.kit.mesh`. Although an
@@ -153,8 +153,8 @@ Any read, UTF-8, extension, parse, mesh, or OBJ-index failure leaves the prior
 triangle cache untouched and returns `ok: false`. The current loader does not
 produce non-fatal warnings, though the reply reserves that vector. The actor
 and parser are in
-[`aether-kit/src/mesh/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/mesh/mod.rs) and
-[`mesh/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/mesh/kinds.rs); the shared
+[`aether-kit-commons/src/mesh/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/mod.rs) and
+[`mesh/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/kinds.rs); the shared
 reply type is in
 [`aether-kinds/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kinds/src/lib.rs).
 
@@ -203,7 +203,7 @@ SubstrateHarness for visual verification. See [Lifecycle](lifecycle.md) and
 - Change canonical topology or tessellation in `aether-mesh`, keeping n-gons
   authoritative per ADR-0057. Do not bake viewer palette or render types into
   the library.
-- Add a viewer file format in `aether-kit/src/mesh`, preserving whole-cache
+- Add a viewer file format in `aether-kit-commons/src/mesh`, preserving whole-cache
   atomic replacement and a structured `MeshLoadResult`. A compatibility
   importer should not silently become a new native authoring representation.
 - The editable loop remains file-first: write DSL through `aether.fs`, send

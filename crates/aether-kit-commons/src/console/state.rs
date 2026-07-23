@@ -302,7 +302,7 @@ impl ConsoleState {
                 Vec::new()
             }
             BuiltInCommand::Version => {
-                self.push_output(format!("aether-kit {}", env!("CARGO_PKG_VERSION")));
+                self.push_output(format!("aether-kit-commons {}", env!("CARGO_PKG_VERSION")));
                 Vec::new()
             }
             BuiltInCommand::Diagnostics => {
@@ -319,7 +319,7 @@ impl ConsoleState {
         self.register_builtin("help", "list commands", BuiltInCommand::Help);
         self.register_builtin("clear", "clear scrollback", BuiltInCommand::Clear);
         self.register_builtin("echo", "write arguments to the console", BuiltInCommand::Echo);
-        self.register_builtin("version", "show aether-kit version", BuiltInCommand::Version);
+        self.register_builtin("version", "show aether-kit-commons version", BuiltInCommand::Version);
         self.register_builtin("diagnostics", "show console diagnostics", BuiltInCommand::Diagnostics);
         self.register_builtin("quit", "request engine shutdown", BuiltInCommand::Quit);
     }
@@ -401,7 +401,7 @@ mod tests {
             state.lines().iter().map(|line| line.text.as_str()).filter(|line| line.contains(" - ")).collect();
 
         assert_eq!(lines.first(), Some(&"aaa - first external"));
-        assert_eq!(lines.last(), Some(&"version - show aether-kit version"));
+        assert_eq!(lines.last(), Some(&"version - show aether-kit-commons version"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use aether_kinds::{
     FrameCheck, FrameCheckResult, FrameReduction, Key, LoadComponent, LoadResult, Modifiers, MouseButton,
     MouseButtonRelease, NamedMail, Render, TextInput, Tick,
 };
-use aether_kit::console::ConsoleConfig;
+use aether_kit_commons::console::ConsoleConfig;
 use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult};
 use aether_kit_terrain::terra::{TerraConfig, TerraQuery, TerraQueryResult};
 use aether_kit_terrain::world::{

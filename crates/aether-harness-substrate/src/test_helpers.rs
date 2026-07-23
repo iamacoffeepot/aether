@@ -67,7 +67,7 @@ static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Returns `None` if no candidate path exists.
 ///
 /// `crate_name` is the underscore-cased crate name of a top-level
-/// cdylib component (e.g. `"aether_kit"`,
+/// cdylib component (e.g. `"aether_kit_commons"`,
 /// `"aether_test_fixtures_bundle"`), or an example name for an
 /// `[[example]]` cdylib. The
 /// workspace target dir is resolved via

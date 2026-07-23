@@ -126,8 +126,8 @@ proptest.workspace = true
 # cost_table, substrate_harness_logs) rehomed here from
 # aether-substrate-bundle. They boot the in-process `SubstrateHarness`
 # harness (issue #3765) — a dev-dep cycle (the harness depends on
-# aether-substrate), which cargo allows; aether-kit's bundle dev-dep was
-# the standing precedent.
+# aether-substrate), which cargo allows; aether-kit-commons's bundle dev-dep
+# was the standing precedent.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # iamacoffeepot/aether#3781: the fleet actor-log tail test
 # (`fleetharness_logs`, ActorLogRing tail + since cursor over RPC) rehomed
@@ -144,9 +144,9 @@ aether-fs = { path = "../aether-fs" }
 # (`use … as _`) so the fixture kinds' descriptor entries land in each
 # test binary.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
-# The cap-registry replace test swaps the probe wasm for aether-kit's
-# camera export and asserts on `aether_kit::camera::CameraCreate`.
-aether-kit = { path = "../aether-kit" }
+# The cap-registry replace test swaps the probe wasm for aether-kit-commons's
+# camera export and asserts on `aether_kit_commons::camera::CameraCreate`.
+aether-kit-commons = { path = "../aether-kit-commons" }
 # iamacoffeepot/aether#3766: the fixture crate whose wasm these tests
 # load, declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when the fixture changes, and xtask's

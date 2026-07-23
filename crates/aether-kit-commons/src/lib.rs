@@ -1,4 +1,4 @@
-//! `aether-kit` — the gameplay-systems layer.
+//! `aether-kit-commons` — the common standalone actors (camera, console, mesh viewer).
 //!
 //! Reusable game-building actors that run on the substrate. Each system is
 //! one module under the crate root that co-locates the actor with its own
@@ -7,18 +7,18 @@
 //! no data/runtime split, just one module per actor:
 //!
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
-//!   `aether_kit@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
+//!   `aether_kit_commons@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
 //!   driver kinds live in [`camera`].
 //! - [`camera::controller::CameraController`] — a keyboard driver that steers a
 //!   peer [`camera::CameraComponent`] (WASD / arrows / zoom), selected by the
-//!   `aether_kit@aether.kit.camera-controller` export. Its
+//!   `aether_kit_commons@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
 //! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
-//!   overlay, selected by the `aether_kit@aether.kit.console` export. Its
+//!   overlay, selected by the `aether_kit_commons@aether.kit.console` export. Its
 //!   config and extension command vocabulary live in [`console`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
-//!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
+//!   to the render sink, selected by the `aether_kit_commons@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
 //!
 //! The terrain-authoring stack — the mark / world / terra / mover actors and

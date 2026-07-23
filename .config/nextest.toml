@@ -6,55 +6,44 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
-# `terrain_workbench_scenario` is the crate's heaviest integration binary —
-# four cold wasm component loads (mark/world/terra/workbench) plus a font
-# load and six GPU captures in one test, versus siblings that load one or
-# two components — and iamacoffeepot/aether#3627 saw it cross the 120s
-# class cap on main's full-suite job (~123.8s on two back-to-back pushes).
-# Locally the scenario completes in ~3s: our dev box has hardware GPU
-# acceleration and 8 idle cores, while CI's shared 2-core runner falls back
-# to a software rasterizer under full-suite contention (the same dev-box
-# vs. CI gap #1275 measured for the derive-crate fixtures below), so a
-# local timing isn't a usable headroom baseline here. Every wait in the
-# test is bounded (`wait_for_idle` panics after 16 frames), so this is
-# slow-but-completing rather than a hang; widen generously, matching the
-# `fleetharness_replace` precedent below, and keep the package-wide cap
-# intact for the crate's other ten integration binaries.
-#
-# Ordering constraint: this override must precede the package-wide
-# `kind(test)` class cap below — nextest applies the first matching
-# override per setting, so listed after the class cap the 300s widening
-# never applies and the test dies at 120s (the #3627 timeout recurring
-# on main even after the widening first landed).
+# `terrain_workbench_scenario` (aether-kit-workbench) is a heavy integration
+# binary — four cold wasm component loads (mark/world/terra/workbench) plus a
+# font load and six GPU captures in one test, versus siblings that load one or
+# two components — and iamacoffeepot/aether#3627 saw it cross the 120s class cap
+# on main's full-suite job (~123.8s on two back-to-back pushes). Locally the
+# scenario completes in ~3s: our dev box has hardware GPU acceleration and 8
+# idle cores, while CI's shared 2-core runner falls back to a software
+# rasterizer under full-suite contention (the same dev-box vs. CI gap #1275
+# measured for the derive-crate fixtures below), so a local timing isn't a
+# usable headroom baseline here. Every wait in the test is bounded
+# (`wait_for_idle` panics after 16 frames), so this is slow-but-completing
+# rather than a hang; widen generously, matching the `fleetharness_replace`
+# precedent below.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit) & binary(terrain_workbench_scenario)"
+filter = "package(=aether-kit-workbench) & binary(terrain_workbench_scenario)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# The two heaviest binaries iamacoffeepot/aether#3768 rehomed from
-# the chassis bundle's 180s-capped suite into aether-kit:
-# `widget_render_interaction`'s scenarios each cold-load the kit wasm plus a
-# font and run multi-capture verdicts, and `world_case_atlas` renders and
-# scores a whole contact sheet per test. Both were sized against the bundle's
-# 180s cap, so the kit-wide 120s class cap below would be a silent tightening
-# under CI's software-rasterizer contention; widen them to the same 300s
-# backstop as `terrain_workbench_scenario` above. Same ordering constraint:
-# these must precede the package-wide `kind(test)` class cap — nextest applies
-# the first matching override per setting.
+# Two more heavy binaries iamacoffeepot/aether#3768 sized against the chassis
+# bundle's 180s cap: `widget_render_interaction` (aether-kit-widget) cold-loads
+# the widget wasm plus a font and runs multi-capture verdicts, and
+# `world_case_atlas` (aether-kit-terrain) renders and scores a whole contact
+# sheet per test. The default 60s class cap would be a silent tightening under
+# CI's software-rasterizer contention; widen them to the same 300s backstop as
+# `terrain_workbench_scenario` above.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit) & (binary(widget_render_interaction) | binary(world_case_atlas))"
+filter = "(package(=aether-kit-widget) & binary(widget_render_interaction)) | (package(=aether-kit-terrain) & binary(world_case_atlas))"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# Every binary under `crates/aether-kit/tests/` cold-loads and compiles
-# `aether_kit.wasm` and boots a wgpu `SubstrateHarness`, so they are one slow
-# class rather than a fixed allowlist: #2805 measured the camera scenario
+# Every binary under `crates/aether-kit-commons/tests/` cold-loads and compiles
+# `aether_kit_commons.wasm` and boots a wgpu `SubstrateHarness`, so they are one
+# slow class rather than a fixed allowlist: #2805 measured the camera scenario
 # around 56.5s and mesh around 52-53s against the default 60s cap, and
-# iamacoffeepot/aether#3527 saw two more binaries (`mark_scenario`,
-# `proposal_scenario`) cross 60s the same way, exactly the allowlist gap a
-# per-binary filter leaves open for the next one. `kind(test)` scopes the
-# cap to the integration binaries; the crate's `kind(lib)` unit tests keep
-# the 60s default.
+# iamacoffeepot/aether#3527 saw two more binaries cross 60s the same way,
+# exactly the allowlist gap a per-binary filter leaves open for the next one.
+# `kind(test)` scopes the cap to the integration binaries; the crate's
+# `kind(lib)` unit tests keep the 60s default.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit) & kind(test)"
+filter = "package(=aether-kit-commons) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # The `aether-component` integration binaries mix two rehomed slow classes:
@@ -75,8 +64,8 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # classes: the harness tests (cap_registry / cost_table /
 # substrate_harness_logs, iamacoffeepot/aether#3770) cold-load fixture wasm
 # — cap_registry's replace test additionally cold-compiles
-# `aether_kit.wasm`, the exact load that pushed the aether-kit binaries
-# past 60s (#2805) — and the fleet log-tail test (`fleetharness_logs`,
+# `aether_kit_commons.wasm`, the exact load that pushed the aether-kit-commons
+# binaries past 60s (#2805) — and the fleet log-tail test (`fleetharness_logs`,
 # iamacoffeepot/aether#3781) forks a real debug
 # `aether-substrate-headless` process and waits for it to bind. The fork
 # class stretches well past 60s under contention with the sibling fleet
@@ -184,7 +173,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-fleet) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
-# The fleetharness replace binary also cold-loads `aether_kit.wasm` and was
+# The fleetharness replace binary also cold-loads `aether_kit_commons.wasm` and was
 # measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary.
 [[profile.ci.overrides]]

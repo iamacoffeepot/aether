@@ -1,7 +1,7 @@
 //! Acceptance: a held key drives the keyboard camera controller, which steers
 //! the peer camera component, which scrolls the rendered view (issue 2820).
 //!
-//! Loads three `aether-kit` actors — `WorldView` (paints the ground),
+//! Loads three `aether-kit-commons` actors — `WorldView` (paints the ground),
 //! `CameraComponent` (the projection state machine, loaded under its default
 //! name `aether.kit.camera`), and `CameraController` (the keyboard driver, loaded
 //! with an init-config) — paints a high-contrast chunk, and captures three
@@ -15,7 +15,7 @@
 //! unit tests; this is the composition-and-motion proof the harness split
 //! routes to `SubstrateHarness`.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit_commons` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
 
@@ -33,7 +33,7 @@ use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
 use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowSize};
-use aether_kit::camera::controller::ControllerConfig;
+use aether_kit_commons::camera::controller::ControllerConfig;
 use aether_kit_terrain::SetChunk;
 use aether_kit_terrain::world::Material;
 
@@ -63,7 +63,7 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     }
 }
 
-/// Load one `aether_kit` export under `name` with optional init-config bytes,
+/// Load one `aether_kit_commons` export under `name` with optional init-config bytes,
 /// blocking on `LoadResult` so the component is instantiated and subscribed
 /// before the next op.
 fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str, config: Vec<u8>) {
@@ -143,11 +143,11 @@ fn capture_scene(harness: &mut SubstrateHarness, camera: &str, world: &str, labe
 #[allow(clippy::cast_precision_loss)]
 fn held_key_pans_the_camera_over_the_painted_world() {
     // The world export moved to the `aether-kit-terrain` wasm; the camera and
-    // its controller stay in the `aether-kit` wasm, so this scenario loads both.
+    // its controller stay in the `aether-kit-commons` wasm, so this scenario loads both.
     let Some(terrain_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
-    let Some(kit_path) = require_runtime("aether_kit") else {
+    let Some(kit_path) = require_runtime("aether_kit_commons") else {
         return;
     };
     let terrain_wasm = fs::read(&terrain_path).expect("read kit-terrain wasm");

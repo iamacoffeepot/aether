@@ -23,7 +23,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build the standalone game (release)
-        run: cargo xtask bundle --profile release --chassis desktop --components aether-kit --title loco-motion
+        run: cargo xtask bundle --profile release --chassis desktop --components aether-kit-commons --title loco-motion
       - name: Rename the executable for hand-out
         run: Move-Item target/release/aether-bundle-desktop.exe target/release/loco-motion.exe
       - name: Upload the Windows executable

@@ -13,7 +13,7 @@ owned.
 | Small replaceable mail filter | Behavior | narrow ABI and effect vocabulary |
 | Host I/O, device access, secrets, or privileged policy | Native capability | chassis-owned resources behind mail |
 | Pure bounded value conversion | Native transform | discoverable value-to-value operation without actor state |
-| Reusable product/editor actor | `aether-kit` actor | shared guest layer, not substrate policy |
+| Reusable product/editor actor | `aether-kit-*` actor | shared guest layer, not substrate policy |
 | New process composition | Chassis profile or bundle | selects drivers and capabilities at boot |
 | Agent/operator convenience | MCP tool over an existing contract | adapts JSON and evidence; should not invent engine semantics |
 | Shared portable identity/schema primitive | Foundation crate | only when multiple owning layers truly need it |

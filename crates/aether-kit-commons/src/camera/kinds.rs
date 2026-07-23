@@ -2,7 +2,7 @@
 //! parameter shapes. Peers that need to *talk to* the camera actor
 //! depend on these wire shapes; the [`CameraComponent`] that
 //! consumes them lives in [`crate::camera`] and ships in
-//! `aether_kit.wasm` as a non-entry export (ADR-0096).
+//! `aether_kit_commons.wasm` as a non-entry export (ADR-0096).
 //!
 //! `aether.view_projection` (the singular `view_proj` kind consumed by the
 //! desktop chassis's `aether.render` mailbox per ADR-0074

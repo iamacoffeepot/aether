@@ -176,7 +176,7 @@ fn the_seeded_repository_policy_parses_and_guards_itself() {
     }
     // The submitted-and-trusted trees still advance on their own.
     assert_eq!(policy.resolve_surface(&["docs/guide/recipes/x.md".to_owned()]), Tier::Auto);
-    assert_eq!(policy.resolve_surface(&["crates/aether-kit/src/lib.rs".to_owned()]), Tier::Auto);
+    assert_eq!(policy.resolve_surface(&["crates/aether-kit-commons/src/lib.rs".to_owned()]), Tier::Auto);
 }
 
 /// A `Completeness` with every check satisfied — the base a completeness test

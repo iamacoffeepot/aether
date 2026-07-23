@@ -106,7 +106,7 @@ rules:
   # Submitted-and-expected-to-come-back-right. These advance on their own.
   - glob: "docs/guide/**"
     tier: auto
-  - glob: "crates/aether-kit/**"
+  - glob: "crates/aether-kit-commons/**"
     tier: auto
   - glob: "crates/aether-math/**"
     tier: auto
