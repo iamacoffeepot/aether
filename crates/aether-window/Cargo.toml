@@ -29,12 +29,16 @@ runtime = ["dep:aether-substrate"]
 # `DesktopWindowCapability` that drives a real winit window. Pulls the
 # substrate runtime (via `runtime`) plus winit; default features stay
 # `runtime`-only, so headless / harness / wasm consumers never build winit.
-desktop = ["runtime", "dep:winit"]
+desktop = ["runtime", "dep:aether-input", "dep:winit"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
+# Temporary compatibility relay for window-originated events. Direct
+# selector-aware fanout is owned here; issue #3991 removes this edge after
+# existing `aether.input` subscribers migrate.
+aether-input = { path = "../aether-input", optional = true, default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime.

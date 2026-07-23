@@ -33,7 +33,6 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
-aether-input = { path = "../aether-input" }
 aether-game = { path = "../aether-game" }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }

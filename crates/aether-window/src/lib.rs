@@ -176,7 +176,10 @@ mod runtime;
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]
-pub use desktop::{DesktopWindowCapability, DesktopWindowParams, WindowCell, resolve_fullscreen};
+pub use desktop::{
+    DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
+    DesktopWindowUserEvent, WindowCell, WindowHostAction, WindowHostEffect, resolve_fullscreen,
+};
 
 #[cfg(test)]
 mod tests {
