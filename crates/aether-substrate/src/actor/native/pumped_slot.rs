@@ -16,6 +16,8 @@
 //!
 //! [`PumpedSlot::drain_available`] drains every queued envelope; it is
 //! callable from any pump point on the owning thread.
+//! [`PumpedSlot::host_turn`] gives that thread bounded mutable host ingress
+//! under the actor's stamped context without draining queued mail.
 //! [`PumpedSlot::shutdown`] runs the pooled Closed path's phases in order:
 //! residual drain, `unwire` under `with_stamped`, cost-row drop
 //! (iamacoffeepot/aether#3051), and the registry close + monitor fan-out.
@@ -102,6 +104,28 @@ where
         }
     }
 
+    /// Run one bounded host-originated turn against this actor's mutable
+    /// state on the pumping thread.
+    ///
+    /// The turn is stamped with this actor's [`ActorSlots`] and receives an
+    /// inbound-less [`NativeCtx`]. Outbound mail therefore starts fresh
+    /// causal roots and flushes through the normal context-drop path before
+    /// the stamp is removed. This does not drain the inbox or dispatch
+    /// self-mail; callers retain explicit control over pump ordering through
+    /// [`Self::drain_available`].
+    ///
+    /// Returns `None` without invoking `turn` once [`Self::shutdown`] has
+    /// consumed the actor.
+    pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_>) -> R) -> Option<R> {
+        let actor = self.actor.as_deref_mut()?;
+        let binding = &self.binding;
+        let slots = &self.slots;
+        Some(local::with_stamped(slots, || {
+            let mut ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
+            turn(actor, &mut ctx)
+        }))
+    }
+
     /// Read from the actor's `A::State` without mutating it (ADR-0161
     /// §Decision 1). The pump-owning thread makes loop decisions off actor
     /// state — the render driver reads its pending capture's deadline to set
@@ -162,8 +186,9 @@ mod tests {
     use aether_actor::local::ActorSlots;
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
-    use aether_actor::{Addressable, HandlesKind, Manual, One};
+    use aether_actor::{Addressable, HandlesKind, Local as _, MailSender, Manual, One};
     use aether_data::{Kind, KindId, MailId, MailboxId, Schema, Source, SourceAddr, mailbox_id_from_name};
+    use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
     use crate::actor::native::Dispatch;
@@ -622,6 +647,113 @@ mod tests {
         assert_eq!(poke.kind, Poke::ID, "the peer received the Poke kind");
         let decoded = Poke::decode_from_bytes(poke.payload.bytes()).expect("the Poke decodes");
         assert_eq!(decoded, Poke { note: 7 }, "the peer received the Poke value");
+    }
+
+    /// ADR-0164 §3: host ingress runs synchronously on the pump-owning
+    /// thread under this actor's Local stamp, then drops its inbound-less
+    /// context before returning. Each turn's buffered peer send therefore
+    /// appears only after the closure exits, starts an independent root, and
+    /// records `Sent` in the pumped actor's trace ring rather than the
+    /// chassis-host ring.
+    #[test]
+    fn host_turn_runs_stamped_on_caller_and_flushes_fresh_peer_roots() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0010);
+        let peer_id = mailbox_id_from_name(Peer::NAMESPACE);
+        let (poke_tx, poke_rx) = mpsc::channel::<(Envelope, thread::ThreadId)>();
+        fx.registry
+            .try_register_inbox_with_id(
+                peer_id,
+                "test.pumped.peer",
+                Arc::new(move |d: Envelope| {
+                    d.discharge();
+                    let _ = poke_tx.send((d, thread::current().id()));
+                }) as Arc<dyn InboxHandler>,
+            )
+            .expect("register the peer inbox");
+
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
+        let caller_thread = thread::current().id();
+        let state_after_turn = slot.host_turn(|state, ctx| {
+            assert_eq!(thread::current().id(), caller_thread, "host ingress stays on its caller thread");
+            assert!(ActorTraceRing::try_with(|_| ()).is_some(), "the pumped actor's Local slots are stamped");
+            state.pings = 41;
+            ctx.actor::<Peer>().send(&Poke { note: 1 });
+            assert!(
+                matches!(poke_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "buffered peer work cannot run before the host closure returns",
+            );
+            state.pings
+        });
+        assert_eq!(state_after_turn, Some(41), "the closure result and state mutation are preserved");
+
+        let (first, first_thread) =
+            poke_rx.recv_timeout(Duration::from_secs(2)).expect("the first host-turn peer send arrived");
+        assert_ne!(first_thread, caller_thread, "peer delivery runs on a pool worker, not inside the host turn");
+        assert_eq!(first.root, first.mail_id, "an inbound-less host turn mints a fresh root");
+        assert!(first.parent_mail.is_none(), "a host-originated root has no parent mail");
+        assert_eq!(Poke::decode_from_bytes(first.payload.bytes()).expect("first Poke decodes"), Poke { note: 1 });
+
+        slot.host_turn(|_, ctx| ctx.actor::<Peer>().send(&Poke { note: 2 })).expect("the slot remains live");
+        let (second, second_thread) =
+            poke_rx.recv_timeout(Duration::from_secs(2)).expect("the second host-turn peer send arrived");
+        assert_ne!(second_thread, caller_thread, "the second peer delivery also runs off the host thread");
+        assert_eq!(second.root, second.mail_id, "each host turn starts its own root");
+        assert_ne!(second.root, first.root, "separate host turns never inherit one another's roots");
+        assert_eq!(Poke::decode_from_bytes(second.payload.bytes()).expect("second Poke decodes"), Poke { note: 2 });
+
+        let trace = slot
+            .host_turn(|_, _| ActorTraceRing::try_with(ActorTraceRing::snapshot).expect("trace ring is stamped"))
+            .expect("the slot remains live");
+        let sent: Vec<(MailId, MailId)> = trace
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                TraceEvent::Sent { mail_id, root, parent_mail, sender, recipient, kind, .. }
+                    if *sender == self_id && *recipient == peer_id && *kind == Poke::ID =>
+                {
+                    assert!(parent_mail.is_none(), "host-turn Sent traces have no parent");
+                    Some((*mail_id, *root))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec![(first.mail_id, first.root), (second.mail_id, second.root)],
+            "both host-originated sends land in the pumped actor's trace ring",
+        );
+    }
+
+    /// ADR-0164 §3: host ingress never hides a recursive pump. Self-mail is
+    /// flushed to the slot's inbox when the context drops, but state does not
+    /// observe it until the owner explicitly drains. A spent slot rejects the
+    /// turn without invoking its closure.
+    #[test]
+    fn host_turn_queues_self_mail_until_drain_and_stops_after_shutdown() {
+        let fx = fixtures();
+        let self_id = MailboxId(0x_0DED_0011);
+        let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+        let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, Some(wake_tx));
+
+        let state_after_turn = slot.host_turn(|state, ctx| {
+            state.pings = 10;
+            ctx.send_detached_to(self_id, &Ping { seq: 1 });
+            state.pings
+        });
+        assert_eq!(state_after_turn, Some(10));
+        assert_eq!(slot.read_state(|state| state.pings), Some(10), "self-mail did not dispatch re-entrantly");
+
+        assert!(
+            matches!(wake_rx.recv_timeout(Duration::from_secs(2)), Ok(PumpWake::Mail)),
+            "the flushed self-mail reached the pumped inbox",
+        );
+        slot.drain_available();
+        assert_eq!(slot.read_state(|state| state.pings), Some(11), "the explicit drain dispatches queued self-mail");
+
+        slot.shutdown();
+        let mut invoked = false;
+        assert!(slot.host_turn(|_, _| invoked = true).is_none(), "a spent slot rejects host ingress");
+        assert!(!invoked, "the rejected host-turn closure was not invoked");
     }
 
     /// ADR-0161 §Decision 2: `await_settlement_pumped` returns `Settled` when
