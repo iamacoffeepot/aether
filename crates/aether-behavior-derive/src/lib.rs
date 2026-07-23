@@ -411,7 +411,6 @@ fn build_guest_exports(self_ty: &Type) -> TokenStream2 {
                 > =
                 ::aether_behavior::__macro_internals::Slot::new();
 
-            #[used]
             #[unsafe(link_section = "aether.behavior.exports")]
             static __AETHER_BEHAVIOR_EXPORTS_SECTION:
                 [u8; <#self_ty>::__AETHER_BEHAVIOR_EXPORTS_LEN] =

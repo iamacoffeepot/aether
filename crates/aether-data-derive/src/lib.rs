@@ -244,7 +244,6 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // The version byte is `aether_data::KINDS_SECTION_VERSION`, the
         // single source of truth the reader also reads.
         #[cfg(target_family = "wasm")]
-        #[used]
         #[unsafe(link_section = "aether.kinds")]
         static #kind_static_ident: [u8; #canonical_len_ident + 1] = {
             let mut out = [0u8; #canonical_len_ident + 1];
@@ -258,7 +257,6 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         };
 
         #[cfg(target_family = "wasm")]
-        #[used]
         #[unsafe(link_section = "aether.kinds.labels")]
         static #kind_labels_static_ident: [u8; #labels_len_ident + 1] = {
             let mut out = [0u8; #labels_len_ident + 1];

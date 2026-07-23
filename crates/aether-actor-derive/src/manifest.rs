@@ -203,12 +203,14 @@ pub fn build_inputs_manifest_consts(
 /// `aether.kinds.labels` statics in the *defining* crate. When the
 /// kind lives in a dependency rlib (e.g. `aether-kinds` or a shared
 /// demo crate), the linker strips those statics from the final cdylib
-/// because no Rust code in the consumer references the symbol by
-/// name. `#[used]` keeps the symbol in the rlib's object file but
-/// doesn't cross the rlib→cdylib boundary under `--gc-sections`. The
-/// `aether.kinds.inputs` section survives only because
-/// `#[actor]` emits it here, in the consumer's own compilation
-/// unit. We apply the same trick to `aether.kinds`.
+/// because the rlib archive member holding them is never extracted into
+/// the link — an unextracted member loses its custom section regardless
+/// of `#[used]`, which pins a symbol against dead-section stripping but
+/// does not force archive extraction. Section survival comes from the
+/// static living in a compilation unit that is actually linked: the
+/// `aether.kinds.inputs` section survives because `#[actor]` emits it
+/// here, in the consumer's own compilation unit, and we emit
+/// `aether.kinds` the same way.
 ///
 /// The bytes are computed via trait dispatch on `<K as Kind>::NAME`
 /// and `<K as Schema>::SCHEMA` so this doesn't require the kind's
@@ -282,7 +284,6 @@ pub fn build_kinds_section_retention_statics(
             // retention records (when this kind lives in a dependency
             // rlib) pair cleanly with the primary records by id.
             #[cfg(target_family = "wasm")]
-            #[used]
             #[unsafe(link_section = "aether.kinds")]
             static #section_ident: [u8; #len_ident + 1] = {
                 let mut out = [0u8; #len_ident + 1];
@@ -327,7 +328,6 @@ pub fn build_kinds_section_retention_statics(
                     &#labels_static_ident,
                 );
             #[cfg(target_family = "wasm")]
-            #[used]
             #[unsafe(link_section = "aether.kinds.labels")]
             static #labels_section_ident: [u8; #labels_len_ident + 1] = {
                 let mut out = [0u8; #labels_len_ident + 1];

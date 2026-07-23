@@ -5,25 +5,23 @@
 //! This is the tripwire the ADR names as the first implementation
 //! risk: `#[link_section]`-to-custom-section emission on the wasm
 //! target. The bugs it catches are real regressions in the macro's
-//! owned logic — a dropped `#[used]` letting the linker strip the
-//! section, the section name diverging from the `aether.asset.<path>`
-//! scheme the ADR-0163 indexer (#3969) keys on, or the embedded bytes
+//! owned logic — the section name diverging from the `aether.asset.<path>`
+//! scheme the ADR-0163 indexer (#3969) keys on, the embedded bytes
 //! drifting from the source file (the byte-exact compare is a computed
-//! tripwire, not a mirror of a declaration).
+//! tripwire, not a mirror of a declaration), or the payload resurfacing
+//! in a linear-memory data segment.
 //!
-//! Deliberately NOT asserted: that the bytes are absent from linear
-//! memory. Measured against the built wasm, rustc emits every
-//! `#[link_section]` custom-section static into both the custom section
-//! and the module's `.rodata` data segment — the existing
-//! `aether.kinds.*` / `aether.namespace` sections duplicate identically,
-//! because a Rust `static` is an addressable linear-memory global that
-//! `#[link_section]` supplements rather than relocates. The ADR-0163
-//! "never in linear memory" property therefore is not delivered by the
-//! macro on the current `cargo build --target wasm32` path (no strip /
-//! `wasm-opt` runs in `cargo xtask dist`); reaching it needs a
-//! post-build custom-section rewrite applied to every section, tracked
-//! as follow-up. Asserting absence here would be a false tripwire that
-//! reds on correct macro output.
+//! The data-segment-absence assertion is the durable half of that.
+//! ADR-0163 §2 requires the asset live in the custom section and never
+//! be instantiated into linear memory. On a wasm target rustc copies a
+//! `#[link_section]` static's bytes into the named custom section while
+//! leaving the static an ordinary linear-memory global; that dead global
+//! reaches the shipped wasm only when pinned against wasm-ld's default
+//! `--gc-sections`, and `export_asset!` withholds the `#[used]` pin so it
+//! is collected. Walking every `DataSection` entry and asserting the
+//! payload appears in none of them reds the moment a toolchain shift, a
+//! `-C link-dead-code` build, or a `--no-gc-sections` link run brings the
+//! copy back.
 //!
 //! The `export_asset!` fixture rides `aether-test-fixtures-bundle`, not
 //! an aether-actor example: `cargo xtask dist` cross-builds that crate's
@@ -109,4 +107,57 @@ fn asset_rides_a_named_custom_section_byte_exact() {
 
     let embedded = section.unwrap_or_else(|| panic!("fixture-bundle wasm carries the {SECTION_NAME} custom section"));
     assert_eq!(embedded, ASSET, "custom-section bytes must match the source asset exactly");
+}
+
+/// Tripwire: the asset bytes live in the custom section and in no
+/// linear-memory data segment. `export_asset!` withholds the `#[used]`
+/// pin, so wasm-ld's default `--gc-sections` collects the dead
+/// linear-memory copy rustc leaves behind — ADR-0163 §2's "never
+/// instantiated into linear memory". This reds if a toolchain shift, a
+/// `-C link-dead-code` build, or a `--no-gc-sections` link run brings
+/// the copy back. Payload-in-subslice, not byte-equal: a data segment is
+/// a concatenation of many statics, so containment is the invariant.
+#[allow(clippy::print_stderr)]
+#[test]
+fn asset_bytes_are_absent_from_every_data_segment() {
+    // Test-binary runtime probe, not cap config — same contract as the
+    // sibling test above.
+    #[allow(clippy::disallowed_methods)]
+    let require = env::var_os("AETHER_REQUIRE_RUNTIME").is_some();
+    let Some(wasm_path) = locate_fixture_wasm() else {
+        assert!(!require, "AETHER_REQUIRE_RUNTIME=1 but aether_test_fixtures_bundle wasm not pre-built");
+        eprintln!(
+            "skipping: aether_test_fixtures_bundle wasm not built under target/wasm32-unknown-unknown/{{debug,release}}"
+        );
+        return;
+    };
+    let bytes = fs::read(&wasm_path).expect("read fixture-bundle wasm");
+
+    let mut data_segments = 0usize;
+    for payload in Parser::new(0).parse_all(&bytes) {
+        if let Payload::DataSection(reader) = payload.expect("parse aether_test_fixtures_bundle.wasm") {
+            for segment in reader {
+                let segment = segment.expect("parse data segment");
+                data_segments += 1;
+                assert!(
+                    !contains_subslice(segment.data, ASSET),
+                    "asset payload found in a linear-memory data segment — the un-pinned .rodata copy \
+                     survived garbage collection (ADR-0163 §2: never instantiated into linear memory)"
+                );
+            }
+        }
+    }
+
+    // Guard against a vacuous pass: a fixture wasm with zero data segments
+    // could not fail the containment check for the wrong reason. The bundle
+    // links real code, so it always carries at least one.
+    assert!(data_segments > 0, "fixture-bundle wasm has no data segments — check the assertion is meaningful");
+}
+
+/// Whether `haystack` contains `needle` as a contiguous subslice.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|window| window == needle)
 }

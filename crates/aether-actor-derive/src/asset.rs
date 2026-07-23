@@ -1,26 +1,31 @@
 //! `export_asset!` expansion (ADR-0163 §2): embed an asset file in a
 //! wasm custom section named `aether.asset.<path>`.
 //!
-//! The emitted static rides the same `#[used]` + `#[unsafe(link_section)]`
-//! path as the `aether.kinds` sections (ADR-0028 / ADR-0032): the bytes
-//! land in a custom section keyed by the asset path, which is the section
-//! the ADR-0163 host-side indexer (#3969) reads at load. The asset is not
+//! The emitted static rides the same `#[unsafe(link_section)]` path as the
+//! `aether.kinds` sections (ADR-0028 / ADR-0032): the bytes land in a
+//! custom section keyed by the asset path, which is the section the
+//! ADR-0163 host-side indexer (#3969) reads at load. The asset is not
 //! addressable from guest code — no symbol the guest can name resolves to
 //! it.
 //!
-//! Toolchain caveat, measured against a built component wasm: rustc emits
-//! a `#[link_section]` custom-section static into **both** the named
-//! custom section and the module's linear-memory data segment (`.rodata`).
-//! Every Rust-emitted custom section behaves this way today — the existing
-//! `aether.kinds.*` / `aether.namespace` sections duplicate identically —
-//! because a Rust `static` is an addressable linear-memory global and
-//! `#[link_section]` adds the custom section without removing the global.
-//! So the ADR-0163 property "never instantiated into linear memory" is not
-//! delivered by the macro alone on the current `cargo build --target
-//! wasm32` path (no strip / `wasm-opt` pass runs in `cargo xtask dist`);
-//! achieving it needs a post-build custom-section rewrite (the wasm-bindgen
-//! approach) applied to every section, which is a build-pipeline change
-//! outside this macro. See the PR body for #3968.
+//! The bytes reach linear memory only if something pins the static against
+//! wasm-ld's default `--gc-sections`, and this expansion deliberately does
+//! not. On a wasm target rustc handles a `#[link_section]` static by
+//! copying its initializer bytes into `wasm.custom_sections` module
+//! metadata (which the LLVM backend emits as the named custom section)
+//! while leaving the static itself an ordinary linear-memory global with
+//! no section attribute — two copies from codegen onward. The custom
+//! section is unconditional: rustc emits the metadata whenever it codegens
+//! the static, and wasm-ld copies custom sections from every linked object.
+//! The linear-memory copy is a dead internal global, so LLVM `GlobalDCE` (in
+//! release) and wasm-ld `--gc-sections` (in debug) drop it before it
+//! reaches the shipped wasm. Omitting `#[used]` — which would pin the dead
+//! global as a no-strip symbol — is what delivers ADR-0163 §2's "never
+//! instantiated into linear memory" from the macro alone, with no
+//! post-build strip or `wasm-opt` pass. The `asset_sections` tripwire test
+//! asserts the payload appears in no data segment, so a toolchain shift or
+//! a `-C link-dead-code` / `--no-gc-sections` link run that resurrects the
+//! copy reds immediately.
 //!
 //! On non-wasm targets the expansion reduces to an anonymous
 //! `include_bytes!` const: no section is emitted (native object
@@ -72,7 +77,6 @@ pub fn expand_export_asset(path_lit: &LitStr) -> syn::Result<TokenStream2> {
     // into a duplicate-symbol link error.
     Ok(quote! {
         #[cfg(target_family = "wasm")]
-        #[used]
         #[doc(hidden)]
         #[unsafe(link_section = #section_name)]
         static #asset_ident: [u8; ::core::include_bytes!(#path_lit).len()] =
