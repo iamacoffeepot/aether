@@ -9,10 +9,11 @@
 
 use anyhow::Context as _;
 
+use aether_chassis::WindowConfig;
 use aether_chassis::autoload::expand_replicas;
+use aether_chassis::boot::CommonEnv;
 use aether_chassis::bundle_pack::decode_pack;
-use aether_chassis::parse_window_mode_env;
-use aether_chassis_desktop::{DesktopChassis, DesktopEnv};
+use aether_chassis_desktop::{DesktopChassis, DesktopCli};
 use aether_substrate::Chassis;
 
 /// The component pack, embedded at build time. `build.rs` stages it
@@ -26,15 +27,21 @@ fn main() -> anyhow::Result<()> {
     // `AETHER_RPC_PORT` (e.g. when the hub spawns this for a capture) still
     // wires up — then overlay the pack's chassis settings and queue the
     // embedded components.
-    let mut env = DesktopEnv::from_env()?;
-    if let Some(title) = pack.chassis.title {
-        env.window.title = title;
-    }
-    if let Some(spec) = pack.chassis.window_mode {
-        let (mode, size) = parse_window_mode_env(&spec)
-            .map_err(|e| anyhow::anyhow!("bundle pack window_mode {spec:?} unparseable: {e}"))?;
-        env.window.mode = mode;
-        env.window.size = size;
+    let mut env = CommonEnv::resolve(DesktopCli::default())?;
+    // ADR-0162: the window boot knobs resolve in `Chassis::build` off the base's
+    // source stack, so the pack's window settings overlay as a top-priority
+    // programmatic override on that stack (beating env, matching the pre-refactor
+    // post-resolution overwrite). `build`'s `WindowConfig::lower` parses the
+    // `window_mode` spec, so the bundle no longer parses it itself.
+    if pack.chassis.title.is_some() || pack.chassis.window_mode.is_some() {
+        let mut window = env.base.sources.resolve::<WindowConfig>()?;
+        if let Some(title) = pack.chassis.title {
+            window.title = Some(title);
+        }
+        if let Some(spec) = pack.chassis.window_mode {
+            window.mode = Some(spec);
+        }
+        env.base.sources.set_override(window);
     }
     if pack.chassis.tick_hz.is_some() {
         tracing::warn!(

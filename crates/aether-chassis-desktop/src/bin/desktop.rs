@@ -5,8 +5,9 @@
 //! each per-cap overlay shadows its `AETHER_*` env var, unset flags
 //! fall through to env-only resolution.
 
+use aether_chassis::boot::CommonEnv;
 use aether_chassis::run_describe_prelude;
-use aether_chassis_desktop::{DesktopChassis, DesktopCli, DesktopEnv};
+use aether_chassis_desktop::{DesktopChassis, DesktopCli};
 use aether_substrate::Chassis;
 use clap::Parser as _;
 
@@ -18,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     if run_describe_prelude::<DesktopChassis>(&cli.meta)?.is_handled() {
         return Ok(());
     }
-    let env = DesktopEnv::resolve(cli)?;
+    let env = CommonEnv::resolve(cli)?;
     let chassis = DesktopChassis::build(env)?;
     tracing::info!(
         target: "aether_substrate::boot",

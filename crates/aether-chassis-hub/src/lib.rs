@@ -19,7 +19,7 @@ mod chassis;
 pub mod cli;
 
 pub use aether_substrate::Chassis;
-pub use chassis::{HubChassis, HubEnv, HubServerDriverCapability, HubServerDriverRunning};
+pub use chassis::{HubChassis, HubServerDriverCapability, HubServerDriverRunning};
 pub use cli::HubCli;
 
 /// Default port the hub binds its `aether.rpc.server` on (issue 763).

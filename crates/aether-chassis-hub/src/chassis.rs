@@ -11,14 +11,12 @@
 //! `signal-hook`'s iterator API blocks the driver thread until SIGINT
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
-use std::mem;
-
 use aether_fleet::FleetServer;
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::{BootableChassis, composed};
-use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
+use aether_substrate::chassis::{BootableChassis, ComposeBase, composed};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, validate_env};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 
@@ -40,18 +38,25 @@ pub struct HubChassis;
 impl Chassis for HubChassis {
     const PROFILE: &'static str = "hub";
     type Driver = HubServerDriverCapability;
-    type Env = HubEnv;
+    type Env = ConfigSources;
 
-    fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+    fn build(mut sources: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         let boot = SubstrateBoot::build()?;
-        // #3849: re-apply the fully-resolved `AETHER_LOG_FILTER` directive now
-        // the subscriber is installed (env > `[runtime]` file > `info`).
-        apply_filter(&env.runtime.log_filter);
-        // Lift the base stratum out; `composed` installs the aborter (the hub's
-        // one deliberate behavior change — `OutboundFatalAborter`, previously the
-        // implicit `PanicAborter`) and the base ahead of `compose`.
-        let base = mem::take(&mut env.base);
-        let builder = composed::<Self>(&boot, base, env);
+        // #3849 / ADR-0162 §config-at-its-seam: re-apply the fully-resolved
+        // `AETHER_LOG_FILTER` directive now the subscriber is installed (env >
+        // `[runtime]` file > `info`). Resolved HERE, at the seam that applies it,
+        // off the source stack `compose` then consumes.
+        apply_filter(&sources.resolve::<RuntimeConfig>()?.log_filter);
+        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
+        // here, before the RPC server binds and any framing runs — the codec
+        // cannot pull the knob itself.
+        install_frame_size(&mut sources)?;
+        // `composed` mints the builder, installs the aborter (the hub's one
+        // deliberate behavior change — `OutboundFatalAborter`, previously the
+        // implicit `PanicAborter`) and the unit no-op base, then runs the hub's
+        // fallible `compose` delta — which resolves the always-bind RPC port and
+        // the base stratum off the source stack it now receives (ADR-0162).
+        let builder = composed::<Self>(&boot, (), sources)?;
         // ADR-0162 (was ADR-0156 §4): warn on any unknown `AETHER_*` env var,
         // sweeping against the composition-derived known-key set plus the hub
         // residual hand records. Post-ADR-0162 the hub's env speaks to a single
@@ -65,138 +70,75 @@ impl Chassis for HubChassis {
 }
 
 impl BootableChassis for HubChassis {
-    type Base = ChassisBase;
+    /// The hub's base is the unit no-op (like bloomery): its `compose` delta needs
+    /// the source stack to resolve its always-bind RPC port, so the stack rides
+    /// [`Chassis::Env`] as [`ConfigSources`] and reaches `compose`, rather than
+    /// being consumed by a `ChassisBase` base ahead of it. The shared
+    /// base stratum is still installed drift-free — `compose` reuses
+    /// [`ChassisBase`]'s own [`ComposeBase::install`] (ADR-0162).
+    type Base = ();
 
+    /// Resolve the hub env off the source stack (ADR-0162): the lone per-chassis
+    /// token is the `HubCli` type. The env IS the raw [`ConfigSources`] — every
+    /// member the hub resolves (runtime, frame size, the base stratum, the RPC
+    /// port) resolves at the seam that consumes it, so nothing is pre-resolved
+    /// into an env bag.
     fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
-        let mut env = HubEnv::from_env()?;
-        let base = mem::take(&mut env.base);
-        Ok((base, env))
+        Ok(((), HubCli::default().into_sources()?))
     }
 
     fn residual_knobs() -> Vec<KnobRecord> {
         hub_residual_knobs()
     }
 
-    /// Compose the hub capability delta on top of the framework-minted, based
-    /// builder [`composed`] hands it — the engines cap and the port-overridden
-    /// RPC server. The universal base stratum (aborter, config sources, the
-    /// non-cap ring / scheduler / settlement members, the two declare-only
-    /// members, and `TraceDispatchCapability`) is installed by [`ChassisBase`]
-    /// before this delta runs, so the hub no longer hand-copies that prelude
-    /// (ADR-0162). This is the single claim/build path (ADR-0155) both
-    /// [`Chassis::build`] and the describe / config helpers run, so the manifest
-    /// roster can never drift from what boots.
-    fn compose(builder: Builder<Self>, _boot: &SubstrateBoot, env: HubEnv) -> Builder<Self> {
-        // `base` is installed by `composed`; the RPC port is the sole per-chassis
-        // input the delta consumes (the hub always binds, unlike desktop /
-        // headless).
-        let HubEnv { base: _, rpc_port, runtime: _ } = env;
-        builder.with_actor::<FleetServer>(()).with_actor_configured::<RpcServerCapability>(
-            RpcServerParams {
-                    peer_kind: PeerKind::Substrate {
-                        engine_name: aether_substrate::engine_name::<Self>(),
-                        engine_version: env!("CARGO_PKG_VERSION").into(),
-                        kinds: vec![],
-                    },
-                    #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
-                    route_target: Some(aether_data::mailbox_id_from_name("aether.fleet")),
-                },
-            RpcServerConfig { port: Some(rpc_port) },
-        )
-    }
-}
-
-/// Build-time inputs the hub chassis takes. `rpc_port` is the
-/// `aether.rpc.server` bind port — the target the out-of-process `aether-mcp`
-/// coordinator dials — resolved off the source stack (`--rpc-port` >
-/// `AETHER_RPC_PORT` > `[rpc]` file) with the [`DEFAULT_RPC_PORT`] fallback.
-///
-/// ADR-0156 §5: the engines-cap `Config` (`FleetConfig`, the liveness
-/// heartbeat tuning) no longer rides as a field — the builder resolves it off
-/// the [`ChassisBase`] source stack. What remains is the base stratum plus the
-/// chassis-side reads of the runtime knobs and the RPC port.
-pub struct HubEnv {
-    /// The universal base stratum (config source stack + the non-cap ring /
-    /// scheduler / settlement members) `composed` installs ahead of `compose` —
-    /// the same [`ChassisBase`] desktop and headless carry (ADR-0162 dissolved
-    /// the hub's hand-copied member / declare prelude into it). Lifted out with
-    /// `mem::take` on the boot and describe paths; the leftover default is never
-    /// re-read. The builder resolves the composed `FleetServer`'s `Config` (the
-    /// liveness-heartbeat tuning, issue 1339) off its source stack.
-    pub base: ChassisBase,
-    /// The resolved `aether.rpc.server` bind port. The hub always binds (unlike
-    /// desktop / headless): `RpcServerConfig` is resolved off the source stack
-    /// (argv `--rpc-port` > `AETHER_RPC_PORT` > `[rpc]` file) with the hub's
-    /// [`DEFAULT_RPC_PORT`] fallback when unset (#3849), then composed as an
-    /// explicit `with_actor_configured` override.
-    pub rpc_port: u16,
-    /// The substrate runtime knobs (#3849); [`Chassis::build`] re-applies
-    /// [`RuntimeConfig::log_filter`] after the subscriber installs.
-    pub runtime: RuntimeConfig,
-}
-
-impl HubEnv {
-    /// Read `AETHER_RPC_PORT` from the environment; fall back to
-    /// [`DEFAULT_RPC_PORT`] when unset or unparseable. Binds on
-    /// `127.0.0.1` — intentional for the current single-host
-    /// development story.
+    /// Compose the hub capability delta on top of the framework-minted builder
+    /// [`composed`] hands it — the shared base stratum, the engines cap, and the
+    /// port-overridden RPC server. `compose` is fallible (ADR-0162
+    /// §config-at-its-seam): the hub resolves its always-bind RPC port off the
+    /// source stack it receives right here, so the port is no longer pre-resolved
+    /// into a per-chassis env bag.
     ///
-    /// # Errors
-    ///
-    /// See [`Self::resolve`].
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::resolve(HubCli::default())
-    }
-
-    /// ADR-0090 unit d (issue 1258): resolve from argv-then-env.
-    /// `--rpc-port` (the flattened `RpcServerOverlay`, #3849) shadows
-    /// `AETHER_RPC_PORT` through the source stack; falling through still
-    /// lands on [`DEFAULT_RPC_PORT`] (the hub always binds an RPC
-    /// server, unlike desktop / headless). The engines overlay
-    /// (`--hub-heartbeat-*`, issue 1339) resolves through the
-    /// derive-emitted `from_argv_then_env` (argv beats
-    /// `AETHER_HUB_HEARTBEAT_*` env beats the literal default). Consumes
-    /// `cli` like desktop / headless — the bin reads `--print-config` /
-    /// `--describe` off `cli.meta` in the prelude, which runs first.
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`ConfigError`] from the ADR-0090 §4 boot sweep
-    /// ([`validate_env`]) — today the sweep only warns, but the
-    /// `Result` keeps the hard-error half free to join without a
-    /// call-site change, matching desktop / headless.
-    pub fn resolve(cli: HubCli) -> Result<Self, ConfigError> {
-        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
-        // where the composed builder's `config_manifest` supplies the hub's
-        // composition-derived known-key set (ADR-0162 retired the fleet
-        // pass-through over-approximation).
-        //
-        // `ChassisCli::into_sources` opens the source stack: the loaded
-        // `--config` file plus the engines-cap and RPC-server argv overlays,
-        // staged in one derived `StageArgv` call off the CLI declaration. The
-        // builder resolves the composed `FleetServer`'s `FleetConfig` off this;
-        // the chassis resolves the non-cap ring / scheduler / teardown / runtime
-        // knobs and the RPC-server port below off the same stack via their
-        // `ConfigMember` sections.
-        let mut sources = cli.into_sources()?;
-        // #3930: resolve the three base non-cap members off the stack as structs;
-        // `ChassisBase::install` fuses each onto its builder seam.
+    /// The base stratum (config sources, the fused ring / scheduler / settlement
+    /// members, the two declare-only members, `TraceDispatchCapability`) is
+    /// installed by reusing [`ChassisBase`]'s own [`ComposeBase::install`] rather
+    /// than hand-copying it, so the hub can never drift from what desktop /
+    /// headless install through their `ChassisBase` base (ADR-0162). The hub uses
+    /// `Base = ()` — not `Base = ChassisBase` — because the RPC-port resolution
+    /// needs the source stack to reach `compose`, which a source-consuming base
+    /// ahead of it would forbid. This is the single claim/build path (ADR-0155)
+    /// both [`Chassis::build`] and the describe / config helpers run, so the
+    /// manifest roster can never drift from what boots.
+    fn compose(
+        builder: Builder<Self>,
+        _boot: &SubstrateBoot,
+        mut sources: ConfigSources,
+    ) -> Result<Builder<Self>, BootError> {
+        // #3930: resolve the three base non-cap members off the stack as structs.
         let actor_ring = sources.resolve::<ActorRingConfig>()?;
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?;
         let settlement = sources.resolve::<SettlementConfig>()?;
-        let runtime = sources.resolve::<RuntimeConfig>()?;
-        // ADR-0156 §6 (#3850): push the resolved wire-frame cap into the codec
-        // here, before the RPC server binds and any framing runs — the codec
-        // cannot pull the knob itself.
-        install_frame_size(&mut sources)?;
         // #3849: the hub always binds (unlike desktop / headless) — resolve the
-        // RPC port through the source stack and fall back to `DEFAULT_RPC_PORT`
-        // when unset. Resolving it here consumes the staged `--rpc-port` overlay;
-        // `compose` re-stages the resolved value as an explicit
+        // RPC port off the source stack (argv `--rpc-port` > `AETHER_RPC_PORT` >
+        // `[rpc]` file) and fall back to `DEFAULT_RPC_PORT` when unset. Resolved
+        // before the stack is moved into the base, then composed as an explicit
         // `with_actor_configured` override so the builder binds it.
         let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
-        let base = ChassisBase { sources, actor_ring, scheduler_tuning, settlement };
-        Ok(Self { base, rpc_port, runtime })
+        // Install the shared base stratum by reusing `ChassisBase`'s own
+        // `ComposeBase::install` — the drift-free single definition — even though
+        // the hub's `Base` is the unit no-op.
+        let builder = ChassisBase { sources, actor_ring, scheduler_tuning, settlement }.install(builder);
+        Ok(builder.with_actor::<FleetServer>(()).with_actor_configured::<RpcServerCapability>(
+            RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: aether_substrate::engine_name::<Self>(),
+                    engine_version: env!("CARGO_PKG_VERSION").into(),
+                    kinds: vec![],
+                },
+                #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
+                route_target: Some(aether_data::mailbox_id_from_name("aether.fleet")),
+            },
+            RpcServerConfig { port: Some(rpc_port) },
+        ))
     }
 }
 

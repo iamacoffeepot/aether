@@ -736,9 +736,9 @@ impl ApplicationHandler<UserEvent> for App {
 pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
-    /// Lowered window boot knobs (mode / size / title / wireframe), threaded
-    /// from `DesktopEnv` as a unit and applied when `resumed` creates the
-    /// window.
+    /// Lowered window boot knobs (mode / size / title / wireframe), resolved in
+    /// the desktop `Chassis::build` off the source stack and threaded here as a
+    /// unit, applied when `resumed` creates the window.
     pub window: aether_chassis::WindowSettings,
     /// Resolved render tuning (the vertex-buffer cap) — ADR-0161 R3 boots the
     /// pumped render actor with it, so the render `Config` is resolved on the

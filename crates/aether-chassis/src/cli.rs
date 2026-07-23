@@ -6,7 +6,9 @@
 //! crate carries what those roots share.
 //!
 //! A chassis bin calls `<Cli>::parse()` and threads the resolved overlays through
-//! `*Env::resolve(cli)`; each overlay's `into_layer()` writes argv-set fields into
+//! the chassis's env resolution (`CommonEnv::resolve(cli)` for the full-stack
+//! chassis, `cli.into_sources()` straight into the hub's `Chassis::build`); each
+//! overlay's `into_layer()` writes argv-set fields into
 //! a partial `<*ConfigLayer as confique::Config>::Layer`, which the cap's
 //! `from_argv_then_env(...)` then preloads ahead of `.env()` so argv beats env
 //! beats literal defaults. Absent flags resolve `None` and fall through to

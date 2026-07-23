@@ -43,7 +43,7 @@ use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
-use crate::cli::ChassisMeta;
+use crate::cli::{ChassisCli, ChassisMeta};
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -760,23 +760,34 @@ pub struct CommonBoot {
     pub game_gateway_params: GameGatewayParams,
 }
 
-/// The resolved config *data* every full-stack chassis (desktop + headless)
-/// carries identically — the single declaration of the shared env, so a knob
-/// added here exists on both chassis instead of being hand-copied into one and
-/// silently missing from the other. `DesktopEnv` / `HeadlessEnv` embed it as a
-/// `common` field and add only their genuinely per-chassis knobs (the desktop
-/// window boot knobs, the headless tick cadence) plus their autoload list.
+/// The full-stack chassis env (desktop + headless): the resolved config *data*
+/// both carry identically, now that the per-chassis `DesktopEnv` / `HeadlessEnv`
+/// bags are retired (ADR-0162 §config-at-its-seam). It is the single declaration
+/// of the shared env, so a knob added here exists on both chassis instead of
+/// being hand-copied into one and silently missing from the other, and it is the
+/// `Chassis::Env` both `Chassis::build` impls consume.
 ///
-/// [`Self::resolve`] is the one shared resolver: it consumes the staged config
-/// source stack and produces this struct (the env-side twin of the CLI's
-/// `CommonOverlay`). [`Self::into_common_boot`] reads it off into the shared
-/// [`CommonBoot`] cap args in one place.
+/// The driver knobs (the desktop window boot knobs / render tuning, the headless
+/// tick cadence) are deliberately NOT fields: their consumer is the driver, so
+/// each chassis's `Chassis::build` resolves them off the `base` source stack at
+/// the seam that constructs the driver, rather than pre-resolving them into this
+/// bag.
+///
+/// [`Self::resolve`] is the one shared resolver — it opens the source stack off
+/// the chassis CLI and produces this struct; [`Self::into_common_boot`] reads it
+/// off into the shared [`CommonBoot`] cap args in one place.
 ///
 /// ADR-0155 §4: this is config only — every field resolves through the
 /// argv/env/file path a real boot uses, so `--describe` resolves it on a
-/// headless host. A test constructs one by staging programmatic overrides into
-/// `sources` (`ConfigSources::set_override`).
+/// headless host. A test constructs one directly, staging programmatic overrides
+/// into `base.sources` (`ConfigSources::set_override`).
 pub struct CommonEnv {
+    /// The universal base stratum (config source stack + the non-cap ring /
+    /// scheduler / settlement members) `composed` installs ahead of `compose`.
+    /// Each chassis's `Chassis::build` resolves its driver knobs off
+    /// `base.sources` before lifting the base out with `mem::take` and handing it
+    /// to `composed`; the leftover default is never re-read.
+    pub base: ChassisBase,
     /// The resolved `aether.fs` namespace roots (save / assets / config).
     /// Resolved chassis-side and passed to the fs cap programmatically so the
     /// cap uses the exact same value.
@@ -794,30 +805,42 @@ pub struct CommonEnv {
     /// through [`ChassisBootConfig::to_workers`] onto the builder's `with_workers`
     /// seam at install time (the headless / desktop boot log line reads the same
     /// lowered value off it). `boot_manifest` is consumed by [`Self::resolve`] for
-    /// the autoload list before the struct is stored. Rides the full-stack side
-    /// rather than [`ChassisBase`] (ADR-0162 keeps the hub's env surface unchanged).
+    /// the autoload list. Rides the full-stack side rather than [`ChassisBase`]
+    /// (ADR-0162 keeps the hub's env surface unchanged).
     pub chassis_boot: ChassisBootConfig,
+    /// Components to auto-load on boot, in order. Resolved off the boot manifest
+    /// named by `AETHER_BOOT_MANIFEST` / `--boot-manifest`; a bundled standalone
+    /// build pushes its embedded pack's components here instead. Each chassis's
+    /// `Chassis::build` drains it into `aether.component.load` after the pool is
+    /// up.
+    pub autoload: Vec<AutoloadComponent>,
 }
 
 impl CommonEnv {
-    /// Resolve the shared chassis config off the already-staged source stack —
-    /// the one place the common `AETHER_*` knobs are read, replacing the
-    /// per-chassis copies of this block. The caller stages `sources` (config
-    /// file + `cli.stage`) and resolves its own per-chassis knob (window / tick)
-    /// off the same stack first; this then consumes `sources` into the returned
-    /// [`CommonEnv`].
+    /// The one generic resolution entry point (ADR-0162): open the source stack
+    /// off the chassis CLI and resolve the shared env. `DesktopCli` /
+    /// `HeadlessCli` are the only per-chassis token left — every knob resolves
+    /// the same way — so a chassis's `resolve_env` is one delegation to this.
     ///
-    /// The boot-manifest autoload list is returned alongside rather than held as
-    /// a field: it rides each chassis's own struct (its bring-up is
-    /// chassis-flavored), but its production shares the [`ChassisBootConfig`]
-    /// resolve with `workers`, so it is resolved here once and handed back.
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the `--config` file cannot be read, when a
+    /// known `AETHER_*` member (or argv overlay value) holds an unparseable value
+    /// (ADR-0090 §4), or when a boot manifest cannot be read.
+    pub fn resolve(cli: impl ChassisCli) -> Result<Self, ConfigError> {
+        Self::from_sources(cli.into_sources()?)
+    }
+
+    /// Resolve the shared chassis config off the already-staged source stack —
+    /// the one place the common `AETHER_*` knobs are read. [`Self::resolve`]
+    /// opens the stack off the CLI; a test hands a pre-staged stack directly.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when a known `AETHER_*` member (or argv overlay
     /// value) holds an unparseable value (ADR-0090 §4), or when a boot manifest
     /// named by `AETHER_BOOT_MANIFEST` / `--boot-manifest` cannot be read.
-    pub fn resolve(mut sources: ConfigSources) -> Result<(ChassisBase, Self, Vec<AutoloadComponent>), ConfigError> {
+    fn from_sources(mut sources: ConfigSources) -> Result<Self, ConfigError> {
         // Chassis-side reads of resolved members (ADR-0156 §5) — each resolves
         // off the same stack via its `ConfigMember` section: the derived staging
         // inputs (fs roots + content-gen) and the non-cap pool / ring / scheduler
@@ -849,11 +872,12 @@ impl CommonEnv {
             None => Vec::new(),
         };
 
-        // The base stratum (`ChassisBase`) takes the source stack and the three
-        // non-cap members `composed` installs ahead of the chassis's own delta;
-        // the full-stack remainder rides `CommonEnv`.
+        // The base stratum (`ChassisBase`) carries the source stack and the three
+        // non-cap members `composed` installs ahead of the chassis's own delta —
+        // embedded here so each `Chassis::build` can resolve its driver knobs off
+        // `base.sources` before lifting the base out.
         let base = ChassisBase { sources, actor_ring, scheduler_tuning, settlement };
-        Ok((base, Self { namespace_roots, runtime, chassis_boot }, autoload))
+        Ok(Self { base, namespace_roots, runtime, chassis_boot, autoload })
     }
 
     /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
@@ -862,16 +886,17 @@ impl CommonEnv {
     /// (`component_host_params`, `game_gateway_params`) are supplied by the
     /// caller. `runtime` is dropped here — it is consumed chassis-side
     /// (`apply_filter`) before `compose` runs and is not a `CommonBoot` field.
-    /// The aborter and the source stack are no longer threaded through: the
-    /// framework mints the aborter in `composed`, and the source stack rides
-    /// [`ChassisBase`].
+    /// `base` and `autoload` are lifted out in `Chassis::build` before `compose`
+    /// runs, so the leftover defaults here are ignored. The aborter and the
+    /// source stack are not threaded through: the framework mints the aborter in
+    /// `composed`, and the source stack rides [`ChassisBase`].
     #[must_use]
     pub fn into_common_boot(
         self,
         component_host_params: ComponentHostParams,
         game_gateway_params: GameGatewayParams,
     ) -> CommonBoot {
-        let Self { namespace_roots, runtime: _, chassis_boot } = self;
+        let Self { base: _, namespace_roots, runtime: _, chassis_boot, autoload: _ } = self;
         CommonBoot { chassis_boot, component_host_params, namespace_roots, game_gateway_params }
     }
 }

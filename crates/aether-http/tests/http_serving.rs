@@ -36,7 +36,7 @@ use aether_chassis::autoload::AutoloadComponent;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
 };
-use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
+use aether_chassis_headless::HeadlessChassis;
 use aether_component::WasmTrampoline;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
@@ -47,7 +47,7 @@ use aether_substrate::config::ConfigSources;
 
 /// ADR-0156 §5: stage the cap configs a headless HTTP scenario needs as
 /// programmatic overrides on the builder's source stack — the in-code
-/// equivalent of the argv/env/file layers `HeadlessEnv::from_env` assembles.
+/// equivalent of the argv/env/file layers `CommonEnv::resolve` assembles.
 /// The builder resolves each composed cap's `Config` off this at boot, so a
 /// test constructs configs in code without a process env read.
 fn base_sources(server_config: HttpServerConfig) -> ConfigSources {
@@ -356,19 +356,16 @@ mod tests {
         };
 
         let sandbox = init_save_sandbox("http-serving");
-        let env = HeadlessEnv {
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(100),
+            namespace_roots: test_namespace_roots(sandbox),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -467,19 +464,16 @@ mod tests {
         };
 
         let sandbox = init_save_sandbox("http-serving-stream");
-        let env = HeadlessEnv {
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(100),
+            namespace_roots: test_namespace_roots(sandbox),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -573,19 +567,16 @@ mod tests {
         };
 
         let sandbox = init_save_sandbox("http-serving-stream-route");
-        let env = HeadlessEnv {
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(100),
+            namespace_roots: test_namespace_roots(sandbox),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -684,19 +675,16 @@ mod tests {
         };
 
         let sandbox = init_save_sandbox("http-serving-websocket");
-        let env = HeadlessEnv {
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(100),
+            namespace_roots: test_namespace_roots(sandbox),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
@@ -909,19 +897,16 @@ mod tests {
         };
 
         let sandbox = init_save_sandbox("http-route-drop");
-        let env = HeadlessEnv {
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(100),
+            namespace_roots: test_namespace_roots(sandbox),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload: vec![
                 AutoloadComponent {
                     wasm: wasm.clone(),

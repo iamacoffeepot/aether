@@ -7,8 +7,9 @@
 // CLI diagnostic before tracing subscriber is installed (issue 891).
 #![allow(clippy::print_stderr)]
 
+use aether_chassis::cli::ChassisCli as _;
 use aether_chassis::run_describe_prelude;
-use aether_chassis_hub::{Chassis, HubChassis, HubCli, HubEnv};
+use aether_chassis_hub::{Chassis, HubChassis, HubCli};
 use clap::Parser as _;
 
 fn main() -> anyhow::Result<()> {
@@ -19,7 +20,10 @@ fn main() -> anyhow::Result<()> {
     if run_describe_prelude::<HubChassis>(&cli.meta)?.is_handled() {
         return Ok(());
     }
-    let chassis = HubChassis::build(HubEnv::resolve(cli)?)?;
+    // ADR-0162: the hub env is the raw source stack; `build` resolves each member
+    // (runtime, frame size, the base stratum, the always-bind RPC port) at the
+    // seam that consumes it.
+    let chassis = HubChassis::build(cli.into_sources()?)?;
     eprintln!("aether-chassis-hub: hub chassis initialised (profile={})", HubChassis::PROFILE);
     chassis.run()?;
     Ok(())

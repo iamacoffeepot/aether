@@ -31,12 +31,11 @@ use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use winit::event_loop::EventLoop;
 
-use aether_chassis::{WindowConfig, WindowSettings};
+use aether_chassis::WindowConfig;
 
 use super::driver::DesktopDriverCapability;
-use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
+use aether_chassis::autoload::autoload_mail;
 use aether_chassis::boot::{ChassisBase, CommonEnv, chassis_residual_knobs, with_full_stack_caps, with_rpc_server};
-use aether_chassis::cli::ChassisCli;
 
 use crate::cli::DesktopCli;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
@@ -76,7 +75,7 @@ pub struct DesktopChassis;
 impl Chassis for DesktopChassis {
     const PROFILE: &'static str = "desktop";
     type Driver = DesktopDriverCapability;
-    type Env = DesktopEnv;
+    type Env = CommonEnv;
 
     /// Build the desktop chassis: construct the Start-stage runtime handle
     /// (the winit event loop), stand up substrate-core internals, compose the
@@ -104,29 +103,34 @@ impl Chassis for DesktopChassis {
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
         // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.common.runtime.log_filter);
+        apply_filter(&env.runtime.log_filter);
         let mailer = Arc::clone(&boot.queue);
 
-        // Driver-only / post-build fields, read out before `compose` consumes
-        // `env`: the window boot knobs and the render tuning `Config` ride the
-        // desktop driver (which boots the pumped render actor, ADR-0161 R3),
-        // the `assets` root threads into that actor's params for `capture_frame`
-        // similarity references, and the autoload list is drained after build.
-        // `WindowSettings` / `RenderTuningConfig` are `Clone` and tiny, so the
-        // clones are free.
+        // ADR-0162 §config-at-its-seam: the window boot knobs and the render
+        // tuning `Config` are driver config — their consumer is the desktop
+        // driver (which boots the pumped `aether.render` actor, ADR-0161 R3), not
+        // a composed cap — so they resolve HERE, off the base's source stack, at
+        // the seam that constructs the driver rather than pre-resolved into a
+        // per-chassis env bag. `lower` delegates the window mode to
+        // `parse_window_mode_env`: a present-but-bad `AETHER_WINDOW_MODE` aborts
+        // boot (ADR-0090 §4), an absent value resolves to `Windowed`.
+        let window = env.base.sources.resolve::<WindowConfig>()?.lower()?;
+        // ADR-0161 R3: the render tuning `Config` (vertex-buffer cap) resolves off
+        // the same stack the pooled `with_actor::<RenderCapability>` path resolved
+        // it before the swap, and rides to the driver alongside the window knobs.
+        let render_config = env.base.sources.resolve::<RenderTuningConfig>()?;
+        // The `assets` root threads into the pumped render actor's params for
+        // `capture_frame` similarity references.
+        let assets_dir = env.namespace_roots.assets.clone();
         // #3930: the non-cap members ride as resolved structs now; lower `workers`
         // for the boot log line (the same lowered value as before). The fused
         // `with_chassis_config_member` install re-lowers it onto the builder seam
         // during `compose`.
-        let workers = env.common.chassis_boot.to_workers();
-        let window = env.window.clone();
-        let render_config = env.render.clone();
-        let assets_dir = env.common.namespace_roots.assets.clone();
+        let workers = env.chassis_boot.to_workers();
+        // The autoload list is drained after build; lift the base stratum out so
+        // the framework mints the builder and installs the aborter + base ahead of
+        // `compose` (the leftover default `env.base` is never re-read).
         let autoload = mem::take(&mut env.autoload);
-        // Lift the base stratum out of the env; the framework mints the builder
-        // and installs the aborter + base ahead of `compose` (the leftover
-        // default `env.base` is never re-read — `compose` consumes only the
-        // full-stack remainder).
         let base = mem::take(&mut env.base);
 
         tracing::info!(
@@ -135,10 +139,10 @@ impl Chassis for DesktopChassis {
             "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
-        let builder = composed::<Self>(&boot, base, env);
+        let builder = composed::<Self>(&boot, base, env)?;
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
-        // residual hand records. Runs here (not in `from_env`) because the
+        // residual hand records. Runs here (not in `resolve_env`) because the
         // per-chassis known keys come from the composed builder's manifest.
         validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
         // ADR-0161 R3: the driver boots the pumped `aether.render` actor from
@@ -161,8 +165,13 @@ impl Chassis for DesktopChassis {
 impl BootableChassis for DesktopChassis {
     type Base = ChassisBase;
 
+    /// Resolve the shared env off the source stack (ADR-0162): the lone
+    /// per-chassis token is the `DesktopCli` type. `CommonEnv::resolve` embeds
+    /// the base stratum; splitting it out is what the describe / config helpers
+    /// hand `composed`, while `Chassis::build` keeps it embedded so it can resolve
+    /// the window / render driver knobs off `base.sources` first.
     fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
-        let mut env = DesktopEnv::from_env()?;
+        let mut env = CommonEnv::resolve(DesktopCli::default())?;
         let base = mem::take(&mut env.base);
         Ok((base, env))
     }
@@ -183,13 +192,11 @@ impl BootableChassis for DesktopChassis {
     ///
     /// Takes the boot handle by reference — [`Chassis::build`] moves the same
     /// `boot` into the driver afterward. The window boot knobs (mode / size /
-    /// title / wireframe) and the `autoload` list ride [`DesktopEnv`] but take
-    /// no part in the claim chain, so they are ignored here.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: DesktopEnv) -> Builder<Self> {
-        // `base` is installed by `composed` before this delta runs; the leftover
-        // default here is unused.
-        let DesktopEnv { base: _, common, window: _, render: _, autoload: _ } = env;
-
+    /// title / wireframe) and the render tuning `Config` are driver config that
+    /// [`Chassis::build`] resolves at the driver seam (ADR-0162), so they take no
+    /// part in this claim chain. Desktop's delta resolves nothing itself, so it
+    /// returns `Ok`.
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: CommonEnv) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
@@ -199,15 +206,16 @@ impl BootableChassis for DesktopChassis {
         // path on desktop — the driver boots the pumped `aether.render` actor
         // itself (owning the surface + capture as plain state on the winit
         // thread). The render `Config` (vertex-buffer cap) and the `assets`
-        // root ride `DesktopEnv` → `DesktopDriverCapability` instead of a
-        // `RenderParams` handoff here.
+        // root resolve in `Chassis::build` and ride `DesktopDriverCapability`
+        // instead of a `RenderParams` handoff here.
 
         // Boot order is declaration order — `with_full_stack_caps` runs the base
         // app caps first, render last so it claims its mailboxes after every
         // other chassis cap. `into_common_boot` reads the env-sourced
-        // `CommonBoot` fields off the shared remainder in one place; the aborter
-        // and source stack are supplied earlier by `composed` / `ChassisBase`.
-        let common = common.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
+        // `CommonBoot` fields off the shared env in one place; the aborter and
+        // source stack are supplied earlier by `composed` / `ChassisBase` (the
+        // base + autoload were lifted out in `Chassis::build`).
+        let common = env.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
         // ADR-0082 §11 / issues 1378 + 1489: desktop drives the shared
         // `Tick → Render → Present → Tick` frame graph, with the `Quit`
         // escape to `Shutdown` on `Present` so OS-close / ctrlc drain the
@@ -218,110 +226,7 @@ impl BootableChassis for DesktopChassis {
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
-        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
-    }
-}
-
-/// Bag of resolved config *data* the desktop chassis takes at build time.
-/// `main()` populates it from env vars (per ADR-0070's "substrate-core
-/// never reads env" invariant); tests construct one directly.
-///
-/// ADR-0155 §4: this is config only — every field resolves through the
-/// argv/env/file path a real boot uses, so `--describe` can resolve it on
-/// a headless host. The Start-stage winit `EventLoop` that rides the boot
-/// path is not config: it is constructed in the desktop [`Chassis::build`]
-/// (winit's `EventLoop` is `!Send` on macOS and is the chassis's main
-/// thread, so it stays local to the boot call `main()` makes).
-pub struct DesktopEnv {
-    /// The universal base stratum (config source stack + the non-cap ring /
-    /// scheduler / settlement members) `composed` installs ahead of `compose`.
-    /// Lifted out with `mem::take` on the boot and describe paths; the leftover
-    /// default is never re-read.
-    pub base: ChassisBase,
-    /// The full-stack config remainder (fs roots, runtime knobs, worker/boot
-    /// knobs). Resolved by [`CommonEnv::resolve`] — the single declaration, so a
-    /// shared knob can't exist on one chassis and silently not the other.
-    pub common: CommonEnv,
-    /// Lowered desktop window boot knobs (mode / size / title / wireframe),
-    /// grouped into one embedded unit like the other knob groups and
-    /// threaded to the desktop driver. Produced by [`WindowConfig::lower`];
-    /// `wireframe` reaches the pumped render actor's lazy wgpu boot through
-    /// `RenderParams::wireframe`.
-    pub window: WindowSettings,
-    /// Resolved render tuning `Config` (the vertex-buffer cap). ADR-0161 R3
-    /// boots the pumped `aether.render` actor with it from the driver, so it
-    /// resolves off the same source stack as every other cap `Config` and
-    /// rides to the driver alongside the window knobs rather than through the
-    /// pooled `with_actor::<RenderCapability>` compose that the swap removed.
-    pub render: RenderTuningConfig,
-    /// Components to auto-load on boot, in order. A bundled standalone build
-    /// populates this so the game comes up with no hub; the normal desktop bin
-    /// leaves it empty and loads components over the hub instead.
-    pub autoload: Vec<AutoloadComponent>,
-}
-
-impl DesktopEnv {
-    /// Resolve every chassis-relevant env var into a fresh `DesktopEnv` of
-    /// config *data*. The single env-reading edge for the desktop chassis
-    /// (per issue 464). Tests bypass this by constructing `DesktopEnv`
-    /// directly.
-    ///
-    /// ADR-0155 §4: env resolution produces config only — the winit
-    /// `EventLoop` is a Start-stage runtime handle constructed on the boot
-    /// path in the desktop [`Chassis::build`], not here — so the only fallible
-    /// step is the ADR-0090 §4 config validation / parse path.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] when a known `AETHER_*` env var (or argv
-    /// overlay value) holds an unparseable value.
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::resolve(DesktopCli::default())
-    }
-
-    /// ADR-0090 unit d (issue 1258): resolve every cap config through
-    /// the argv-then-env overlay. `cli` carries `Option<T>` flags;
-    /// unset fields fall through to env-only resolution, so an empty
-    /// argv (the path the existing `from_env` callers exercise) is
-    /// byte-identical to the pre-d behaviour.
-    ///
-    /// # Errors
-    ///
-    /// See [`Self::from_env`].
-    pub fn resolve(cli: DesktopCli) -> Result<Self, ConfigError> {
-        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
-        // where the composed builder's `config_manifest` supplies the
-        // per-chassis known-key set (desktop no longer "knows" the headless
-        // tick knob).
-        //
-        // `ChassisCli::into_sources` opens the source stack: it loads the
-        // `--config` file and stages every cap member's typed argv overlay in
-        // one derived `StageArgv` call off the CLI declaration itself. The bin
-        // handles `--print-config` / `--describe` (print + exit) before this
-        // resolver runs.
-        let mut sources = cli.into_sources()?;
-
-        // Desktop-only window boot knobs: resolved through `WindowConfig` (argv >
-        // env > default) and lowered as a unit off the shared stack. `lower`
-        // delegates the mode to `parse_window_mode_env` — a present-but-bad
-        // `AETHER_WINDOW_MODE` aborts boot via `ConfigError` (ADR-0090 §4), an
-        // absent value resolves to `Windowed` — and maps `None` / empty title to
-        // `"aether"`. Resolved before the shared block: these are independent
-        // reads off the same stack, so the interleaving order is arbitrary.
-        let window = sources.resolve::<WindowConfig>()?.lower()?;
-
-        // ADR-0161 R3: the render tuning `Config` resolves off the same stack
-        // (argv > env > file), the way the pooled `with_actor::<RenderCapability>`
-        // path resolved it before the swap — an independent read, so its order
-        // relative to the window read is arbitrary.
-        let render = sources.resolve::<RenderTuningConfig>()?;
-
-        // The shared block (base stratum + fs roots / runtime / worker knobs)
-        // plus the boot-manifest autoload list, all resolved by the single common
-        // resolver off the same stack.
-        let (base, common, autoload) = CommonEnv::resolve(sources)?;
-
-        Ok(Self { base, common, window, render, autoload })
+        Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
     }
 }
 

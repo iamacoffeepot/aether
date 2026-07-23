@@ -163,7 +163,7 @@ fn argv_tick_hz_120_reaches_child() {
 #[test]
 fn empty_argv_falls_through_to_env_default() {
     // The regression bar: `args: vec![]` is byte-identical to the
-    // pre-d `HeadlessEnv::from_env()` path. With `AETHER_TICK_HZ`
+    // no-argv `CommonEnv::resolve` path. With `AETHER_TICK_HZ`
     // unset (the env mutator above clears it), the chassis lands on
     // the env-only `DEFAULT_TICK_HZ` (60 Hz).
     let lines = run_headless_capture(&[], Duration::from_secs(2));
