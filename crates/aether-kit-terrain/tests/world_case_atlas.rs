@@ -10,7 +10,7 @@
 //! camera component or font dependency; grid order plus the opt-in legend is
 //! the stable labelling surface.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit_terrain` wasm has not
 //! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1`, turning either skip
 //! into a hard failure.
 
@@ -33,7 +33,7 @@ use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, FrameVerdict,
     LoadComponent, LoadResult, NamedMail, Render,
 };
-use aether_kit::world::{
+use aether_kit_terrain::world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE,
     SetCellHeights, SetCellPoints, SetChunk, SetRegion, WorldPoint,
 };
@@ -583,7 +583,7 @@ fn export_demo_if_requested(png: &[u8], legend: &str) {
 #[test]
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn starter_case_atlas_is_scored_isolated_and_demo_exportable() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

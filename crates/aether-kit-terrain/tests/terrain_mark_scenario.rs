@@ -17,10 +17,10 @@ use aether_kinds::{
     DescribeComponent, DescribeComponentResult, FrameCheck, FrameCheckResult, FrameReduction, LoadComponent,
     LoadResult, NamedMail, Render,
 };
-use aether_kit::mark::{
+use aether_kit_terrain::mark::{
     MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGeometry, MarkRef, MarkUpdate, MarkUpdateResult,
 };
-use aether_kit::world::{
+use aether_kit_terrain::world::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, PickTerrain, PickTerrainResult, SUBCELLS_PER_CELL, SetCellHeights,
     SetChunk, SetMarkOverlaySelection, SetMarkOverlaySelectionResult, SetMarkOverlayVisibility,
     SetMarkOverlayVisibilityResult, TerrainRay, WaterPlane, World, WorldDirection, WorldLoad, WorldPoint,
@@ -30,7 +30,7 @@ use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
 
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_terrain as _;
 
 const MARK_COMPONENT_NAME: &str = "aether.kit.mark";
 const WORLD_COMPONENT_NAME: &str = "world";
@@ -141,7 +141,7 @@ fn overlay_checks() -> Vec<FrameCheck> {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-terrain-mark");

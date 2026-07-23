@@ -24,7 +24,8 @@ The immediate `apply_terrain_brush` and `run_terrain_automaton` tools remain
 useful for intentionally live edits, but they are not the preview-first path.
 
 > **Verify against current code.** The public kinds live in
-> `crates/aether-kit/src/{mark,terra,world,workbench}/`; the task adapters are
+> `crates/aether-kit-terrain/src/{mark,terra,world}/` and
+> `crates/aether-kit/src/workbench/`; the task adapters are
 > `crates/aether-mcp/src/{args.rs,tools/terrain.rs,tools/mod.rs}`. The design
 > contracts are [ADR-0142](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0142-terrain-mark-identity-and-revisions.md)
 > and [ADR-0143](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0143-terrain-proposal-commit-transaction.md). If a
@@ -32,15 +33,16 @@ useful for intentionally live edits, but they are not the preview-first path.
 
 ## Load the peer set and retain its identities
 
-Load the `aether_kit` exports in this order:
+Load the exports in this order — the mark, world, and terra actors from the
+`aether-kit-terrain` module, the workbench from `aether-kit`:
 
-1. `aether.kit.mark`, named exactly `aether.kit.mark` for the workbench's
-   overlay refresh.
-2. `aether.kit.world`.
-3. `aether.kit.terra`, configured with the MarkBook's returned `mailbox_id` as
-   `TerraConfig.mark_book_mailbox`.
-4. `aether.kit.workbench`, configured with the three returned mailbox ids in
-   `WorkbenchConfig { mark_book_mailbox, terra_mailbox, world_mailbox, ... }`
+1. `aether_kit_terrain@aether.kit.mark`, named exactly `aether.kit.mark` for the
+   workbench's overlay refresh.
+2. `aether_kit_terrain@aether.kit.world`.
+3. `aether_kit_terrain@aether.kit.terra`, configured with the MarkBook's returned
+   `mailbox_id` as `TerraConfig.mark_book_mailbox`.
+4. `aether_kit@aether.kit.workbench`, configured with the three returned mailbox
+   ids in `WorkbenchConfig { mark_book_mailbox, terra_mailbox, world_mailbox, ... }`
    and a non-overlapping `WorkbenchLayout`.
 
 Use `load_component` and `describe_component` for the live config schemas. The
@@ -355,7 +357,7 @@ The executable evidence is deliberately in-tree:
   `aether_harness_substrate_capture::visual::{decode_png, run_checks, target_color_stats}`
   to prove staging is bounded, discard restores the baseline, and accepted
   pixels equal the preview.
-- `crates/aether-kit/tests/proposal_scenario.rs` proves the lower-level
+- `crates/aether-kit-terrain/tests/proposal_scenario.rs` proves the lower-level
   `aether.kit.world` transaction: staging leaves the committed frame unchanged,
   preview is visibly bounded, commit is pixel-exact with that preview, stale
   peers reject, and replacement drops proposal session state.

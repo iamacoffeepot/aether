@@ -17,7 +17,7 @@ use aether_math::Vec2;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 use serde::{Deserialize, Serialize};
 
-use crate::world::AutomatonRule;
+use aether_kit_terrain::world::AutomatonRule;
 use aether_kit_widget::composite::Composite;
 use aether_kit_widget::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
@@ -783,8 +783,8 @@ fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effe
 
 #[cfg(test)]
 mod tests {
-    use crate::mark::{MarkId, MarkRef};
-    use crate::world::{OperatorChunk, ProposalDigest, ProposalId};
+    use aether_kit_terrain::mark::{MarkId, MarkRef};
+    use aether_kit_terrain::world::{OperatorChunk, ProposalDigest, ProposalId};
 
     use super::*;
 

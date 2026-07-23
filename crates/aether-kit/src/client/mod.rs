@@ -29,8 +29,8 @@ use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
 
-use crate::OCTIMETERS_PER_TILE;
-use crate::world::WorldPoint;
+use aether_kit_terrain::OCTIMETERS_PER_TILE;
+use aether_kit_terrain::world::WorldPoint;
 
 const MAX_RENDER_GRID_EDGE: i64 = 32;
 const MAX_RENDER_ENTITIES: usize = 1_024;

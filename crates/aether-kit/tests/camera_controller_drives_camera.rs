@@ -33,9 +33,9 @@ use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
 use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowSize};
-use aether_kit::SetChunk;
 use aether_kit::camera::controller::ControllerConfig;
-use aether_kit::world::Material;
+use aether_kit_terrain::SetChunk;
+use aether_kit_terrain::world::Material;
 
 /// Capture surface — a 4:3 frame the camera's aspect matches once the
 /// `WindowSize` below lands.
@@ -142,11 +142,17 @@ fn capture_scene(harness: &mut SubstrateHarness, camera: &str, world: &str, labe
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn held_key_pans_the_camera_over_the_painted_world() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    // The world export moved to the `aether-kit-terrain` wasm; the camera and
+    // its controller stay in the `aether-kit` wasm, so this scenario loads both.
+    let Some(terrain_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    // Composition: GPU captures + kit wasm loads; every Key / WindowSize is
+    let Some(kit_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let terrain_wasm = fs::read(&terrain_path).expect("read kit-terrain wasm");
+    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
+    // Composition: GPU captures + wasm loads; every Key / WindowSize is
     // mailed straight to a component mailbox, so no input fan-out cap.
     let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -161,13 +167,13 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     let camera = component_address("aether.kit.camera");
     let controller = component_address("controller");
 
-    load_kit_export(&mut harness, &wasm, "aether.kit.world", "world", Vec::new());
-    load_kit_export(&mut harness, &wasm, "aether.kit.camera", "aether.kit.camera", Vec::new());
+    load_kit_export(&mut harness, &terrain_wasm, "aether.kit.world", "world", Vec::new());
+    load_kit_export(&mut harness, &kit_wasm, "aether.kit.camera", "aether.kit.camera", Vec::new());
     // Default config drives the camera's boot `"main"` orbit camera — the
     // documented baseline. Loaded last so the camera instance exists when the
     // controller's `wire()` seed mail arrives.
     let config = ControllerConfig::default().encode_into_bytes();
-    load_kit_export(&mut harness, &wasm, "aether.kit.camera-controller", "controller", config);
+    load_kit_export(&mut harness, &kit_wasm, "aether.kit.camera-controller", "controller", config);
 
     // Paint the split chunk and feed the camera a real window aspect, then
     // settle the seed + subscriptions before the first capture.

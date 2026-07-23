@@ -7,9 +7,9 @@ use aether_data::MailboxId;
 use serde::{Deserialize, Serialize};
 
 use crate::console::ConsoleConfig;
-use crate::mark::MarkRef;
-use crate::terra::TerraError;
-use crate::world::{
+use aether_kit_terrain::mark::MarkRef;
+use aether_kit_terrain::terra::TerraError;
+use aether_kit_terrain::world::{
     AutomatonRule, BrushParameters, MAX_TERRAIN_PICK_DISTANCE_METERS, OperatorBudget, ProposalDigest, ProposalError,
     ProposalId, TerrainPickError, WorldPoint, WorldPositionMeters,
 };

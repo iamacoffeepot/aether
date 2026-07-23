@@ -66,6 +66,15 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
 aether-mesh = { path = "../aether-mesh" }
+# iamacoffeepot/aether#3951: the terrain stack (mark / world / terra / mover)
+# was extracted to `aether-kit-terrain`. kit's sim, client, and workbench
+# systems still consume its `CellPos` / `WorldPoint` / octimeter position
+# vocabulary and its mark / terra / world types, so kit takes an rlib
+# dependency on it. kit is itself a cdylib whose `export!` binds the fixed-name
+# FFI entries, and a wasm module carries exactly one `export!`, so kit enables
+# the terrain crate's `library` feature to strip its `export!` entry surface
+# from the embedding wasm module.
+aether-kit-terrain = { path = "../aether-kit-terrain", features = ["library"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail
 # (out-of-bounds teleport, etc.). Default-features-off per the SDK pattern.

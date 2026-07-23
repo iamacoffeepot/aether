@@ -7,17 +7,17 @@ use std::path::Path;
 use aether_actor::{Addressable, Kind};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_kit::mark::{
+use aether_kit_terrain::mark::{
     Mark, MarkCreate, MarkCreateResult, MarkGeometry, MarkGet, MarkGetResult, MarkRef, MarkUpdate, MarkUpdateResult,
 };
-use aether_kit::terra::{
+use aether_kit_terrain::terra::{
     CreateTerraMark, DeleteTerraSelection, MoveTerraSelection, RelabelTerraSelection, SetTerraSelection,
     TerraCommandResult, TerraConfig, TerraError, TerraQuery, TerraQueryResult, WorldDelta,
 };
-use aether_kit::world::WorldPoint;
+use aether_kit_terrain::world::WorldPoint;
 
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_terrain as _;
 
 const MARK_COMPONENT_NAME: &str = "terrain-marks";
 const TERRA_COMPONENT_NAME: &str = "terra";
@@ -110,7 +110,7 @@ fn expect_applied(result: TerraCommandResult) -> AppliedCommand {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_terrain") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");

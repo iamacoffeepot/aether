@@ -16,8 +16,8 @@ use aether_kinds::{
     FrameCheck, FrameCheckResult, FrameReduction, LoadComponent, LoadResult, NamedMail, Render, ReplaceComponent,
     ReplaceResult,
 };
-use aether_kit::mark::{MarkId, MarkRef};
-use aether_kit::world::{
+use aether_kit_terrain::mark::{MarkId, MarkRef};
+use aether_kit_terrain::world::{
     ApplyBrush, BrushParameters, CommitProposal, DiscardProposal, Material, OperatorBudget, OperatorChunk,
     ProposalDigest, ProposalError, ProposalId, ProposalOperation, ProposalOperationResult, ProposalResult, Propose,
     SetChunk, SetProposalPreview, WorldPoint,
@@ -26,7 +26,7 @@ use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
 
 #[allow(unused_imports)]
-use aether_kit as _;
+use aether_kit_terrain as _;
 
 const COMPONENT_NAME: &str = "proposal-world";
 const WIDTH: u32 = 128;
@@ -135,7 +135,7 @@ fn staged(result: ProposalResult) -> (ProposalId, ProposalOperationResult, Propo
 
 #[test]
 fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let mut harness =
@@ -184,7 +184,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     let mut harness =

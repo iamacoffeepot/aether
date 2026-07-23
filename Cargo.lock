@@ -667,6 +667,7 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-input",
  "aether-kinds",
+ "aether-kit-terrain",
  "aether-kit-widget",
  "aether-lifecycle",
  "aether-math",
@@ -674,6 +675,27 @@ dependencies = [
  "aether-render",
  "aether-tcp",
  "aether-text",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "aether-kit-terrain"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-data",
+ "aether-fs",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-input",
+ "aether-kinds",
+ "aether-kit-widget",
+ "aether-lifecycle",
+ "aether-math",
+ "aether-render",
  "inventory",
  "serde",
  "tracing",

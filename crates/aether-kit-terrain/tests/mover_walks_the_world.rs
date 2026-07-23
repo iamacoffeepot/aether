@@ -9,9 +9,11 @@
 //! evidence. Releasing W and advancing again proves the held-input state clears
 //! and the camera stops.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
-//! been pre-built. CI sets `AETHER_REQUIRE_RUNTIME=1`, turning either skip into
-//! a hard failure.
+//! Skipped when no wgpu adapter is available or a required wasm has not been
+//! pre-built: the world / mover exports come from the `aether_kit_terrain`
+//! wasm, and the editor-routing case additionally loads the widget editor
+//! shell from the `aether_kit` wasm. CI sets `AETHER_REQUIRE_RUNTIME=1`,
+//! turning either skip into a hard failure.
 
 // Integration-test diagnostics intentionally surface alongside a failing test.
 #![allow(clippy::print_stderr)]
@@ -33,8 +35,8 @@ use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
     LoadResult, NamedMail, Render, WindowSize,
 };
-use aether_kit::world::{Material, SetChunk, SetRegion};
-use aether_kit::{MoverConfig, MoverTeleport};
+use aether_kit_terrain::world::{Material, SetChunk, SetRegion};
+use aether_kit_terrain::{MoverConfig, MoverTeleport};
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 
 const WINDOW_WIDTH: u32 = 128;
@@ -248,16 +250,17 @@ fn assert_cliff_shape(label: &str, stats: ColorRegionStats, exclusion: ColorRegi
 
 #[test]
 fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(terrain_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
     // The `EditorShell` arbiter now ships in the `aether-kit-widget` wasm
-    // (iamacoffeepot/aether#3950); world + mover still ship in the kit wasm.
-    let Some(widget_wasm_path) = require_runtime("aether_kit_widget") else {
+    // (iamacoffeepot/aether#3950); world + mover ship in the `aether-kit-terrain`
+    // wasm (iamacoffeepot/aether#3951).
+    let Some(widget_path) = require_runtime("aether_kit_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let widget_wasm = fs::read(&widget_wasm_path).expect("read kit-widget wasm");
+    let terrain_wasm = fs::read(&terrain_path).expect("read kit-terrain wasm");
+    let widget_wasm = fs::read(&widget_path).expect("read kit-widget wasm");
     let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()
@@ -267,10 +270,10 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .expect("boot");
     let world = component_address("world");
     let mover_address = component_address("mover");
-    let _world_mailbox = load_kit_export(&mut harness, &wasm, "aether.kit.world", "world");
+    let _world_mailbox = load_kit_export(&mut harness, &terrain_wasm, "aether.kit.world", "world");
     let mover_mailbox = load_kit_export_with_config(
         &mut harness,
-        &wasm,
+        &terrain_wasm,
         "aether.kit.mover",
         "mover",
         MoverConfig { owns_input: false }.encode_into_bytes(),
@@ -337,10 +340,10 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
 #[test]
 #[allow(clippy::too_many_lines)]
 fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read kit-terrain wasm");
     let mut harness = SubstrateHarness::builder()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .with_render()

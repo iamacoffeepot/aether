@@ -88,7 +88,7 @@ const MAX_STAGED_PROPOSALS: usize = 64;
 /// mesh cache, and replays the cache to the render sink each frame.
 ///
 /// # Agent
-/// Load with the `aether_kit@aether.kit.world` export. Paint the world by
+/// Load with the `aether_kit_terrain@aether.kit.world` export. Paint the world by
 /// sending `aether.kit.world.stamp_{polygon,disc,hexagon}` for compact smooth
 /// shapes, bounded `apply_brush` / `run_automaton` requests for repeatable
 /// mark-attributed generation, `aether.kit.world.set_chunk` for raw planes, and
@@ -243,7 +243,7 @@ impl WorldView {
             && self.mark_overlay.refresh_attempts == MARK_OVERLAY_REFRESH_ATTEMPT_LIMIT
         {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_terrain",
                 attempts = self.mark_overlay.refresh_attempts,
                 "mark overlay refresh send was dropped; retry budget exhausted",
             );
@@ -459,7 +459,7 @@ impl WasmActor for WorldView {
                 && !self.mark_overlay.budget_overflowed
             {
                 tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_terrain",
                     first_omitted_mark = overflow.first_omitted_mark.get(),
                     emitted_triangles = overflow.emitted_triangles,
                     emitted_vertices = overflow.emitted_vertices,
@@ -725,7 +725,7 @@ impl WasmActor for WorldView {
         let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
         let context = WorldLoadContext { namespace: msg.namespace, path: msg.path };
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_terrain",
             namespace = %read.namespace,
             path = %read.path,
             "world load requested; issuing read",
@@ -752,7 +752,7 @@ impl WasmActor for WorldView {
                     self.remesh_all();
                     self.advance_committed_revision();
                     tracing::info!(
-                        target: "aether_kit",
+                        target: "aether_kit_terrain",
                         namespace = %context.namespace,
                         path = %context.path,
                         chunks = self.meshes.len(),
@@ -760,7 +760,7 @@ impl WasmActor for WorldView {
                     );
                 }
                 Err(error) => tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_terrain",
                     namespace = %context.namespace,
                     path = %context.path,
                     error = ?error,
@@ -768,7 +768,7 @@ impl WasmActor for WorldView {
                 ),
             },
             ReadResult::Err { error, .. } => tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_terrain",
                 namespace = %context.namespace,
                 path = %context.path,
                 error = ?error,
