@@ -17,20 +17,19 @@
 //!   `aether.asset.tile.rgba` custom section, emitted by
 //!   [`export_asset!`](aether_actor::export_asset). Never instantiated
 //!   into linear memory; addressable only host-side at load.
-//! - **The door** — [`wire`](BundleComponent::wire) is the load window.
-//!   It pulls the bytes through [`AssetWindow::asset`], hands them to
-//!   `aether.render.create_texture`, and keeps only the returned
-//!   `texture_id` plus the fixed layout. When `wire` returns the window
-//!   closes and the payload path is gone; the bytes were consumed, not
-//!   retained.
-//! - **Warm** — actor state holds a handle and a layout table
-//!   ([`BundleComponent::texture`]), never payload bytes.
+//! - **The door** — `wire` is the load window. It pulls the bytes through
+//!   [`AssetWindow::asset`], hands them to `aether.render.create_texture`,
+//!   and keeps only the returned `texture_id` plus the fixed layout. When
+//!   `wire` returns the window closes and the payload path is gone; the
+//!   bytes were consumed, not retained.
+//! - **Warm** — actor state holds a handle and a layout table (the
+//!   [`BundleComponent`]'s `tile` field), never payload bytes.
 //! - **Hot** — the engine-resident texture the `texture_id` names. The
 //!   tick handler resends `aether.render.draw_textured_quads` every frame
 //!   (immediate-mode, like `draw_triangle`) so the resident stays
 //!   visible.
-//! - **Teardown** — [`unwire`](BundleComponent::unwire) destroys exactly
-//!   the resident `wire` created (`aether.render.destroy_texture`), so
+//! - **Teardown** — `unwire` destroys exactly the resident `wire` created
+//!   (`aether.render.destroy_texture`), so
 //!   "what components are loaded" and "what assets are resident" answer
 //!   the same question. **This symmetry is the convention the reference
 //!   actor enforces by example** — the engine does not enforce it, and
