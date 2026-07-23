@@ -141,21 +141,24 @@ impl NativeActor for InventoryCapability {
         ListKindsResult { kinds }
     }
 
-    /// Resolve each requested tagged-id string to its origin name via
-    /// the runtime-registry arm of the reverse-lookup chain.
+    /// Resolve each requested tagged-id string to its origin name,
+    /// dispatching on the ADR-0064 tag to the table that owns the id's
+    /// family — the process-global thread-name registry for `thr-…`, the
+    /// engine's own `Registry` for `mbx-…` / `knd-…`.
     ///
     /// # Agent
     /// Reply: `ResolveResult`. One `ResolvedName { id, name }` per
     /// requested id, in request order and echoing `id` for
-    /// correlation. `name` is `Some` for a dynamically-minted
-    /// instance the substrate has registered; `None` on a miss (or an
+    /// correlation. `name` is `Some` for a runtime-minted thread,
+    /// mailbox, or kind the engine has registered — including a
+    /// component loaded at `aether.component/aether.embedded:NAME`,
+    /// which no link-time manifest can carry; `None` on a miss (or an
     /// unparseable id), at which point the caller renders the
     /// ADR-0064 tagged-id string itself. Call this only for ids a
     /// locally-folded manifest couldn't resolve.
-    // Reads the process-global runtime name registry.
     #[handler::single]
-    fn on_resolve(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
-        ResolveResult { resolved: resolve_ids(mail.ids) }
+    fn on_resolve(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
+        ResolveResult { resolved: resolve_ids(ctx.mailer().registry(), mail.ids) }
     }
 
     /// Reply with the native handler manifest (ADR-0109 §5): every
@@ -212,7 +215,7 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
-    use aether_substrate::mail::registry::Registry;
+    use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
     use std::sync::Arc;
@@ -225,13 +228,17 @@ mod tests {
     struct Fixture {
         transport: Arc<NativeBinding>,
         state: InventoryCapabilityState,
+        /// The same `Registry` the handlers reach through the ctx — held
+        /// so a test can seed it the way a live chassis registration would.
+        registry: Arc<Registry>,
     }
 
     fn fixture() -> Fixture {
+        let registry = Arc::new(Registry::new());
         let (outbound, _rx) = HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())).with_outbound(outbound));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x1117)));
-        Fixture { transport, state: InventoryCapabilityState }
+        Fixture { transport, state: InventoryCapabilityState, registry }
     }
 
     fn session_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
@@ -277,15 +284,16 @@ mod tests {
         );
     }
 
-    /// A registered dynamic-instance id resolves to its name; an
-    /// unregistered id and a malformed string both report `None`
-    /// (the latter without sinking its siblings). Order + `id` echo
-    /// are preserved.
-    // Constructs a well-formed mailbox id the runtime registry never holds
-    // to drive the miss path — incidental test data, not a real address.
+    /// Each id family reverses through the table that owns it: a thread
+    /// id through the process-global name registry, a mailbox id through
+    /// the engine's own `Registry`. An id neither table holds, and a
+    /// malformed string, both report `None` (the latter without sinking
+    /// its siblings). Order + `id` echo are preserved.
+    // Constructs a well-formed mailbox id no registry holds to drive the
+    // miss path — incidental test data, not a real address.
     #[allow(clippy::disallowed_methods)]
     #[test]
-    fn resolve_returns_registered_name_and_none_on_miss() {
+    fn resolve_dispatches_each_id_family_to_its_table() {
         // Register a dynamic instance name the way the runtime name
         // builders do (a name no static template instantiates).
         let registered = ThreadId::from_name("aether-instanced-inventory-test:7");
@@ -296,13 +304,24 @@ mod tests {
         let unseen = thread_id_from_name("aether-instanced-never-registered");
         let unseen_tag = tagged_id::encode(unseen.0).expect("ThreadId always tag-encodes");
 
-        // A well-formed mailbox id that the runtime registry doesn't
-        // hold (statics live in the static map, not the dynamic arm),
-        // so `resolve_runtime` misses it -> None.
-        let mailbox = mailbox_id_from_name("aether.fs");
+        // A well-formed mailbox id no table holds -> None.
+        let mailbox = mailbox_id_from_name("aether.never-registered");
         let mailbox_tag = tagged_id::encode(mailbox.0).expect("MailboxId tag-encodes");
 
         let mut fix = fixture();
+
+        // A mailbox registered the way the spawn path registers a hosted
+        // actor (`spawn.rs:470`, ADR-0099 §3): under a lineage-folded id,
+        // carrying the rendered `/` address as its display name — which is
+        // why the id is not `hash(name)` here either. No link-time manifest
+        // carries this name, so the engine `Registry` is the only table
+        // that can reverse it.
+        let component = mailbox_id_from_name("aether.inventory-test.lineage-fold");
+        fix.registry
+            .try_register_inbox_with_id(component, "aether.component/aether.embedded:probe", noop_handler())
+            .expect("fresh registry has no conflicting mailbox");
+        let component_tag = tagged_id::encode(component.0).expect("MailboxId tag-encodes");
+
         let mut ctx = session_ctx(&fix.transport);
         let result = InventoryCapability::on_resolve(
             &mut fix.state,
@@ -311,13 +330,14 @@ mod tests {
                 ids: vec![
                     registered_tag.clone(),
                     unseen_tag.clone(),
+                    component_tag.clone(),
                     mailbox_tag.clone(),
                     "not-a-tagged-id".to_string(),
                 ],
             },
         );
         drop(ctx);
-        assert_eq!(result.resolved.len(), 4, "one entry per requested id");
+        assert_eq!(result.resolved.len(), 5, "one entry per requested id");
 
         assert_eq!(result.resolved[0].id, registered_tag);
         assert_eq!(
@@ -329,11 +349,18 @@ mod tests {
         assert_eq!(result.resolved[1].id, unseen_tag);
         assert_eq!(result.resolved[1].name, None, "unregistered id misses the runtime registry");
 
-        assert_eq!(result.resolved[2].id, mailbox_tag);
-        assert_eq!(result.resolved[2].name, None, "a static name lives in the manifest, not the dynamic arm");
+        assert_eq!(result.resolved[2].id, component_tag);
+        assert_eq!(
+            result.resolved[2].name.as_deref(),
+            Some("aether.component/aether.embedded:probe"),
+            "a runtime-registered mailbox reverses through the engine registry",
+        );
 
-        assert_eq!(result.resolved[3].id, "not-a-tagged-id");
-        assert_eq!(result.resolved[3].name, None, "a malformed id reports None without aborting the batch");
+        assert_eq!(result.resolved[3].id, mailbox_tag);
+        assert_eq!(result.resolved[3].name, None, "a mailbox id no registry holds reports None");
+
+        assert_eq!(result.resolved[4].id, "not-a-tagged-id");
+        assert_eq!(result.resolved[4].name, None, "a malformed id reports None without aborting the batch");
     }
 
     /// A native test cap with a synchronous `-> R` handler — the
