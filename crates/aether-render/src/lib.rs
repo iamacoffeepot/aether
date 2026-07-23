@@ -75,13 +75,13 @@ pub use runtime::{
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
-// form): it reads the cap's sibling runtime module off disk and emits the
+// form): it reads the cap's runtime module off disk and emits the
 // always-on addressing markers + handler inventory against the struct here.
 // The state-bearing, GPU-bound behavior of each cap — its `#[runtime] impl
 // NativeActor`, runtime state struct, the wgpu accumulator helpers, the
 // `HubOutbound` — lives in a per-cap runtime module: `runtime` for
-// [`RenderCapability`] (gated `render-runtime`) and `headless_runtime` for
-// [`HeadlessRenderCapability`] (gated the default `runtime`). The
+// [`RenderCapability`] and the nested `runtime::headless` for
+// [`HeadlessRenderCapability`], both under the one `mod runtime;` gate. The
 // `aether_substrate` ctx types each impl names (`NativeActor` / `NativeCtx`
 // / … / `Manual` / `CaptureFrameResult`) are now sourced inside each runtime
 // module beside the body, not here — only the handler-argument kinds the
@@ -95,11 +95,11 @@ use aether_actor::actor;
 #[cfg(feature = "runtime")]
 mod runtime;
 
-// The headless companion's runtime half lives in `headless_runtime.rs`,
-// gated on the default `runtime` feature so a no-GPU headless build still
-// compiles it.
-#[cfg(feature = "runtime")]
-mod headless_runtime;
+// The headless companion's identity lives in `headless.rs` (always-on, like
+// the [`RenderCapability`] ZST below); its runtime half is the nested
+// `runtime::headless` module, covered by the `mod runtime;` gate above.
+mod headless;
+pub use headless::HeadlessRenderCapability;
 
 /// `aether.render` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable`, the per-handler
@@ -118,22 +118,3 @@ mod headless_runtime;
 /// this cap.
 #[actor(singleton)]
 pub struct RenderCapability;
-
-/// `HeadlessRenderCapability` **identity** (ADR-0122 identity/runtime
-/// split). The chassis-without-GPU companion to [`RenderCapability`],
-/// claiming the same `aether.render` mailbox so desktop-designed
-/// components loaded on headless can mail `DrawTriangle` / `aether.view_projection`
-/// / `aether.render.capture_frame` against a known recipient —
-/// `DrawTriangle` and `ViewProjection` no-op (the warn-storm sink-replacement role
-/// pre-issue-603 Phase 2), `CaptureFrame` replies `Err` so MCP
-/// `capture_frame` fails fast instead of timing out.
-///
-/// A ZST carrying only the addressing; the state-bearing runtime
-/// (`HeadlessRenderCapabilityState`, holding the captured `HubOutbound`)
-/// lives behind the default `runtime` gate in `headless_runtime` — no
-/// `render-runtime` dep, so it compiles on a no-GPU headless build.
-///
-/// Headless chassis composes one of [`Self`] / [`RenderCapability`], never
-/// both — the chassis builder rejects double-claiming a mailbox.
-#[actor(singleton, headless_runtime)]
-pub struct HeadlessRenderCapability;

@@ -1,5 +1,10 @@
 //! Native runtime backends and handlers for `aether.clipboard`.
 
+// The `HeadlessClipboardCapability` companion's runtime half (identity in the
+// crate-root `headless` module) — a nested child so the same `mod runtime;`
+// gate covers it.
+mod headless;
+
 use super::{
     ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult, SetClipboardText,
     SetClipboardTextResult,

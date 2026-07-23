@@ -170,7 +170,7 @@ The current composition is defined in
 [`chassis_common.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis/src/boot.rs),
 [`substrate_harness/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs),
 and
-[`render/headless_runtime.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/headless_runtime.rs).
+[`render/runtime/headless.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/runtime/headless.rs).
 
 ## Where to change or extend it
 

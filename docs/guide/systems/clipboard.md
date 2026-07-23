@@ -64,7 +64,7 @@ waits on a request that cannot complete.
 
 - Marker and typed helpers: `crates/aether-clipboard/src/mod.rs`
 - Kinds: `crates/aether-clipboard/src/kinds.rs`
-- System/in-memory runtime: `crates/aether-clipboard/src/runtime.rs`
-- Unsupported runtime: `crates/aether-clipboard/src/headless_runtime.rs`
+- System/in-memory runtime: `crates/aether-clipboard/src/runtime/mod.rs`
+- Unsupported runtime: `crates/aether-clipboard/src/runtime/headless.rs`
 - Backend selection: `crates/aether-clipboard/src/config.rs`
 - Chassis installation: `crates/aether-chassis-{desktop,headless,harness}/`

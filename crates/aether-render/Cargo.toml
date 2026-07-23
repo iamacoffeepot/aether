@@ -11,7 +11,7 @@ license.workspace = true
 # accumulator + wgpu GPU bundle (`runtime`: `pipeline` / `texture` /
 # `quad` / `capture` / `config` / `material`), the `RenderCapability`
 # identity, and the fail-fast `HeadlessRenderCapability` companion
-# (`headless_runtime`).
+# (`headless` + `runtime::headless`).
 #
 # Unlike the pure-leaf `aether-clipboard`, this crate has inbound cap
 # consumers: `aether-text` composes the render surface, so it holds a

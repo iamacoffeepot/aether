@@ -78,6 +78,12 @@ fn ui() {
     // identity, and emits the addressing markers plus the gap-3 `include_bytes!`
     // rebuild edge. `rt_ok.rs` is the sibling stub read off disk, never compiled.
     t.pass("tests/ui/accepts_struct_hosted_actor.rs");
+    // The module-path form of the same harvest: `#[actor(singleton,
+    // nested::rt_nested)]` joins the path segments into a file path relative
+    // to the invoking file (`nested/rt_nested.rs`) — the headless-companion
+    // layout (`runtime::headless`). `nested/rt_nested.rs` is read off disk,
+    // never compiled.
+    t.pass("tests/ui/accepts_struct_nested_runtime.rs");
     // ADR-0123 struct-hosted `#[actor]` diagnostics. An unrecognised arg fails
     // at parse; the disk-read harvest hard-errors on a missing runtime module,
     // a runtime module with no `#[handler]`-bearing `impl NativeActor`, a
