@@ -43,4 +43,12 @@ pub struct WasmTrampolineConfig {
     /// handler set (looked up by actor-type tag), and so each
     /// spawned sibling carries the same map for its own spawns.
     pub actor_caps: Vec<ActorInputs>,
+    /// ADR-0163 §3 (#3984): the module's raw wasm bytes, retained so
+    /// `WasmTrampoline::init` can index an asset load window over its
+    /// `aether.asset.*` sections (installed on the `ComponentCtx` before
+    /// `Component::instantiate`, closed once `wire` returns) and so a later
+    /// `spawn_child::<Sibling>` from the same resident module can index its
+    /// own window. Shared `Arc` — the module bytes are indexed, never
+    /// mutated.
+    pub wasm_bytes: Arc<[u8]>,
 }

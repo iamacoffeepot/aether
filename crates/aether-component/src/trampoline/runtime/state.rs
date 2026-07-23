@@ -52,4 +52,9 @@ pub struct WasmTrampolineState {
     /// [`WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
     /// up its own handler set here by actor-type tag.
     pub actor_caps: Vec<ActorInputs>,
+    /// ADR-0163 §3 (#3984): the resident module's raw wasm bytes, retained
+    /// so a `spawn_child::<Sibling>` from this module can index its own
+    /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
+    /// never mutated.
+    pub wasm_bytes: Arc<[u8]>,
 }

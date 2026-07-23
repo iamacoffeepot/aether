@@ -126,6 +126,32 @@ pub struct ConfigEcho {
 #[kind(name = "aether.test_fixtures.config_query")]
 pub struct ConfigQuery;
 
+/// ADR-0163 §3 (#3984) driver kind: ask the `Probe` fixture to report
+/// what it pulled from its asset load window during `wire`. No-payload
+/// query; the reply is an [`AssetProbeResult`]. Structured unit struct so
+/// it exercises the schema-driven dispatch path like [`ConfigQuery`].
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.test_fixtures.asset_probe")]
+pub struct AssetProbe;
+
+/// Reply kind for [`AssetProbe`]: the length and a wrapping-sum checksum of
+/// the bytes the fixture pulled through `AssetWindow::asset` in `wire`,
+/// stashed in state and surfaced from a post-`wire` handler. Lets a test
+/// assert the guest-side asset pull round-tripped the exact bytes across
+/// the FFI (the checksum is content-sensitive) and that the value survived
+/// the window closing (the read happens after `wire`). `pulled` is `false`
+/// when the window returned no such asset — a loud negative rather than a
+/// silent zero.
+#[derive(
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq,
+)]
+#[kind(name = "aether.test_fixtures.asset_probe_result")]
+pub struct AssetProbeResult {
+    pub pulled: bool,
+    pub len: u64,
+    pub checksum: u64,
+}
+
 /// Trigger for the `mat4_source` fixture (issue 1472). A DAG `Source`
 /// dispatches this no-payload trigger to the loaded `mat4_source`
 /// component, whose reply (`Mat4Apply`) feeds the `mat4_apply` transform

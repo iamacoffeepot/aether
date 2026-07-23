@@ -7,6 +7,8 @@
 use core::str::from_utf8;
 use std::sync::Arc;
 
+use aether_actor::{AssetCatalog, AssetWindow};
+use aether_data::wire;
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
@@ -567,7 +569,140 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0163 §3 asset load window (#3984). This cannot be a
+    // native capability addressed by mail: `asset` is a synchronous read
+    // inside the guest's own `init` / `wire`, and the bytes live host-side
+    // in the module file — the guest must pull them across the FFI at that
+    // instant and get them back into its own linear memory. That is the
+    // same host-mediated byte-transport shape as config delivery into
+    // `init` (ADR-0090) and mail delivery into `receive`, none of which a
+    // mail-round-trip capability can express. The surface is window-scoped
+    // (traps after `wire`), so it grows no persistent capability.
+    //
+    // Pull one asset's bytes through the load window: the guest passes the
+    // asset name (a slice in guest memory), the host looks it up in the
+    // `LoadWindow` installed on the ctx, allocates a buffer in guest memory
+    // through the guest's own `realloc_p32`, writes the bytes, and returns
+    // the ADR-0163 packed `(ptr << 32) | len`. Encoding:
+    //   - `ASSET_NOT_FOUND` (`u64::MAX`) — the window is open but carries
+    //     no asset by that name; the guest maps it to `None`.
+    //   - any other value — `(ptr << 32) | len`, a live guest buffer the
+    //     SDK copies out and frees.
+    // A call after the window closed (post-`wire`) or with no window at all
+    // traps, so the type-fence (`asset` lives only on the init/wire ctx) is
+    // backed by a loud runtime failure for a hand-rolled guest, never a
+    // silent empty. Not-found vs closed is thus a returned sentinel vs a
+    // trap — two unambiguous outcomes.
+    linker.func_wrap(
+        "aether",
+        "asset_fetch_p32",
+        |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
+            let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
+            let bytes = {
+                let ctx = caller.data_mut();
+                let Some(window) = ctx.load_window.as_mut() else {
+                    return Err(wasmtime::Error::msg("asset_fetch: this component has no asset load window"));
+                };
+                if !window.is_open() {
+                    return Err(wasmtime::Error::msg(
+                        "asset_fetch: called outside the load window — asset payload access ends when `wire` \
+                         returns (ADR-0163 §3)",
+                    ));
+                }
+                window.asset(&name)
+            };
+            bytes.map_or_else(|| Ok(ASSET_NOT_FOUND), |bytes| deliver_bytes_to_guest(&mut caller, &bytes))
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0163 §3 (#3984) — the catalog companion of the
+    // asset_fetch pull above, backing the guest's `AssetCatalog::assets()`
+    // (the `AssetWindow: AssetCatalog` supertrait). Same host-mediated
+    // byte-transport rationale; a mail capability cannot serve a
+    // synchronous in-`wire` read into guest memory. Returns the window's
+    // catalog as a wire-encoded `Vec<AssetInfo>` delivered like
+    // `asset_fetch_p32`; an empty catalog encodes to a valid empty
+    // sequence (no sentinel). Unlike `asset_fetch`, this reads the catalog
+    // metadata retained past `close()`, so it answers for the instance's
+    // life; it traps only when no window was ever installed.
+    linker.func_wrap(
+        "aether",
+        "asset_catalog_p32",
+        |mut caller: Caller<'_, ComponentCtx>| -> wasmtime::Result<u64> {
+            let bytes = {
+                let ctx = caller.data();
+                let Some(window) = ctx.load_window.as_ref() else {
+                    return Err(wasmtime::Error::msg("asset_catalog: this component has no asset load window"));
+                };
+                wire::to_vec(window.assets())
+                    .map_err(|e| wasmtime::Error::msg(format!("asset_catalog: encode failed: {e}")))?
+            };
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
     Ok(())
+}
+
+/// ADR-0163 packed-return marker for "the load window is open but carries
+/// no asset by the requested name" — distinct from a real `(ptr << 32) |
+/// len` (a 4 GiB asset at pointer `0xFFFF_FFFF` is impossible under the
+/// frame and address bounds). The guest maps it to `None`.
+const ASSET_NOT_FOUND: u64 = u64::MAX;
+
+/// Alignment the asset delivery buffer is allocated with. Byte payloads
+/// need no alignment, so `1` keeps the guest's free (`realloc_bytes(ptr,
+/// len, 1, 0)`) layout-exact. The guest's instantiate-time small region
+/// has already claimed the reused scratch, so this allocation always falls
+/// through to the global allocator — never the scratch — so the guest can
+/// free it.
+const ASSET_ALLOC_ALIGN: u32 = 1;
+
+/// Read a UTF-8 string from `(ptr, len)` in the caller's guest memory.
+/// Traps on no-memory, out-of-bounds, or invalid UTF-8 — a malformed asset
+/// name from a hand-rolled guest fails loud rather than resolving to a
+/// wrong asset.
+fn read_guest_utf8(caller: &mut Caller<'_, ComponentCtx>, ptr: u32, len: u32) -> wasmtime::Result<String> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(wasmtime::Extern::into_memory)
+        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
+    let data = memory.data(&caller);
+    let start = ptr as usize;
+    let end = start
+        .checked_add(len as usize)
+        .filter(|end| *end <= data.len())
+        .ok_or_else(|| wasmtime::Error::msg("asset name pointer out of bounds"))?;
+    from_utf8(&data[start..end]).map(str::to_owned).map_err(|_| wasmtime::Error::msg("asset name is not valid UTF-8"))
+}
+
+/// Allocate `bytes.len()` bytes in guest memory through the guest's
+/// `realloc_p32` export, write `bytes` there, and return the ADR-0163
+/// packed `(ptr << 32) | len`. The SDK copies the buffer out and frees it
+/// via the same guest allocator (`realloc_bytes(ptr, len,
+/// ASSET_ALLOC_ALIGN, 0)`), so host and guest agree on the layout. Traps
+/// when the guest exports no allocator or memory, or the allocator returns
+/// null — a non-conforming guest, consistent with the config-delivery
+/// path. A grow may relocate linear memory, so `memory` is re-fetched
+/// after the allocator call.
+fn deliver_bytes_to_guest(caller: &mut Caller<'_, ComponentCtx>, bytes: &[u8]) -> wasmtime::Result<u64> {
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| wasmtime::Error::msg("asset payload exceeds the 4 GiB guest-address bound"))?;
+    let realloc_export = caller.get_export("realloc_p32").and_then(wasmtime::Extern::into_func);
+    let Some(realloc) = realloc_export else {
+        return Err(wasmtime::Error::msg("guest exports no realloc_p32 allocator; cannot deliver asset bytes"));
+    };
+    let realloc = realloc.typed::<(u32, u32, u32, u32), u32>(&caller)?;
+    let ptr = realloc.call(&mut *caller, (0, 0, ASSET_ALLOC_ALIGN, len))?;
+    if ptr == 0 {
+        return Err(wasmtime::Error::msg("guest allocator returned null for the asset buffer"));
+    }
+    let memory = caller
+        .get_export("memory")
+        .and_then(wasmtime::Extern::into_memory)
+        .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
+    memory.write(&mut *caller, ptr as usize, bytes)?;
+    Ok((u64::from(ptr) << 32) | u64::from(len))
 }
 
 /// Issue 1987: resolve the dispatch identity a guest claimed on a send /

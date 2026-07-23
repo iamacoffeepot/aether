@@ -116,6 +116,24 @@ unsafe extern "C" {
     /// host-side error (no memory, OOB, bad UTF-8, no binding/spawner).
     #[link_name = "spawn_inline_child_p32"]
     pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
+    /// ADR-0163 §3 (#3984): pull one asset's bytes through the load window.
+    /// `(name_ptr, name_len)` is the asset name (a UTF-8 slice in guest
+    /// memory), copied out before the call returns. The return is the
+    /// packed `(ptr << 32) | len`: `u64::MAX` means "no such asset in the
+    /// open window" (the SDK maps it to `None`); any other value is a live
+    /// guest buffer of `len` bytes at `ptr` the SDK copies out and frees
+    /// through the guest allocator. A call after the load window closed
+    /// (post-`wire`) traps host-side — payload access is init+wire only.
+    #[link_name = "asset_fetch_p32"]
+    pub fn asset_fetch(name_ptr: u32, name_len: u32) -> u64;
+    /// ADR-0163 §3 (#3984): the component's asset catalog as a wire-encoded
+    /// `Vec<AssetInfo>`, delivered the same way as [`asset_fetch`] — the
+    /// return is the packed `(ptr << 32) | len` of a live guest buffer the
+    /// SDK decodes and frees. An empty catalog is a valid empty sequence.
+    /// Backs `AssetCatalog::assets()`; readable for the instance's life
+    /// (the catalog metadata is retained past the window close).
+    #[link_name = "asset_catalog_p32"]
+    pub fn asset_catalog() -> u64;
 }
 
 /// Host-side stub for the FFI `aether::send_mail` import. Always
@@ -265,4 +283,34 @@ pub unsafe fn spawn_sibling(
 #[must_use]
 pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0163).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn asset_fetch(_name_ptr: u32, _name_len: u32) -> u64 {
+    panic!("aether-actor: asset_fetch called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::asset_catalog` import (ADR-0163).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn asset_catalog() -> u64 {
+    panic!("aether-actor: asset_catalog called outside the FFI guest");
 }

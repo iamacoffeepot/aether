@@ -147,18 +147,22 @@ impl ComponentHostCapabilityState {
                 )
             };
 
-        // 2c. ADR-0163 §3: index the module's `aether.asset.*` custom
-        // sections and attach the catalog (name / length / sha256 per
-        // asset) so `describe_component` and `LoadResult` report what the
-        // bundle carries without executing it. A module with no asset
-        // sections indexes to an empty catalog; a malformed one (duplicate
-        // or empty asset path) fails the load loudly, the same fail-at-load
-        // stance the kinds parse takes above. Payload access itself is the
-        // separate load-window surface, not this metadata.
-        match asset_manifest::read_assets_from_bytes(&payload.wasm) {
-            Ok(records) => capabilities.assets = records.into_iter().map(|record| record.info).collect(),
+        // 2c. ADR-0163 §3 (#3984): index the module's `aether.asset.*`
+        // custom sections into a load window. Its catalog (name / length /
+        // sha256 per asset) attaches to the capabilities so
+        // `describe_component` and `LoadResult` report what the bundle
+        // carries without executing it; the window itself rides into the
+        // trampoline (installed on the `ComponentCtx` before instantiate)
+        // so the guest's `init` / `wire` can pull asset bytes through the
+        // `asset_fetch_p32` host fn. A malformed asset section (duplicate or
+        // empty path) fails the load loudly, the same fail-at-load stance
+        // the kinds parse takes above. The `Arc<[u8]>` is shared with the
+        // module's boot window (below) so both index the one byte buffer.
+        let wasm_bytes: Arc<[u8]> = Arc::from(payload.wasm.as_slice());
+        capabilities.assets = match asset_manifest::read_assets_from_bytes(&wasm_bytes) {
+            Ok(records) => records.into_iter().map(|record| record.info).collect(),
             Err(error) => return LoadResult::Err { error },
-        }
+        };
 
         // 3. Compile module.
         let module = match Module::new(&self.engine, &payload.wasm) {
@@ -183,10 +187,11 @@ impl ComponentHostCapabilityState {
                 let hash = content_hash_hex(&payload.wasm);
                 let fresh = !self.boot_registry.contains_key(&hash);
                 if fresh {
-                    let boot_mailbox = match self.spawn_boot_singleton(ctx, &module, boot_ns, &actors) {
-                        Ok(id) => id,
-                        Err(error) => return LoadResult::Err { error },
-                    };
+                    let boot_mailbox =
+                        match self.spawn_boot_singleton(ctx, &module, boot_ns, &actors, Arc::clone(&wasm_bytes)) {
+                            Ok(id) => id,
+                            Err(error) => return LoadResult::Err { error },
+                        };
                     self.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot_mailbox, refcount: 0 });
                 }
                 (Some(hash), fresh)
@@ -239,6 +244,10 @@ impl ComponentHostCapabilityState {
             // `spawn_child::<Sibling>` can register the spawned
             // sibling's own handler set (looked up by actor-type tag).
             actor_caps: actors,
+            // ADR-0163 §3 (#3984): the module bytes, so the trampoline's
+            // `init` indexes + installs an asset load window (closed after
+            // `wire`) and later sibling spawns index their own.
+            wasm_bytes: Arc::clone(&wasm_bytes),
         };
         let mailbox_id = match ctx.spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config, ()).finish()
         {
@@ -339,6 +348,7 @@ impl ComponentHostCapabilityState {
         module: &Module,
         boot_namespace: &str,
         actors: &[ActorInputs],
+        wasm_bytes: Arc<[u8]>,
     ) -> Result<MailboxId, String> {
         let boot_caps = actors
             .iter()
@@ -365,6 +375,10 @@ impl ComponentHostCapabilityState {
             config: Vec::new(),
             type_tag: Some(boot_tag),
             actor_caps: actors.to_vec(),
+            // ADR-0163 §3 (#3984): the same module bytes, so the boot
+            // trampoline indexes its own window and a boot `wire` can pull
+            // assets too.
+            wasm_bytes,
         };
         let boot_mailbox = ctx
             .spawn_child::<WasmTrampoline>(Subname::Named(boot_namespace), boot_config, ())
@@ -459,7 +473,7 @@ impl ComponentHostCapabilityState {
                 // and the caller must know. Announce the freshly-spawned boot
                 // mailbox on success so `ListComponents` and the hub see it (a
                 // load egresses this; a replace otherwise would not).
-                let boot_mailbox = self.spawn_boot_singleton(ctx, &module, &boot_ns, &actors)?;
+                let boot_mailbox = self.spawn_boot_singleton(ctx, &module, &boot_ns, &actors, Arc::from(new_wasm))?;
                 self.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot_mailbox, refcount: 0 });
                 self.outbound.egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
             }
