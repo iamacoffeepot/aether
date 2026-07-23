@@ -83,6 +83,13 @@ impl SwapTable {
     pub fn publish(&self, next: FxHashMap<u64, Entry>) {
         self.current.store(Arc::new(next));
     }
+
+    /// Install `next` as the head and hand back the previous head — the
+    /// double-buffer strategy's role swap. The returned map becomes the
+    /// standby the owner replays the lag onto next cycle.
+    pub fn swap_in(&self, next: Arc<FxHashMap<u64, Entry>>) -> Arc<FxHashMap<u64, Entry>> {
+        self.current.swap(next)
+    }
 }
 
 /// Proposed shape, structural-sharing publish strategy: same `ArcSwap`

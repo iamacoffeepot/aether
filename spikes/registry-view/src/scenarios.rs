@@ -175,6 +175,82 @@ fn churn_run(
     }
 }
 
+pub struct ScaleResult {
+    pub table_size: u64,
+    pub fx_clone_micros: f64,
+    pub fx_insert_nanos: f64,
+    pub im_insert_nanos: f64,
+    pub im_read_nanos: f64,
+    pub fx_read_nanos: f64,
+}
+
+/// Scenario D: how each publish strategy scales with table size. The
+/// clone-per-cycle strategy pays `fx_clone` once per publish (O(n));
+/// structural sharing pays `im_insert` per update (O(log n)) and O(1)
+/// per publish, at the price of `im_read` on the hot path.
+pub fn publish_scale(table_size: u64) -> ScaleResult {
+    let working_fx = seed_fx(table_size);
+    let mut working_im = im::HashMap::new();
+    for id in 0..table_size {
+        working_im.insert(id, Entry::new(id));
+    }
+
+    let started = Instant::now();
+    let clones = 20u32;
+    for _ in 0..clones {
+        std::hint::black_box(working_fx.clone());
+    }
+    let fx_clone_micros = started.elapsed().as_micros() as f64 / f64::from(clones);
+
+    let inserts = 100_000u64;
+    let mut fx_scratch = working_fx.clone();
+    let started = Instant::now();
+    for i in 0..inserts {
+        fx_scratch.insert(table_size + i, Entry::new(table_size + i));
+    }
+    let fx_insert_nanos = started.elapsed().as_nanos() as f64 / inserts as f64;
+    let started = Instant::now();
+    for i in 0..inserts {
+        working_im.insert(table_size + i, Entry::new(table_size + i));
+    }
+    let im_insert_nanos = started.elapsed().as_nanos() as f64 / inserts as f64;
+
+    let reads = 2_000_000u64;
+    let mut ids = Ids::new(7, table_size);
+    let started = Instant::now();
+    for _ in 0..reads {
+        std::hint::black_box(working_fx.get(&ids.next()));
+    }
+    let fx_read_nanos = started.elapsed().as_nanos() as f64 / reads as f64;
+    let mut ids = Ids::new(7, table_size);
+    let started = Instant::now();
+    for _ in 0..reads {
+        std::hint::black_box(working_im.get(&ids.next()));
+    }
+    let im_read_nanos = started.elapsed().as_nanos() as f64 / reads as f64;
+
+    ScaleResult { table_size, fx_clone_micros, fx_insert_nanos, im_insert_nanos, im_read_nanos, fx_read_nanos }
+}
+
+#[derive(Clone, Copy)]
+enum PublishMode {
+    /// Owner clones the whole `FxHashMap` once per drained cycle.
+    FxClonePerCycle,
+    /// Owner republishes the `im::HashMap` after every update — worst case.
+    ImPerOp,
+    /// Owner republishes the `im::HashMap` once per drained cycle — the
+    /// structural-sharing strategy priced fairly: O(log n) per update
+    /// applied to the working map, O(1) publish, no whole-map clone ever.
+    ImPerCycle,
+    /// Two `FxHashMap` buffers alternate as the published head; each
+    /// drained batch is applied to the standby (plus the previous
+    /// batch's replay lag), then the buffers swap roles. Every update
+    /// costs two plain inserts amortized and no publish ever clones the
+    /// table — `Arc::make_mut` clones only if a straggling reader still
+    /// holds the two-publishes-old snapshot.
+    DoubleBuffer,
+}
+
 pub struct WriteResult {
     pub label: String,
     pub per_update_nanos: f64,
@@ -210,7 +286,12 @@ pub fn write_path(total: u64, batch: usize) -> Vec<WriteResult> {
         mean_drained_batch: 0.0,
     });
 
-    for (label, per_op_publish) in [("mail+swap", false), ("mail+im", true)] {
+    for (label, mode) in [
+        ("mail+swap", PublishMode::FxClonePerCycle),
+        ("mail+im-op", PublishMode::ImPerOp),
+        ("mail+im-cycle", PublishMode::ImPerCycle),
+        ("mail+double", PublishMode::DoubleBuffer),
+    ] {
         let (tx, rx) = mpsc::channel::<Vec<(u64, Entry)>>();
         let swap = SwapTable::seeded(TABLE_SIZE);
         let im = ImTable::seeded(TABLE_SIZE);
@@ -218,6 +299,8 @@ pub fn write_path(total: u64, batch: usize) -> Vec<WriteResult> {
         let owner = thread::spawn(move || {
             let mut working_fx = seed_fx(TABLE_SIZE);
             let mut working_im = im.snapshot();
+            let mut standby = Arc::new(seed_fx(TABLE_SIZE));
+            let mut lag: Vec<(u64, Entry)> = Vec::new();
             let mut publishes = 0u64;
             let mut cycles = 0u64;
             let mut drained = 0u64;
@@ -228,18 +311,40 @@ pub fn write_path(total: u64, batch: usize) -> Vec<WriteResult> {
                 }
                 drained += updates.len() as u64;
                 cycles += 1;
-                if per_op_publish {
-                    for (id, entry) in updates {
-                        working_im.insert(id, entry);
+                match mode {
+                    PublishMode::DoubleBuffer => {
+                        let map = Arc::make_mut(&mut standby);
+                        for (id, entry) in lag.drain(..) {
+                            map.insert(id, entry);
+                        }
+                        for (id, entry) in &updates {
+                            map.insert(*id, entry.clone());
+                        }
+                        standby = swap.swap_in(Arc::clone(&standby));
+                        lag = updates;
+                        publishes += 1;
+                    }
+                    PublishMode::ImPerOp => {
+                        for (id, entry) in updates {
+                            working_im.insert(id, entry);
+                            im.publish(working_im.clone());
+                            publishes += 1;
+                        }
+                    }
+                    PublishMode::ImPerCycle => {
+                        for (id, entry) in updates {
+                            working_im.insert(id, entry);
+                        }
                         im.publish(working_im.clone());
                         publishes += 1;
                     }
-                } else {
-                    for (id, entry) in updates {
-                        working_fx.insert(id, entry);
+                    PublishMode::FxClonePerCycle => {
+                        for (id, entry) in updates {
+                            working_fx.insert(id, entry);
+                        }
+                        swap.publish(working_fx.clone());
+                        publishes += 1;
                     }
-                    swap.publish(working_fx.clone());
-                    publishes += 1;
                 }
             }
             (publishes, drained as f64 / cycles as f64)

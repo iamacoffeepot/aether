@@ -38,4 +38,17 @@ fn main() {
             }
         }
     }
+
+    println!("\nD. publish-strategy scaling with table size (single-threaded costs)");
+    println!(
+        "{:>10} {:>16} {:>14} {:>14} {:>12} {:>12}",
+        "entries", "fx clone µs", "fx ins ns", "im ins ns", "fx read ns", "im read ns"
+    );
+    for n in [10_000u64, 100_000, 1_000_000] {
+        let r = scenarios::publish_scale(n);
+        println!(
+            "{:>10} {:>16.1} {:>14.1} {:>14.1} {:>12.1} {:>12.1}",
+            r.table_size, r.fx_clone_micros, r.fx_insert_nanos, r.im_insert_nanos, r.fx_read_nanos, r.im_read_nanos
+        );
+    }
 }
