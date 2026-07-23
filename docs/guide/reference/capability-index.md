@@ -14,8 +14,7 @@ fallback or omits the runtime.
 | `aether.render` | draw queues, textures/materials, view/projection, capture | `aether-render/src` | [Rendering](../systems/rendering.md) |
 | `aether.text` | font load, layout, batched text drawing, metrics | `aether-text/src` | [Text](../systems/text.md) |
 | `aether.audio` | instruments, notes, tracks, scheduling, gain/reverb | `aether-audio/src` | [Audio](../systems/audio.md) |
-| `aether.input` | subscription ownership for keyboard/mouse/text/IME streams | `aether-input/src` | [Input](../systems/input.md) |
-| `aether.window` | mode, title, focus and headless replies | `aether-window/src` | [Window](../systems/window.md) |
+| `aether.window` | multi-window lifecycle/control plus selector-aware keyboard, mouse, resize, text, and IME publication | `aether-window/src` | [Window](../systems/window.md), [Input](../systems/input.md) |
 | `aether.clipboard` | text get/set through system or in-memory backend | `aether-clipboard/src` | [Clipboard](../systems/clipboard.md) |
 | `aether.fs` | namespaced read/write/copy/delete/list/fetch-fold | `aether-fs/src` | [File I/O](../systems/file-io.md) |
 | `aether.http` | outbound HTTP fetch | `aether-http/src/client` | [HTTP egress](../systems/http.md) |
@@ -54,7 +53,7 @@ capability crate boundary or are genuinely cross-cutting:
 |---|---|
 | engine/component control | MCP and hub control need the same selectors/results |
 | inventory queries | `aether-mcp` must query without depending on native capability implementation |
-| lifecycle/input/window control bridges | substrate/chassis-wide stage or compatibility vocabulary |
+| lifecycle/window control and window-originated events | substrate/chassis-wide stage, identity, or compatibility vocabulary |
 | trace/log/cost tails | common evidence projected across processes |
 | utility/diagnostics | ping/pong, unresolved-mail and monitor notices |
 

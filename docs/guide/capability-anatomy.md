@@ -69,6 +69,23 @@ runtime discriminator/subname is part of identity. An unsupported chassis may
 install a separate headless/fail-fast identity claiming the same public
 namespace.
 
+Runtime-placement paths let multiple implementations live beside one public
+identity without forcing directory names into actor identity. Window is the
+multi-runtime exemplar:
+
+```rust
+#[actor(singleton)]
+pub struct WindowCapability;
+
+#[actor(singleton, runtime::synthetic)]
+pub struct SyntheticWindowCapability;
+```
+
+Desktop, fail-fast headless, and synthetic window runtimes all claim one
+crate-owned namespace constant. Consumers name only
+`ctx.actor::<WindowCapability>()`; runtime variants must not repeat a namespace
+literal in their declarations or leak platform identity into callers.
+
 ## State in the runtime half
 
 ```rust
@@ -183,14 +200,20 @@ resource, prefer an explicit unsupported actor that replies with the ordinary
 error shape. Examples include headless render/window/clipboard companions and
 the substrate-harness unsupported marker.
 
-The companion mirrors the primary cap's identity/runtime split symmetrically:
-its identity ZST lives in the crate-root `headless` module (`src/headless.rs`,
-always-on, declared with `#[actor(singleton, runtime::headless)]`) and its
-runtime half in `src/runtime/headless.rs`, a nested child covered by the same
-`mod runtime;` gate as the primary runtime. The module-path argument tells the
-struct-hosted `#[actor]` harvest which file to read, resolved relative to the
-invoking file. `aether-render` and `aether-clipboard` are the current
-exemplars.
+Most companions mirror the primary cap's identity/runtime split symmetrically:
+their identity ZST lives in the crate-root `headless` module
+(`src/headless.rs`, always-on, declared with
+`#[actor(singleton, runtime::headless)]`) and their runtime half in
+`src/runtime/headless.rs`, a nested child covered by the same `mod runtime;`
+gate as the primary runtime. The module-path argument tells the struct-hosted
+`#[actor]` harvest which file to read, resolved relative to the invoking file.
+`aether-render` and `aether-clipboard` are exemplars.
+
+Window deliberately uses a neutral `WindowCapability` as both the consumer
+identity and fail-fast runtime identity, plus desktop and
+`runtime::synthetic` implementation types claiming the same shared namespace.
+That shape is appropriate when callers must remain platform-neutral and
+multiple runtimes are mutually exclusive chassis choices.
 
 Do not create a stub for fire-and-forget traffic unless it produces useful
 diagnostics and avoids misleading success. The goal is bounded failure, not
@@ -227,8 +250,9 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 
 ## Current exemplars
 
-- Light single-file runtime: `fs/`, `input/`, `clipboard/`
+- Light single-file runtime: `fs/`, `clipboard/`
 - Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
+- Neutral identity with desktop/headless/synthetic runtimes: `window/`
 - Multi-actor cluster: `engine/`, `http/`, `tcp/`
 - Self-contained guest provider components: `anthropic/`, `gemini/`
 - Split test support: `rpc/server/test_echo.rs`

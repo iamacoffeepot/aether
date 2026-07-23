@@ -242,7 +242,7 @@ the actor's place in the runtime tree come two ids, two distinct moments
 For a **capability** the two coincide. It sits at the root, so its lineage is
 one node and the fold of one node is that node: `MailboxId == ActorId`, the
 `NAMESPACE` is the whole address (`aether.audio`, `aether.render`,
-`aether.input`), and `ctx.actor::<AudioCapability>()` resolves to it as a
+`aether.window`), and `ctx.actor::<AudioCapability>()` resolves to it as a
 compile-time const with no runtime lookup.
 
 For a **component** the `NAMESPACE` is the *default load name*, and the loaded
@@ -281,12 +281,13 @@ though its implementation type is `TerraEditor`, not
 
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
-`ctx.actor::<InputCapability>().subscribe::<Key>()` is one (from
-`InputMailboxExt`), and `ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")`
-is the loaded-component lookup just mentioned (from `ComponentHostWasmExt` in a
-component, `ComponentHostNativeExt` in a capability). Each helper is available on
-both the component and the capability handle, so the same call reads the same
-whichever host you write from.
+`ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)` is one
+(from `WindowMailboxExt`), and
+`ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")` is the
+loaded-component lookup just mentioned (from `ComponentHostWasmExt` in a
+component, `ComponentHostNativeExt` in a capability). Each helper is available
+on both the component and the capability handle, so the same call reads the
+same whichever host you write from.
 
 ## One or many: cardinality
 

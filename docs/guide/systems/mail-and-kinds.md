@@ -191,8 +191,7 @@ recipe).
 **Addressing rules that bite if ignored:**
 
 - Chassis mailboxes live under `aether.<name>` (`aether.render`, `aether.fs`,
-  `aether.audio`, `aether.input`, `aether.lifecycle`, `aether.window`,
-  `aether.component`).
+  `aether.audio`, `aether.lifecycle`, `aether.window`, `aether.component`).
 - A loaded component registers at `aether.component/aether.embedded:NAME` — use the
   full address `LoadResult.name` hands back.
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
@@ -211,8 +210,10 @@ the system a new kind" or "stand up a new mailbox":
   capability (the *Adding a chassis capability* recipe); a wasm one is a
   component (the *Writing a component* recipe). Either way it's the same actor
   model and the same addressing.
-- **Reuse the streams** rather than polling. Tick / key / mouse / window-size
-  are publish-subscribe — subscribe from a component's `wire` hook and you get
+- **Reuse the streams** rather than polling. Tick is subscribed through
+  lifecycle; key, mouse, and window-size events are subscribed through
+  `WindowCapability` with `WindowSelector::One(id)` or
+  `WindowSelector::All`. Subscribe from a component's `wire` hook and receive
   the events as mail. See [Input](input.md) and [File I/O](file-io.md).
 
 Because everything is mail, these few moves compose: a new capability that

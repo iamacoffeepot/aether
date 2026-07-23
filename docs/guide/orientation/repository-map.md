@@ -48,7 +48,7 @@ compares these with native capabilities.
 |---|---|
 | `aether-substrate` | registry, rings, dispatch, scheduler, native/wasm actor hosts, settlement, chassis traits |
 | `aether-render`, `aether-text`, `aether-audio` | draw queues and the wgpu pipeline, font layout and the glyph atlas, the synth and instrument banks |
-| `aether-fs`, `aether-clipboard`, `aether-window`, `aether-input` | namespaced file I/O, text clipboard, window mode/title/focus, input-stream subscriptions |
+| `aether-fs`, `aether-clipboard`, `aether-window` | namespaced file I/O, text clipboard, multi-window lifecycle/control, and selector-aware window-event subscriptions |
 | `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
