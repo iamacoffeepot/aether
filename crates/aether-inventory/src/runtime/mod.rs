@@ -3,8 +3,8 @@
 //! in the parent carries the gate), so a transport-only build of the
 //! `InventoryCapability` identity never names these types nor pulls
 //! `aether_substrate`. The substrate-typed imports are gated once by this
-//! module rather than line-by-line; the wire-projection helpers nest here as
-//! sibling files (`manifest.rs`, `resolve.rs`) covered by the same gate.
+//! module rather than line-by-line; the reverse-lookup helper nests here as
+//! a sibling file (`resolve.rs`) covered by the same gate.
 
 // The moved `#[runtime] impl NativeActor for InventoryCapability` body
 // names the `#[runtime]` attribute, the cap identity, and the input/reply
@@ -17,40 +17,36 @@ use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve};
 #[cfg(not(target_family = "wasm"))]
 use super::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
 
-// The wire-projection helpers, nested under this `runtime` directory so the
-// one `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`).
-mod manifest;
+// The reverse-lookup helper, nested under this `runtime` directory so the
+// one `mod runtime;` gate in the parent covers it (no per-sibling `#[cfg]`).
 mod resolve;
 
-pub use manifest::param_kind_wire;
 pub use resolve::resolve_ids;
 
 pub use aether_data::KindId;
 pub use aether_data::canonical::kind_id_from_parts;
-pub use aether_data::name_inventory::{handler_entries, name_entries, template_entries};
+pub use aether_data::name_inventory::{ParamKind, handler_entries, name_entries, template_entries};
 pub use aether_data::wire;
-pub use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, TemplateEntryWire};
+pub use aether_kinds::{HandlerEntryWire, KindDescriptorWire, NameEntryWire, ParamKindWire, TemplateEntryWire};
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::registry::Registry;
 use std::collections::HashSet;
-pub use std::sync::Arc;
 
-/// `aether.inventory` runtime state (ADR-0091 §2). Holds the substrate's
-/// shared `Arc<Registry>` — the same `Arc` `ComponentHostCapability`
-/// clones for `register_or_match_all` — so a load-time registration is
-/// visible to `on_list_kinds` the moment it returns. The `Manifest` /
-/// `Resolve` / `ListHandlers` arms are stateless reads of process-global
-/// link-time tables. The addressing identity is the distinct ZST
-/// `InventoryCapability`.
-pub struct InventoryCapabilityState {
-    pub registry: Arc<Registry>,
-}
+/// `aether.inventory` runtime state — a ZST, because the cap has none.
+/// Every arm reads either a process-global link-time table or the
+/// engine's `Registry` borrowed from the handler ctx.
+///
+/// It exists as a named type rather than `Self` because a struct-hosted
+/// split identity (ADR-0122) requires one: `#[actor]` reads
+/// `type State = Self` as a request for the *un-split* shape, whose
+/// handlers take a `&mut self` receiver and whose runtime impls are not
+/// gated on `feature = "runtime"` (`native_expand.rs:60`).
+pub struct InventoryCapabilityState;
 
 #[runtime]
 impl NativeActor for InventoryCapability {
-    /// The runtime state this identity boots into (ADR-0122 split): the
-    /// shared substrate `Arc<Registry>` the `ListKinds` arm projects.
+    /// The runtime state this identity boots into (ADR-0122 split) — a
+    /// ZST; see [`InventoryCapabilityState`].
     type State = InventoryCapabilityState;
 
     type Config = ();
@@ -59,15 +55,8 @@ impl NativeActor for InventoryCapability {
     /// headless chassis (via `with_full_stack_caps`), matching `aether.fs`.
     const NAMESPACE: &'static str = "aether.inventory";
 
-    fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<InventoryCapabilityState, BootError> {
-        // Clone the substrate's shared `Arc<Registry>` — the same
-        // `Arc` `ComponentHostCapability` clones for
-        // `register_or_match_all` at `component.rs:170`. The shared
-        // `Arc` is the propagation channel per ADR-0091 §2: a
-        // load-time registration is visible to `on_list_kinds` the
-        // moment it returns.
-        let registry = Arc::clone(ctx.mailer().registry());
-        Ok(InventoryCapabilityState { registry })
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<InventoryCapabilityState, BootError> {
+        Ok(InventoryCapabilityState)
     }
 
     /// Reply with the per-build reverse-lookup manifest: every
@@ -80,9 +69,7 @@ impl NativeActor for InventoryCapability {
     /// shape). Fold `names` into a hash → name map and expand the
     /// `Bounded`/`Declared` templates locally; resolve `Dynamic`
     /// families per-id via `aether.inventory.resolve`.
-    // The manifest is read from the process-global link-time
-    // inventories — `state.registry` is only consulted by
-    // `on_list_kinds`, so this arm takes `_state`.
+    // Read from the process-global link-time inventories.
     #[handler::single]
     fn on_manifest(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: Manifest) -> ManifestResult {
         let names = name_entries()
@@ -95,7 +82,14 @@ impl NativeActor for InventoryCapability {
                 // pattern; the split is an internal const-construction
                 // detail (ADR-0099 §5/§6 forward-feed).
                 template: entry.pattern().into_owned(),
-                param: param_kind_wire(&entry.param),
+                // `Bounded` / `Declared` carry their range / domain so the
+                // client expands the family locally; `Dynamic` carries only
+                // the shape (its instances reverse via `Resolve`).
+                param: match entry.param {
+                    ParamKind::Bounded { lo, hi } => ParamKindWire::Bounded { lo, hi },
+                    ParamKind::Declared { domain } => ParamKindWire::Declared { domain: domain.to_vec() },
+                    ParamKind::Dynamic => ParamKindWire::Dynamic,
+                },
             })
             .collect();
         ManifestResult { names, templates }
@@ -118,10 +112,15 @@ impl NativeActor for InventoryCapability {
     /// wire bytes (`schema_wire`) because `SchemaType` has
     /// no `Schema` impl of its own; decode it with
     /// `wire::from_bytes::<SchemaType>(&desc.schema_wire)`.
+    // The engine's live vocabulary is read straight off the ctx-borrowed
+    // `Registry` — the same one `ComponentHostCapability` registers into,
+    // so a `load_component`'s kinds are visible the moment it returns
+    // (ADR-0091 §2) without the cap holding its own `Arc` clone.
     #[handler::single]
-    fn on_list_kinds(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
-        let kinds = state
-            .registry
+    fn on_list_kinds(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
+        let kinds = ctx
+            .mailer()
+            .registry()
             .list_kind_descriptors()
             .into_iter()
             .map(|desc| {
@@ -153,8 +152,7 @@ impl NativeActor for InventoryCapability {
     /// unparseable id), at which point the caller renders the
     /// ADR-0064 tagged-id string itself. Call this only for ids a
     /// locally-folded manifest couldn't resolve.
-    // Stateless arm — `resolve` reads the process-global runtime
-    // registry, not the cap state, so it takes `_state`.
+    // Reads the process-global runtime name registry.
     #[handler::single]
     fn on_resolve(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
         ResolveResult { resolved: resolve_ids(mail.ids) }
@@ -176,8 +174,7 @@ impl NativeActor for InventoryCapability {
     /// `namespace` to read each native cap (`aether.fs`,
     /// `aether.render`, …) as a `describe_component`-style
     /// `In -> Out` handler list.
-    // The manifest is read from the process-global link-time
-    // inventory, so this arm takes `_state`.
+    // Read from the process-global link-time inventory.
     //
     // Field-identical rows are deduped (ADR-0160 §Decision 2): two
     // `#[actor]` blocks can legitimately share one `NAMESPACE` — the
@@ -220,21 +217,21 @@ mod tests {
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
     use std::sync::Arc;
 
-    /// Runtime state + fully-wired test mailer + `NativeBinding`
+    /// The stateless cap + a fully-wired test mailer + `NativeBinding`
     /// transport. Handlers are called directly and return their
     /// result; no egress channel decode needed (ADR-0112 `-> R`
-    /// migration).
+    /// migration). The engine `Registry` reaches the handlers through
+    /// the ctx's mailer, the same way it does on a live chassis.
     struct Fixture {
         transport: Arc<NativeBinding>,
         state: InventoryCapabilityState,
     }
 
     fn fixture() -> Fixture {
-        let registry = Arc::new(Registry::new());
         let (outbound, _rx) = HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x1117)));
-        Fixture { transport, state: InventoryCapabilityState { registry: Arc::clone(&registry) } }
+        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())).with_outbound(outbound));
+        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x1117)));
+        Fixture { transport, state: InventoryCapabilityState }
     }
 
     fn session_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {

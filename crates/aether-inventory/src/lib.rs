@@ -45,15 +45,16 @@
 //! which is barred from a cap-crate dependency, so the
 //! family stays whole in `aether-kinds`.
 //!
-//! The cap holds a clone of the substrate's `Arc<Registry>` (taken in
-//! `init` via `NativeInitCtx::mailer().registry()` — the same `Arc` the
-//! component-host cap clones for `register_or_match_all`), so a
-//! `load_component`'s registrations are visible to `ListKinds` the
-//! moment they return; no event channel, no cache invalidation. The
-//! manifest / resolve arms remain stateless reads of process-global
-//! link-time tables. `#[actor(singleton)]` auto-submits its own
-//! `NameEntry` for `NAMESPACE`, so `aether.inventory` reverses through
-//! the same static map it serves.
+//! The cap is stateless. `ListKinds` reads the engine's `Registry`
+//! through the handler ctx (`NativeCtx::mailer().registry()`) — the same
+//! one the component-host cap registers into for `register_or_match_all`,
+//! so a `load_component`'s registrations are visible the moment they
+//! return; no event channel, no cache invalidation, and no `Arc` clone
+//! pinning one registry instance for the cap's lifetime. The manifest /
+//! resolve / handlers arms read process-global link-time tables.
+//! `#[actor(singleton)]` auto-submits its own `NameEntry` for
+//! `NAMESPACE`, so `aether.inventory` reverses through the same static
+//! map it serves.
 
 // Handler-signature kinds must be importable at module root because
 // `#[actor]` emits `impl HandlesKind<K> for InventoryCapability {}`
@@ -68,18 +69,17 @@ use aether_actor::actor;
 /// ADR-0088 §6, widened by ADR-0091 §5). A ZST carrying only the
 /// addressing — the `Addressable` / `HandlesKind` markers and the
 /// name-inventory entry, all emitted always-on by `#[actor]`. The
-/// state-bearing runtime (`InventoryCapabilityState`, holding the
-/// substrate `Arc<Registry>` the `ListKinds` arm projects) lives behind
-/// the one `feature = "runtime"` gate, so a transport-only build never
-/// names it nor pulls `aether_substrate` through this cap.
+/// `#[runtime] impl` lives behind the one `feature = "runtime"` gate, so
+/// a transport-only build never pulls `aether_substrate` through this cap.
 ///
-/// The `Manifest` and `Resolve` arms read process-global tables (the
-/// link-time inventories, the runtime registry) directly with no
-/// per-cap state. The `ListKinds` arm projects the substrate's shared
-/// `Arc<Registry>`, captured in `init` from the harness / chassis mailer —
-/// load-time registrations performed by `ComponentHostCapability` mutate
-/// the same `Arc<Registry>`, so the reply reflects whatever vocabulary
-/// the substrate currently holds without any cross-cap event channel.
+/// The cap carries no runtime state (`type State = Self`). The
+/// `Manifest`, `Resolve`, and `ListHandlers` arms read process-global
+/// tables — the link-time inventories and the runtime name registry —
+/// directly. The `ListKinds` arm reads the engine's `Registry` off the
+/// handler ctx, so the reply reflects whatever vocabulary the substrate
+/// currently holds (including anything `ComponentHostCapability`
+/// registered at load time) without a cross-cap event channel and
+/// without pinning one registry instance at `init`.
 #[actor(singleton)]
 pub struct InventoryCapability;
 
