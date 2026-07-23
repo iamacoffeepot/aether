@@ -25,9 +25,17 @@ const DEFAULT_CHASSIS: &str = "headless";
 
 /// Fork `binary_path --describe` and parse the JSON manifest it prints
 /// (ADR-0115, issue 1953). The one-time capture of what a binary *is* —
-/// its chassis kind, linked caps, and build provenance — without the
-/// hub linking the chassis crate. `stdin` is nulled so a describe can't
-/// block on input.
+/// its chassis kind, linked caps, config surface, and build provenance —
+/// without the hub linking the chassis crate. `stdin` is nulled so a
+/// describe can't block on input.
+///
+/// The parsed manifest is held to strict shape conformance
+/// ([`validate_manifest`]) before it can enter the store (ADR-0162 §
+/// consume side, #3936): unstorable = unspawnable, so a binary that
+/// skipped or diverged from the describe contract is rejected here rather
+/// than trusted to author diligence. The rejection names the specific
+/// malformation — the `--describe` output surfaces to an agent through the
+/// `upload_binary` MCP error, so it must say what to fix.
 fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
     let output = Command::new(binary_path)
         .arg("--describe")
@@ -41,7 +49,86 @@ fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
             String::from_utf8_lossy(&output.stderr).trim(),
         ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))
+    // Parse twice off the same bytes: once to a raw `Value` so presence of
+    // a `#[serde(default)]` field can be told apart from its default
+    // (`env_keys` / `argv_flags` — a permissive typed parse alone can't
+    // distinguish an absent field from an empty one, ADR-0162 read
+    // policy), and once to the typed manifest the store holds. The raw
+    // parse also decides the pre-ADR-0162 rejection message.
+    let raw: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))?;
+    let manifest: BinaryManifest = serde_json::from_value(raw.clone())
+        .map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))?;
+    validate_manifest(&manifest, &raw)
+        .map_err(|why| format!("{binary_path:?} --describe manifest is nonconforming: {why}"))?;
+    Ok(manifest)
+}
+
+/// Hold a parsed `--describe` manifest to strict shape conformance before
+/// it enters the store (ADR-0162 consume side, #3936). Every field the
+/// produce side ([`describe_manifest`](aether_substrate)) structurally
+/// guarantees must be present and non-empty:
+///
+/// - `chassis` — the profile string is always `Chassis::PROFILE`.
+/// - `caps` — every chassis composes at least the RPC server (ADR-0155
+///   §3), so the claim roster is never empty.
+/// - `git_sha` / `profile` / `target` — the bundle's `build.rs` bakes
+///   `"unknown"` rather than an empty string when a fact is unavailable
+///   (built outside a git checkout), so `"unknown"` is a *conforming*
+///   value; only a truly empty string is a divergence.
+/// - `env_keys` / `argv_flags` — the config surface every chassis
+///   composes (ADR-0162): the RPC server alone contributes
+///   `AETHER_RPC_PORT` / `--rpc-port`, so a conforming manifest carries a
+///   non-empty set of each. These fields are `#[serde(default)]` on the
+///   shared kind (an old stored sidecar reads back with empty sets rather
+///   than failing the store, #3943), so *absent from the JSON* is checked
+///   on the raw `Value` and rejected with a distinct "predates the
+///   ADR-0162 config surface" message — the new fields joining the
+///   required shape is the point of this gate: a binary built before the
+///   config surface existed is unspawnable and must not enter the store.
+///
+/// This strictness applies to *new ingestion only*. The stored-manifest
+/// read path stays permissive (ADR-0162 / #3943): entries already in the
+/// store under old hashes keep parsing with defaulted fields.
+///
+/// Unknown-field policy: **tolerated**. The typed parse does not set
+/// `deny_unknown_fields`, and this validator checks only for the presence
+/// and shape of the fields it requires, ignoring any extra. A *newer*
+/// binary that reports additional manifest fields must stay uploadable to
+/// an *older* hub — rejecting unknown fields would make every hub a hard
+/// floor on binary vintage, the opposite of the forward-compatible store.
+fn validate_manifest(manifest: &BinaryManifest, raw: &serde_json::Value) -> Result<(), String> {
+    for (field, value) in [
+        ("chassis", manifest.chassis.as_str()),
+        ("git_sha", manifest.git_sha.as_str()),
+        ("profile", manifest.profile.as_str()),
+        ("target", manifest.target.as_str()),
+    ] {
+        if value.is_empty() {
+            return Err(format!("required field {field:?} is empty"));
+        }
+    }
+    if manifest.caps.is_empty() {
+        return Err("required field \"caps\" is empty — every chassis composes at least the RPC server (ADR-0155 §3)"
+            .to_owned());
+    }
+    // `env_keys` / `argv_flags` are `#[serde(default)]`, so an absent field
+    // decodes to an empty set indistinguishably from an empty one in the
+    // JSON. Check presence on the raw value first, naming the pre-ADR-0162
+    // vintage precisely, then require non-empty on the decoded set.
+    for (field, decoded) in [("env_keys", &manifest.env_keys), ("argv_flags", &manifest.argv_flags)] {
+        if raw.get(field).is_none() {
+            return Err(format!(
+                "manifest omits {field:?}: the binary predates the ADR-0162 config surface and cannot be addressed — rebuild it against a chassis-main that self-reports its config surface",
+            ));
+        }
+        if decoded.is_empty() {
+            return Err(format!(
+                "required field {field:?} is empty — every chassis composes a config surface (the RPC server alone contributes AETHER_RPC_PORT / --rpc-port, ADR-0162)",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Ingest the binary at `path` into `store` content-addressed,
@@ -274,4 +361,128 @@ pub fn realize_executable(src: &Path, dest: &Path) -> io::Result<()> {
         fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bootstrap_ingest, validate_manifest};
+    use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
+    use aether_kinds::BinaryManifest;
+
+    /// A fully conforming manifest: every field the produce side
+    /// structurally guarantees is present and non-empty. The baseline the
+    /// rejection cases perturb one field at a time.
+    fn conforming() -> BinaryManifest {
+        BinaryManifest {
+            chassis: "headless".to_owned(),
+            caps: vec!["aether.rpc.server".to_owned()],
+            git_sha: "deadbee".to_owned(),
+            profile: "debug".to_owned(),
+            target: "x86_64-unknown-linux-gnu".to_owned(),
+            env_keys: vec!["AETHER_RPC_PORT".to_owned()],
+            argv_flags: vec!["rpc-port".to_owned()],
+        }
+    }
+
+    fn raw(manifest: &BinaryManifest) -> serde_json::Value {
+        serde_json::to_value(manifest).expect("a manifest serializes to a JSON value")
+    }
+
+    #[test]
+    fn a_conforming_manifest_is_accepted() {
+        let manifest = conforming();
+        validate_manifest(&manifest, &raw(&manifest)).expect("a fully-shaped manifest conforms");
+    }
+
+    /// Tripwire: `build.rs` bakes `"unknown"` (never an empty string) when
+    /// a provenance fact is unavailable (built outside a git checkout), so
+    /// `"unknown"` is a conforming value — the gate rejects only a truly
+    /// empty field. A regression that treated `"unknown"` as missing would
+    /// reject every binary built outside a git checkout.
+    #[test]
+    fn unknown_provenance_is_conforming() {
+        let mut manifest = conforming();
+        manifest.git_sha = "unknown".to_owned();
+        validate_manifest(&manifest, &raw(&manifest)).expect("baked \"unknown\" provenance conforms");
+    }
+
+    #[test]
+    fn a_manifest_predating_the_config_surface_is_rejected_naming_the_field() {
+        // A pre-ADR-0162 manifest: the JSON carries no `env_keys` /
+        // `argv_flags`. The typed value defaults them to empty, so the raw
+        // JSON is what distinguishes absent (predates the surface) from
+        // present-but-empty — the gate must reject the former naming the
+        // missing field and the ADR that added it.
+        let raw = serde_json::json!({
+            "chassis": "headless",
+            "caps": ["aether.fs"],
+            "git_sha": "deadbee",
+            "profile": "debug",
+            "target": "x86_64-unknown-linux-gnu"
+        });
+        let manifest: BinaryManifest =
+            serde_json::from_value(raw.clone()).expect("an old-shape manifest parses with defaulted fields");
+        let error = validate_manifest(&manifest, &raw).expect_err("a pre-config-surface manifest is rejected");
+        assert!(error.contains("env_keys"), "the rejection names the missing field: {error}");
+        assert!(error.contains("ADR-0162"), "the rejection names the vintage that must rebuild: {error}");
+    }
+
+    #[test]
+    fn an_empty_produce_side_guaranteed_field_is_rejected_naming_it() {
+        let mut manifest = conforming();
+        manifest.caps.clear();
+        let error = validate_manifest(&manifest, &raw(&manifest)).expect_err("an empty caps set is rejected");
+        assert!(error.contains("caps"), "the rejection names the empty field: {error}");
+    }
+
+    #[test]
+    fn a_present_but_empty_config_surface_field_is_rejected_naming_it() {
+        // Distinct from the absent case: the field *is* in the JSON, just
+        // empty. This exercises the non-empty branch (a different message
+        // than the predates-the-surface branch), which a real chassis can
+        // never produce — the RPC server alone fills each set.
+        let mut manifest = conforming();
+        manifest.argv_flags.clear();
+        let error = validate_manifest(&manifest, &raw(&manifest)).expect_err("an empty argv_flags set is rejected");
+        assert!(error.contains("argv_flags"), "the rejection names the empty field: {error}");
+    }
+
+    /// `bootstrap_ingest` keeps its log-and-skip contract even now that
+    /// ingestion is gated (#3936): a bootstrap entry whose `--describe`
+    /// yields a nonconforming manifest is skipped, never a boot failure —
+    /// the store stays empty rather than the call panicking. A bad
+    /// bootstrap entry must not fail hub boot.
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_ingest_skips_a_nonconforming_bin_rather_than_failing() {
+        use std::collections::HashSet;
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::{env, process};
+
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-strict-bootstrap-skip-{}-{nanos}", process::id()));
+        fs::create_dir_all(&dir).expect("test setup: temp dir");
+
+        // A stand-in that prints a pre-ADR-0162 manifest on `--describe`
+        // (no config surface) — nonconforming, so the upload gate rejects
+        // it and bootstrap skips it.
+        let stand_in = dir.join("aether-substrate-headless");
+        fs::write(
+            &stand_in,
+            "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
+                 '{\"chassis\":\"headless\",\"caps\":[\"aether.fs\"],\"git_sha\":\"deadbee\",\
+                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; fi\n",
+        )
+        .expect("test setup: write stand-in");
+        fs::set_permissions(&stand_in, Permissions::from_mode(0o755)).expect("test setup: chmod");
+
+        let mut store =
+            ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES).expect("test setup: open store");
+        bootstrap_ingest(&mut store, &HashSet::from([stand_in.to_string_lossy().into_owned()]));
+        assert_eq!(store.entry_count(), 0, "a nonconforming bootstrap bin is skipped, not stored");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
