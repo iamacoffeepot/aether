@@ -8,7 +8,7 @@
 #![allow(clippy::print_stderr)]
 
 use aether_chassis::cli::HubCli;
-use aether_chassis::{PreludeFlags, run_describe_prelude};
+use aether_chassis::run_describe_prelude;
 use aether_chassis_hub::{Chassis, HubChassis, HubEnv};
 use clap::Parser as _;
 
@@ -17,12 +17,10 @@ fn main() -> anyhow::Result<()> {
     // ADR-0162 shared prelude: `--print-config` (ADR-0090 §4 dump) and
     // `--describe` (ADR-0115 manifest) print and exit before Init; a plain
     // invocation falls through to boot.
-    if run_describe_prelude::<HubChassis>(PreludeFlags { describe: cli.describe, print_config: cli.print_config })?
-        .is_handled()
-    {
+    if run_describe_prelude::<HubChassis>(&cli.meta)?.is_handled() {
         return Ok(());
     }
-    let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli)?)?;
+    let chassis = HubChassis::build(HubEnv::resolve(cli)?)?;
     eprintln!("aether-chassis-hub: hub chassis initialised (profile={})", HubChassis::PROFILE);
     chassis.run()?;
     Ok(())

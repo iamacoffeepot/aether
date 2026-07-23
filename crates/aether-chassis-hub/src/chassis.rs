@@ -18,7 +18,7 @@ use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerConfig
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
+use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, validate_env};
 use aether_substrate::runtime::log_install::apply_filter;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
@@ -26,9 +26,9 @@ use aether_trace::TraceDispatchCapability;
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
     ActorRingConfig, BuilderChassisConfigMember, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
-    hub_residual_knobs, install_frame_size, load_chassis_config,
+    hub_residual_knobs, install_frame_size,
 };
-use aether_chassis::cli::HubCli;
+use aether_chassis::cli::{ChassisCli, HubCli};
 use std::thread;
 
 /// ADR-0071 marker for the hub chassis. Carries no fields — the
@@ -166,9 +166,9 @@ impl HubEnv {
     ///
     /// # Errors
     ///
-    /// See [`Self::from_env_with_argv`].
+    /// See [`Self::resolve`].
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with_argv(&HubCli::default())
+        Self::resolve(HubCli::default())
     }
 
     /// ADR-0090 unit d (issue 1258): resolve from argv-then-env.
@@ -178,9 +178,9 @@ impl HubEnv {
     /// server, unlike desktop / headless). The engines overlay
     /// (`--hub-heartbeat-*`, issue 1339) resolves through the
     /// derive-emitted `from_argv_then_env` (argv beats
-    /// `AETHER_HUB_HEARTBEAT_*` env beats the literal default). Takes
-    /// `&HubCli`, cloning the overlay rather than consuming `cli` so the
-    /// bin keeps it for the `--print-config` dump.
+    /// `AETHER_HUB_HEARTBEAT_*` env beats the literal default). Consumes
+    /// `cli` like desktop / headless — the bin reads `--print-config` /
+    /// `--describe` off `cli.meta` in the prelude, which runs first.
     ///
     /// # Errors
     ///
@@ -188,24 +188,20 @@ impl HubEnv {
     /// ([`validate_env`]) — today the sweep only warns, but the
     /// `Result` keeps the hard-error half free to join without a
     /// call-site change, matching desktop / headless.
-    pub fn from_env_with_argv(cli: &HubCli) -> Result<Self, ConfigError> {
+    pub fn resolve(cli: HubCli) -> Result<Self, ConfigError> {
         // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
         // where the composed builder's `config_manifest` supplies the hub's
         // composition-derived known-key set (ADR-0162 retired the fleet
         // pass-through over-approximation).
-        let config_file = load_chassis_config(cli.config.clone())?;
-        // ADR-0156 §5: assemble the source stack — the loaded config file plus
-        // the engines-cap and RPC-server argv overlays. The builder resolves the
-        // composed `FleetServer`'s `FleetConfig` off this; the chassis resolves
-        // the non-cap ring / scheduler / teardown / runtime knobs and the
-        // RPC-server port below off the same stack via their `ConfigMember`
-        // sections.
-        // ADR-0156 §5 (issue 3872): stage the engines-cap and RPC-server argv
-        // overlays in one derived `StageArgv` call off the CLI declaration
-        // (`cli` is borrowed so the bin keeps it for `--print-config`; clone to
-        // stage by value). No hand-maintained per-cap `set_argv` block to forget.
-        let mut sources = ConfigSources::new(config_file);
-        cli.clone().stage(&mut sources);
+        //
+        // `ChassisCli::into_sources` opens the source stack: the loaded
+        // `--config` file plus the engines-cap and RPC-server argv overlays,
+        // staged in one derived `StageArgv` call off the CLI declaration. The
+        // builder resolves the composed `FleetServer`'s `FleetConfig` off this;
+        // the chassis resolves the non-cap ring / scheduler / teardown / runtime
+        // knobs and the RPC-server port below off the same stack via their
+        // `ConfigMember` sections.
+        let mut sources = cli.into_sources()?;
         // #3930: resolve the three seam-installed non-cap members off the stack as
         // structs; `compose` lowers each onto its builder seam via the fuse.
         let actor_ring = sources.resolve::<ActorRingConfig>()?;

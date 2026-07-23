@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    let env = BloomeryEnv::from_env_with_argv(&cli)?;
+    let env = BloomeryEnv::resolve(&cli)?;
     // `build` installs the substrate tracing subscriber, so this logs.
     let chassis = BloomeryChassis::build(env)?;
     tracing::info!("aether-chassis-bloomery: bloomery chassis initialised (profile={})", BloomeryChassis::PROFILE);

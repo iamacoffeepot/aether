@@ -104,28 +104,28 @@ pub struct BloomeryEnv {
 impl BloomeryEnv {
     /// Resolve every knob from `AETHER_*` env (and literal defaults), with no
     /// argv overlay — the env-only entry point. Delegates to
-    /// [`Self::from_env_with_argv`] with an empty [`BloomeryCli`], so the two
+    /// [`Self::resolve`] with an empty [`BloomeryCli`], so the two
     /// paths resolve identically when argv is absent.
     ///
     /// # Errors
     ///
-    /// See [`Self::from_env_with_argv`].
+    /// See [`Self::resolve`].
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_env_with_argv(&BloomeryCli::default())
+        Self::resolve(&BloomeryCli::default())
     }
 
     /// ADR-0090 unit d: resolve every knob argv > `AETHER_*` env > default.
     /// `--rpc-port` shadows `AETHER_RPC_PORT` and `--store-path` shadows
     /// `AETHER_STORE_PATH`, each riding the derive-`Config` argv-then-env path
-    /// (no naked env reads). Mirrors the hub's `HubEnv::from_env_with_argv`;
-    /// takes `&BloomeryCli` by reference so the bin keeps `cli` for its
+    /// (no naked env reads). Mirrors the hub's `HubEnv::resolve`; takes
+    /// `&BloomeryCli` by reference so the bin keeps `cli` for its
     /// `--describe` branch.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] when a known env value (or argv overlay value)
     /// fails its parser.
-    pub fn from_env_with_argv(cli: &BloomeryCli) -> Result<Self, ConfigError> {
+    pub fn resolve(cli: &BloomeryCli) -> Result<Self, ConfigError> {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;

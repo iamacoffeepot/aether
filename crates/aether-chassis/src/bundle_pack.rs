@@ -214,7 +214,7 @@ pub fn read_manifest(manifest_path: &Path) -> Result<BundleManifest, ManifestErr
 /// names into a [`Pack`]. Pure file I/O — emits no cargo directives, so
 /// the same reader serves the compile-time embed (`build.rs`, which
 /// registers `rerun-if-changed` itself) and the runtime boot-manifest
-/// path (`AETHER_BOOT_MANIFEST`, read in the chassis `from_env_with_argv`).
+/// path (`AETHER_BOOT_MANIFEST`, read in the chassis `resolve`).
 /// Paths in the manifest are resolved as-is (absolute, per the writer
 /// contract).
 ///
