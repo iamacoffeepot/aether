@@ -30,7 +30,7 @@ aether-kinds = { path = "../aether-kinds" }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-substrate = { path = "../aether-substrate" }
 aether-trace = { path = "../aether-trace" }
-aether-window = { path = "../aether-window" }
+aether-window = { path = "../aether-window", features = ["synthetic"] }
 anyhow = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 clap = { workspace = true }

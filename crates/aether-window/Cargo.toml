@@ -30,6 +30,9 @@ runtime = ["dep:aether-substrate"]
 # substrate runtime (via `runtime`) plus winit; default features stay
 # `runtime`-only, so headless / harness / wasm consumers never build winit.
 desktop = ["runtime", "dep:aether-input", "dep:winit"]
+# Deterministic in-memory window manager and raw event injection surface for
+# real-substrate harness tests. Production chassis do not enable this feature.
+synthetic = ["runtime"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }

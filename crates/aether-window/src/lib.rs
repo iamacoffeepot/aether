@@ -1,9 +1,10 @@
 //! Public `aether.window` actor identity, wire vocabulary, and sender facade.
 //!
 //! [`WindowCapability`] is the platform-neutral address callers use. A
-//! chassis installs either its fail-fast headless runtime or, behind the
-//! `desktop` feature, the distinct [`DesktopWindowCapability`] implementation.
-//! Both claim the same `aether.window` mailbox.
+//! chassis installs its fail-fast headless runtime, the
+//! [`DesktopWindowCapability`] implementation behind `desktop`, or the
+//! [`SyntheticWindowCapability`] test implementation behind `synthetic`.
+//! Every implementation claims the same `aether.window` mailbox.
 
 // Handler methods take decoded request payloads by value as part of the
 // actor dispatch ABI; the facade also consumes owned request values.
@@ -18,6 +19,8 @@ use aether_actor::{WasmActorMailbox, actor};
 use aether_data::{Kind, MailboxId};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
+
+const WINDOW_NAMESPACE: &str = "aether.window";
 
 /// Platform-neutral addressing identity for the `aether.window` actor.
 ///
@@ -173,6 +176,9 @@ impl WindowMailboxExt for NativeActorMailbox<'_, WindowCapability> {
 #[cfg(feature = "runtime")]
 mod runtime;
 
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+mod subscribers;
+
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]
@@ -180,6 +186,11 @@ pub use desktop::{
     DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
     DesktopWindowUserEvent, WindowCell, WindowHostAction, WindowHostEffect, resolve_fullscreen,
 };
+
+#[cfg(feature = "synthetic")]
+mod synthetic;
+#[cfg(feature = "synthetic")]
+pub use synthetic::{InjectWindowEvent, SyntheticWindowCapability};
 
 #[cfg(test)]
 mod tests {

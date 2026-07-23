@@ -1,3 +1,5 @@
+#![allow(clippy::self_named_module_files)] // ADR-0123 path is intentionally `runtime::synthetic`.
+
 //! Fail-fast runtime for chassis without a window peripheral.
 
 use aether_actor::runtime;
@@ -24,7 +26,7 @@ impl NativeActor for WindowCapability {
     type State = HeadlessWindowCapabilityState;
     type Config = ();
 
-    const NAMESPACE: &'static str = "aether.window";
+    const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
 
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessWindowCapabilityState, BootError> {
         Ok(HeadlessWindowCapabilityState)
@@ -108,3 +110,6 @@ impl NativeActor for WindowCapability {
     #[handler::single]
     fn on_unsubscribe_all(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UnsubscribeAllWindows) {}
 }
+
+#[cfg(feature = "synthetic")]
+pub mod synthetic;

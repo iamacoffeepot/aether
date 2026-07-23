@@ -9,13 +9,13 @@ use aether_substrate::mail::registry::{MailboxEntry, Registry};
 
 use crate::{WindowId, WindowSelector};
 
-/// Selector-aware subscriptions for events originating at desktop windows.
+/// Selector-aware subscriptions for events originating at windows.
 ///
 /// `All` and `One(window)` are stored separately so an all-window
 /// subscription naturally includes windows created later. Recipient lookup
 /// unions into a `BTreeSet`, which makes a mailbox subscribed through both
 /// selectors receive one copy.
-pub(super) struct WindowSubscribers {
+pub struct WindowSubscribers {
     registry: Arc<Registry>,
     all: HashMap<KindId, BTreeSet<MailboxId>>,
     specific: HashMap<(WindowId, KindId), BTreeSet<MailboxId>>,
@@ -23,11 +23,11 @@ pub(super) struct WindowSubscribers {
 }
 
 impl WindowSubscribers {
-    pub(super) fn new(registry: Arc<Registry>) -> Self {
+    pub fn new(registry: Arc<Registry>) -> Self {
         Self { registry, all: HashMap::new(), specific: HashMap::new(), monitors: HashMap::new() }
     }
 
-    pub(super) fn subscribe<M: ReplyMode>(
+    pub fn subscribe<M: ReplyMode>(
         &mut self,
         ctx: &mut NativeCtx<'_, M>,
         selector: WindowSelector,
@@ -40,7 +40,7 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    pub(super) fn subscribe_self<M: ReplyMode>(
+    pub fn subscribe_self<M: ReplyMode>(
         &mut self,
         ctx: &mut NativeCtx<'_, M>,
         selector: WindowSelector,
@@ -56,18 +56,13 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    pub(super) fn unsubscribe(
-        &mut self,
-        selector: WindowSelector,
-        kind: KindId,
-        mailbox: MailboxId,
-    ) -> Result<(), String> {
+    pub fn unsubscribe(&mut self, selector: WindowSelector, kind: KindId, mailbox: MailboxId) -> Result<(), String> {
         validate_subscriber_mailbox(&self.registry, mailbox)?;
         self.remove(selector, kind, mailbox);
         Ok(())
     }
 
-    pub(super) fn unsubscribe_self<M: ReplyMode>(
+    pub fn unsubscribe_self<M: ReplyMode>(
         &mut self,
         ctx: &NativeCtx<'_, M>,
         selector: WindowSelector,
@@ -82,7 +77,7 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    pub(super) fn unsubscribe_all(&mut self, mailbox: MailboxId) {
+    pub fn unsubscribe_all(&mut self, mailbox: MailboxId) {
         self.all.retain(|_, recipients| {
             recipients.remove(&mailbox);
             !recipients.is_empty()
@@ -93,12 +88,12 @@ impl WindowSubscribers {
         });
     }
 
-    pub(super) fn purge_departed(&mut self, mailbox: MailboxId) {
+    pub fn purge_departed(&mut self, mailbox: MailboxId) {
         self.monitors.remove(&mailbox);
         self.unsubscribe_all(mailbox);
     }
 
-    pub(super) fn recipients(&self, window: WindowId, kind: KindId) -> BTreeSet<MailboxId> {
+    pub fn recipients(&self, window: WindowId, kind: KindId) -> BTreeSet<MailboxId> {
         let mut recipients = self.all.get(&kind).cloned().unwrap_or_default();
         if let Some(specific) = self.specific.get(&(window, kind)) {
             recipients.extend(specific);

@@ -13,7 +13,7 @@
 //!   `aether_harness_substrate::SubstrateHarness`.
 //!
 //! The harness boots basics only — trace dispatch, the harness cap,
-//! lifecycle, the fail-fast headless window, the observer mailbox — and
+//! lifecycle, the deterministic synthetic window, the observer mailbox — and
 //! each test composes the caps its scenario needs on the builder (issue
 //! #3764). GPU capture support plugs in through the [`FrameHook`] hook
 //! factory (ADR-0161) from `aether-harness-substrate-capture`, which boots
@@ -34,10 +34,10 @@ pub mod unsupported_cap;
 
 pub use cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability};
 pub use chassis::{
-    CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis,
-    SubstrateHarnessEnv, WORKERS,
+    CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
+    SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
 };
-pub use execute::{ExecutionError, ExecutionResult, HarnessOp, HarnessOutput};
+pub use execute::{ExecutionError, ExecutionResult, HarnessActor, HarnessOp, HarnessOutput};
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,
 };
