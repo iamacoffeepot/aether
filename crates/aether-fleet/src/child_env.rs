@@ -63,8 +63,8 @@ const ALLOWLISTED_PREFIXES: &[&str] =
     &["LC_", "XDG_", "VK_", "MESA_", "LIBGL_", "__GL_", "__EGL_", "DRI_", "PULSE_", "PIPEWIRE_", "ALSA_"];
 
 /// True when `key` names environment a forked child may inherit from the
-/// parent — an exact match in [`ALLOWLISTED_NAMES`] or a member of a family in
-/// [`ALLOWLISTED_PREFIXES`]. A non-UTF-8 key never matches (the allowlist is
+/// parent — an exact match in the allowlisted-names set or a member of an
+/// allowlisted prefix family. A non-UTF-8 key never matches (the allowlist is
 /// all ASCII), so it is dropped, which is the safe default. No `AETHER_*` key
 /// matches, so aether config never rides the inherited channel.
 #[must_use]
