@@ -14,17 +14,15 @@
 //! Each input kind has its own `#[handler]` method. Issue 640 retired
 //! the cap-side manifest auto-subscribe walker (and the macro-side
 //! walker retired earlier in #403); components subscribe from the
-//! `wire` hook by sending a `SubscribeInput { kind, mailbox }` to the
-//! `InputCapability`.
+//! `wire` hook through the typed `aether.window` facade.
 
 // Stateless logger: each `#[handler]` keeps `&mut self` for the
 // ADR-0033 / ADR-0038 dispatch ABI but doesn't need any field access.
 #![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_data::Kind;
-use aether_input::{InputCapability, SubscribeInput};
 use aether_kinds::{Key, MouseButton, MouseMove};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 pub struct InputLogger;
 
@@ -37,11 +35,10 @@ impl WasmActor for InputLogger {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let me = ctx.mailbox_id();
-        let input = ctx.actor::<InputCapability>();
-        for kind in [Key::ID, MouseMove::ID, MouseButton::ID] {
-            input.send(&SubscribeInput { kind, mailbox: me });
-        }
+        let window = ctx.actor::<WindowCapability>();
+        window.subscribe::<Key>(WindowSelector::All);
+        window.subscribe::<MouseMove>(WindowSelector::All);
+        window.subscribe::<MouseButton>(WindowSelector::All);
     }
 
     #[handler::single]
