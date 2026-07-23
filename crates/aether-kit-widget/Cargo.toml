@@ -17,6 +17,16 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# `runtime` gates the `export!` FFI emission — the cdylib entry that turns this
+# crate into a loadable wasm component. Default-on so `cargo xtask dist` (which
+# builds with stock features) produces the standalone `aether_kit_widget.wasm`.
+# The widgets' `#[actor] impl WasmActor` blocks are ungated and always compile,
+# so a consuming cdylib (aether-kit's workbench) can inline-spawn them through an
+# rlib dependency with `default-features = false`: it links the actor impls
+# without a second copy of the `receive_p32` / `init` FFI shims colliding with
+# its own `export!`.
+default = ["runtime"]
+runtime = []
 # ADR-0137 / issue 2687: wrap a stock widget slot in a behavior script host.
 # Forwards to `aether-behavior/host` and lights up the `WidgetKind::BehaviorHost`
 # spawn arm + the host's presence in the module's `export!` set. Non-default so

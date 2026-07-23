@@ -12,7 +12,7 @@ use crate::theme::{Theme, ThemeState};
 use crate::{WidgetControlState, WidgetStateChanged, WidgetValidation};
 
 #[derive(Debug, Clone)]
-pub(super) struct InteractionState {
+pub struct InteractionState {
     control: WidgetControlState,
     focused: bool,
     hovered: bool,
@@ -118,7 +118,7 @@ impl InteractionState {
     }
 }
 
-pub(super) fn emit_state_changed(ctx: &WasmCtx<'_>, state: &InteractionState) {
+pub fn emit_state_changed(ctx: &WasmCtx<'_>, state: &InteractionState) {
     if let Some(parent) = ctx.parent() {
         parent.send(&WidgetStateChanged { state: state.control().clone() });
     }

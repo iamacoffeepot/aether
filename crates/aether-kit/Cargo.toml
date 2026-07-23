@@ -24,7 +24,11 @@ aether-actor = { path = "../aether-actor" }
 # `set::*` widgets: the generic `spawn_inline_child::<A>` constructs the child
 # in-guest through the `ErasedWasmActor` bound, so the type only needs linking
 # into the spawning cdylib, not listing in kit's own `export!`.
-aether-kit-widget = { path = "../aether-kit-widget" }
+# `default-features = false` drops the widget crate's `runtime` feature — the
+# entry-free rlib face. One `export!` (kit's own) emits the FFI entries per wasm
+# module; without this the widget crate's `export!` shims (`receive_p32`, `init`,
+# …) would collide with kit's at the wasm link step.
+aether-kit-widget = { path = "../aether-kit-widget", default-features = false }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`. kit is a wasm guest, so it takes the marker-only
 # identity face — it addresses `ComponentHostCapability`, resolves loaded

@@ -66,7 +66,14 @@ pub use theme::{SetTheme, Theme, ThemeState};
 // `BehaviorHost` so the panel's `WidgetKind::BehaviorHost` arm can spawn it by
 // tag; the two invocations are cfg-exclusive, keeping the ordinary build's
 // exported set (and its `aether.kinds` section) unchanged.
-#[cfg(not(feature = "behavior"))]
+//
+// `export!` rides the `runtime` feature so a consuming cdylib (aether-kit's
+// workbench) can depend on this crate with `default-features = false` and link
+// the widget `WasmActor` impls for inline-spawn without inheriting a second copy
+// of the `receive_p32` / `init` FFI shims — which would collide with its own
+// `export!` at the wasm link step. `runtime` is default-on, so the standalone
+// `cargo xtask dist` build still emits the loadable wasm.
+#[cfg(all(feature = "runtime", not(feature = "behavior")))]
 aether_actor::export!(
     Widget,
     ScrollWidget,
@@ -85,7 +92,7 @@ aether_actor::export!(
     WidgetPanel
 );
 
-#[cfg(feature = "behavior")]
+#[cfg(all(feature = "runtime", feature = "behavior"))]
 aether_actor::export!(
     Widget,
     ScrollWidget,

@@ -117,8 +117,14 @@ impl WidgetClipRect {
 /// Result of composing two optional widget clips. Two absent clips are
 /// unbounded, while an explicit invalid, empty, disjoint, or edge-touching
 /// rectangle is empty and omits the item.
+// Crate-internal geometry helper, kept out of the public API. `kinds` is a
+// private module glob-re-exported by the crate root (`pub use kinds::*`), so
+// `pub` would leak this into the public surface; `pub(crate)` is deliberate and
+// `super` is the crate root here, which is why the nursery lint sees it as
+// redundant.
+#[allow(clippy::redundant_pub_crate)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum WidgetClipIntersection {
+pub(crate) enum WidgetClipIntersection {
     Unbounded,
     Finite { rect: WidgetClipRect },
     Empty,
