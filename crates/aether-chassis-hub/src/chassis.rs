@@ -72,8 +72,8 @@ impl Chassis for HubChassis {
 impl BootableChassis for HubChassis {
     /// The hub's base is the unit no-op (like bloomery): its `compose` delta needs
     /// the source stack to resolve its always-bind RPC port, so the stack rides
-    /// [`Chassis::Env`](Chassis::Env) as [`ConfigSources`] and reaches `compose`,
-    /// rather than being consumed by a `ChassisBase` base ahead of it. The shared
+    /// [`Chassis::Env`] as [`ConfigSources`] and reaches `compose`, rather than
+    /// being consumed by a `ChassisBase` base ahead of it. The shared
     /// base stratum is still installed drift-free — `compose` reuses
     /// [`ChassisBase`]'s own [`ComposeBase::install`] (ADR-0162).
     type Base = ();

@@ -769,9 +769,9 @@ pub struct CommonBoot {
 ///
 /// The driver knobs (the desktop window boot knobs / render tuning, the headless
 /// tick cadence) are deliberately NOT fields: their consumer is the driver, so
-/// each chassis's `Chassis::build` resolves them off [`base`](Self::base)'s
-/// source stack at the seam that constructs the driver, rather than pre-resolving
-/// them into this bag.
+/// each chassis's `Chassis::build` resolves them off the `base` source stack at
+/// the seam that constructs the driver, rather than pre-resolving them into this
+/// bag.
 ///
 /// [`Self::resolve`] is the one shared resolver — it opens the source stack off
 /// the chassis CLI and produces this struct; [`Self::into_common_boot`] reads it
