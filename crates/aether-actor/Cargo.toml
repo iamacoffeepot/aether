@@ -22,11 +22,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # longer re-exports them (ADR-0077 / issue 552 consolidated them into this
 # crate for compile cost; aether-data forwards only the data-layer derives).
 aether-actor-derive = { path = "../aether-actor-derive" }
-# ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses its
-# control subscription for every `K::IS_INPUT` handler kind.
-# The wasm-shim helpers in `wasm::{io, net, log}` (folded in by issue
-# 552 stage 0) also build `aether.fs.*` / `aether.net.*` / `aether.log.*`
-# request kinds — that whole vocabulary lives in `aether-kinds`.
+# The actor SDK uses `aether-kinds` for its shared typed mail vocabulary;
+# wasm-shim helpers in `wasm::{io, net, log}` also build `aether.fs.*`,
+# `aether.net.*`, and `aether.log.*` request kinds from this crate.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { workspace = true, default-features = false }
 # Decoding typed payloads (e.g. `PriorState::decode_kind`,
