@@ -165,6 +165,7 @@ pub struct CommonOverlay {
 
 /// Every `--long` flag a clap command declares. The building block chassis crates
 /// assemble their root-flag checkability tests from (see [`overlay_flags`]).
+#[must_use]
 pub fn long_flags(command: &clap::Command) -> BTreeSet<String> {
     command.get_arguments().filter_map(|arg| arg.get_long().map(str::to_owned)).collect()
 }
@@ -174,6 +175,7 @@ pub fn long_flags(command: &clap::Command) -> BTreeSet<String> {
 /// `#[command(flatten)]`-ing the overlay. A chassis crate builds its root's
 /// expected flag set by unioning `overlay_flags::<T>()` over the overlays it
 /// composes, plus [`meta_flags`].
+#[must_use]
 pub fn overlay_flags<T: Args>() -> BTreeSet<String> {
     long_flags(&T::augment_args(clap::Command::new("probe")))
 }
@@ -182,6 +184,7 @@ pub fn overlay_flags<T: Args>() -> BTreeSet<String> {
 /// name the file source and the print/describe exits, so they belong to no cap
 /// member). Derived from the [`ChassisMeta`] `Args` group itself, the same
 /// flatten a root gets, so the expected set cannot drift from the declaration.
+#[must_use]
 pub fn meta_flags() -> BTreeSet<String> {
     overlay_flags::<ChassisMeta>()
 }
