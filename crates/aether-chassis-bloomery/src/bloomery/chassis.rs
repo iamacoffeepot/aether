@@ -210,6 +210,11 @@ impl BootableChassis for BloomeryChassis {
             hub_outbound: Arc::clone(&boot.outbound),
         };
 
+        // #3947's explicit `with_aborter` is superseded by the seam inversion:
+        // `composed` (which `build` routes through) installs `OutboundFatalAborter`
+        // on every chassis, so bloomery gets the aborter by construction. The
+        // aborter behavior #3947 guards (control-core boot replay fatal-aborting on
+        // a bad journal record) is preserved — see `tests/recovery.rs`.
         builder
             .with_actor::<TraceDispatchCapability>(())
             .with_actor_configured::<StoreCapability>((), store)
