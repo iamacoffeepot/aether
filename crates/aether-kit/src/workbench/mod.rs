@@ -20,7 +20,6 @@ use aether_lifecycle::LifecycleMailboxExt;
 use serde::{Deserialize, Serialize};
 
 use crate::console::{ConsoleCommandOutput, ConsoleOverlay};
-use crate::widget::{EditorConfig, EditorKeyChord, EditorShell, RegionInputLanes, RegionSpec};
 use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult, MarkRef};
 use aether_kit_terrain::terra::{CreateTerraMark, RelabelTerraSelection, TerraCommandResult, TerraError};
 use aether_kit_terrain::world::{
@@ -28,6 +27,7 @@ use aether_kit_terrain::world::{
     ProposalId, ProposalOperation, ProposalResult, Propose, RunAutomaton, SetMarkOverlaySelection,
     SetMarkOverlaySelectionResult, SetMarkOverlayVisibility, SetProposalPreview,
 };
+use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorShell, RegionInputLanes, RegionSpec};
 
 use self::panel::{TerrainToolPanelState, WorkbenchIntent};
 use self::viewport::{
@@ -903,13 +903,13 @@ fn intent_control(intent: &WorkbenchIntent) -> WorkbenchControl {
 #[cfg(test)]
 mod tests {
     use crate::console::{ConsoleConfig, ConsoleTheme};
-    use crate::widget::EditorRegionRect;
-    use crate::widget::theme::Theme;
     use aether_kit_terrain::mark::{MarkId, MarkRef};
     use aether_kit_terrain::world::{
         AutomatonRule, BrushParameters, OperatorBudget, OperatorChunk, ProposalDigest, ProposalError, ProposalId,
         ProposalOperationResult, WorldPoint,
     };
+    use aether_kit_widget::EditorRegionRect;
+    use aether_kit_widget::theme::Theme;
 
     use super::*;
 

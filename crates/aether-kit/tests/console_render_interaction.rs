@@ -29,9 +29,8 @@ use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
     LoadResult, NamedMail, Tick, WindowSize,
 };
-use aether_kit::{
-    ConsoleCommandOutput, ConsoleConfig, EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec,
-};
+use aether_kit::{ConsoleCommandOutput, ConsoleConfig};
+use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 use aether_render::RenderCapability;
 use aether_text::TextCapability;
 
@@ -266,7 +265,13 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
+    // The `EditorShell` arbiter now ships in the `aether-kit-widget` wasm
+    // (iamacoffeepot/aether#3950); the console still ships in the kit wasm.
+    let Some(widget_wasm_path) = require_runtime("aether_kit_widget") else {
+        return;
+    };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let widget_wasm = fs::read(&widget_wasm_path).expect("read kit-widget wasm");
     let mut harness = build_bench();
     let console =
         load_console_with_config(&mut harness, &wasm, &ConsoleConfig { owns_input: false, ..ConsoleConfig::default() });
@@ -283,7 +288,7 @@ fn editor_shell_exclusively_forwards_console_input_while_window_size_stays_direc
     let closed = top_band_coverage(&mut harness, "owns-input-disabled");
     assert!(closed < 0.01, "console must not self-subscribe to interactive input; coverage={closed:.3}");
 
-    load_editor_shell(&mut harness, &wasm, console);
+    load_editor_shell(&mut harness, &widget_wasm, console);
     harness
         .execute(vec![("routed-toggle", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE }))])
         .expect("toggle through editor shell");

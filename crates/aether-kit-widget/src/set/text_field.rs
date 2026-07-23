@@ -33,15 +33,15 @@ use aether_kinds::{
 use aether_text::FontMetricsResult;
 use alloc::string::String;
 
-use crate::widget::set::{
+use crate::set::{
     apply_text_control_state, apply_text_theme, arm_text_drag, pump_text_font_metrics, release_left,
     reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte, text_control_theme_state,
     update_text_modifiers,
 };
-use crate::widget::state::InteractionState;
-use crate::widget::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
-use crate::widget::theme::{SetTheme, Theme, ThemeState};
-use crate::widget::{
+use crate::state::InteractionState;
+use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
+use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextCommitted, TextFieldConfig,
     WidgetControlState, WidgetFrame,
 };
@@ -269,7 +269,7 @@ impl WasmActor for TextFieldWidget {
         let pump_deferred = match result {
             FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
             FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit", %error, "text field font metrics failed");
+                tracing::warn!(target: "aether_kit_widget", %error, "text field font metrics failed");
                 self.font_metrics.accept_reply(None)
             }
         };
@@ -303,7 +303,7 @@ impl WasmActor for TextFieldWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::WidgetControlState;
+    use crate::WidgetControlState;
 
     fn field() -> TextFieldWidget {
         TextFieldWidget {

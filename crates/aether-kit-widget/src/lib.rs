@@ -36,6 +36,8 @@
 //! spawning on the shared `Tick` / `Collect` activation path gives both roles
 //! one guarded layout setup.
 
+extern crate alloc;
+
 mod kinds;
 pub use kinds::*;
 pub mod composite;
@@ -52,6 +54,62 @@ pub mod theme;
 pub use editor::EditorShell;
 pub use panel::WidgetPanel;
 pub use scroll::ScrollWidget;
+pub use theme::{SetTheme, Theme, ThemeState};
+
+// A cdylib carries one `export!` (the shared init/receive FFI entry); the macro
+// emits the wasm32 FFI shims and the `aether.kinds` custom section for every
+// listed actor. This is a grab-bag widget module (ADR-0138), so the bare list
+// designates NO default: every actor is selector-only by `module@actor`
+// selector (`aether_kit_widget@aether.kit.widget.*` /
+// `aether_kit_widget@aether.kit.widget.editor`), never by list position. The
+// `behavior` feature (ADR-0137, issue 2687) appends `aether-behavior`'s
+// `BehaviorHost` so the panel's `WidgetKind::BehaviorHost` arm can spawn it by
+// tag; the two invocations are cfg-exclusive, keeping the ordinary build's
+// exported set (and its `aether.kinds` section) unchanged.
+//
+// The `export!` macro itself gates its emitted entry surface behind the invoking
+// crate's `library` feature, so a consuming cdylib (aether-kit's workbench) links
+// the widget `WasmActor` impls for inline-spawn — enabling `library` — without
+// inheriting a second copy of the `receive_p32` / `init` FFI shims that would
+// collide with its own `export!`. The call sites stay bare.
+#[cfg(not(feature = "behavior"))]
+aether_actor::export!(
+    Widget,
+    ScrollWidget,
+    set::SliderWidget,
+    set::TextFieldWidget,
+    set::TextAreaWidget,
+    set::RadioGroupWidget,
+    set::ButtonWidget,
+    set::LabelWidget,
+    set::ImageWidget,
+    set::VirtualListWidget,
+    set::ToggleWidget,
+    set::SegmentedWidget,
+    set::NumericWidget,
+    EditorShell,
+    WidgetPanel
+);
+
+#[cfg(feature = "behavior")]
+aether_actor::export!(
+    Widget,
+    ScrollWidget,
+    set::SliderWidget,
+    set::TextFieldWidget,
+    set::TextAreaWidget,
+    set::RadioGroupWidget,
+    set::ButtonWidget,
+    set::LabelWidget,
+    set::ImageWidget,
+    set::VirtualListWidget,
+    set::ToggleWidget,
+    set::SegmentedWidget,
+    set::NumericWidget,
+    EditorShell,
+    WidgetPanel,
+    aether_behavior::BehaviorHost
+);
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
@@ -64,8 +122,8 @@ use aether_render::{
 };
 use aether_text::{DrawText, DrawTextBatch, TextCapability};
 
-use crate::widget::composite::Composite;
-use crate::widget::kinds::WidgetClipIntersection;
+use crate::composite::Composite;
+use crate::kinds::WidgetClipIntersection;
 
 /// A compositing widget node. `config` fixes its role and layout;
 /// `composite` accumulates its subtree each frame; `spawned` guards the
@@ -116,7 +174,7 @@ impl FrameDischarge {
 fn decode_nested_widget_config(spec: &WidgetChildSpec) -> Option<WidgetConfig> {
     let Some(config) = WidgetConfig::decode_from_bytes(&spec.config) else {
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             subname = %spec.subname,
             "widget child config failed to decode; slot skipped",
         );
@@ -124,7 +182,7 @@ fn decode_nested_widget_config(spec: &WidgetChildSpec) -> Option<WidgetConfig> {
     };
     if config.root {
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             subname = %spec.subname,
             "nested widget child cannot be a root; slot skipped",
         );
@@ -158,7 +216,7 @@ impl Widget {
                     <Self as Addressable>::NAMESPACE,
                 ),
                 Err(error) => tracing::warn!(
-                    target: "aether_kit",
+                    target: "aether_kit_widget",
                     subname = %spec.subname,
                     ?error,
                     "widget child spawn failed; slot skipped",
@@ -199,7 +257,7 @@ impl Widget {
         } else if let Some(parent) = ctx.parent() {
             parent.send(&list);
         } else {
-            tracing::warn!(target: "aether_kit", "non-root widget finished without a parent; draw list dropped");
+            tracing::warn!(target: "aether_kit_widget", "non-root widget finished without a parent; draw list dropped");
         }
         let closed = self.frame_discharge.close_frame();
         debug_assert!(closed, "an open widget frame closes exactly once");
@@ -358,8 +416,10 @@ fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
 /// Emit a flattened subtree as the cluster's single render + text sender.
 /// Compatible solid/textured runs preserve authored non-text order through
 /// same-recipient FIFO, then one authored-order `DrawTextBatch` reaches the
-/// text cap. Text's extra hop keeps the established later lane.
-pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
+/// text cap. Text's extra hop keeps the established later lane. Public so a
+/// peer compositor in another crate (the terrain workbench panel) reuses the
+/// same single-sender flush for its own composite.
+pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     for run in direct_runs(list) {
         match run {
             DirectRun::Solid { clip, quads } => {

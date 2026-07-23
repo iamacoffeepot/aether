@@ -61,11 +61,10 @@ aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-# `mover_walks_the_world` runtime-loads the widget editor shell that still
-# lives in `aether-kit` and imports its `EditorConfig` vocabulary. kit takes an
-# rlib dependency on this crate, so the edge back is a dev-only cycle cargo
-# permits (tests, not the library build).
-aether-kit = { path = "../aether-kit" }
+# `mover_walks_the_world` runtime-loads the widget editor shell from the
+# `aether-kit-widget` module (iamacoffeepot/aether#3950) and imports its
+# `EditorConfig` vocabulary.
+aether-kit-widget = { path = "../aether-kit-widget" }
 
 [lints]
 workspace = true

@@ -14,14 +14,14 @@ use aether_kinds::{
 };
 use aether_text::FontMetricsResult;
 
-use crate::widget::set::{
+use crate::set::{
     apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_left,
     reply_with_draw_items, text_control_theme_state, text_origin_y, update_text_modifiers,
 };
-use crate::widget::state::InteractionState;
-use crate::widget::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
-use crate::widget::theme::{SetTheme, Theme, ThemeState};
-use crate::widget::{
+use crate::state::InteractionState;
+use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
+use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextAreaConfig, TextCommitted,
     WidgetControlState, WidgetDrawItem, WidgetFrame,
 };
@@ -505,7 +505,7 @@ impl WasmActor for TextAreaWidget {
         let pump_deferred = match result {
             FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
             FontMetricsResult::Err { error } => {
-                tracing::warn!(target: "aether_kit", %error, "text area font metrics failed");
+                tracing::warn!(target: "aether_kit_widget", %error, "text area font metrics failed");
                 self.font_metrics.accept_reply(None)
             }
         };

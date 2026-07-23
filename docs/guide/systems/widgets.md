@@ -1,6 +1,6 @@
 # The widget set & focus model
 
-`aether-kit` ships a set of guest-side widgets — a slider, a text field, a
+`aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
 an image, a toggle, a segmented control, and a numeric editor — as ordinary
 `#[actor(instanced)]` types.
@@ -8,6 +8,12 @@ A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
 layout for each new knob.
+
+The set is a defaultless grab-bag module (ADR-0138): load a widget by its
+`module@export` selector against the `aether_kit_widget` stem — `WidgetPanel` is
+`aether_kit_widget@aether.kit.widget.panel`, the `EditorShell` arbiter is
+`aether_kit_widget@aether.kit.widget.editor`, and so on. The `aether.kit.widget.*`
+export namespaces themselves are unchanged.
 
 The widgets build on two foundations documented alongside them: the
 draw-compositing protocol (ADR-0117 — `Collect` down, `WidgetDrawList` up, the

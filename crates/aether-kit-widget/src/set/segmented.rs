@@ -12,12 +12,10 @@ use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
-use crate::widget::set::{
-    clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
-};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme, ThemeState};
-use crate::widget::{
+use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SegmentedConfig, SegmentedSelected, SetWidgetState,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };

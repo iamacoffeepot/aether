@@ -29,7 +29,7 @@ A behavior script is a `cdylib` that depends on `aether-behavior` and **not** on
 structurally by its `aether-actor` dependency, so a script tree that stays clear
 of `aether-actor` never classifies as a component. It also means a script cannot
 share the kind crate a component would — anything that pulls `aether-actor`
-transitively (`aether-kit`, for one) is off-limits.
+transitively (`aether-kit-widget`, for one) is off-limits.
 
 ```toml
 # Cargo.toml
@@ -57,7 +57,7 @@ a compile error.
 ```rust
 use serde::{Deserialize, Serialize};
 
-// Twin of aether-kit's slider event — same wire name, so it decodes the
+// Twin of aether-kit-widget's slider event — same wire name, so it decodes the
 // real SliderChanged flowing past the host.
 #[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema, Clone)]
 #[kind(name = "aether.kit.widget.slider.changed")]
@@ -157,14 +157,14 @@ A behavior runs inside a **`BehaviorHost`** (`aether.behavior.host`) — a stock
 actor that wraps one child, occupies its slot, and offers the slot's mail to your
 script. The host takes a `HostConfig` naming the wrapped child (by its actor type
 tag), the script source, and the fuel budget. Encode that config with the real
-types — `aether_kit::WidgetKind::type_tag()` yields a stock widget's tag
-without linking the kit's runtime, and `ScriptSource::Inline` ships the wasm bytes
+types — `aether_kit_widget::WidgetKind::type_tag()` yields a stock widget's tag
+without linking that crate's runtime, and `ScriptSource::Inline` ships the wasm bytes
 directly. The following is a small **host-side config-preparation program**, not
 code linked into the behavior script:
 
 ```rust
 use aether_behavior::host::{ChildSpec, HostConfig, ScriptSource};
-use aether_kit::{SliderConfig, Theme, WidgetKind};
+use aether_kit_widget::{SliderConfig, Theme, WidgetKind};
 use aether_data::Kind;
 
 let script = std::fs::read(".../clamp_behavior.wasm")?;
@@ -191,11 +191,12 @@ let config = HostConfig {
 std::fs::write(".../host_config.json", serde_json::to_vec_pretty(&config)?)?;
 ```
 
-Load the host from a kit build compiled with its `behavior` feature (which pulls
-the interpreter in and exports the host), pointing `config_path` at that JSON:
+Load the host from an `aether-kit-widget` build compiled with its `behavior`
+feature (which pulls the interpreter in and exports the host), pointing
+`config_path` at that JSON:
 
 ```text
-upload_component(staged_path = ".../aether_kit.wasm")                    → { hash, name }
+upload_component(staged_path = ".../aether_kit_widget.wasm")             → { hash, name }
 spawn_substrate()                                                        → engine_id
 load_component(engine_id, selector, export = "aether.behavior.host",
                config_path = ".../host_config.json")                     → LoadResult

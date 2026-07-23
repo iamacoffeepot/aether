@@ -7,14 +7,14 @@ use aether_data::MailboxId;
 use serde::{Deserialize, Serialize};
 
 use crate::console::ConsoleConfig;
-use crate::widget::EditorRegionRect;
-use crate::widget::theme::Theme;
 use aether_kit_terrain::mark::MarkRef;
 use aether_kit_terrain::terra::TerraError;
 use aether_kit_terrain::world::{
     AutomatonRule, BrushParameters, MAX_TERRAIN_PICK_DISTANCE_METERS, OperatorBudget, ProposalDigest, ProposalError,
     ProposalId, TerrainPickError, WorldPoint, WorldPositionMeters,
 };
+use aether_kit_widget::EditorRegionRect;
+use aether_kit_widget::theme::Theme;
 
 /// Three independently-routed regions assembled by the workbench.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]

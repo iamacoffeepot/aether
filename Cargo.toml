@@ -30,6 +30,7 @@ members = [
     "crates/aether-mesh",
     "crates/aether-kit",
     "crates/aether-kit-terrain",
+    "crates/aether-kit-widget",
     "crates/aether-rpc",
     "crates/aether-fleet",
     "crates/aether-harness-fleet",

@@ -55,24 +55,24 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 
-use crate::widget::composite::Composite;
-use crate::widget::focus::{
+use crate::composite::Composite;
+use crate::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
-use crate::widget::set::{
+use crate::set::{
     ButtonWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget, SliderWidget,
     TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
 };
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
+use crate::theme::{SetTheme, Theme};
+use crate::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
     NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome,
     ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TextAreaConfig,
     TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListConfig, VirtualListSelected, Widget,
     WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
-use crate::widget::{FrameDischarge, decode_nested_widget_config};
-use crate::widget::{accept_open_child_list, emit, flush_membership};
+use crate::{FrameDischarge, decode_nested_widget_config};
+use crate::{accept_open_child_list, emit, flush_membership};
 
 /// One spawned child's alias plus the logical name the panel attributes its
 /// value-up events under (for the map-editor translation / logging) — the
@@ -399,7 +399,7 @@ fn spawn_virtual_list_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpe
 fn virtual_list_profile(subname: &str, row_height: f32, config: &VirtualListConfig) -> Option<VirtualListProfile> {
     let Some(height) = virtual_list_height(row_height, config.visible_row_count) else {
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             subname,
             row_height,
             visible_row_count = config.visible_row_count,
@@ -426,7 +426,7 @@ fn spawn_composite_child(
 ) -> Option<SpawnedChild> {
     if matches!(layout, ChildLayout::Panel { .. }) {
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             subname = %spec.subname,
             "a bare Composite child is supported only as scroll content; panel slot skipped",
         );
@@ -457,7 +457,7 @@ fn spawn_scroll_child(
     decode_child::<ScrollConfig>(spec).and_then(|config| {
         if let Some(assigned_extent) = layout.scroll_viewport_mismatch(config.viewport_extent) {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_widget",
                 subname = %spec.subname,
                 assigned_width_pixels = assigned_extent.width_pixels,
                 assigned_height_pixels = assigned_extent.height_pixels,
@@ -537,7 +537,7 @@ fn decode_named<C: Kind>(subname: &str, bytes: &[u8]) -> Option<C> {
     let config = C::decode_from_bytes(bytes);
     if config.is_none() {
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             subname,
             "widget child config failed to decode; slot skipped",
         );
@@ -654,7 +654,7 @@ where
         Ok(id) => Some(id),
         Err(error) => {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_widget",
                 subname,
                 ?error,
                 "widget spawn failed; slot skipped",
@@ -690,9 +690,9 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         FocusLost::ID.0,
         HoverGained::ID.0,
         HoverLost::ID.0,
-        crate::widget::SetWidgetState::ID.0,
+        crate::SetWidgetState::ID.0,
         WidgetStateChanged::ID.0,
-        crate::widget::ChildrenChanged::ID.0,
+        crate::ChildrenChanged::ID.0,
         ScrollOutcome::ID.0,
         ScrollResidual::ID.0,
     ]
@@ -709,7 +709,7 @@ fn behavior_mirror_kinds() -> Vec<u64> {
 /// trigger.
 #[cfg(feature = "behavior")]
 fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
-    use crate::widget::{BehaviorHostSpec, ScriptRef};
+    use crate::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_behavior::HostConfig;
     use aether_behavior::host::{ChildSpec, ScriptSource};
@@ -717,7 +717,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
     let host_spec = decode_child::<BehaviorHostSpec>(spec)?;
     let Some(type_tag) = host_spec.wrapped.type_tag() else {
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             subname = %spec.subname,
             wrapped = ?host_spec.wrapped,
             "BehaviorHost cannot wrap this widget kind (container or host); slot skipped",
@@ -837,7 +837,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         }),
         Err(error) => {
             tracing::warn!(
-                target: "aether_kit",
+                target: "aether_kit_widget",
                 subname = %spec.subname,
                 ?error,
                 "behavior host spawn failed; slot skipped",
@@ -852,7 +852,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
 #[cfg(not(feature = "behavior"))]
 fn spawn_behavior_host(_ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, _row: f32) -> Option<SpawnedChild> {
     tracing::warn!(
-        target: "aether_kit",
+        target: "aether_kit_widget",
         subname = %spec.subname,
         "WidgetKind::BehaviorHost needs the kit `behavior` feature; slot skipped",
     );
@@ -1077,7 +1077,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Manual>, outcome: ScrollOutcome) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             source = ctx.source_mailbox().unwrap_or(MailboxId::NONE).0,
             container = outcome.container.0,
             offset_x_pixels = outcome.offset.x_pixels,
@@ -1096,7 +1096,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Manual>, residual: ScrollResidual) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             source = ctx.source_mailbox().unwrap_or(MailboxId::NONE).0,
             residual_x_pixels = residual.x_pixels,
             residual_y_pixels = residual.y_pixels,
@@ -1112,7 +1112,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_slider_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: SliderChanged) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             value = changed.value,
             committed = changed.committed,
@@ -1127,7 +1127,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_text_committed(&mut self, ctx: &mut WasmCtx<'_, Manual>, committed: TextCommitted) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             text = %committed.text,
             "widget text committed",
@@ -1141,7 +1141,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_radio_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: RadioSelected) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             index = selected.index,
             "widget radio selected",
@@ -1155,7 +1155,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: VirtualListSelected) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             selected_index = selected.selected_index,
             "widget virtual list selected",
@@ -1169,7 +1169,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_button_clicked(&mut self, ctx: &mut WasmCtx<'_, Manual>, _clicked: ButtonClicked) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             "widget button clicked",
         );
@@ -1179,7 +1179,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: ToggleChanged) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             on = changed.on,
             "widget toggle changed",
@@ -1190,7 +1190,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: SegmentedSelected) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             index = selected.index,
             "widget segmented selected",
@@ -1201,7 +1201,7 @@ impl WasmActor for WidgetPanel {
     #[handler::manual]
     fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: NumericChanged) {
         tracing::info!(
-            target: "aether_kit",
+            target: "aether_kit_widget",
             widget = self.child_name(ctx.source_mailbox()),
             value = changed.value,
             committed = changed.committed,
@@ -1219,7 +1219,7 @@ impl WasmActor for WidgetPanel {
                 self.fan_theme(ctx);
             }
             LoadFontResult::Err { error, .. } => {
-                tracing::warn!(target: "aether_kit", %error, "panel font load failed");
+                tracing::warn!(target: "aether_kit_widget", %error, "panel font load failed");
             }
         }
     }
@@ -1295,7 +1295,7 @@ mod dispatch_tests {
 #[cfg(all(test, feature = "behavior"))]
 mod behavior_tests {
     use super::*;
-    use crate::widget::{BehaviorHostSpec, ScriptRef};
+    use crate::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_data::Kind;
 

@@ -62,10 +62,12 @@ wat = "1"
 # harness with the component host composed and drives the panel/host/slider
 # cluster through `execute`.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-# The gate builds the panel/slider/behavior-host configs from kit's widget
-# vocabulary and loads the `behavior`-feature kit wasm by stem
-# (`aether_kit_behavior`, built by `cargo xtask dist`).
-aether-kit = { path = "../aether-kit" }
+# The gate builds the panel/slider/behavior-host configs from the widget
+# vocabulary and loads the `behavior`-feature widget wasm by stem
+# (`aether_kit_widget_behavior`, built by `cargo xtask dist`). The widget set
+# and its `behavior` feature were extracted from `aether-kit` to
+# `aether-kit-widget` (iamacoffeepot/aether#3950).
+aether-kit-widget = { path = "../aether-kit-widget" }
 # The gate addresses the loaded panel + host by their `/`-rendered lineage
 # built from `WasmTrampoline::NAMESPACE` (ADR-0099 §4).
 aether-component = { path = "../aether-component" }

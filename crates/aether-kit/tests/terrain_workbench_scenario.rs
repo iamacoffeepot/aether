@@ -19,8 +19,6 @@ use aether_kinds::{
     MouseButtonRelease, NamedMail, Render, TextInput, Tick,
 };
 use aether_kit::console::ConsoleConfig;
-use aether_kit::widget::EditorRegionRect;
-use aether_kit::widget::theme::Theme;
 use aether_kit::workbench::{
     WorkbenchCamera, WorkbenchConfig, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchLayout, WorkbenchMarkMode,
     WorkbenchOperator, WorkbenchPanelSettings, WorkbenchQuery, WorkbenchQueryResult,
@@ -31,6 +29,8 @@ use aether_kit_terrain::world::{
     AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, ProposalError, SUBCELLS_PER_CELL,
     SetCellHeights, SetChunk, WorldPositionMeters,
 };
+use aether_kit_widget::EditorRegionRect;
+use aether_kit_widget::theme::Theme;
 use aether_text::{LoadFontBytes, LoadFontResult, TextCapability};
 
 const MARK_COMPONENT_NAME: &str = "aether.kit.mark";
