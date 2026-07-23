@@ -309,7 +309,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
 ///
 /// ```text
 /// <out>/
-///   aether-substrate            # chassis binary (desktop or headless)
+///   aether-substrate            # chassis binary (desktop or headless; .exe on Windows)
 ///   pack/manifest               # `encode_manifest` output
 ///   pack/objects/<sha256>       # component wasm (+ config), content-addressed
 /// ```
@@ -357,16 +357,32 @@ fn run_package(args: &PackageArgs) -> Result<()> {
         (chassis_bin, components, ChassisSettings::default())
     };
 
-    let chassis_src = target_dir.join(args.profile.as_str()).join(chassis_bin);
-    let manifest = emit_depot(&out, &chassis_src, chassis_bin, &components, settings)?;
+    // `package` builds host-target only (no `--target`), so cargo's on-disk
+    // filename is the host platform's — `.exe` on Windows. The depot carries
+    // that filename verbatim so the shipped binary is runnable as-is.
+    let chassis_file = host_binary_filename(chassis_bin);
+    let chassis_src = target_dir.join(args.profile.as_str()).join(&chassis_file);
+    let manifest = emit_depot(&out, &chassis_src, &chassis_file, &components, settings)?;
 
     println!(
         "package: {} component object(s) + {} chassis bin -> {}",
         manifest.entries.len(),
-        chassis_bin,
+        chassis_file,
         out.display(),
     );
     Ok(())
+}
+
+/// The chassis binary's on-disk filename for the host platform: cargo appends
+/// `.exe` on Windows and leaves the bare name elsewhere. `package` never
+/// cross-compiles (no `--target`), so `cfg!(windows)` matches what cargo
+/// wrote and what the depot must carry.
+fn host_binary_filename(bin: &str) -> String {
+    if cfg!(windows) {
+        format!("{bin}.exe")
+    } else {
+        bin.to_string()
+    }
 }
 
 /// The discover-everything dev sweep component set: build every
@@ -395,14 +411,15 @@ fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: Profile) ->
         .collect()
 }
 
-/// Write the depot tree at `out`: copy the chassis binary to `<out>/<chassis_bin>`,
+/// Write the depot tree at `out`: copy the chassis binary to
+/// `<out>/<chassis_file>` (the host-platform filename, `.exe` on Windows),
 /// then write the `pack/` tree (content-addressed objects + `pack/manifest`)
 /// via [`write_pack`]. Regenerates `out` from scratch so a stale prior run
 /// can't leave orphaned objects. Returns the manifest it wrote.
 fn emit_depot(
     out: &Path,
     chassis_src: &Path,
-    chassis_bin: &str,
+    chassis_file: &str,
     components: &[PackComponent],
     settings: ChassisSettings,
 ) -> Result<PackageManifest> {
@@ -410,7 +427,7 @@ fn emit_depot(
         fs::remove_dir_all(out).with_context(|| format!("clear {}", out.display()))?;
     }
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
-    copy_artifact(chassis_src, &out.join(chassis_bin))?;
+    copy_artifact(chassis_src, &out.join(chassis_file))?;
     write_pack(out, components, settings)
 }
 

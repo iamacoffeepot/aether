@@ -26,7 +26,7 @@ jobs:
       - name: Build the standalone game package (release)
         run: cargo xtask package --profile release --chassis desktop --components aether-kit-commons --title loco-motion
       - name: Rename the chassis executable for hand-out
-        run: Rename-Item target/package/aether-substrate loco-motion.exe
+        run: Rename-Item target/package/aether-substrate.exe loco-motion.exe
       - name: Zip the package depot
         run: Compress-Archive -Path target/package/* -DestinationPath loco-motion-windows.zip
       - name: Upload the Windows package

@@ -49,7 +49,7 @@ into `pack/objects/`.
 
 ```text
 <out>/
-  aether-substrate            # the chassis binary (desktop or headless)
+  aether-substrate            # the chassis binary (desktop or headless; .exe on Windows)
   pack/manifest               # the persisted, versioned package manifest
   pack/objects/<sha256>       # component wasm + config bytes, content-addressed
 ```
