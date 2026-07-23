@@ -212,12 +212,12 @@ impl BootableChassis for HeadlessChassis {
 /// from env vars (per ADR-0070's "substrate-core never reads env" invariant);
 /// tests construct one directly.
 ///
-/// The shared config (source stack, fs roots, content-gen staging, runtime,
-/// pool / ring / scheduler / teardown knobs) lives in the embedded
-/// [`CommonEnv`]; only the headless tick cadence and the autoload list are
+/// The config source stack and the non-cap ring / scheduler / settlement members
+/// live in the embedded [`ChassisBase`]; the fs roots, runtime, and worker knobs
+/// in [`CommonEnv`]; only the headless tick cadence and the autoload list are
 /// per-chassis. ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
 /// `HttpServerConfig`, `AnthropicConfig`, `GeminiConfig`, `LifecycleConfig`) no
-/// longer ride as fields — the builder resolves each off [`CommonEnv::sources`],
+/// longer ride as fields — the builder resolves each off the base's source stack,
 /// and a test stages programmatic overrides into it (`ConfigSources::set_override`).
 pub struct HeadlessEnv {
     /// The universal base stratum (config source stack + the non-cap ring /
@@ -327,7 +327,7 @@ mod config_manifest_tests {
         // #3849 + #3850: the RPC port, the runtime knobs, and the frame-size knob
         // migrated off the residual hand records onto derive-`Config` members
         // (`RpcServerConfig` composed via `with_rpc_server`, `RuntimeConfig` +
-        // `FrameSizeConfig` declared in `with_common_caps`), so the composition
+        // `FrameSizeConfig` declared in `ChassisBase`), so the composition
         // walk — not `chassis_residual_knobs` — is what now claims them. Catches a
         // dropped `declare_config_member` or a de-composed RPC server reintroducing
         // a false unknown-key warning.

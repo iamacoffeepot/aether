@@ -441,8 +441,8 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
 /// and `--print-config` dump — like any other member instead of riding
 /// [`chassis_residual_knobs`]. Each chassis resolves it before Compose and
 /// declares its membership via `declare_config_member` (its value applies off
-/// the builder, so it is declaration-only; folded into [`with_common_caps`] and
-/// the hub compose).
+/// the builder, so it is declaration-only; folded into [`ChassisBase`], the
+/// shared base every full-stack chassis and the hub install).
 ///
 /// `env_prefix = "AETHER"` with an explicit `env =` per field pins each
 /// historical key byte-for-byte. Only [`log_filter`](Self::log_filter) is
@@ -724,18 +724,18 @@ pub fn tick_only_lifecycle_params() -> LifecycleParams {
     LifecycleParams { graph, initial_subscribers: vec![] }
 }
 
-/// Args every full-stack chassis hands to [`with_common_caps`]. Kept
+/// Args every full-stack chassis hands to [`with_full_stack_caps`]. Kept
 /// as a flat struct (no defaults) so an added cap forces the chassis
 /// builders to acknowledge it.
 ///
 /// ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
 /// `ProcessConfig`, …) no longer ride here — the builder resolves each off the
-/// source stack the chassis handed it via `Builder::with_config_sources`. What
-/// remains is the composer-supplied construction input (`Params`, the aborter,
-/// the resolved non-cap member structs `with_common_caps` fuses onto their
-/// builder seams via `with_chassis_config_member`) plus `namespace_roots`,
-/// passed programmatically so the fs cap uses the exact roots value the chassis
-/// resolved.
+/// source stack [`ChassisBase`] handed it. What remains is the composer-supplied
+/// construction input (`Params`, plus the resolved `chassis_boot` member
+/// [`with_full_stack_caps`] fuses onto its builder seam via
+/// `with_chassis_config_member`) plus `namespace_roots`, passed programmatically
+/// so the fs cap uses the exact roots value the chassis resolved. The aborter
+/// and the base non-cap members moved to `composed` / [`ChassisBase`].
 pub struct CommonBoot {
     /// The resolved boot knobs (worker count + boot manifest). Installed onto the
     /// builder via [`with_chassis_config_member`](BuilderChassisConfigMember::with_chassis_config_member),
@@ -876,9 +876,9 @@ impl CommonEnv {
 }
 
 /// Wire the worker count and the full-stack app caps that desktop and headless
-/// share (Input, ComponentHost, Fs, Text, Inventory, Http, Tcp, Process,
-/// GameGateway). The renderer / window / audio caps each chassis adds after this
-/// in `.with_actor::<_>()` chains.
+/// share (`Input`, `ComponentHost`, `Fs`, `Text`, `Inventory`, `Http`, `Tcp`,
+/// `Process`, `GameGateway`). The renderer / window / audio caps each chassis
+/// adds after this in `.with_actor::<_>()` chains.
 ///
 /// The universal base stratum — the aborter, the config sources, the non-cap
 /// ring / scheduler / settlement members, the two declare-only members, and

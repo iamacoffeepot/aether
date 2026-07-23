@@ -111,9 +111,8 @@ impl BootableChassis for HubChassis {
 ///
 /// ADR-0156 §5: the engines-cap `Config` (`FleetConfig`, the liveness
 /// heartbeat tuning) no longer rides as a field — the builder resolves it off
-/// [`Self::sources`]. What remains is the source stack plus the chassis-side
-/// reads of the non-cap pool / ring / scheduler / teardown / runtime knobs and
-/// the RPC port.
+/// the [`ChassisBase`] source stack. What remains is the base stratum plus the
+/// chassis-side reads of the runtime knobs and the RPC port.
 pub struct HubEnv {
     /// The universal base stratum (config source stack + the non-cap ring /
     /// scheduler / settlement members) `composed` installs ahead of `compose` —
