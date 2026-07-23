@@ -1,22 +1,21 @@
-//! ADR-0021 publish/subscribe round-trip via [`SubstrateHarness`]. Loads
+//! ADR-0164 window-subscription round-trip via [`SubstrateHarness`]. Loads
 //! `aether-test-fixtures`'s `probe` cdylib into a real chassis and exercises
-//! `aether.input.subscribe` / `aether.input.unsubscribe` and the
-//! `aether.component.drop` lifecycle's effect on the input subscriber
-//! set. Tracked under issue 648.
+//! selector-aware subscribe / unsubscribe plus the `aether.component.drop`
+//! lifecycle's effect on the window subscriber set.
 //!
-//! Minimal composition (issue #3764): the component host (probe wasm)
-//! plus the input cap on the harness basics — no render, no wgpu gate.
+//! Minimal composition (issue #3764): the component host (probe wasm) on
+//! harness basics, which include the synthetic window runtime — no render,
+//! no wgpu gate.
 //! The probe wasm must be pre-built (`require_wasm` skips otherwise;
 //! `AETHER_REQUIRE_RUNTIME=1` turns the skip into a hard failure).
 //!
 //! Targets the `Key` input stream, not `Tick`: issue 1490 moved `Tick`
-//! off `aether.input` onto `aether.lifecycle` (it is a frame-lifecycle
-//! stage, not an input interrupt), so the `aether.input` subscribe /
-//! unsubscribe / drop-clears contract is exercised here against a
-//! genuine input stream. The probe subscribes `Key` in `wire` and
-//! broadcasts a `key_observed` per dispatch; Tick-via-lifecycle delivery
-//! is covered by the `substrate_harness` frame-loop scenarios.
+//! onto `aether.lifecycle` because it is a frame-lifecycle stage, not a
+//! window-originated interrupt. The probe subscribes `Key` for all windows
+//! in `wire` and broadcasts a `key_observed` per dispatch; Tick-via-lifecycle
+//! delivery is covered by the `substrate_harness` frame-loop scenarios.
 
+use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
@@ -24,17 +23,16 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_input::{InputCapability, SubscribeInputResult, UnsubscribeInput};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput, WindowId};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
-use std::fs;
+use aether_window::{SyntheticWindowCapability, UnsubscribeWindow, WindowSelector};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
 fn boot_bench() -> SubstrateHarness {
-    SubstrateHarness::builder().with_component_host().with_actor::<InputCapability>(()).build().expect("boot")
+    SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
 fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {
@@ -54,31 +52,31 @@ fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str
     }
 }
 
-/// Inject `count` synthetic `Key` presses to `aether.input`. The input
-/// cap fans each out to every `Key` subscriber; `execute` blocks on
+/// Inject `count` synthetic `Key` presses from one window. The synthetic
+/// window actor fans each out to every matching subscriber; `execute` blocks on
 /// settlement, so the `key_observed` broadcasts have landed by return.
 fn send_keys(harness: &mut SubstrateHarness, count: usize) {
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
     let steps: Vec<(&str, HarnessOp)> = labels
         .iter()
         .map(|label| {
-            (label.as_str(), HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_CODE }))
+            (label.as_str(), HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_CODE }))
         })
         .collect();
     harness.execute(steps).expect("key send sequence");
 }
 
 fn unsubscribe(harness: &mut SubstrateHarness, kind: KindId, mailbox: MailboxId) {
-    let result = harness
+    harness
         .execute(vec![(
             "unsub",
-            HarnessOp::send_and_await(InputCapability::NAMESPACE, &UnsubscribeInput { kind, mailbox }),
+            HarnessOp::actor::<SyntheticWindowCapability>().send(&UnsubscribeWindow {
+                selector: WindowSelector::All,
+                kind,
+                mailbox,
+            }),
         )])
         .expect("unsubscribe sequence");
-    match result.reply::<SubscribeInputResult>("unsub").expect("decode SubscribeInputResult") {
-        SubscribeInputResult::Ok => {}
-        SubscribeInputResult::Err { error } => panic!("unsubscribe failed: {error}"),
-    }
 }
 
 fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
@@ -95,7 +93,7 @@ fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
 }
 
 /// No probes loaded ⇒ no `Key` subscribers ⇒ an injected key event
-/// fans out to no one. Confirms the input fanout is gated on the
+/// fans out to no one. Confirms window fanout is gated on the
 /// subscriber set rather than firing unconditionally.
 #[test]
 fn empty_subscribers_means_no_delivery() {
@@ -113,11 +111,10 @@ fn empty_subscribers_means_no_delivery() {
 }
 
 /// A subscribed probe receives fanned-out `TextInput`. The plausible bug
-/// this guards: a new stream kind whose input-cap fan-out `#[handler]` is
-/// missing warn-drops silently at dispatch (the cap is a strict receiver),
-/// so a `TextInput`-subscribing widget would never see committed text.
-/// Injecting synthetic `TextInput` at `aether.input` and observing the
-/// probe's re-broadcast proves the `on_text_input` fan-out is wired.
+/// this guards: a window-originated kind that is published but not routed
+/// to matching subscribers would silently disappear before the guest handler.
+/// Injecting synthetic `TextInput` and observing the probe's re-broadcast
+/// proves the generic window-event fan-out is wired.
 #[test]
 fn subscribed_component_receives_published_text_input() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
@@ -130,7 +127,7 @@ fn subscribed_component_receives_published_text_input() {
     harness
         .execute(vec![(
             "text",
-            HarnessOp::send_mail("aether.input", &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() }),
+            HarnessOp::window_event(TEST_WINDOW_ID, &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() }),
         )])
         .expect("text send sequence");
 
@@ -176,9 +173,9 @@ fn two_subscribers_each_receive_every_key() {
     );
 }
 
-/// `aether.input.unsubscribe` removes the mailbox from the `Key`
-/// subscriber set; subsequent key events stop producing broadcasts
-/// from that probe.
+/// Explicit all-window unsubscribe removes the mailbox from the `Key`
+/// subscriber set; subsequent key events stop producing broadcasts from
+/// that probe.
 #[test]
 fn unsubscribe_stops_delivery() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
@@ -207,10 +204,10 @@ fn unsubscribe_stops_delivery() {
     );
 }
 
-/// `aether.component.drop` clears the dropped mailbox from the input
+/// `aether.component.drop` clears the dropped mailbox from the window
 /// subscriber set as a side effect of lifecycle teardown
-/// (ADR-0021 + ADR-0038). Subsequent key events don't broadcast from
-/// the dropped probe.
+/// (ADR-0164 + ADR-0038). Subsequent key events don't broadcast from the
+/// dropped probe.
 #[test]
 fn drop_clears_subscriptions() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {

@@ -603,13 +603,9 @@ name = "aether-input"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-component",
  "aether-data",
- "aether-harness-substrate",
  "aether-kinds",
  "aether-substrate",
- "aether-test-fixtures-bundle",
- "aether-test-fixtures-kinds",
  "bytemuck",
  "inventory",
  "serde",
@@ -970,13 +966,13 @@ dependencies = [
  "aether-data",
  "aether-fs",
  "aether-http",
- "aether-input",
  "aether-kinds",
  "aether-lifecycle",
  "aether-math",
  "aether-render",
  "aether-tcp",
  "aether-test-fixtures-kinds",
+ "aether-window",
  "serde",
  "tracing",
 ]
@@ -1064,10 +1060,14 @@ name = "aether-window"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-data",
+ "aether-harness-substrate",
  "aether-input",
  "aether-kinds",
  "aether-substrate",
+ "aether-test-fixtures-bundle",
+ "aether-test-fixtures-kinds",
  "inventory",
  "serde",
  "winit",

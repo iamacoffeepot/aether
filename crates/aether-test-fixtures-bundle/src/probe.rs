@@ -6,7 +6,7 @@
 //!
 //! Test-fixture component for substrate-feature scenarios. Not a
 //! demo, not exemplary — its only job is to expose substrate /
-//! substrate-harness primitives (input subscription, drop, replace, capture)
+//! substrate-harness primitives (window-event subscription, drop, replace, capture)
 //! to scenario assertions in a way that's easy to observe.
 //!
 //! Behaviour:
@@ -61,7 +61,6 @@
 use aether_actor::{
     ActorInitError, AssetWindow, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
@@ -71,6 +70,7 @@ use aether_test_fixtures_kinds::{
     AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig,
     SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender, TextInputObserved, TickObserved,
 };
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 pub struct Probe {
     tick_count: u64,
@@ -93,13 +93,14 @@ impl WasmActor for Probe {
     /// has no send surface, issue 703).
     ///
     /// `Tick` is a frame-lifecycle stage, so it subscribes on
-    /// `aether.lifecycle` (ADR-0082); `Key` is a genuine input interrupt,
-    /// so it subscribes on `aether.input` (ADR-0021) — the input-stream
-    /// path the round-trip scenarios exercise (issue 1490).
+    /// `aether.lifecycle` (ADR-0082). `Key` and `TextInput` originate at
+    /// windows, so the probe subscribes to every window through
+    /// `aether.window` (ADR-0164).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
-        ctx.actor::<InputCapability>().subscribe::<Key>();
-        ctx.actor::<InputCapability>().subscribe::<TextInput>();
+        let window = ctx.actor::<WindowCapability>();
+        window.subscribe::<Key>(WindowSelector::All);
+        window.subscribe::<TextInput>(WindowSelector::All);
         // ADR-0163 §3 (#3984): pull the bundle's asset through the load
         // window (open during `wire`) and stash a content fingerprint —
         // length + a wrapping-sum checksum — so a later `AssetProbe` proves
@@ -119,7 +120,7 @@ impl WasmActor for Probe {
     ///
     /// # Agent
     /// Not sent manually; the substrate's tick fanout fires it once
-    /// per advance for every input-subscribed mailbox. Watch
+    /// per advance for every lifecycle-subscribed mailbox. Watch
     /// `receive_mail` for `aether.test_fixture.tick_observed` to see
     /// the count climbing.
     #[handler::single]
@@ -141,14 +142,13 @@ impl WasmActor for Probe {
         }
     }
 
-    /// Broadcasts a `key_observed` for each `Key` input dispatch, so the
-    /// ADR-0021 input round-trip scenarios can count `aether.input`
-    /// fan-out deliveries (subscribe / unsubscribe / drop-clears) on a
-    /// genuine input interrupt.
+    /// Broadcasts a `key_observed` for each `Key` dispatch, so the
+    /// ADR-0164 window round-trip scenarios can count selector-aware
+    /// fan-out deliveries (subscribe / unsubscribe / drop-clears).
     ///
     /// # Agent
-    /// Not sent manually; the substrate's input fan-out fires it for
-    /// every `aether.input`-subscribed mailbox when a key is pressed.
+    /// Not sent manually; the window actor's fan-out fires it for
+    /// every matching subscriber when a key is pressed.
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
@@ -156,11 +156,11 @@ impl WasmActor for Probe {
     }
 
     /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,
-    /// so the ADR-0021 round-trip scenario can assert the `aether.input`
-    /// cap fanned the committed-text stream out to a subscriber.
+    /// so the ADR-0164 round-trip scenario can assert the window actor
+    /// fanned the committed-text stream out to a subscriber.
     ///
     /// # Agent
-    /// Not sent manually; the substrate's input fan-out fires it for
+    /// Not sent manually; the window actor's fan-out fires it for
     /// every `TextInput`-subscribed mailbox when text is committed.
     /// Watch `receive_mail` for `aether.test_fixture.text_input_observed`.
     #[handler::single]

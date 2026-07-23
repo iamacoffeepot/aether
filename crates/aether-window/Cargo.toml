@@ -56,5 +56,22 @@ winit = { version = "0.30", optional = true }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }
 
+[dev-dependencies]
+# The selector/unsubscribe/drop integration scenarios boot the in-process
+# harness with its synthetic window runtime and component host.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+# The scenarios load and drop the Probe wasm through `aether.component`.
+aether-component = { path = "../aether-component" }
+# The Probe's re-broadcast kinds the scenarios count at the harness observer.
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+# The Probe wasm loaded by stem (`aether_test_fixtures_bundle.wasm`): declared
+# so the runtime artifact coupling is cargo-visible.
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
+
+# The Probe wasm coupling above is load-by-stem only — no source import — so
+# the source-scanning unused-deps gate cannot see it.
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-bundle"]
+
 [lints]
 workspace = true

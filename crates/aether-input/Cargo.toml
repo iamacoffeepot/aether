@@ -52,24 +52,6 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # The runtime unit tests boot the `aether_substrate::testing` mailer
 # fixture, enabled by the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The subscribe/unsubscribe/drop integration test boots the in-process
-# harness harness with the component host + input cap composed.
-aether-harness-substrate = { path = "../aether-harness-substrate" }
-# The test loads the probe wasm through `aether.component`, addressing the
-# host by `ComponentHostCapability::NAMESPACE`.
-aether-component = { path = "../aether-component" }
-# The probe's re-broadcast kinds (`KeyObserved`, `TextInputObserved`) the
-# test counts at the harness observer mailbox.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
-# The probe wasm the test loads by stem (`aether_test_fixtures_bundle.wasm`,
-# issue #3766): declared so the wasm coupling is cargo-visible even though
-# nothing links the host rlib.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
-
-# The probe wasm coupling above is load-by-stem only — no source import —
-# so the source-scanning unused-deps gate cannot see it.
-[package.metadata.cargo-machete]
-ignored = ["aether-test-fixtures-bundle"]
 
 [lints]
 workspace = true
