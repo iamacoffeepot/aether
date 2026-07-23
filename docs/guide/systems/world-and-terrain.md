@@ -26,10 +26,11 @@ arbiter.
 
 All four are guest actors, not chassis capabilities. The world, mark, and terra
 actors are exported from the multi-actor `aether-kit-terrain` module; the
-workbench is exported from `aether-kit`. Load each by selector —
+workbench is exported from `aether-kit-workbench`. Load each by selector —
 `aether_kit_terrain@aether.kit.world`, `aether_kit_terrain@aether.kit.mark`,
-`aether_kit_terrain@aether.kit.terra`, and `aether_kit@aether.kit.workbench` —
-rather than relying on a module's bare-load entry. See
+`aether_kit_terrain@aether.kit.terra`, and
+`aether_kit_workbench@aether.kit.workbench` — rather than relying on a module's
+bare-load entry. See
 [`aether-kit-terrain/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/lib.rs)
 and
 [`aether-kit/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/lib.rs).
@@ -208,10 +209,10 @@ points. The public external observability kind is
 intents are child-internal, so agents that do not drive input should use the
 mark/terra/world kinds directly.
 
-See [`workbench/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/workbench/kinds.rs),
-[`workbench/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/workbench/mod.rs),
-[`workbench/panel.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/workbench/panel.rs), and
-[`workbench/viewport.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/workbench/viewport.rs).
+See [`src/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/kinds.rs),
+[`src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/lib.rs),
+[`src/panel.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/panel.rs), and
+[`src/viewport.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/viewport.rs).
 
 ## Chassis caveats and extension routes
 

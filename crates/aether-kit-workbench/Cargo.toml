@@ -1,0 +1,83 @@
+[package]
+name = "aether-kit-workbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The terrain-annotation workbench extracted from `aether-kit`
+# (iamacoffeepot/aether#3953). It is the top-of-stack assembly crate: the one
+# module that genuinely spans widget + terrain + console, so it links all three
+# sibling crates as rlibs and inline-spawns their actors (EditorShell + the
+# `set::*` widgets from aether-kit-widget, ConsoleOverlay from aether-kit)
+# around the terrain mark / terra / world vocabulary from aether-kit-terrain.
+# Guest code throughout — no data/runtime split — so `export!` emits the
+# wasm32-only FFI shims that stay inert in a host rlib and integration tests
+# link the same artifact. Nothing embeds this crate, so it declares no
+# `library` feature of its own: its `export!` owns the sole entry surface in
+# the assembled wasm module.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# iamacoffeepot/aether#3956: the widget-compositing layer. The workbench's
+# editor regions are arbitrated by `EditorShell` and populated with the
+# `set::*` widgets, inline-spawned through this rlib dependency — the generic
+# `spawn_inline_child::<A>` constructs the child in-guest through the
+# `ErasedWasmActor` bound, so the type only needs linking into this cdylib, not
+# listing in this crate's own `export!`. `features = ["library"]` takes the
+# widget crate's entry-free rlib face: one `export!` (this crate's own) owns
+# the entry surface per wasm module, so the widget crate's `receive_p32` /
+# `init` shims must not collide with it at the wasm link step.
+aether-kit-widget = { path = "../aether-kit-widget", features = ["library"] }
+# iamacoffeepot/aether#3957: the terrain-authoring stack. The workbench
+# consumes its mark / terra / world types and octimeter position vocabulary;
+# `features = ["library"]` strips its `export!` entry surface from this
+# embedding wasm module the same way.
+aether-kit-terrain = { path = "../aether-kit-terrain", features = ["library"] }
+# The gameplay-systems layer. The workbench inline-spawns `ConsoleOverlay` and
+# reads its `ConsoleConfig` / `ConsoleTheme` vocabulary; `features = ["library"]`
+# strips kit's `export!` entry surface from this embedding wasm module.
+aether-kit = { path = "../aether-kit", features = ["library"] }
+# iamacoffeepot/aether#3749: the lifecycle cap. The workbench and its panel /
+# viewport subscribe the frame stage through it; wasm guest, marker-only
+# identity face.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# iamacoffeepot/aether#3721: the render cap. The viewport emits the world
+# view-projection through it; wasm guest, marker-only identity face.
+aether-render = { path = "../aether-render", default-features = false }
+# iamacoffeepot/aether#3727: the text cap. The tool panel loads its font and
+# emits glyphs through it; wasm guest, marker-only identity face.
+aether-text = { path = "../aether-text", default-features = false }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail.
+# Default-features-off per the SDK pattern.
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native builds
+# so the `aether.kinds` descriptor list picks up its types. Wasm guests skip
+# the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+# The integration scenario boots a `SubstrateHarness`, runtime-loads the
+# terrain and workbench wasm artifacts, and asserts the full raw-input proposal
+# loop. Tests run host-side; the wasm is built separately for
+# `wasm32-unknown-unknown` and discovered at runtime under
+# `target/wasm32-unknown-unknown/{debug,release}/`. The caps the scenario
+# composes on the `SubstrateHarnessBuilder` appear here with their default
+# `runtime` feature on — dev-only, the wasm lib build keeps the marker-only
+# faces above.
+[dev-dependencies]
+aether-input = { path = "../aether-input" }
+aether-text = { path = "../aether-text" }
+aether-component = { path = "../aether-component", default-features = false }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+
+[lints]
+workspace = true

@@ -16,19 +16,16 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# An embedding cdylib (aether-kit-workbench inline-spawns `console::ConsoleOverlay`)
+# enables this to strip this crate's `export!` entry surface: one `export!` emits
+# the FFI entries per wasm module, so the entry-free rlib face keeps the actor
+# impls without a second `receive_p32` / `init` colliding with the embedder's own
+# `export!` at link. Non-default, so kit's own wasm build still emits.
+library = []
+
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-# iamacoffeepot/aether#3950: the widget set + its `EditorShell` arbiter and the
-# `behavior` feature were extracted to `aether-kit-widget`. kit keeps an rlib
-# dependency on it so `workbench` can inline-spawn `EditorShell` and the
-# `set::*` widgets: the generic `spawn_inline_child::<A>` constructs the child
-# in-guest through the `ErasedWasmActor` bound, so the type only needs linking
-# into the spawning cdylib, not listing in kit's own `export!`.
-# `features = ["library"]` takes the widget crate's entry-free rlib face: its
-# `export!` emits no FFI entries in this wasm module. One `export!` (kit's own)
-# owns the entry surface per module; without this the widget crate's `export!`
-# shims (`receive_p32`, `init`, …) would collide with kit's at the wasm link step.
-aether-kit-widget = { path = "../aether-kit-widget", features = ["library"] }
 # iamacoffeepot/aether#3756: the component cap was extracted to
 # `aether-component`. kit is a wasm guest, so it takes the marker-only
 # identity face — it addresses `ComponentHostCapability`, resolves loaded
@@ -56,15 +53,6 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
 aether-mesh = { path = "../aether-mesh" }
-# iamacoffeepot/aether#3951: the terrain stack (mark / world / terra / mover)
-# was extracted to `aether-kit-terrain`. kit's sim, client, and workbench
-# systems still consume its `CellPos` / `WorldPoint` / octimeter position
-# vocabulary and its mark / terra / world types, so kit takes an rlib
-# dependency on it. kit is itself a cdylib whose `export!` binds the fixed-name
-# FFI entries, and a wasm module carries exactly one `export!`, so kit enables
-# the terrain crate's `library` feature to strip its `export!` entry surface
-# from the embedding wasm module.
-aether-kit-terrain = { path = "../aether-kit-terrain", features = ["library"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Substrate-side `aether.log` (ADR-0060) for warn-log on rejected mail
 # (out-of-bounds teleport, etc.). Default-features-off per the SDK pattern.
@@ -90,6 +78,18 @@ aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 aether-text = { path = "../aether-text" }
+# iamacoffeepot/aether#3953: the workbench (kit's last source consumer of the
+# widget crate) moved to `aether-kit-workbench`, so the widget rlib dependency
+# left kit's `[dependencies]`. `console_render_interaction` still runtime-loads
+# the widget editor shell and imports its `EditorConfig` vocabulary at source,
+# so it stays as a dev-dependency here.
+aether-kit-widget = { path = "../aether-kit-widget" }
+# iamacoffeepot/aether#3953: with the workbench (and, per #3952, sim / client)
+# gone, no kit system consumes the terrain vocabulary in source, so the terrain
+# rlib dependency left kit's `[dependencies]`. `camera_controller_drives_camera`
+# still runtime-loads the terrain world wasm and imports its `SetChunk` /
+# `Material` vocabulary at source, so it stays as a dev-dependency here.
+aether-kit-terrain = { path = "../aether-kit-terrain" }
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@ use core::f32::consts::{FRAC_PI_3, PI};
 use aether_data::MailboxId;
 use serde::{Deserialize, Serialize};
 
-use crate::console::ConsoleConfig;
+use aether_kit::console::ConsoleConfig;
 use aether_kit_terrain::mark::MarkRef;
 use aether_kit_terrain::terra::TerraError;
 use aether_kit_terrain::world::{

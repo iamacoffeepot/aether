@@ -1,4 +1,4 @@
-//! Full terrain annotation workbench flow through the real kit wasm.
+//! Full terrain annotation workbench flow through the real workbench wasm.
 
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_input::InputCapability;
@@ -19,10 +19,6 @@ use aether_kinds::{
     MouseButtonRelease, NamedMail, Render, TextInput, Tick,
 };
 use aether_kit::console::ConsoleConfig;
-use aether_kit::workbench::{
-    WorkbenchCamera, WorkbenchConfig, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchLayout, WorkbenchMarkMode,
-    WorkbenchOperator, WorkbenchPanelSettings, WorkbenchQuery, WorkbenchQueryResult,
-};
 use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult};
 use aether_kit_terrain::terra::{TerraConfig, TerraQuery, TerraQueryResult};
 use aether_kit_terrain::world::{
@@ -31,6 +27,10 @@ use aether_kit_terrain::world::{
 };
 use aether_kit_widget::EditorRegionRect;
 use aether_kit_widget::theme::Theme;
+use aether_kit_workbench::{
+    WorkbenchCamera, WorkbenchConfig, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchLayout, WorkbenchMarkMode,
+    WorkbenchOperator, WorkbenchPanelSettings, WorkbenchQuery, WorkbenchQueryResult,
+};
 use aether_text::{LoadFontBytes, LoadFontResult, TextCapability};
 
 const MARK_COMPONENT_NAME: &str = "aether.kit.mark";
@@ -195,13 +195,13 @@ fn replace_numeric_with_zero(harness: &mut SubstrateHarness) {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
-    // The mark / world / terra exports moved to the `aether-kit-terrain` wasm;
-    // the workbench export stays in the `aether-kit` wasm, so this scenario
-    // loads both.
+    // The mark / world / terra exports live in the `aether-kit-terrain` wasm and
+    // the workbench export in this crate's own `aether-kit-workbench` wasm, so
+    // this scenario loads both.
     let Some(terrain_wasm_path) = require_runtime("aether_kit_terrain") else {
         return;
     };
-    let Some(kit_wasm_path) = require_runtime("aether_kit") else {
+    let Some(workbench_wasm_path) = require_runtime("aether_kit_workbench") else {
         return;
     };
     let mut harness = SubstrateHarness::builder()
@@ -257,7 +257,7 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
     };
     load_export(
         &mut harness,
-        &kit_wasm_path,
+        &workbench_wasm_path,
         "aether.kit.workbench",
         WORKBENCH_COMPONENT_NAME,
         workbench_config.encode_into_bytes(),

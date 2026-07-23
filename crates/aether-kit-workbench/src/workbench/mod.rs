@@ -19,7 +19,7 @@ use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use serde::{Deserialize, Serialize};
 
-use crate::console::{ConsoleCommandOutput, ConsoleOverlay};
+use aether_kit::console::{ConsoleCommandOutput, ConsoleOverlay};
 use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult, MarkRef};
 use aether_kit_terrain::terra::{CreateTerraMark, RelabelTerraSelection, TerraCommandResult, TerraError};
 use aether_kit_terrain::world::{
@@ -902,7 +902,7 @@ fn intent_control(intent: &WorkbenchIntent) -> WorkbenchControl {
 
 #[cfg(test)]
 mod tests {
-    use crate::console::{ConsoleConfig, ConsoleTheme};
+    use aether_kit::console::{ConsoleConfig, ConsoleTheme};
     use aether_kit_terrain::mark::{MarkId, MarkRef};
     use aether_kit_terrain::world::{
         AutomatonRule, BrushParameters, OperatorBudget, OperatorChunk, ProposalDigest, ProposalError, ProposalId,

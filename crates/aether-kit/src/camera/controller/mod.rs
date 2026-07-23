@@ -8,7 +8,7 @@
 //! Turns held keys into camera-pose deltas and mails them to a peer
 //! [`CameraComponent`], so plain scene
 //! navigation ("look around with the keyboard") composes without dragging in
-//! a gameplay body the way [`WorldMover`](aether_kit_terrain::mover::WorldMover)'s embedded
+//! a gameplay body the way `aether-kit-terrain`'s `WorldMover` embedded
 //! follow-camera does. The camera stays a pure projection state machine; all
 //! keyboard policy lives here.
 //!
