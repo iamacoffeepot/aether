@@ -42,10 +42,9 @@ aether-tcp = { path = "../aether-tcp", default-features = false }
 # `aether-lifecycle`. This crate is a wasm guest, so it takes the marker-only
 # identity face.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
-# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`. The
-# client subscribes movement keys; this crate is a wasm guest, so it takes the
-# marker-only identity face.
-aether-input = { path = "../aether-input", default-features = false }
+# ADR-0164: the window actor owns movement-key publication. This crate is a
+# wasm guest, so it takes the marker-only identity face.
+aether-window = { path = "../aether-window", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # This crate is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
@@ -76,7 +75,6 @@ inventory = { workspace = true }
 [dev-dependencies]
 aether-component = { path = "../aether-component" }
 aether-game = { path = "../aether-game" }
-aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
 aether-tcp = { path = "../aether-tcp" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }

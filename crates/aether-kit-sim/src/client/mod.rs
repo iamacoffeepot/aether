@@ -22,12 +22,12 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_codec::frame::encode_frame;
 use aether_data::{Kind, MailboxId, wire};
 use aether_game::{CellPosition, GridBounds, MoveDirection, MoveIntent, PlayerFrame, Spawn, TickBundle, WIRE_VERSION};
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, Render, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 use aether_kit_terrain::OCTIMETERS_PER_TILE;
 use aether_kit_terrain::world::WorldPoint;
@@ -222,9 +222,9 @@ impl WasmActor for PlayerClient {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let input = ctx.actor::<InputCapability>();
-        input.subscribe::<Key>();
-        input.subscribe::<KeyRelease>();
+        let window = ctx.actor::<WindowCapability>();
+        window.subscribe::<Key>(WindowSelector::All);
+        window.subscribe::<KeyRelease>(WindowSelector::All);
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();
         lifecycle.subscribe::<Render>();

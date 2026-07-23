@@ -55,12 +55,12 @@ pub use kinds::*;
 use core::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 use crate::OCTIMETERS_PER_TILE;
 use crate::world::CellPos;
@@ -202,14 +202,14 @@ impl WasmActor for WorldMover {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let input = ctx.actor::<InputCapability>();
+        let window = ctx.actor::<WindowCapability>();
         if self.owns_input {
-            input.subscribe::<Key>();
-            input.subscribe::<KeyRelease>();
-            input.subscribe::<MouseButton>();
-            input.subscribe::<MouseMove>();
+            window.subscribe::<Key>(WindowSelector::All);
+            window.subscribe::<KeyRelease>(WindowSelector::All);
+            window.subscribe::<MouseButton>(WindowSelector::All);
+            window.subscribe::<MouseMove>(WindowSelector::All);
         }
-        input.subscribe::<WindowSize>();
+        window.subscribe::<WindowSize>(WindowSelector::All);
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();
         lifecycle.subscribe::<Render>();

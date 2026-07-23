@@ -23,7 +23,6 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{ColorRegionStats, decode_png, target_color_stats};
-use aether_input::InputCapability;
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, WindowId, keycode};
 use aether_kit_commons::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit_sim::{
@@ -259,7 +258,6 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(())
         .with_actor::<TcpCapability>(())
         .build()
         .expect("boot controlled client SubstrateHarness");
@@ -310,16 +308,15 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     let initial = capture_entity(&mut harness, "initial");
     assert!(initial.matching > 20, "expected visible magenta marker at initial cell: {initial:?}");
 
+    let press_east = Key { window: TEST_WINDOW_ID, code: keycode::KEY_D };
+    let release_east = KeyRelease { window: TEST_WINDOW_ID, code: keycode::KEY_D };
     harness
         .execute(vec![
-            ("press-east", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: keycode::KEY_D })),
+            ("press-east", HarnessOp::window_event(TEST_WINDOW_ID, &press_east)),
             ("emit-move", HarnessOp::advance(1)),
-            (
-                "release-east",
-                HarnessOp::send_mail("aether.input", &KeyRelease { window: TEST_WINDOW_ID, code: keycode::KEY_D }),
-            ),
+            ("release-east", HarnessOp::window_event(TEST_WINDOW_ID, &release_east)),
         ])
-        .expect("drive held east input through aether.input");
+        .expect("drive held east input through the synthetic window");
     let ControlledEvent::Move(intent) = event_rx.recv_timeout(TCP_TIMEOUT).expect("controlled MoveIntent arrives")
     else {
         panic!("controlled peer reported a second handshake");
@@ -360,7 +357,6 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
     let sim_mailbox = resolve_embedded(SIM_NAME);
     let mut harness = SubstrateHarness::builder()
         .with_component_host()
-        .with_actor::<InputCapability>(())
         .with_actor::<TcpCapability>(())
         .size(FRAME_WIDTH, FRAME_HEIGHT)
         .with_actor_configured::<GameGatewayCapability>(
@@ -414,11 +410,14 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
 
     harness
         .execute(vec![
-            ("press-west", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: keycode::KEY_A })),
+            (
+                "press-west",
+                HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: keycode::KEY_A }),
+            ),
             ("emit-west", HarnessOp::advance(1)),
             (
                 "release-west",
-                HarnessOp::send_mail("aether.input", &KeyRelease { window: TEST_WINDOW_ID, code: keycode::KEY_A }),
+                HarnessOp::window_event(TEST_WINDOW_ID, &KeyRelease { window: TEST_WINDOW_ID, code: keycode::KEY_A }),
             ),
         ])
         .expect("drive west input through active gateway");
