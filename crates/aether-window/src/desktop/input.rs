@@ -97,7 +97,7 @@ pub(super) enum TextSource {
 /// composition is open, `KeyText` is dropped and the commit is the single
 /// source of truth. `Preedit { active }` opens or closes the gate without
 /// publishing (the in-flight text rides `ImePreedit` instead); `Disabled`
-/// closes it. Winit-free so the dedupe is testable without a winit `App`.
+/// closes it. Winit-free so the dedupe is testable without a winit application.
 ///
 /// `KeyText` also strips control characters before publishing. Winit
 /// reports a named key's (Backspace / Enter / Tab / Escape / Delete) text
@@ -128,6 +128,12 @@ pub(super) fn text_input_gate(composing: &mut bool, source: TextSource) -> Optio
             None
         }
     }
+}
+
+/// Convert winit's byte-index IME cursor span to the wire vocabulary.
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn ime_cursor_span(cursor: Option<(usize, usize)>) -> (Option<u32>, Option<u32>) {
+    cursor.map_or((None, None), |(begin, end)| (Some(begin as u32), Some(end as u32)))
 }
 
 /// Scroll lines are normalized to pixels at this rate. A tuning knob,
@@ -243,8 +249,9 @@ mod tests {
     }
 
     #[test]
-    fn map_winit_keycode_covers_console_activation_key() {
-        assert_eq!(map_winit_keycode(KeyCode::Backquote), Some(keycode::KEY_BACKQUOTE));
+    fn ime_cursor_span_preserves_present_and_absent_byte_offsets() {
+        assert_eq!(ime_cursor_span(Some((2, 5))), (Some(2), Some(5)));
+        assert_eq!(ime_cursor_span(None), (None, None));
     }
 
     #[test]
@@ -268,7 +275,7 @@ mod tests {
 
     // Tripwire: the five text-editing navigation keys must translate to
     // their paired stable `aether_kinds::keycode` constant — the desktop
-    // chassis's sole bridge from winit's unstable `KeyCode` discriminants
+    // window actor's sole bridge from winit's unstable `KeyCode` discriminants
     // onto the wire.
     #[test]
     fn map_winit_keycode_covers_editing_navigation_keys() {

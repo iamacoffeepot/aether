@@ -1,7 +1,8 @@
 //! Desktop chassis driver capability — ADR-0071 phase 3 / ADR-0161 R3.
 //!
-//! Holds the winit `App` struct and the `ApplicationHandler` impl that drives
-//! per-frame work. Post-ADR-0161 the driver is a pure pump host: it owns two
+//! Holds the temporary `DesktopWindowCompatibilityBridge` and the
+//! `ApplicationHandler` impl that drives per-frame work. Post-ADR-0161 the
+//! driver is a pure pump host: it owns two
 //! pumped slots on the winit thread — `aether.window` (ADR-0160) and
 //! `aether.render` (this slice) — booting each via
 //! [`DriverCtx::boot_pumped_actor`] from a Claim-stage reservation, pushing
@@ -18,6 +19,7 @@
 //! exited cleanly; the `chassis_builder` then tears down every passive in
 //! reverse boot order via `BootedPassives::Drop`.
 
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,11 +28,7 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_data::{encode_empty, mailbox_id_from_name};
-use aether_input::InputCapability;
-use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, TextInput,
-    Tick, WindowId as EngineWindowId, WindowMode, WindowSize,
-};
+use aether_kinds::{Quit, Tick, WindowId as EngineWindowId};
 use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
@@ -43,21 +41,20 @@ use aether_substrate::{
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
-use aether_window::{DesktopWindowCapability, DesktopWindowParams, WindowCell, resolve_fullscreen};
+use aether_window::{
+    DesktopWindowCapability, DesktopWindowParams, WindowCell, WindowHostAction, WindowHostEffect, WindowSizeRequest,
+    WindowSpec,
+};
 use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId as WinitWindowId};
 
 use super::chassis::UserEvent;
-use input::{TextSource, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
 use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply};
 use shutdown::install_shutdown_handler;
-use winit::dpi::PhysicalSize;
 
-mod input;
 mod lifecycle;
 mod shutdown;
 
@@ -67,17 +64,11 @@ mod shutdown;
 /// cap, a genuine wedge exhausts it (issue #1305).
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 
-/// Transitional identity for the single chassis-owned boot window. The
-/// manager slice replaces this constant with allocator-owned ids.
-const BOOT_WINDOW_ID: EngineWindowId = EngineWindowId(1);
-
-pub struct App {
+/// Temporary adapter between the window-owned winit domain and the current
+/// single-target render/lifecycle path. Multi-target render replaces this
+/// bridge in issue #3990.
+pub struct DesktopWindowCompatibilityBridge {
     queue: Arc<Mailer>,
-    /// `aether.input` mailbox id, cached at driver boot. Each platform
-    /// event fans through a single mail push to this mailbox; the
-    /// `InputCapability` actor owns the subscriber table and fans
-    /// out per-subscriber on its own dispatcher (issue 640).
-    input_mailbox: MailboxId,
     /// `aether.lifecycle` mailbox id, cached at boot. Each redraw
     /// fires one `LifecycleAdvance` here; the cap broadcasts the `Tick`
     /// stage directly to its stage subscribers (issue 1490 retired the
@@ -100,28 +91,6 @@ pub struct App {
     /// Mailbox id of [`Self::lifecycle_reply_inbox`], used as the
     /// `Component` reply target stamped onto each `LifecycleAdvance`.
     lifecycle_reply_mailbox: MailboxId,
-    kind_key: aether_data::KindId,
-    kind_key_release: aether_data::KindId,
-    kind_mouse_button: aether_data::KindId,
-    kind_mouse_button_release: aether_data::KindId,
-    kind_mouse_wheel: aether_data::KindId,
-    kind_mouse_move: aether_data::KindId,
-    kind_window_size: aether_data::KindId,
-    kind_text_input: aether_data::KindId,
-    kind_ime_preedit: aether_data::KindId,
-    kind_modifiers: aether_data::KindId,
-    /// Last cursor position seen in a `CursorMoved` event, in window
-    /// coordinates. Stamped onto each button / wheel event so a click or
-    /// scroll carries its location without the consumer correlating a
-    /// separate `MouseMove`.
-    last_cursor: (f32, f32),
-    /// Composition gate for the text-input stream. `true` while an IME
-    /// composition is active (a non-empty `Ime::Preedit` opened it,
-    /// `Ime::Commit` / `Ime::Disabled` / a synthetic empty `Preedit`
-    /// closes it). While composing, raw `KeyEvent.text` is suppressed so
-    /// a committed character is published once (via `Ime::Commit`), never
-    /// doubled. Driven by [`text_input_gate`].
-    composing: bool,
     /// Hub outbound — held for log egress to the hub and
     /// `lifecycle::fatal_abort`. NOT used for chassis replies:
     /// `HubOutbound::send_reply` only routes `Session` / `EngineMailbox`
@@ -136,6 +105,10 @@ pub struct App {
     /// (iamacoffeepot/aether#1316).
     outbound: Arc<HubOutbound>,
     window: Option<Arc<Window>>,
+    /// Engine identity of the one window the compatibility render target can
+    /// present. The window manager may own additional windows; #3990 gives
+    /// render a target map for them.
+    window_id: Option<EngineWindowId>,
     /// The pumped `aether.render` runtime (ADR-0161 §Decision 1), dispatched
     /// on this winit thread through a [`PumpedSlot`] — the same pump home the
     /// `aether.window` actor uses. It owns the wgpu surface, the accumulators,
@@ -170,10 +143,10 @@ pub struct App {
     window_settings: aether_chassis::WindowSettings,
     /// The `aether.window` desktop runtime, pumped on the winit thread
     /// (ADR-0160 §Decision 3). Booted from the Claim-stage `aether.window`
-    /// reservation via [`DriverCtx::boot_pumped_actor`]; drained inside
-    /// [`ApplicationHandler::about_to_wait`] between frames — inline on the
-    /// chassis main thread, since winit / macOS require window mutations
-    /// there. Mail arrival pokes `UserEvent::WindowMail` via the claim's
+    /// reservation via [`DriverCtx::boot_pumped_actor`]; drained inside the
+    /// winit callbacks — inline on the chassis main thread, since winit /
+    /// macOS require window mutations there. Mail arrival pokes
+    /// `UserEvent::WindowMail` via the claim's
     /// wake slot (iamacoffeepot/aether#1318), so `about_to_wait` runs and
     /// drains even under `ControlFlow::Wait` (set when the window occludes)
     /// — the case `aether.window.focus` most needs, since the loop is
@@ -183,21 +156,21 @@ pub struct App {
     /// so `aether.window` reports identically to any pooled actor;
     /// [`PumpedSlot::shutdown`] runs the actor's `unwire` on loop exit.
     window_slot: PumpedSlot<DesktopWindowCapability>,
-    /// One-shot handle shared with the pumped [`DesktopWindowCapability`]:
-    /// `resumed` fills it exactly once after `create_window`, and the
-    /// actor's handlers read the winit `Window` from it. A double-fill is a
-    /// bug (guarded by `resumed`'s window-already-set early return).
+    /// One-shot handle retained strictly for the current render actor: the
+    /// first successful compatibility attachment fills it, and render reads
+    /// the winit `Window` while #3990 replaces this single-target seam.
     window_cell: WindowCell,
     /// ADR-0080 §6 chassis-root correlation counter (issue
     /// iamacoffeepot/aether#723). Bumped per chassis-source push so
-    /// every input/window/frame-stats emission carries a fresh
+    /// every chassis-owned render/lifecycle emission carries a fresh
     /// `MailId` for the trace observer to root a tree on. Symmetric
     /// with the per-actor counter on `NativeBinding`.
     chassis_correlation: AtomicU64,
     /// True once a graceful-shutdown `Quit` has been pushed to
     /// `aether.lifecycle` (iamacoffeepot/aether#1489), via either
     /// `WindowEvent::CloseRequested` or an observed SIGINT/SIGTERM.
-    /// Guards [`App::request_quit`] so the `Quit` mail is pushed exactly
+    /// Guards [`DesktopWindowCompatibilityBridge::request_quit`] so the
+    /// `Quit` mail is pushed exactly
     /// once, and bypasses the `RedrawRequested` occlusion early-return so
     /// the shutdown frame still drives the lifecycle to its `Shutdown`
     /// terminal even on a minimized/hidden window.
@@ -212,11 +185,11 @@ pub struct App {
     shutdown: Arc<AtomicBool>,
 }
 
-impl App {
+impl DesktopWindowCompatibilityBridge {
     /// ADR-0080 §6 chassis-source push helper (issue
     /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
     /// `push_chassis_root_mail` so the trace observer sees a `Sent`
-    /// event for every input/window/frame-stats emission. Returns the
+    /// event for every chassis-owned render/lifecycle emission. Returns the
     /// minted chain-root [`MailId`] so frame-gating callers can
     /// subscribe its settlement (ADR-0082 §6).
     fn push_chassis_root(
@@ -319,11 +292,6 @@ impl App {
         }
     }
 
-    fn publish_window_size(&self, width: u32, height: u32) {
-        let payload = WindowSize { window: BOOT_WINDOW_ID, width, height }.encode_into_bytes();
-        self.push_chassis_root(self.input_mailbox, self.kind_window_size, payload, 1);
-    }
-
     /// Push a chassis-internal render mail (a per-frame [`Frame`] request or
     /// an [`Occluded`] forward) to the pumped `aether.render` mailbox and
     /// drain the slot so its handler runs inline on this thread. Draining
@@ -342,7 +310,10 @@ impl App {
     /// relocated into the actor) — and parks / unparks the loop. `Wait` when
     /// occluded is the power-save; `Poll` + a redraw poke on un-occlude
     /// resumes rendering.
-    fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
+    fn set_occluded(&mut self, id: EngineWindowId, occluded: bool, event_loop: &ActiveEventLoop) {
+        if self.window_id != Some(id) {
+            return;
+        }
         if self.occluded == occluded {
             return;
         }
@@ -440,53 +411,158 @@ impl App {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
-}
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
+    fn initial_window_spec(&self) -> WindowSpec {
+        WindowSpec {
+            title: self.window_settings.title.clone(),
+            mode: self.window_settings.mode.clone(),
+            size: self.window_settings.size.map(|(width, height)| WindowSizeRequest { width, height }),
         }
-        let mut attrs = Window::default_attributes().with_title(&self.window_settings.title);
-        if let Some((w, h)) = self.window_settings.size {
-            attrs = attrs.with_inner_size(PhysicalSize::new(w, h));
-        }
-        match resolve_fullscreen(&self.window_settings.mode, event_loop.primary_monitor().as_ref()) {
-            Ok(fs) => attrs = attrs.with_fullscreen(fs),
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::boot",
-                    error = %e,
-                    "AETHER_WINDOW_MODE boot request rejected — falling back to Windowed",
-                );
-                self.window_settings.mode = WindowMode::Windowed;
-            }
-        }
-        let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
-        // Opt this window into IME event delivery. Most platforms send no
-        // `Ime` events (and therefore no composed/committed CJK text)
-        // unless the window has explicitly allowed IME. Candidate-window
-        // placement (`set_ime_cursor_area`) is deferred — its absence only
-        // floats the IME popup at a default position.
-        window.set_ime_allowed(true);
-        window.request_redraw();
-        let initial_size = window.inner_size();
-        // ADR-0160 §Decision 3 / ADR-0161 §Decision 3: hand the freshly-created
-        // window to the pumped `aether.window` and `aether.render` actors
-        // through the one shared one-shot cell (both received a clone of it in
-        // their params). `resumed` early-returns once `self.window` is set
-        // (above), so this fills exactly once — a double-fill is a bug, so the
-        // `set` `Err` arm is unreachable here. The render actor boots wgpu
-        // lazily against this cell on its first `on_frame`; there is no more
-        // driver-side `Gpu::new`.
-        debug_assert!(self.window_cell.get().is_none(), "window cell filled twice — resumed ran again");
-        let _ = self.window_cell.set(Arc::clone(&window));
-        self.window = Some(window);
-        self.started = Some(Instant::now());
-        self.publish_window_size(initial_size.width, initial_size.height);
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn take_window_work(&mut self) -> (Vec<WindowHostAction>, Vec<WindowHostEffect>) {
+        self.window_slot.drain_available();
+        self.window_slot.host_turn(|state, _ctx| state.take_host_work()).unwrap_or_default()
+    }
+
+    fn apply_window_work(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        actions: Vec<WindowHostAction>,
+        effects: Vec<WindowHostEffect>,
+    ) {
+        let mut dirty = BTreeSet::new();
+        self.apply_window_effects(event_loop, effects, &mut dirty);
+
+        for action in actions {
+            match &action {
+                WindowHostAction::Create { id, .. } => {
+                    let id = *id;
+                    match action.realize(event_loop) {
+                        Ok(Some(window)) => {
+                            match self.window_slot.host_turn(|state, _ctx| state.stage_created_window(id, window)) {
+                                Some(Ok(created)) => {
+                                    self.apply_window_effects(event_loop, vec![created], &mut dirty);
+                                }
+                                Some(Err(error)) => {
+                                    let effects = self
+                                        .window_slot
+                                        .host_turn(|state, _ctx| state.fail_window_creation(id, error))
+                                        .unwrap_or_default();
+                                    self.apply_window_effects(event_loop, effects, &mut dirty);
+                                }
+                                None => {}
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let effects = self
+                                .window_slot
+                                .host_turn(|state, _ctx| state.fail_window_creation(id, error))
+                                .unwrap_or_default();
+                            self.apply_window_effects(event_loop, effects, &mut dirty);
+                        }
+                    }
+                }
+                WindowHostAction::Close { id } => {
+                    self.apply_window_effects(event_loop, vec![WindowHostEffect::Closing { id: *id }], &mut dirty);
+                    let effects = self
+                        .window_slot
+                        .host_turn(|state, ctx| state.finish_window_close(*id, ctx))
+                        .unwrap_or_default();
+                    self.apply_window_effects(event_loop, effects, &mut dirty);
+                }
+            }
+        }
+
+        self.render_dirty_windows(event_loop, &dirty);
+    }
+
+    fn apply_window_effects(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        effects: Vec<WindowHostEffect>,
+        dirty: &mut BTreeSet<EngineWindowId>,
+    ) {
+        let mut effects = VecDeque::from(effects);
+        while let Some(effect) = effects.pop_front() {
+            match effect {
+                WindowHostEffect::Created { id, window } => {
+                    let attachment = self.attach_compatibility_window(id, window);
+                    let follow_up = self
+                        .window_slot
+                        .host_turn(|state, ctx| state.finish_window_attachment(id, attachment, ctx))
+                        .unwrap_or_default();
+                    effects.extend(follow_up);
+                }
+                WindowHostEffect::Closing { .. } => {
+                    // The current render actor has no target-keyed detach
+                    // ingress. #3990 replaces this no-op with an explicit
+                    // detach before manager removal.
+                }
+                WindowHostEffect::Dirty { id } => {
+                    dirty.insert(id);
+                }
+                WindowHostEffect::Occluded { id, occluded } => {
+                    self.set_occluded(id, occluded, event_loop);
+                }
+                WindowHostEffect::LastWindowClosed => {
+                    self.request_quit();
+                    if let Some(id) = self.window_id {
+                        dirty.insert(id);
+                    } else {
+                        // A boot-window creation/attachment failure leaves no
+                        // render target that could advance lifecycle to its
+                        // terminal. Exit instead of parking before frame one.
+                        event_loop.exit();
+                    }
+                }
+            }
+        }
+    }
+
+    fn attach_compatibility_window(&mut self, id: EngineWindowId, window: Arc<Window>) -> Result<(), String> {
+        if self.window.is_some() {
+            // Until #3990, additional windows participate in manager identity,
+            // controls, and input routing but share no render target.
+            return Ok(());
+        }
+        if let Some(existing) = self.window_cell.get() {
+            if !Arc::ptr_eq(existing, &window) {
+                return Err("compatibility WindowCell already contains a different window".to_owned());
+            }
+        } else {
+            let _ = self.window_cell.set(Arc::clone(&window));
+        }
+        self.window = Some(window);
+        self.window_id = Some(id);
+        self.started.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    fn render_dirty_windows(&mut self, event_loop: &ActiveEventLoop, dirty: &BTreeSet<EngineWindowId>) {
+        if self.window_id.is_none_or(|id| !dirty.contains(&id)) || (self.occluded && !self.quit_requested) {
+            return;
+        }
+
+        let reached_terminal = self.run_frame_advance();
+        self.send_render_and_drain(&Frame { replay_cache_when_idle: false });
+        self.frame += 1;
+        if reached_terminal {
+            event_loop.exit();
+            return;
+        }
+        self.park_after_drain(event_loop);
+    }
+}
+
+impl ApplicationHandler<UserEvent> for DesktopWindowCompatibilityBridge {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let (actions, effects) = self.take_window_work();
+        self.apply_window_work(event_loop, actions, effects);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         // `WindowMail` is the generic "a pumped slot took mail — turn the
         // loop" wake (ADR-0161 generalized the ADR-0160 window rule to every
         // pumped slot): both the `aether.window` and `aether.render` slot
@@ -497,9 +573,9 @@ impl ApplicationHandler<UserEvent> for App {
         // shutdown-flag poll.
         match event {
             UserEvent::WindowMail => {
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                let (actions, effects) = self.take_window_work();
+                self.apply_window_work(event_loop, actions, effects);
+                self.render_slot.drain_available();
             }
             UserEvent::Quit => {
                 // iamacoffeepot/aether#1489: the signal-watcher thread
@@ -514,198 +590,16 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    // winit's `window_event` dispatches one arm per `WindowEvent`
-    // variant; we route every variant through this single fn so the
-    // event-to-engine bridging lives in one place.
-    #[allow(clippy::too_many_lines)]
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WinitWindowId, event: WindowEvent) {
-        match event {
-            // iamacoffeepot/aether#1489: route OS-close through `Quit`
-            // mail rather than tearing winit down directly, so the
-            // lifecycle drains the in-flight frame and broadcasts
-            // `Shutdown` before the loop exits. `request_quit` pushes the
-            // `Quit` and pokes the redraw; the advance loop below drives
-            // to the terminal and calls `event_loop.exit()` there.
-            WindowEvent::CloseRequested => self.request_quit(),
-            WindowEvent::Resized(size) => {
-                // ADR-0161 §Decision 3: the surface + offscreen reconfigure is
-                // actor-side now (the pumped runtime reads the window's size and
-                // reconfigures on its next `on_frame`), so the driver only
-                // tracks occlusion and republishes the size for `WindowSize`
-                // subscribers (the camera's aspect tracking).
-                self.set_occluded(size.width == 0 || size.height == 0, event_loop);
-                if size.width != 0 && size.height != 0 {
-                    self.publish_window_size(size.width, size.height);
-                }
-            }
-            WindowEvent::Occluded(occluded) => {
-                self.set_occluded(occluded, event_loop);
-            }
-            WindowEvent::RedrawRequested => {
-                // iamacoffeepot/aether#1489: a quit-driven frame must run even
-                // when occluded so the lifecycle reaches `Shutdown`; the
-                // `!self.quit_requested` clause bypasses the power-save
-                // early-return for the shutdown frame. Capture no longer
-                // enters here — it is mail-driven inside the pumped render
-                // actor (ADR-0161 §Decision 4), so occlusion just power-saves.
-                if self.occluded && !self.quit_requested {
-                    return;
-                }
-                // Publish the live window size once per frame so `WindowSize`
-                // subscribers (the camera's aspect tracking) read it during
-                // the Tick stage.
-                if let Some(window) = &self.window {
-                    let size = window.inner_size();
-                    if size.width != 0 && size.height != 0 {
-                        self.publish_window_size(size.width, size.height);
-                    }
-                }
-                // ADR-0161 §Decision 1: `RedrawRequested` collapses to advance
-                // loop → `aether.render.frame` mail → drain. The advance loop
-                // pumps the render slot mid-wait so draw mail on the advance
-                // chain dispatches; once it settles, one `Frame` request
-                // records the accumulated geometry and presents (and resolves
-                // any ready capture). `replay_cache_when_idle: false` — desktop
-                // always commits current producer state (issue 847's
-                // replay-cache mode is the harness path).
-                let reached_terminal = self.run_frame_advance();
-                self.send_render_and_drain(&Frame { replay_cache_when_idle: false });
-                self.frame += 1;
-                // iamacoffeepot/aether#1489: the lifecycle reached its
-                // `Shutdown` terminal and broadcast it (the advance loop gates
-                // on settlement, so every `Shutdown` subscriber's cleanup chain
-                // has drained). The final frame is now presented — exit winit.
-                // `run_app` returns and the chassis runs each passive's
-                // teardown + per-actor `unwire` in reverse boot order,
-                // including the render slot's. Don't park on this path.
-                if reached_terminal {
-                    event_loop.exit();
-                    return;
-                }
-                self.park_after_drain(event_loop);
-            }
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
-                // Text path: publish the layout-resolved characters from
-                // `KeyEvent.text` when no IME composition is active. Repeats
-                // are forwarded here (holding a key types a run of
-                // characters), unlike the named-key edge path below.
-                if key_event.state == ElementState::Pressed
-                    && let Some(text) = &key_event.text
-                    && let Some(committed) = text_input_gate(&mut self.composing, TextSource::KeyText(text.to_string()))
-                {
-                    let payload = TextInput { window: BOOT_WINDOW_ID, text: committed }.encode_into_bytes();
-                    self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
-                }
-                // Named-key edge path: `Key` / `KeyRelease` keep their
-                // no-repeat contract and carry the boot window identity.
-                if !key_event.repeat
-                    && let Some(code) = (match key_event.physical_key {
-                        PhysicalKey::Code(k) => map_winit_keycode(k),
-                        PhysicalKey::Unidentified(_) => None,
-                    })
-                {
-                    match key_event.state {
-                        ElementState::Pressed => {
-                            self.push_chassis_root(
-                                self.input_mailbox,
-                                self.kind_key,
-                                Key { window: BOOT_WINDOW_ID, code }.encode_into_bytes(),
-                                1,
-                            );
-                        }
-                        ElementState::Released => {
-                            self.push_chassis_root(
-                                self.input_mailbox,
-                                self.kind_key_release,
-                                KeyRelease { window: BOOT_WINDOW_ID, code }.encode_into_bytes(),
-                                1,
-                            );
-                        }
-                    }
-                }
-            }
-            WindowEvent::Ime(ime) => match ime {
-                Ime::Preedit(text, cursor) => {
-                    text_input_gate(&mut self.composing, TextSource::Preedit { active: !text.is_empty() });
-                    // winit reports the cursor span as byte offsets into
-                    // the preedit string (usize); the wire kind carries
-                    // u32. A preedit is a handful of characters, far inside
-                    // u32.
-                    #[allow(clippy::cast_possible_truncation)]
-                    let (cursor_begin, cursor_end) = match cursor {
-                        Some((begin, end)) => (Some(begin as u32), Some(end as u32)),
-                        None => (None, None),
-                    };
-                    let payload =
-                        ImePreedit { window: BOOT_WINDOW_ID, text, cursor_begin, cursor_end }.encode_into_bytes();
-                    self.push_chassis_root(self.input_mailbox, self.kind_ime_preedit, payload, 1);
-                }
-                Ime::Commit(text) => {
-                    if let Some(committed) = text_input_gate(&mut self.composing, TextSource::Commit(text)) {
-                        let payload = TextInput { window: BOOT_WINDOW_ID, text: committed }.encode_into_bytes();
-                        self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
-                    }
-                }
-                Ime::Disabled => {
-                    text_input_gate(&mut self.composing, TextSource::Disabled);
-                }
-                Ime::Enabled => {}
-            },
-            WindowEvent::ModifiersChanged(modifiers) => {
-                let state = modifiers.state();
-                let payload = Modifiers {
-                    window: BOOT_WINDOW_ID,
-                    shift: state.shift_key(),
-                    ctrl: state.control_key(),
-                    alt: state.alt_key(),
-                    meta: state.super_key(),
-                }
-                .encode_into_bytes();
-                self.push_chassis_root(self.input_mailbox, self.kind_modifiers, payload, 1);
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                // winit's `Other(n)` buttons map to no engine constant and
-                // produce no mail, mirroring the unmapped-key contract.
-                if let Some(button) = map_mouse_button(button) {
-                    let (x, y) = self.last_cursor;
-                    match state {
-                        ElementState::Pressed => {
-                            self.push_chassis_root(
-                                self.input_mailbox,
-                                self.kind_mouse_button,
-                                MouseButton { window: BOOT_WINDOW_ID, button, x, y }.encode_into_bytes(),
-                                1,
-                            );
-                        }
-                        ElementState::Released => {
-                            self.push_chassis_root(
-                                self.input_mailbox,
-                                self.kind_mouse_button_release,
-                                MouseButtonRelease { window: BOOT_WINDOW_ID, button, x, y }.encode_into_bytes(),
-                                1,
-                            );
-                        }
-                    }
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let (delta_x, delta_y) = normalize_wheel(delta);
-                let (x, y) = self.last_cursor;
-                let payload = MouseWheel { window: BOOT_WINDOW_ID, delta_x, delta_y, x, y }.encode_into_bytes();
-                self.push_chassis_root(self.input_mailbox, self.kind_mouse_wheel, payload, 1);
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                // winit reports cursor position as f64; the input wire
-                // kind carries f32. Realistic window sizes (< 2^20 px)
-                // stay well inside f32 mantissa.
-                #[allow(clippy::cast_possible_truncation)]
-                let (x, y) = (position.x as f32, position.y as f32);
-                self.last_cursor = (x, y);
-                let payload = MouseMove { window: BOOT_WINDOW_ID, x, y }.encode_into_bytes();
-                self.push_chassis_root(self.input_mailbox, self.kind_mouse_move, payload, 1);
-            }
-            _ => {}
-        }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WinitWindowId, event: WindowEvent) {
+        self.window_slot.drain_available();
+        let (actions, effects) = self
+            .window_slot
+            .host_turn(|state, ctx| {
+                state.window_event(window_id, event, ctx);
+                state.take_host_work()
+            })
+            .unwrap_or_default();
+        self.apply_window_work(event_loop, actions, effects);
     }
 
     /// winit fires this between events. Issue 603 Phase 3 makes the
@@ -713,7 +607,8 @@ impl ApplicationHandler<UserEvent> for App {
     /// drain happens here instead of riding through `EventLoopProxy`
     /// from a separate dispatcher thread.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.window_slot.drain_available();
+        let (actions, effects) = self.take_window_work();
+        self.apply_window_work(event_loop, actions, effects);
         // ADR-0161: drain the pumped render slot here too, so render mail that
         // arrived while the loop was parked — a `capture_frame` on an occluded
         // window (fail-fast), an `Occluded` forward — is serviced even under
@@ -737,7 +632,7 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// ADR-0071 driver capability for the desktop chassis. Owns the
 /// pieces the winit event-loop body needs at construction time, then
-/// `boot()`-builds the App + `DriverRunning` that drives the loop.
+/// `boot()` builds the compatibility bridge plus `DriverRunning`.
 /// `boot()` looks up `RenderCapability` via `DriverCtx::expect`
 /// (booted earlier in the `.with()` chain) and pulls the accumulator
 /// handles out of it.
@@ -763,7 +658,7 @@ pub struct DesktopDriverCapability {
 }
 
 pub struct DesktopDriverRunning {
-    app: App,
+    app: DesktopWindowCompatibilityBridge,
     event_loop: EventLoop<UserEvent>,
     /// `SubstrateBoot` drops at the end of `run()`. The `chassis_builder`
     /// `BootedPassives` (holding audio/io/http/log runnings) drops just
@@ -810,8 +705,8 @@ impl DriverCapability for DesktopDriverCapability {
         members
     }
 
-    // One-shot boot wiring: kind-id lookups, mailbox claims, and the
-    // `App` construction all thread through a single flat sequence;
+    // One-shot boot wiring: mailbox claims and bridge construction thread
+    // through a single flat sequence;
     // splitting would just pass the same dozen fields through a helper.
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
@@ -822,35 +717,18 @@ impl DriverCapability for DesktopDriverCapability {
         // actor owns the surface, accumulators, and pending capture as plain
         // state on this thread.
 
-        let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-        let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
-        let kind_key_release = boot.registry.kind_id(KeyRelease::NAME).expect("KeyRelease registered");
-        let kind_mouse_button = boot.registry.kind_id(MouseButton::NAME).expect("MouseButton registered");
-        let kind_mouse_button_release =
-            boot.registry.kind_id(MouseButtonRelease::NAME).expect("MouseButtonRelease registered");
-        let kind_mouse_wheel = boot.registry.kind_id(MouseWheel::NAME).expect("MouseWheel registered");
-        let kind_mouse_move = boot.registry.kind_id(MouseMove::NAME).expect("MouseMove registered");
-        let kind_window_size = boot.registry.kind_id(WindowSize::NAME).expect("WindowSize registered");
-        let kind_text_input = boot.registry.kind_id(TextInput::NAME).expect("TextInput registered");
-        let kind_ime_preedit = boot.registry.kind_id(ImePreedit::NAME).expect("ImePreedit registered");
-        let kind_modifiers = boot.registry.kind_id(Modifiers::NAME).expect("Modifiers registered");
-
         // Issue 603 Phase 3 / ADR-0160 §Decision 3: the desktop driver is the
         // pump host for the `aether.window` actor (`DesktopWindowCapability`).
         // `boot_pumped_actor` recovers the Claim-stage `aether.window`
         // reservation `DesktopDriverCapability::claim` made (ADR-0155 §4 —
         // recovered here at Start rather than re-claiming, since a second
         // claim would collide), builds the pumped slot, runs the actor's
-        // `init` / `wire`, and hands back the claim's wake slot. The actor
-        // mutates the winit `Window` through a one-shot [`WindowCell`] the
-        // `resumed` handler fills post-create; its initial mode mirrors the
-        // boot `AETHER_WINDOW_MODE`. `about_to_wait` drains the slot inline
-        // between frames.
+        // `init` / `wire`, and hands back the claim's wake slot. The manager
+        // owns native window creation, identity, controls, and event routing;
+        // `about_to_wait` drains it inline between frames.
         let window_cell = WindowCell::default();
-        let (window_slot, window_wake_slot) = ctx.boot_pumped_actor::<DesktopWindowCapability>(
-            (),
-            DesktopWindowParams { id: BOOT_WINDOW_ID, window: window_cell.clone(), initial_mode: window.mode.clone() },
-        )?;
+        let (window_slot, window_wake_slot) =
+            ctx.boot_pumped_actor::<DesktopWindowCapability>((), DesktopWindowParams)?;
 
         // iamacoffeepot/aether#1318: install an `EventLoopProxy` wake on the
         // claim's wake slot so window-control mail (`focus` / `set_mode` /
@@ -867,12 +745,10 @@ impl DriverCapability for DesktopDriverCapability {
         }));
 
         // ADR-0161 §Decision 1/3: boot the pumped `aether.render` actor from
-        // the driver's Claim-stage `aether.render` reservation, sharing the one
-        // `WindowCell` the window actor received (one cell, cloned into both
-        // params, filled once by `resumed`) so the render runtime boots wgpu
-        // lazily against the same window. `RenderTuningConfig` (the vertex cap)
-        // and the `assets` root ride through here since render no longer
-        // composes on the pooled `with_actor` path.
+        // the driver's Claim-stage `aether.render` reservation. The one-shot
+        // `WindowCell` is now strictly a compatibility seam between this
+        // bridge and the still-single-target render actor; #3990 replaces it
+        // with explicit attach/detach host ingress.
         let (render_slot, render_wake_slot) = ctx.boot_pumped_actor::<RenderCapability>(
             render_config,
             RenderParams {
@@ -903,8 +779,8 @@ impl DriverCapability for DesktopDriverCapability {
 
         // Chassis route-freezing: the pumped render actor's own id (its
         // NAMESPACE), the recipient for the per-frame `Frame` request and the
-        // `Occluded` forward. ctx-less, no sibling resolver in scope — same
-        // escape hatch the input / lifecycle mailbox ids below use.
+        // `Occluded` forward. ctx-less, no sibling resolver in scope — the
+        // lifecycle route below uses the same escape hatch.
         #[allow(clippy::disallowed_methods)]
         let render_mailbox = mailbox_id_from_name(<RenderCapability as Addressable>::NAMESPACE);
 
@@ -916,7 +792,7 @@ impl DriverCapability for DesktopDriverCapability {
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         // iamacoffeepot/aether#1489: install the SIGINT/SIGTERM →
-        // graceful-shutdown bridge. The flag is shared with `App`
+        // graceful-shutdown bridge. The flag is shared with the compatibility bridge
         // (`about_to_wait` polls it); the watcher sends `UserEvent::Quit`
         // via this proxy to wake a parked loop. Minted here while
         // `event_loop` is still owned by the capability.
@@ -929,34 +805,16 @@ impl DriverCapability for DesktopDriverCapability {
         // each `LifecycleAdvance` and drains the receiver synchronously
         // to gate the next advance (see `recv_lifecycle_advance_next`).
         let lifecycle_reply_claim = ctx.claim_mailbox("aether.lifecycle.advance_reply")?;
-        let _ = kind_tick; // PR 3b retired direct Tick push; the
-        // chassis still resolves the kind id via `boot.registry` for
-        // compatibility but the redraw handler no longer reads it.
 
-        let app = App {
+        let mut app = DesktopWindowCompatibilityBridge {
             queue: Arc::clone(&boot.queue),
-            // Chassis route-freezing: the input cap's own id (its NAMESPACE),
-            // ctx-less, no sibling resolver in scope.
-            #[allow(clippy::disallowed_methods)]
-            input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             lifecycle_mailbox,
             kind_lifecycle_advance,
             lifecycle_reply_inbox: lifecycle_reply_claim.inbox,
             lifecycle_reply_mailbox: lifecycle_reply_claim.id,
-            kind_key,
-            kind_key_release,
-            kind_mouse_button,
-            kind_mouse_button_release,
-            kind_mouse_wheel,
-            kind_mouse_move,
-            kind_window_size,
-            kind_text_input,
-            kind_ime_preedit,
-            kind_modifiers,
-            last_cursor: (0.0, 0.0),
-            composing: false,
             outbound: Arc::clone(&boot.outbound),
             window: None,
+            window_id: None,
             render_slot,
             render_mailbox,
             render_pump_tx,
@@ -973,6 +831,10 @@ impl DriverCapability for DesktopDriverCapability {
             quit_requested: false,
             shutdown,
         };
+        let initial = app.initial_window_spec();
+        let _ = app.window_slot.host_turn(|state, _ctx| {
+            let _ = state.queue_initial_window(initial);
+        });
 
         Ok(DesktopDriverRunning {
             app,
