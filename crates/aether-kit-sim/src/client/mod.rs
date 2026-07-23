@@ -300,7 +300,7 @@ impl WasmActor for PlayerClient {
             return;
         }
         tracing::warn!(
-            target: "aether_kit",
+            target: "aether_kit_sim",
             session = %mail.session_name,
             peer = %mail.peer,
             reason = %mail.reason,
@@ -406,7 +406,7 @@ impl PlayerClient {
     }
 
     fn fail(&mut self, ctx: &mut WasmCtx<'_>, reason: &str) {
-        tracing::warn!(target: "aether_kit", reason, "player client closed");
+        tracing::warn!(target: "aether_kit_sim", reason, "player client closed");
         self.phase = ConnectionPhase::Closed;
         if let Some(session) = &self.session {
             ctx.actor::<TcpCapability>().connect_session_close(&session.name);

@@ -14,18 +14,12 @@
 //!   `aether_kit@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
-//! - [`PlayerClient`] — the outbound player-session and authoritative
-//!   presentation actor, selected by the `aether_kit@aether.kit.client`
-//!   export. Its `aether.kit.client.config` init-config lives in [`client`].
 //! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
 //!   overlay, selected by the `aether_kit@aether.kit.console` export. Its
 //!   config and extension command vocabulary live in [`console`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
-//! - [`TurnSim`] — the deterministic fixed-tick reference simulation,
-//!   selected by the `aether_kit@aether.kit.sim` export. Its tick-native
-//!   intent, trajectory, summary, and catch-up vocabulary lives in [`sim`].
 //! - [`TerrainWorkbench`] — the peer-first terrain annotation assembly,
 //!   selected by the `aether_kit@aether.kit.workbench` export. Its editor
 //!   regions are arbitrated by `EditorShell` and populated with the
@@ -35,8 +29,10 @@
 //! The terrain-authoring stack — the mark / world / terra / mover actors and
 //! their `CellPos` / `WorldPoint` / octimeter position vocabulary — was
 //! extracted to the sibling [`aether-kit-terrain`](aether_kit_terrain) crate
-//! (iamacoffeepot/aether#3951); the sim, client, and workbench systems here
-//! depend on it for that vocabulary.
+//! (iamacoffeepot/aether#3951); the `workbench` system here depends on it for
+//! that vocabulary. The reference game-loop pair — `TurnSim` and
+//! `PlayerClient` — moved to the sibling `aether-kit-sim` crate
+//! (iamacoffeepot/aether#3952).
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
 //! module); the explicit entry type is the bare-load target, and the FFI
@@ -46,20 +42,13 @@
 extern crate alloc;
 
 pub mod camera;
-pub mod client;
 pub mod console;
 pub mod mesh;
-pub mod sim;
 pub mod workbench;
 
-pub use client::{PlayerClient, PlayerClientConfig};
 pub use console::{
     ConsoleCommandInvoked, ConsoleCommandOutput, ConsoleConfig, ConsoleTheme, RegisterConsoleCommand,
     UnregisterConsoleCommand,
-};
-pub use sim::{
-    CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary,
-    TickBundle, TrajectoryEvent, TrajectoryKind, TurnSim,
 };
 pub use workbench::{
     TerrainToolPanel, TerrainViewport, TerrainWorkbench, WorkbenchCamera, WorkbenchConfig, WorkbenchControl,
@@ -75,17 +64,17 @@ pub use workbench::{
 // explicitly named as the default. `console::ConsoleOverlay`
 // is the kit's narrow bare-load target; all other actors stay selector-only by
 // `module@actor` selector, never by list position. The widget set and its
-// `EditorShell` arbiter now live in `aether-kit-widget`, and the terrain stack
-// (mark / world / terra / mover) in `aether-kit-terrain`; kit depends on both
-// as rlibs (so `workbench` can inline-spawn the widgets and reuse the terrain
-// vocabulary), and each is exported from its own cdylib, not here.
+// `EditorShell` arbiter now live in `aether-kit-widget`, the terrain stack
+// (mark / world / terra / mover) in `aether-kit-terrain`, and the reference
+// game-loop pair (`TurnSim` / `PlayerClient`) in `aether-kit-sim`; kit depends
+// on the widget and terrain crates as rlibs (so `workbench` can inline-spawn
+// the widgets and reuse the terrain vocabulary), and each is exported from its
+// own cdylib, not here.
 aether_actor::export!(
     default = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
-    PlayerClient,
     mesh::MeshViewer,
-    TurnSim,
     TerrainToolPanel,
     TerrainViewport,
     TerrainWorkbench

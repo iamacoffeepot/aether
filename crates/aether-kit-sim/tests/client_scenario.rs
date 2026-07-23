@@ -1,4 +1,7 @@
-//! Real-TCP player client scenarios through the shipped `aether-kit` wasm.
+//! Real-TCP player client scenarios through the shipped `aether-kit-sim` wasm.
+//! The camera the first scenario composes stays in `aether-kit`, so that
+//! scenario loads two wasm modules — the camera export from `aether-kit`, the
+//! client export from `aether-kit-sim`.
 
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
@@ -23,7 +26,7 @@ use aether_harness_substrate_capture::visual::{ColorRegionStats, decode_png, tar
 use aether_input::InputCapability;
 use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
 use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
-use aether_kit::{
+use aether_kit_sim::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
     StateSummary, TickBundle,
 };
@@ -239,10 +242,14 @@ fn gateway_listener_port(harness: &mut SubstrateHarness) -> u16 {
 
 #[test]
 fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(camera_wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
+    let Some(client_wasm_path) = require_runtime("aether_kit_sim") else {
+        return;
+    };
+    let camera_wasm = fs::read(camera_wasm_path).expect("read aether-kit wasm");
+    let client_wasm = fs::read(client_wasm_path).expect("read aether-kit-sim wasm");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind controlled loopback peer");
     let server_addr = listener.local_addr().expect("controlled peer address").to_string();
     let session_identity = resolve_embedded("controlled-player-session");
@@ -256,7 +263,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
         .build()
         .expect("boot controlled client SubstrateHarness");
 
-    load_export(&mut harness, &wasm, "aether.kit.camera", CAMERA_NAME, Vec::new());
+    load_export(&mut harness, &camera_wasm, "aether.kit.camera", CAMERA_NAME, Vec::new());
     harness
         .execute(vec![(
             "camera",
@@ -278,13 +285,13 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
         .expect("configure client camera");
     let client_mailbox = load_export(
         &mut harness,
-        &wasm,
+        &client_wasm,
         "aether.kit.client",
         CLIENT_NAME,
         PlayerClientConfig {
             server_addr,
             client_name: "controlled".into(),
-            spawn_cell: aether_kit::CellPosition { cell_x: 0, cell_z: 0 },
+            spawn_cell: aether_kit_sim::CellPosition { cell_x: 0, cell_z: 0 },
             grid_bounds: GridBounds { min_cell_x: -1, max_cell_x: 2, min_cell_z: -1, max_cell_z: 1 },
         }
         .encode_into_bytes(),
@@ -342,10 +349,10 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
 
 #[test]
 fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
-    let Some(wasm_path) = require_wasm("aether_kit") else {
+    let Some(wasm_path) = require_wasm("aether_kit_sim") else {
         return;
     };
-    let wasm = fs::read(wasm_path).expect("read aether-kit wasm");
+    let wasm = fs::read(wasm_path).expect("read aether-kit-sim wasm");
     let sim_mailbox = resolve_embedded(SIM_NAME);
     let mut harness = SubstrateHarness::builder()
         .with_component_host()
@@ -386,7 +393,7 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
         PlayerClientConfig {
             server_addr: format!("{}:{listener_port}", Ipv4Addr::LOCALHOST),
             client_name: "gateway-loop".into(),
-            spawn_cell: aether_kit::CellPosition { cell_x: 1, cell_z: 1 },
+            spawn_cell: aether_kit_sim::CellPosition { cell_x: 1, cell_z: 1 },
             grid_bounds: GridBounds::default(),
         }
         .encode_into_bytes(),
