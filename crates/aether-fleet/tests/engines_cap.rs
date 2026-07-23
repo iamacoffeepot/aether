@@ -283,21 +283,25 @@ mod tests {
         let dir = env::temp_dir().join(format!("aether-engcap-badspawn-{}-{nanos}", process::id()));
         fs::create_dir_all(&dir).expect("test setup: bad-spawn temp dir");
 
-        // A stand-in chassis bin that ingests cleanly (prints a headless
-        // manifest on `--describe`) but, when forked normally, `exec`s a
-        // sleep instead of binding the RPC port the hub hands it via
-        // `--rpc-port` (ADR-0162 argv injection). The proxy's
-        // dial refuses for the whole (short) connect budget, so the
-        // spawn fails after the substrate forked but never connected —
-        // the post-allocation failure this test pins. `exec` makes the
-        // sleep the direct child so the proxy's SIGKILL reaps it (no
-        // orphan).
+        // A stand-in chassis bin that ingests cleanly (prints a
+        // *conforming* headless manifest on `--describe` — non-empty
+        // caps + config surface, so the upload gate accepts it, #3936)
+        // but, when forked normally, `exec`s a sleep instead of binding
+        // the RPC port the hub hands it via `--rpc-port` (ADR-0162 argv
+        // injection). The proxy's dial refuses for the whole (short)
+        // connect budget, so the spawn fails after the substrate forked
+        // but never connected — the post-allocation failure this test
+        // pins. `exec` makes the sleep the direct child so the proxy's
+        // SIGKILL reaps it (no orphan).
         let stand_in = dir.join("aether-substrate-headless");
         fs::write(
             &stand_in,
             "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
-                 '{\"chassis\":\"headless\",\"caps\":[],\"git_sha\":\"deadbee\",\
-                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; exit 0; fi\n\
+                 '{\"chassis\":\"headless\",\"caps\":[\"aether.rpc.server\"],\
+                 \"git_sha\":\"deadbee\",\"profile\":\"debug\",\
+                 \"target\":\"x86_64-unknown-linux-gnu\",\
+                 \"env_keys\":[\"AETHER_RPC_PORT\"],\"argv_flags\":[\"rpc-port\"]}'; \
+                 exit 0; fi\n\
                  exec sleep 30\n",
         )
         .expect("test setup: write bad-spawn stand-in");

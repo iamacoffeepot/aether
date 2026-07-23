@@ -310,14 +310,18 @@ mod tests {
         let dir = env::temp_dir().join(format!("aether-binstore-bootstrap-{}-{nanos}", process::id()));
         fs::create_dir_all(&dir).expect("test setup: bootstrap temp dir");
 
-        // A stand-in chassis bin: on `--describe` it prints a headless
-        // manifest; its own bytes are what the store content-addresses.
+        // A stand-in chassis bin: on `--describe` it prints a conforming
+        // headless manifest (non-empty caps + config surface, so the
+        // upload gate accepts it, #3936); its own bytes are what the
+        // store content-addresses.
         let stand_in = dir.join("aether-substrate-headless");
         fs::write(
             &stand_in,
             "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \
-                 '{\"chassis\":\"headless\",\"caps\":[\"aether.fs\"],\"git_sha\":\"deadbee\",\
-                 \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; fi\n",
+                 '{\"chassis\":\"headless\",\"caps\":[\"aether.fs\",\"aether.rpc.server\"],\
+                 \"git_sha\":\"deadbee\",\"profile\":\"debug\",\
+                 \"target\":\"x86_64-unknown-linux-gnu\",\
+                 \"env_keys\":[\"AETHER_RPC_PORT\"],\"argv_flags\":[\"rpc-port\"]}'; fi\n",
         )
         .expect("test setup: write stand-in");
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("test setup: chmod stand-in");
