@@ -38,7 +38,6 @@ members = [
     "crates/aether-harness-perf",
     "crates/aether-clipboard",
     "crates/aether-window",
-    "crates/aether-input",
     "crates/aether-lifecycle",
     "crates/aether-tcp",
     "crates/aether-game",

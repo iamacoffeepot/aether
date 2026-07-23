@@ -78,7 +78,6 @@ fn main() -> anyhow::Result<()> {
         // per scenario instead.
         component_host: true,
         compose: vec![
-            Box::new(|b| b.with_actor::<aether_input::InputCapability>(())),
             Box::new(|b| b.with_actor::<aether_tcp::TcpCapability>(())),
             Box::new(|b| b.with_actor::<aether_text::TextCapability>(())),
             Box::new(|b| {

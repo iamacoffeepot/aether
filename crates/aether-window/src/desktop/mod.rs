@@ -13,9 +13,8 @@ mod input;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{HandlesKind, Manual, actor};
+use aether_actor::{Manual, actor};
 use aether_data::Kind;
-use aether_input::InputCapability;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
@@ -205,7 +204,7 @@ impl DesktopWindowCapabilityState {
                 }
                 self.publish(ctx, id, &WindowOpened { window: info.clone() });
                 if info.width != 0 && info.height != 0 {
-                    self.publish_input(ctx, id, &WindowSize { window: id, width: info.width, height: info.height });
+                    self.publish(ctx, id, &WindowSize { window: id, width: info.width, height: info.height });
                 }
                 Vec::new()
             }
@@ -255,9 +254,8 @@ impl DesktopWindowCapabilityState {
         Vec::new()
     }
 
-    /// Translate one native window event and update manager state. Every
-    /// typed publication goes both to selector-aware direct subscribers and,
-    /// temporarily, to `aether.input` for unmigrated consumers.
+    /// Translate one native window event and publish typed input directly to
+    /// selector-aware subscribers.
     #[allow(clippy::too_many_lines)]
     pub fn window_event(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_>) {
         let Some(id) = self.winit_windows.get(&winit_id).copied() else {
@@ -286,7 +284,7 @@ impl DesktopWindowCapabilityState {
                     self.pending_host_effects.push(WindowHostEffect::Occluded { id, occluded });
                 }
                 if size.width != 0 && size.height != 0 {
-                    self.publish_input(ctx, id, &WindowSize { window: id, width: size.width, height: size.height });
+                    self.publish(ctx, id, &WindowSize { window: id, width: size.width, height: size.height });
                     if let Some(window) = self.native_windows.get(&id) {
                         window.request_redraw();
                     }
@@ -313,7 +311,7 @@ impl DesktopWindowCapabilityState {
                         state.height = size.height;
                     }
                     if size.width != 0 && size.height != 0 {
-                        self.publish_input(ctx, id, &WindowSize { window: id, width: size.width, height: size.height });
+                        self.publish(ctx, id, &WindowSize { window: id, width: size.width, height: size.height });
                     }
                 }
                 self.pending_host_effects.push(WindowHostEffect::Dirty { id });
@@ -329,7 +327,7 @@ impl DesktopWindowCapabilityState {
                     None
                 };
                 if let Some(text) = committed {
-                    self.publish_input(ctx, id, &TextInput { window: id, text });
+                    self.publish(ctx, id, &TextInput { window: id, text });
                 }
                 if !event.repeat
                     && let Some(code) = match event.physical_key {
@@ -338,8 +336,8 @@ impl DesktopWindowCapabilityState {
                     }
                 {
                     match event.state {
-                        ElementState::Pressed => self.publish_input(ctx, id, &Key { window: id, code }),
-                        ElementState::Released => self.publish_input(ctx, id, &KeyRelease { window: id, code }),
+                        ElementState::Pressed => self.publish(ctx, id, &Key { window: id, code }),
+                        ElementState::Released => self.publish(ctx, id, &KeyRelease { window: id, code }),
                     }
                 }
             }
@@ -349,7 +347,7 @@ impl DesktopWindowCapabilityState {
                         text_input_gate(&mut state.composing, TextSource::Preedit { active: !text.is_empty() });
                     }
                     let (cursor_begin, cursor_end) = ime_cursor_span(cursor);
-                    self.publish_input(ctx, id, &ImePreedit { window: id, text, cursor_begin, cursor_end });
+                    self.publish(ctx, id, &ImePreedit { window: id, text, cursor_begin, cursor_end });
                 }
                 Ime::Commit(text) => {
                     let committed = self
@@ -357,7 +355,7 @@ impl DesktopWindowCapabilityState {
                         .get_mut(&id)
                         .and_then(|state| text_input_gate(&mut state.composing, TextSource::Commit(text)));
                     if let Some(text) = committed {
-                        self.publish_input(ctx, id, &TextInput { window: id, text });
+                        self.publish(ctx, id, &TextInput { window: id, text });
                     }
                 }
                 Ime::Disabled => {
@@ -379,17 +377,17 @@ impl DesktopWindowCapabilityState {
                 if let Some(window) = self.windows.get_mut(&id) {
                     window.modifiers = modifiers;
                 }
-                self.publish_input(ctx, id, &modifiers);
+                self.publish(ctx, id, &modifiers);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(button) = map_mouse_button(button) {
                     let (x, y) = self.windows.get(&id).map_or((0.0, 0.0), |window| window.cursor);
                     match state {
                         ElementState::Pressed => {
-                            self.publish_input(ctx, id, &MouseButton { window: id, button, x, y });
+                            self.publish(ctx, id, &MouseButton { window: id, button, x, y });
                         }
                         ElementState::Released => {
-                            self.publish_input(ctx, id, &MouseButtonRelease { window: id, button, x, y });
+                            self.publish(ctx, id, &MouseButtonRelease { window: id, button, x, y });
                         }
                     }
                 }
@@ -397,7 +395,7 @@ impl DesktopWindowCapabilityState {
             WindowEvent::MouseWheel { delta, .. } => {
                 let (delta_x, delta_y) = normalize_wheel(delta);
                 let (x, y) = self.windows.get(&id).map_or((0.0, 0.0), |window| window.cursor);
-                self.publish_input(ctx, id, &MouseWheel { window: id, delta_x, delta_y, x, y });
+                self.publish(ctx, id, &MouseWheel { window: id, delta_x, delta_y, x, y });
             }
             WindowEvent::CursorMoved { position, .. } => {
                 #[allow(clippy::cast_possible_truncation)]
@@ -405,7 +403,7 @@ impl DesktopWindowCapabilityState {
                 if let Some(state) = self.windows.get_mut(&id) {
                     state.cursor = (x, y);
                 }
-                self.publish_input(ctx, id, &MouseMove { window: id, x, y });
+                self.publish(ctx, id, &MouseMove { window: id, x, y });
             }
             _ => {}
         }
@@ -489,14 +487,6 @@ impl DesktopWindowCapabilityState {
 
     fn publish<K: Kind>(&self, ctx: &mut NativeCtx<'_>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
-    }
-
-    fn publish_input<K: Kind>(&self, ctx: &mut NativeCtx<'_>, window: WindowId, event: &K)
-    where
-        InputCapability: HandlesKind<K>,
-    {
-        self.publish(ctx, window, event);
-        ctx.actor::<InputCapability>().send(event);
     }
 }
 

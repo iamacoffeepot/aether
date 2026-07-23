@@ -1,6 +1,6 @@
 //! Shared `Builder` boot fragments for the desktop and headless
 //! chassis. Both `Chassis::build` impls pre-extraction wired the same
-//! 10-cap base (handle, log, trace, input, component-host, fs, http,
+//! 9-cap base (handle, log, trace, component-host, fs, http,
 //! tcp + the aborter + worker count) and the same optional RPC
 //! server tail, with only their renderer + window stack differing.
 //! The duplicate-code check flagged the parallel chains as duplicated code; this module
@@ -23,7 +23,6 @@ use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_fs::{FsCapability, NamespaceRoots};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayParams};
 use aether_http::HttpCapability;
-use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
 use aether_kinds::{Shutdown, Tick};
 use aether_lifecycle::{LifecycleGraphData, LifecycleParams};
@@ -969,7 +968,6 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
         // `AETHER_BOOT_MANIFEST`. Fuses its value install (`with_workers`) with
         // its aggregate-membership declaration in one call.
         .with_chassis_config_member(&boot.chassis_boot)
-        .with_actor::<InputCapability>(())
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
         // Programmatic: the fs cap uses the exact roots resolved chassis-side.
         .with_actor_configured::<FsCapability>((), boot.namespace_roots)
