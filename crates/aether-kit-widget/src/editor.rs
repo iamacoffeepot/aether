@@ -50,7 +50,7 @@ impl WasmActor for EditorShell {
 
     /// Subscribe only raw interactive input. The shell has no lifecycle,
     /// render, or window-size role.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let input = ctx.actor::<InputCapability>();
         input.subscribe::<MouseButton>();
         input.subscribe::<MouseButtonRelease>();

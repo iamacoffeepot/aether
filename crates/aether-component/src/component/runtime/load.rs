@@ -14,6 +14,7 @@ use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, LoadResu
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{NativeCtx, spawn::Subname};
+use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
 use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::helpers::register_or_match_all;
@@ -101,7 +102,7 @@ impl ComponentHostCapabilityState {
             };
         }
 
-        let (capabilities, type_tag, selected_namespace): (ComponentCapabilities, Option<u64>, Option<String>) =
+        let (mut capabilities, type_tag, selected_namespace): (ComponentCapabilities, Option<u64>, Option<String>) =
             if let Some(requested) = &payload.export {
                 let Some(group) = actors.iter().find(|a| a.namespace.as_deref() == Some(requested.as_str())) else {
                     let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
@@ -145,6 +146,19 @@ impl ComponentHostCapabilityState {
                     default_actor.and_then(|a| a.namespace.clone()),
                 )
             };
+
+        // 2c. ADR-0163 §3: index the module's `aether.asset.*` custom
+        // sections and attach the catalog (name / length / sha256 per
+        // asset) so `describe_component` and `LoadResult` report what the
+        // bundle carries without executing it. A module with no asset
+        // sections indexes to an empty catalog; a malformed one (duplicate
+        // or empty asset path) fails the load loudly, the same fail-at-load
+        // stance the kinds parse takes above. Payload access itself is the
+        // separate load-window surface, not this metadata.
+        match asset_manifest::read_assets_from_bytes(&payload.wasm) {
+            Ok(records) => capabilities.assets = records.into_iter().map(|record| record.info).collect(),
+            Err(error) => return LoadResult::Err { error },
+        }
 
         // 3. Compile module.
         let module = match Module::new(&self.engine, &payload.wasm) {

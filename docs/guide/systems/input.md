@@ -138,7 +138,7 @@ with mail allowed. Address the cap by type and name the stream as a type
 parameter — the cap subscribes the calling actor:
 
 ```rust
-fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let input = ctx.actor::<InputCapability>();
     input.subscribe::<Key>();
     input.subscribe::<WindowSize>();

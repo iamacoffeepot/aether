@@ -56,7 +56,9 @@ pub mod raw;
 // Re-exports of `Wasm*` types — the `Wasm` prefix is deliberate (native/wasm split);
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
-pub use ctx::{ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx};
+pub use ctx::{
+    ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
+};
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::WasmActorMailbox;
 

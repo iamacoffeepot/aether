@@ -82,7 +82,7 @@ impl WasmActor for TurnSim {
         })
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let lifecycle = ctx.actor::<LifecycleCapability>();
         lifecycle.subscribe::<Tick>();
         lifecycle.subscribe::<Render>();

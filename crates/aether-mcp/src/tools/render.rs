@@ -30,6 +30,10 @@ pub(super) fn project_capabilities(caps: &ComponentCapabilities, full: bool) -> 
             .map(|f| FallbackCapability { doc: f.doc.as_deref().map(first_doc_line).map(str::to_owned) }),
         doc: caps.doc.as_deref().map(first_doc_line).map(str::to_owned),
         config: caps.config.clone(),
+        // ADR-0163 §3: the asset catalog is name/len/sha256 metadata with
+        // no rustdoc to summarize, so it passes through both the full and
+        // projected views unchanged.
+        assets: caps.assets.clone(),
     }
 }
 

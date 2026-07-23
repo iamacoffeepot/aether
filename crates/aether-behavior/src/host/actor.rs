@@ -104,7 +104,7 @@ impl WasmActor for BehaviorHost {
     /// Genuine first attach only (reload runs `init` + `on_rehydrate`, not
     /// `wire`): spawn the wrapped child by tag, kick an `FsRef` boot fetch,
     /// prime the widget with a re-emit request, and offer the ATTACH sentinel.
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         match ctx.spawn_inline_child_by_tag(
             ActorTypeTag(self.config.child.type_tag),
             Subname::Named(&self.config.child.subname),

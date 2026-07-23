@@ -483,7 +483,7 @@ impl WasmActor for TerrainToolPanel {
         })
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         if !self.config.settings.font_path.is_empty() {
             ctx.actor::<TextCapability>().send(&LoadFont {

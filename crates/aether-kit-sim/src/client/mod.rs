@@ -221,7 +221,7 @@ impl WasmActor for PlayerClient {
         })
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let input = ctx.actor::<InputCapability>();
         input.subscribe::<Key>();
         input.subscribe::<KeyRelease>();

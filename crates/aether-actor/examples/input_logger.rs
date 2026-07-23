@@ -36,7 +36,7 @@ impl WasmActor for InputLogger {
         Ok(InputLogger)
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let me = ctx.mailbox_id();
         let input = ctx.actor::<InputCapability>();
         for kind in [Key::ID, MouseMove::ID, MouseButton::ID] {

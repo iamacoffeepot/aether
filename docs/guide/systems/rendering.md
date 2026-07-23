@@ -139,7 +139,7 @@ Both are frame-lifecycle stages, subscribed on `aether.lifecycle` from the `wire
 hook:
 
 ```rust
-fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let lifecycle = ctx.actor::<LifecycleCapability>();
     lifecycle.subscribe::<Tick>();
     lifecycle.subscribe::<Render>();

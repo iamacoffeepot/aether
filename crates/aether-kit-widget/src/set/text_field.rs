@@ -125,7 +125,7 @@ impl WasmActor for TextFieldWidget {
 
     /// Kick off the font-metrics request for the initial theme font (inline
     /// children now run `wire`).
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         self.pump_font_metrics(ctx);
     }
 

@@ -343,7 +343,7 @@ impl WasmActor for TextAreaWidget {
         Ok(area)
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         self.pump_font_metrics(ctx);
     }
 

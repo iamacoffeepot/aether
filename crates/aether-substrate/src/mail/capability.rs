@@ -176,6 +176,7 @@ mod tests {
             fallback: fallback.then_some(FallbackCapability { doc: None }),
             doc: None,
             config: None,
+            assets: Vec::new(),
         }
     }
 

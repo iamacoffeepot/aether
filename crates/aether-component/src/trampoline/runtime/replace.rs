@@ -6,6 +6,7 @@ use aether_actor::Local as _;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::native::spawn::Subname;
+use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
@@ -142,10 +143,19 @@ impl WasmTrampolineState {
         // instantiates plus the capability group to advertise —
         // export-named, or the trampoline's current hosted type for a
         // bare replace. See [`Self::resolve_replace_target`].
-        let (capabilities, effective_tag) = match self.resolve_replace_target(payload.export.as_deref(), &actors) {
+        let (mut capabilities, effective_tag) = match self.resolve_replace_target(payload.export.as_deref(), &actors) {
             Ok(resolved) => resolved,
             Err(error) => return ReplaceResult::Err { error },
         };
+
+        // ADR-0163 §3: re-index the replacement module's asset catalog so
+        // the post-swap `describe_component` / `ReplaceResult` report the
+        // new bundle's assets. A malformed asset section fails the replace
+        // loudly, before the swap runs.
+        match asset_manifest::read_assets_from_bytes(&payload.wasm) {
+            Ok(records) => capabilities.assets = records.into_iter().map(|record| record.info).collect(),
+            Err(error) => return ReplaceResult::Err { error },
+        }
 
         // Run unwire then on_dehydrate on the old instance and lift
         // any saved-state bundle. If the trampoline is currently

@@ -420,7 +420,7 @@ impl WasmActor for ConsoleOverlay {
         })
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         let input = ctx.actor::<InputCapability>();
         if self.config.owns_input {

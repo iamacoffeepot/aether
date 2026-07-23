@@ -134,10 +134,13 @@ frame, the other is everything that interrupts it.
 **Subscribe a stage in `wire`.** `init` can't send mail (its context is
 resolver-only), so a stage subscription goes in the `wire` hook, which runs
 post-init with mail allowed — the same site as an [input](input.md) subscribe,
-addressing a different cap:
+addressing a different cap. `wire` receives a `WireCtx`, the window-bearing
+context that also serves the assets a component ships in
+`aether.asset.<path>` sections (ADR-0163); it `Deref`s to `WasmCtx`, so every
+send and subscribe verb reads the same as in a handler:
 
 ```rust
-fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let lifecycle = ctx.actor::<LifecycleCapability>();
     lifecycle.subscribe::<Tick>();
     lifecycle.subscribe::<Render>();

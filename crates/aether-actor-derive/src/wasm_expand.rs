@@ -452,13 +452,19 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
     let (has_wire, has_unwire) = rename_lifecycle_hooks(&mut boot_hooks);
+    // ADR-0163 §3: `wire` receives the window-bearing `WireCtx`, not a bare
+    // `WasmCtx`, so an author can read assets in `wire` but not from a
+    // handler (which is handed a `WasmCtx`). The forwarder wraps the
+    // `WasmCtx` the lifecycle call builds; `WireCtx` `Deref`s to it, so the
+    // user's `wire` body reaches every send / subscribe verb unchanged.
     let wire_forward = if has_wire {
         quote! {
             fn wire(
                 __aether_state: &mut Self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
             ) {
-                #self_ty::__aether_wire(__aether_state, __aether_ctx);
+                let mut __aether_wire_ctx = ::aether_actor::WireCtx::__new(__aether_ctx);
+                #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx);
             }
         }
     } else {
