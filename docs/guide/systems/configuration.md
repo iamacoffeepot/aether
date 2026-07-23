@@ -33,14 +33,16 @@ default), **discovery** (one listing of every knob, its default, and what it
 does), and no **duplicated** parsing across subsystems.
 
 The second reason is per-spawn configuration. Configuration enters a process
-once, at startup, and a substrate inherits its environment from the hub that
-forked it — the hub from the tunnel, the tunnel from the launching shell.
-Environment values are therefore **fleet-global**: every engine the hub forks
-sees the same ones, with no way to enable a capability on one substrate and
-disable it on another. Per-spawn arguments are what let one engine differ from
-the rest — they ride the spawn call to a single substrate and layer above the
-shared environment — which is what the "substrate as a general application host"
-direction needs.
+once, at startup, and each channel addresses one audience (ADR-0162).
+Environment variables configure the process a person launches directly — the
+hub at a shell — and stop there: the hub and tunnel construct a forked child's
+environment rather than handing down their own, clearing `AETHER_*` entirely
+and copying only a shared allowlist of platform keys (locale, proxy, GPU and
+audio driver families, `PATH` / `HOME`, and the like). Exporting an aether knob
+on the hub therefore does not reach the substrates it forks. Per-spawn arguments
+are what configure one engine differently from the rest — they ride the spawn
+call to a single substrate as argv, the addressed machine channel — which is
+what the "substrate as a general application host" direction needs.
 
 ## The model: layered sources, one struct per subsystem
 
@@ -91,12 +93,14 @@ when you're unsure what a build will do with a given variable.
 
 Over MCP there are three ways to set configuration, from coarsest to finest:
 
-- **The environment** is the fleet-wide layer. Use `--print-config`, the owning
+- **The environment** configures the process you launch directly — the hub
+  itself, or a chassis you run at a shell. Use `--print-config`, the owning
   config struct, and the active surface contract for exact knobs
   (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`,
-  `AETHER_ACTOR_TRACE_RING_SIZE`, and the rest). It's fleet-wide and fixed at
-  launch: set it before bringing the tunnel up, and every engine the hub forks
-  inherits it.
+  `AETHER_ACTOR_TRACE_RING_SIZE`, and the rest). It's fixed at launch and
+  addressed to that one process: `AETHER_*` is scrubbed from a spawned engine's
+  environment at fork (ADR-0162), so a knob exported on the hub does not reach
+  the substrates it forks — configure those through per-spawn arguments below.
 - **A chassis config file** is the persistent per-deployment layer. Pass
   `--config path/to/chassis.toml` on the chassis command line, or set
   `AETHER_CONFIG_FILE` as a fallback for the file path. The file is sectioned by
@@ -104,13 +108,13 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   `[gemini]`, `[actor]`, `[scheduler]`, `[settlement]`,
   `[chassis]`, plus chassis-specific sections such as `[window]`, `[tick]`, and
   hub `[engine]`. Environment variables still override file values.
-- **Per-spawn arguments** are the per-engine override. `spawn_substrate` forwards
-  its `args` to the substrate as command-line arguments, layered *above* the
-  inherited environment — so you can spawn one engine with `--gemini-api-key …`
-  or `--http-disable` and leave the next one alone. This is what makes two
-  differently-configured substrates from one environment possible. Flag names are
-  mechanical: take the environment key, drop the `AETHER_` prefix, lowercase, and
-  hyphenate (`AETHER_HTTP_TIMEOUT_MS` → `--http-timeout-ms`).
+- **Per-spawn arguments** are how a spawned engine is configured. `spawn_substrate`
+  forwards its `args` to the substrate as command-line arguments — the addressed
+  machine channel (ADR-0162) — so you can spawn one engine with `--gemini-api-key …`
+  or `--http-disable` and leave the next one alone. Argv is where each engine's
+  knobs live, since the hub's environment does not cross into its children. Flag
+  names are mechanical: take the environment key, drop the `AETHER_` prefix,
+  lowercase, and hyphenate (`AETHER_HTTP_TIMEOUT_MS` → `--http-timeout-ms`).
 - **Component config** is finer still: a component declares a typed `Config` and
   receives it at `init`. Because a guest's config crosses the wasm boundary as
   bytes, that type is a **kind** (schema-bearing): `describe_component`

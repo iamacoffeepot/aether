@@ -19,18 +19,16 @@ use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
-use aether_audio::AudioConfig;
 use aether_codec::frame::install_max_frame_size;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_fs::{FsCapability, NamespaceRoots};
 use aether_game::{GameGatewayCapability, GameGatewayConfig, GameGatewayParams};
-use aether_http::{HttpCapability, HttpConfig, HttpServerConfig};
+use aether_http::HttpCapability;
 use aether_input::InputCapability;
 use aether_inventory::InventoryCapability;
 use aether_kinds::{Shutdown, Tick};
-use aether_lifecycle::{LifecycleConfig, LifecycleGraphData, LifecycleParams};
-use aether_process::{ProcessCapability, ProcessConfig, ProcessParams};
-use aether_render::RenderTuningConfig;
+use aether_lifecycle::{LifecycleGraphData, LifecycleParams};
+use aether_process::{ProcessCapability, ProcessParams};
 use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::error::BootError;
@@ -47,8 +45,6 @@ use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
-use crate::tick::TickConfig;
-use crate::window::WindowConfig;
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -448,7 +444,7 @@ pub fn install_frame_size(sources: &mut ConfigSources) -> Result<(), ConfigError
 /// [`chassis_residual_knobs`]. Each chassis resolves it before Compose and
 /// declares its membership via `declare_config_member` (its value applies off
 /// the builder, so it is declaration-only; folded into [`with_common_caps`] and
-/// [`with_hub_fleet_passthrough`]).
+/// the hub compose).
 ///
 /// `env_prefix = "AETHER"` with an explicit `env =` per field pins each
 /// historical key byte-for-byte. Only [`log_filter`](Self::log_filter) is
@@ -637,45 +633,6 @@ impl<C: Chassis> BuilderChassisConfigMember<C> for Builder<C> {
     fn with_chassis_config_member<M: ChassisConfigMember>(self, member: &M) -> Self {
         member.install(self).declare_config_member::<M>()
     }
-}
-
-/// Declare the hub's fleet pass-through config members (ADR-0156 §4) — the
-/// **one documented over-approximation** in the aggregate. The hub composes
-/// only its own thin cap set (trace dispatcher, engines cap, RPC server), but
-/// a hub-spawned substrate inherits the hub's process environment, so the
-/// full fleet cap knobs legitimately sit in the hub's env destined for the
-/// spawned engine. Rather than derive that set from a composition the hub
-/// never runs, the hub declares it explicitly here: every operator-resolvable
-/// cap `Config` a full-stack substrate composes, plus the non-cap members the
-/// hub does not itself compose onto a builder seam. This is deliberately a
-/// superset of what the hub itself wires — the union of every substrate
-/// profile's knobs — so the hub's unknown-`AETHER_*` sweep never flags a fleet
-/// knob an operator legitimately sets for the substrates it spawns.
-///
-/// The three seam-installed non-cap members the hub *does* compose —
-/// `ActorRingConfig`, `SchedulerTuningConfig`, `SettlementConfig` — are not
-/// declared here: the hub installs them through
-/// [`BuilderChassisConfigMember::with_chassis_config_member`] at its own compose
-/// site, which declares their membership as it installs their value.
-/// `ChassisBootConfig` stays (the hub never composes the worker pool or a boot
-/// manifest, so its value is genuinely absent), as do the process-global
-/// `FrameSizeConfig` / `RuntimeConfig`, whose values apply off the builder.
-#[must_use]
-pub fn with_hub_fleet_passthrough<C: Chassis>(builder: Builder<C>) -> Builder<C> {
-    builder
-        .declare_config_member::<HttpConfig>()
-        .declare_config_member::<HttpServerConfig>()
-        .declare_config_member::<ProcessConfig>()
-        .declare_config_member::<AudioConfig>()
-        .declare_config_member::<NamespaceRoots>()
-        .declare_config_member::<RenderTuningConfig>()
-        .declare_config_member::<LifecycleConfig>()
-        .declare_config_member::<GameGatewayConfig>()
-        .declare_config_member::<WindowConfig>()
-        .declare_config_member::<TickConfig>()
-        .declare_config_member::<ChassisBootConfig>()
-        .declare_config_member::<FrameSizeConfig>()
-        .declare_config_member::<RuntimeConfig>()
 }
 
 /// Build the single-stage lifecycle params the headless chassis runs

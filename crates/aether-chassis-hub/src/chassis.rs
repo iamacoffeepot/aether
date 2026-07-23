@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use aether_fleet::FleetServer;
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_rpc::{FrameSizeConfig, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
@@ -26,7 +26,7 @@ use aether_trace::TraceDispatchCapability;
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
     ActorRingConfig, BuilderChassisConfigMember, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
-    hub_residual_knobs, install_frame_size, load_chassis_config, with_hub_fleet_passthrough,
+    hub_residual_knobs, install_frame_size, load_chassis_config,
 };
 use aether_chassis::cli::HubCli;
 use std::thread;
@@ -47,9 +47,12 @@ impl Chassis for HubChassis {
         // the subscriber is installed (env > `[runtime]` file > `info`).
         apply_filter(&env.runtime.log_filter);
         let builder = Self::compose(&boot, env);
-        // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
-        // var, sweeping against the composition-derived known-key set (the
-        // declared fleet pass-through) plus the hub residual hand records.
+        // ADR-0162 (was ADR-0156 §4): warn on any unknown `AETHER_*` env var,
+        // sweeping against the composition-derived known-key set plus the hub
+        // residual hand records. Post-ADR-0162 the hub's env speaks to a single
+        // audience (spawned children no longer inherit it — the fleet fork
+        // scrubs `AETHER_*` and injects addressed config via argv), so the
+        // known-key set is purely composition-derived like every other chassis.
         validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
         let driver = HubServerDriverCapability { boot };
         builder.driver(driver).build()
@@ -79,23 +82,31 @@ impl BootableChassis for HubChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
-        // ADR-0156 §4: declare the hub's fleet pass-through set — the full
-        // fleet knobs a hub-spawned substrate inherits from the hub's env, the
-        // one documented over-approximation in the aggregate. The engines cap
-        // (`FleetConfig`) declares its own member via `with_actor` below.
+        // ADR-0162: the hub's known-key set is purely composition-derived, like
+        // every other chassis — the fleet pass-through union is deleted now that a
+        // hub-spawned substrate no longer inherits the hub's env (the fleet fork
+        // scrubs `AETHER_*` and addresses config to the child via argv). The
+        // engines cap (`FleetConfig`) declares its own member via `with_actor`
+        // below; the two process-global members the hub itself resolves —
+        // `FrameSizeConfig` (pushed into the codec by `install_frame_size`) and
+        // `RuntimeConfig` (the log-filter re-apply + panic-hook knobs) — declare
+        // their aggregate membership here, since their values apply off the
+        // builder rather than through a cap.
         //
-        // #3930: the three non-cap members the hub genuinely composes onto builder
-        // seams — ring capacities / scheduler tuning / settlement teardown — fuse
-        // their value install with their aggregate-membership declaration through
-        // `with_chassis_config_member`, so they leave `with_hub_fleet_passthrough`
-        // (which now declares only the knobs the hub does not itself compose).
+        // #3930: the three non-cap members the hub composes onto builder seams —
+        // ring capacities / scheduler tuning / settlement teardown — fuse their
+        // value install with their aggregate-membership declaration through
+        // `with_chassis_config_member`.
         //
         // ADR-0156 §5: hand the builder the source stack so it resolves the
         // composed `FleetServer`'s `FleetConfig` (the liveness-heartbeat
         // tuning, issue 1339) off it. #3849: the RPC server's `Config` is now a
         // derive member resolved off the stack; the hub always binds, so it
         // composes the resolved-with-default port as an explicit override.
-        with_hub_fleet_passthrough(Builder::<Self>::new(registry, mailer).with_config_sources(sources))
+        Builder::<Self>::new(registry, mailer)
+            .with_config_sources(sources)
+            .declare_config_member::<FrameSizeConfig>()
+            .declare_config_member::<RuntimeConfig>()
             .with_chassis_config_member(&actor_ring)
             .with_chassis_config_member(&scheduler_tuning)
             .with_chassis_config_member(&settlement)
@@ -179,8 +190,9 @@ impl HubEnv {
     /// call-site change, matching desktop / headless.
     pub fn from_env_with_argv(cli: &HubCli) -> Result<Self, ConfigError> {
         // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
-        // where the composed builder's `config_manifest` (including the
-        // declared fleet pass-through) supplies the hub's known-key set.
+        // where the composed builder's `config_manifest` supplies the hub's
+        // composition-derived known-key set (ADR-0162 retired the fleet
+        // pass-through over-approximation).
         let config_file = load_chassis_config(cli.config.clone())?;
         // ADR-0156 §5: assemble the source stack — the loaded config file plus
         // the engines-cap and RPC-server argv overlays. The builder resolves the
@@ -310,19 +322,43 @@ mod config_manifest_tests {
     use aether_substrate::chassis::config_manifest;
 
     #[test]
-    fn hub_known_keys_carry_fleet_passthrough_engine_and_store_root() {
-        // ADR-0156 §4 acceptance: the hub composes only trace+engine+rpc, but
-        // a hub-spawned substrate inherits its env, so the hub declares the
-        // full fleet knob set as its one documented over-approximation. Its own
-        // engines-cap knob rides `with_actor`; the store-root override folds in
-        // as a residual hand record.
+    fn hub_known_keys_are_composition_derived_and_exclude_fleet_knobs() {
+        // ADR-0162 acceptance: the hub's known-key set is purely
+        // composition-derived, like every other chassis. The fleet pass-through
+        // over-approximation is deleted now that a hub-spawned substrate no
+        // longer inherits the hub's env, so a fleet knob the hub does not itself
+        // compose must be ABSENT from the hub's known set — this inverted
+        // assertion is the drift tripwire against the pass-through returning.
+        // The hub's own composed engines-cap knob rides `with_actor`; the
+        // store-root override folds in as a residual hand record.
         let manifest = config_manifest::<HubChassis>().expect("hub config manifest");
         let known = manifest.known_keys(&hub_residual_knobs());
-        assert!(known.contains("AETHER_AUDIO_DISABLE"), "hub declares the fleet audio knob as pass-through");
-        assert!(known.contains("AETHER_WINDOW_MODE"), "hub declares the fleet window knob as pass-through");
-        assert!(known.contains("AETHER_TICK_HZ"), "hub declares the fleet tick knob as pass-through");
+        assert!(
+            !known.contains("AETHER_TICK_HZ"),
+            "hub does not compose the headless tick cap, so the fleet tick knob must not be a known key"
+        );
+        assert!(
+            !known.contains("AETHER_WINDOW_MODE"),
+            "hub does not compose the desktop window cap, so the fleet window knob must not be a known key"
+        );
+        assert!(
+            !known.contains("AETHER_AUDIO_DISABLE"),
+            "hub does not compose the audio cap, so the fleet audio knob must not be a known key"
+        );
         assert!(known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"), "hub claims its own composed engines-cap knob");
         assert!(known.contains("AETHER_FLEET_STORE_ROOT"), "hub folds in the store-root residual knob");
+        // The two process-global members the hub itself resolves stay known:
+        // `AETHER_MAX_FRAME_SIZE` (pushed into the codec by `install_frame_size`)
+        // and the runtime log/panic-hook knobs (`RuntimeConfig`), each declared at
+        // the hub compose since their values apply off the builder.
+        assert!(
+            known.contains("AETHER_MAX_FRAME_SIZE"),
+            "hub resolves the wire frame-size knob, so it stays a known key via the declared FrameSizeConfig member"
+        );
+        assert!(
+            known.contains("AETHER_LOG_FILTER"),
+            "hub resolves and re-applies the log-filter knob, so it stays known via the declared RuntimeConfig member"
+        );
         // #3930: the ring / scheduler / settlement members moved out of the
         // pass-through and are now composed onto their builder seams through
         // `with_chassis_config_member`, which declares their membership as it
