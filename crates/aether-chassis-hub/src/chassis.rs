@@ -89,10 +89,8 @@ impl BootableChassis for HubChassis {
         // input the delta consumes (the hub always binds, unlike desktop /
         // headless).
         let HubEnv { base: _, rpc_port, runtime: _ } = env;
-        builder
-            .with_actor::<FleetServer>(())
-            .with_actor_configured::<RpcServerCapability>(
-                RpcServerParams {
+        builder.with_actor::<FleetServer>(()).with_actor_configured::<RpcServerCapability>(
+            RpcServerParams {
                     peer_kind: PeerKind::Substrate {
                         engine_name: aether_substrate::engine_name::<Self>(),
                         engine_version: env!("CARGO_PKG_VERSION").into(),
@@ -101,8 +99,8 @@ impl BootableChassis for HubChassis {
                     #[allow(clippy::disallowed_methods)] // hub wires both caps; resolve the engines-cap mailbox by its well-known depth-1 name
                     route_target: Some(aether_data::mailbox_id_from_name("aether.fleet")),
                 },
-                RpcServerConfig { port: Some(rpc_port) },
-            )
+            RpcServerConfig { port: Some(rpc_port) },
+        )
     }
 }
 
