@@ -298,10 +298,11 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
             ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
             (
                 "retained-window-size",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
-                ),
+                HarnessOp::actor::<InputCapability>().send(&WindowSize {
+                    window: TEST_WINDOW_ID,
+                    width: WINDOW_WIDTH,
+                    height: WINDOW_HEIGHT,
+                }),
             ),
             ("place", HarnessOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             ("settle", HarnessOp::advance(2)),
@@ -311,21 +312,23 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
     let before = capture_scene(&mut harness, &mover_address, &world, "opt-out-before");
     harness
         .execute(vec![
-            ("unrouted-w", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_W })),
+            ("unrouted-w", HarnessOp::actor::<InputCapability>().send(&Key { window: TEST_WINDOW_ID, code: KEY_W })),
             ("unrouted-advance", HarnessOp::advance(32)),
         ])
         .expect("unrouted input window");
     let blocked = capture_scene(&mut harness, &mover_address, &world, "opt-out-blocked");
 
     load_mover_editor_shell(&mut harness, &widget_wasm, mover_mailbox);
+    // #3995 removes the legacy half when terrain's remaining input surface migrates.
+    let routed_press = Key { window: TEST_WINDOW_ID, code: KEY_W };
+    let routed_release = KeyRelease { window: TEST_WINDOW_ID, code: KEY_W };
     harness
         .execute(vec![
-            ("routed-w", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_W })),
+            ("legacy-routed-w", HarnessOp::actor::<InputCapability>().send(&routed_press)),
+            ("window-routed-w", HarnessOp::window_event(TEST_WINDOW_ID, &routed_press)),
             ("routed-advance", HarnessOp::advance(32)),
-            (
-                "routed-release",
-                HarnessOp::send_mail("aether.input", &KeyRelease { window: TEST_WINDOW_ID, code: KEY_W }),
-            ),
+            ("legacy-routed-release", HarnessOp::actor::<InputCapability>().send(&routed_release)),
+            ("window-routed-release", HarnessOp::window_event(TEST_WINDOW_ID, &routed_release)),
         ])
         .expect("editor-routed input window");
     let routed = capture_scene(&mut harness, &mover_address, &world, "editor-routed");

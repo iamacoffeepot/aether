@@ -51,10 +51,10 @@ use core::f32::consts::FRAC_PI_3;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
 use aether_component::component::ComponentHostWasmExt;
-use aether_input::{InputCapability, InputMailboxExt};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{TAU, Vec2, Vec3};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
 
 use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
 
@@ -150,13 +150,13 @@ impl WasmActor for CameraController {
         Ok(Self { config, held: Held::default(), shadow })
     }
 
-    /// Subscribe the key streams and the tick stage, then seed the target
+    /// Subscribe the all-window key streams and the tick stage, then seed the target
     /// camera so the shadow is authoritative from frame one. `wire` is the
     /// placement for the seed — `init`'s ctx can't mail.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let input = ctx.actor::<InputCapability>();
-        input.subscribe::<Key>();
-        input.subscribe::<KeyRelease>();
+        let window = ctx.actor::<WindowCapability>();
+        window.subscribe::<Key>(WindowSelector::All);
+        window.subscribe::<KeyRelease>(WindowSelector::All);
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         self.seed(ctx);
     }

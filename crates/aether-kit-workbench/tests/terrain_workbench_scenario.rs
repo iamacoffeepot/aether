@@ -6,7 +6,7 @@ use std::f32::consts::FRAC_PI_3;
 use std::fs;
 use std::path::Path;
 
-use aether_actor::Addressable;
+use aether_actor::{Addressable, HandlesKind};
 use aether_component::WasmTrampoline;
 use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -113,20 +113,31 @@ fn load_panel_font(harness: &mut SubstrateHarness) -> u32 {
 }
 
 fn click(harness: &mut SubstrateHarness, x: f32, y: f32) {
+    let press = MouseButton { window: TEST_WINDOW_ID, button: 0, x, y };
+    let release = MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x, y };
     harness
         .execute(vec![
-            ("press", HarnessOp::send_mail("aether.input", &MouseButton { window: TEST_WINDOW_ID, button: 0, x, y })),
-            (
-                "release",
-                HarnessOp::send_mail("aether.input", &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x, y }),
-            ),
+            ("legacy-press", HarnessOp::actor::<InputCapability>().send(&press)),
+            ("window-press", HarnessOp::window_event(TEST_WINDOW_ID, &press)),
+            ("legacy-release", HarnessOp::actor::<InputCapability>().send(&release)),
+            ("window-release", HarnessOp::window_event(TEST_WINDOW_ID, &release)),
         ])
         .expect("raw pointer click");
     harness.execute(vec![("settle", HarnessOp::advance(3))]).expect("settle raw pointer click");
 }
 
-fn send_input<K: Kind>(harness: &mut SubstrateHarness, mail: &K) {
-    harness.execute(vec![("input", HarnessOp::send_mail("aether.input", mail))]).expect("raw input mail");
+fn send_input<K>(harness: &mut SubstrateHarness, mail: &K)
+where
+    K: Kind,
+    InputCapability: HandlesKind<K>,
+{
+    // #3996 removes the legacy half when this scenario migrates completely.
+    harness
+        .execute(vec![
+            ("legacy-input", HarnessOp::actor::<InputCapability>().send(mail)),
+            ("window-input", HarnessOp::window_event(TEST_WINDOW_ID, mail)),
+        ])
+        .expect("raw input mail");
 }
 
 fn query_workbench(harness: &mut SubstrateHarness, workbench: &str) -> WorkbenchQueryResult {

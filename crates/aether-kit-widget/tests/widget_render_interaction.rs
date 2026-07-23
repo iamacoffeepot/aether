@@ -10,7 +10,7 @@
 //! expression's vertical centering per row.
 //!
 //! This suite renders the reference `WidgetPanel` with the vendored
-//! `RobotoMono.ttf`, drives it through the real `aether.input` fan-out, and
+//! `RobotoMono.ttf`, drives it through synthetic window-event fan-out, and
 //! asserts per-widget placement + behavior through issue 2673's region-scoped
 //! `FrameCheck` verdict path — each check pins its own surface background so the
 //! accent fills / near-white glyphs form the lit mask, and reads the reduction
@@ -53,7 +53,6 @@ use aether_harness_substrate_capture::{
     test_helpers::{init_save_sandbox, require_runtime},
     visual::{Image, decode_png},
 };
-use aether_input::InputCapability;
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     KEY_V, KEY_X,
@@ -148,8 +147,8 @@ fn assets_dir() -> PathBuf {
 /// Boot a chassis whose `assets://` points at the kit assets dir (the TTF)
 /// and whose `save://` / `config://` sink into a per-process sandbox tempdir.
 ///
-/// Composition: GPU captures + kit / fixture wasm loads, the real
-/// `aether.input` fan-out the suite drives, `aether.text` glyph rasterization
+/// Composition: GPU captures + kit / fixture wasm loads, synthetic window
+/// fan-out, `aether.text` glyph rasterization
 /// (fonts fetched via `aether.fs`, composed from the roots), and the
 /// deterministic in-memory clipboard the copy/cut/paste scenarios read back.
 fn build_bench() -> SubstrateHarness {
@@ -158,7 +157,6 @@ fn build_bench() -> SubstrateHarness {
     SubstrateHarness::builder()
         .with_render()
         .with_component_host()
-        .with_actor::<InputCapability>(())
         .with_actor::<TextCapability>(())
         .with_actor::<ClipboardCapability>(ClipboardParams::InMemory)
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -1140,20 +1138,20 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     // typing `Z`, distinguishes capture (`Z`) from a lost drag (`Zabcd`).
     harness
         .execute(vec![
-            ("press", HarnessOp::send_mail("aether.input", &press(PANEL_X + PAD, PANEL_Y + 12.0))),
+            ("press", HarnessOp::window_event(TEST_WINDOW_ID, &press(PANEL_X + PAD, PANEL_Y + 12.0))),
             (
                 "cross-region-drag",
-                HarnessOp::send_mail(
-                    "aether.input",
+                HarnessOp::window_event(
+                    TEST_WINDOW_ID,
                     &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: PANEL_Y + 12.0 },
                 ),
             ),
-            ("cross-region-release", HarnessOp::send_mail("aether.input", &release(150.0, PANEL_Y + 12.0))),
+            ("cross-region-release", HarnessOp::window_event(TEST_WINDOW_ID, &release(150.0, PANEL_Y + 12.0))),
             (
                 "replace-selection",
-                HarnessOp::send_mail("aether.input", &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
+                HarnessOp::window_event(TEST_WINDOW_ID, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
             ),
-            ("commit", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("commit", HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
         .expect("route real panel drag through editor shell");
 

@@ -40,9 +40,9 @@ aether-behavior = { path = "../aether-behavior", default-features = false, optio
 # frame stage through it; the crate is a wasm guest, so it takes the
 # marker-only identity face.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
-# iamacoffeepot/aether#3747: the input cap. Widgets read typed input; wasm
-# guest, marker-only identity face.
-aether-input = { path = "../aether-input", default-features = false }
+# ADR-0164 / iamacoffeepot/aether#3994: widgets subscribe window-originated
+# input through the neutral window identity. Marker-only guest face.
+aether-window = { path = "../aether-window", default-features = false }
 # iamacoffeepot/aether#3721: the render cap. The cluster root emits solid /
 # textured quads through it; wasm guest, marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
@@ -75,7 +75,6 @@ inventory = { workspace = true }
 # wasm lib build keeps the marker-only face above.
 [dev-dependencies]
 aether-clipboard = { path = "../aether-clipboard" }
-aether-input = { path = "../aether-input" }
 aether-render = { path = "../aether-render" }
 aether-text = { path = "../aether-text" }
 aether-component = { path = "../aether-component" }

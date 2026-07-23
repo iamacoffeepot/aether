@@ -6,7 +6,6 @@ use std::path::Path;
 use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_input::InputCapability;
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
@@ -79,7 +78,7 @@ fn drain(harness: &mut SubstrateHarness, actor: &LoadedActor, label: &'static st
 }
 
 fn input<K: Kind>(mail: &K) -> HarnessOp {
-    HarnessOp::send_mail("aether.input", mail)
+    HarnessOp::window_event(TEST_WINDOW_ID, mail)
 }
 
 #[test]
@@ -89,12 +88,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     else {
         return;
     };
-    let mut harness = SubstrateHarness::builder()
-        .size(200, 100)
-        .with_component_host()
-        .with_actor::<InputCapability>(())
-        .build()
-        .expect("boot");
+    let mut harness = SubstrateHarness::builder().size(200, 100).with_component_host().build().expect("boot");
     let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "region-b");
     let mut b_lanes = RegionInputLanes::ALL;
@@ -110,42 +104,18 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 
     harness
         .execute(vec![
-            (
-                "press-a",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 },
-                ),
-            ),
-            ("drag-b", HarnessOp::send_mail("aether.input", &MouseMove { window: TEST_WINDOW_ID, x: 140.0, y: 25.0 })),
-            (
-                "release-other-b",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &MouseButtonRelease { window: TEST_WINDOW_ID, button: 1, x: 140.0, y: 25.0 },
-                ),
-            ),
-            (
-                "release-owner-b",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 140.0, y: 25.0 },
-                ),
-            ),
-            ("move-b", HarnessOp::send_mail("aether.input", &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: 30.0 })),
+            ("press-a", input(&MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
+            ("drag-b", input(&MouseMove { window: TEST_WINDOW_ID, x: 140.0, y: 25.0 })),
+            ("release-other-b", input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 1, x: 140.0, y: 25.0 })),
+            ("release-owner-b", input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 140.0, y: 25.0 })),
+            ("move-b", input(&MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: 30.0 })),
             (
                 "release-without-owner-b",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 150.0, y: 30.0 },
-                ),
+                input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 150.0, y: 30.0 }),
             ),
             (
                 "filtered-wheel-b",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 },
-                ),
+                input(&MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 }),
             ),
         ])
         .expect("route pointer sequence");
@@ -182,12 +152,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     else {
         return;
     };
-    let mut harness = SubstrateHarness::builder()
-        .size(200, 100)
-        .with_component_host()
-        .with_actor::<InputCapability>(())
-        .build()
-        .expect("boot");
+    let mut harness = SubstrateHarness::builder().size(200, 100).with_component_host().build().expect("boot");
     let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");
     let a = region("focus-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL);
