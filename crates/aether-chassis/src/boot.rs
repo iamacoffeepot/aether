@@ -644,7 +644,7 @@ impl<C: Chassis> BuilderChassisConfigMember<C> for Builder<C> {
 /// instead.
 ///
 /// The advance timeout is resolved separately through the
-/// [`LifecycleConfig`] `Config` channel.
+/// [`LifecycleConfig`](aether_lifecycle::LifecycleConfig) `Config` channel.
 ///
 /// # Panics
 /// Panics if the (compile-time-fixed) graph fails to build — it can't,
