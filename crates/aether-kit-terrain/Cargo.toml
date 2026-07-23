@@ -16,6 +16,20 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# ADR-0066 kind-crate convention: under `runtime` the same crate emits its
+# cdylib guest surface via `export!`. On-by-default so a bare
+# `cargo build --target wasm32-unknown-unknown -p aether-kit-terrain` produces
+# the loadable component. `aether-kit` links this crate's rlib for the terrain
+# types its sim / client / workbench actors consume, and is itself a cdylib
+# whose own `export!` binds the fixed-name FFI entries (`init`, `receive_p32`,
+# …); a wasm module carries exactly one `export!`, so kit depends on this crate
+# with `default-features = false` to take the entry-free rlib face and avoid a
+# duplicate-symbol link error. The shims are wasm32-only and inert in host test
+# builds, so dev-dependency consumers keep the default face.
+default = ["runtime"]
+runtime = []
+
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 # Marker-only identity faces: this crate is a wasm guest, so it addresses each

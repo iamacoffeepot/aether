@@ -83,7 +83,11 @@ pub const TILE_BITS: u32 = 8;
 // macro emits the wasm32 FFI shims and the `aether.kinds` custom section for
 // every listed actor. The terrain crate has no bare-load target — each actor
 // is loaded by its `module@actor` selector (ADR-0138 defaultless policy), so
-// the `export!` names no default.
+// the `export!` names no default. Gated behind the on-by-default `runtime`
+// feature so an rlib consumer (`aether-kit`, itself a cdylib) can take this
+// crate's types without pulling a second copy of the fixed-name FFI entries
+// into its wasm module — see the feature comment in Cargo.toml.
+#[cfg(feature = "runtime")]
 aether_actor::export!(world::WorldView, mark::MarkBook, terra::TerraEditor, mover::WorldMover);
 
 #[cfg(test)]
