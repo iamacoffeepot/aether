@@ -7,9 +7,9 @@ license.workspace = true
 # `aether.window` capability, extracted by the arc that dissolved the
 # capabilities monolith (iamacoffeepot/aether#3717) as a per-cap crate. Owns the chassis-without-window companion:
 # the `HeadlessWindowCapability` identity + its fail-fast `Err`-replying
-# runtime (`runtime`). The window request/reply mail kinds themselves
-# (`SetWindowMode` / `SetWindowTitle` / `FocusWindow` + `*Result`) live in
-# `aether-kinds`, so this crate only references them.
+# runtime (`runtime`). The crate also owns the public multi-window request,
+# reply, lifecycle, selector, and sender-facade surface; only the shared
+# `WindowId` and `WindowMode` values live in `aether-kinds`.
 #
 # Unlike the pure-leaf `aether-clipboard`, this crate has an inbound
 # consumer: `aether-rpc`'s server test addresses `HeadlessWindowCapability` to
@@ -22,16 +22,6 @@ license.workspace = true
 # guest can address `ctx.actor::<HeadlessWindowCapability>()` without
 # dragging the substrate through.
 
-# The `#[actor]` macro's generated dispatch / `HandlerEntry` inventory code
-# names `aether_data::` paths (`KindId`, the encode/decode helpers), but this
-# crate defines no kinds of its own (they live in `aether-kinds`), so
-# `aether_data` never appears in this crate's source. cargo-machete's
-# source-only scan therefore flags it as unused — a false positive (the
-# macro-emitted use is real and the crate fails to compile without it), so
-# it is ignored here rather than dropped.
-[package.metadata.cargo-machete]
-ignored = ["aether-data"]
-
 [features]
 default = ["runtime"]
 runtime = ["dep:aether-substrate"]
@@ -43,8 +33,9 @@ desktop = ["runtime", "dep:winit"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
+aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # Native-only runtime half — gated so wasm/marker builds skip the substrate
 # runtime.
 aether-substrate = { path = "../aether-substrate", optional = true }

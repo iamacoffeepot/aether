@@ -16,7 +16,7 @@ use aether_harness_substrate_capture::visual::{Rect, decode_png, run_checks, tar
 use aether_kinds::keycode::{KEY_A, KEY_ENTER, KEY_UP};
 use aether_kinds::{
     FrameCheck, FrameCheckResult, FrameReduction, Key, LoadComponent, LoadResult, Modifiers, MouseButton,
-    MouseButtonRelease, NamedMail, Render, TextInput, Tick,
+    MouseButtonRelease, NamedMail, Render, TextInput, Tick, WindowId,
 };
 use aether_kit_commons::console::ConsoleConfig;
 use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult};
@@ -39,6 +39,7 @@ const TERRA_COMPONENT_NAME: &str = "terra";
 const WORKBENCH_COMPONENT_NAME: &str = "workbench";
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 const SELECTED_SRGB: [u8; 3] = [255, 190, 48];
 const STONE_SRGB: [u8; 3] = [140, 140, 148];
 const COLOR_TOLERANCE: u8 = 28;
@@ -114,8 +115,11 @@ fn load_panel_font(harness: &mut SubstrateHarness) -> u32 {
 fn click(harness: &mut SubstrateHarness, x: f32, y: f32) {
     harness
         .execute(vec![
-            ("press", HarnessOp::send_mail("aether.input", &MouseButton { button: 0, x, y })),
-            ("release", HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x, y })),
+            ("press", HarnessOp::send_mail("aether.input", &MouseButton { window: TEST_WINDOW_ID, button: 0, x, y })),
+            (
+                "release",
+                HarnessOp::send_mail("aether.input", &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x, y }),
+            ),
         ])
         .expect("raw pointer click");
     harness.execute(vec![("settle", HarnessOp::advance(3))]).expect("settle raw pointer click");
@@ -185,11 +189,11 @@ fn differing_pixels(left_png: &[u8], right_png: &[u8], region: Rect) -> usize {
 
 fn replace_numeric_with_zero(harness: &mut SubstrateHarness) {
     click(harness, 90.0, 102.0);
-    send_input(harness, &Modifiers { ctrl: true, ..Modifiers::default() });
-    send_input(harness, &Key { code: KEY_A });
-    send_input(harness, &TextInput { text: "0".to_owned() });
-    send_input(harness, &Modifiers::default());
-    send_input(harness, &Key { code: KEY_ENTER });
+    send_input(harness, &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() });
+    send_input(harness, &Key { window: TEST_WINDOW_ID, code: KEY_A });
+    send_input(harness, &TextInput { window: TEST_WINDOW_ID, text: "0".to_owned() });
+    send_input(harness, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() });
+    send_input(harness, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER });
 }
 
 #[test]
@@ -298,12 +302,12 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
         .expect("seed non-flat terrain and activate workbench");
 
     click(&mut harness, 90.0, 42.0);
-    send_input(&mut harness, &TextInput { text: "ridge instruction".to_owned() });
-    send_input(&mut harness, &Key { code: KEY_ENTER });
+    send_input(&mut harness, &TextInput { window: TEST_WINDOW_ID, text: "ridge instruction".to_owned() });
+    send_input(&mut harness, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER });
     assert_eq!(query_workbench(&mut harness, &workbench).draft.instruction, "ridge instruction");
 
     click(&mut harness, 90.0, 102.0);
-    send_input(&mut harness, &Key { code: KEY_UP });
+    send_input(&mut harness, &Key { window: TEST_WINDOW_ID, code: KEY_UP });
     assert_eq!(query_workbench(&mut harness, &workbench).draft.brush.radius_octimeters, 97);
 
     click(&mut harness, 380.0, 180.0);

@@ -251,8 +251,8 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
     use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
-    use aether_kinds::{SetWindowMode, SetWindowModeResult, WindowMode};
-    use aether_window::HeadlessWindowCapability;
+    use aether_kinds::{WindowId, WindowMode};
+    use aether_window::{HeadlessWindowCapability, SetWindowMode, SetWindowModeResult};
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -268,7 +268,8 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
     let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
     complete_handshake(&mut stream);
 
-    let payload = SetWindowMode { mode: WindowMode::Windowed, width: None, height: None }.encode_into_bytes();
+    let payload = SetWindowMode { window: WindowId(1), mode: WindowMode::Windowed, width: None, height: None }
+        .encode_into_bytes();
     let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
@@ -297,7 +298,10 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
     };
     assert_eq!(envelope.kind, <SetWindowModeResult as Kind>::ID);
     let decoded = SetWindowModeResult::decode_from_bytes(&envelope.payload).expect("decode SetWindowModeResult");
-    assert!(matches!(decoded, SetWindowModeResult::Err { .. }), "headless window cap replies Err, got {decoded:?}");
+    assert!(
+        matches!(decoded, SetWindowModeResult::Err { window: WindowId(1), .. }),
+        "headless window cap preserves the addressed id in its Err reply, got {decoded:?}",
+    );
 
     let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
     match end {

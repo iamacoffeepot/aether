@@ -32,7 +32,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
-use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowSize};
+use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowId, WindowSize};
 use aether_kit_commons::camera::controller::ControllerConfig;
 use aether_kit_terrain::SetChunk;
 use aether_kit_terrain::world::Material;
@@ -41,6 +41,7 @@ use aether_kit_terrain::world::Material;
 /// `WindowSize` below lands.
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 
 /// Chunk edge in cells (`CELLS_PER_CHUNK`), mirrored here so the split-paint
 /// plane below is the right length.
@@ -182,7 +183,10 @@ fn held_key_pans_the_camera_over_the_painted_world() {
             ("paint", HarnessOp::send_mail(world.as_str(), &split_chunk())),
             (
                 "aspect",
-                HarnessOp::send_mail(camera.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail(
+                    camera.as_str(),
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
             ("settle", HarnessOp::advance(2)),
         ])
@@ -195,7 +199,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // 0.15 m/tick pan walks the target ~7 m across the 16 m chunk.
     harness
         .execute(vec![
-            ("press_d", HarnessOp::send_mail(controller.as_str(), &Key { code: KEY_D })),
+            ("press_d", HarnessOp::send_mail(controller.as_str(), &Key { window: TEST_WINDOW_ID, code: KEY_D })),
             ("pan", HarnessOp::advance(48)),
         ])
         .expect("hold D + pan");
@@ -206,7 +210,10 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // the camera pose is frozen and the view stops moving.
     harness
         .execute(vec![
-            ("release_d", HarnessOp::send_mail(controller.as_str(), &KeyRelease { code: KEY_D })),
+            (
+                "release_d",
+                HarnessOp::send_mail(controller.as_str(), &KeyRelease { window: TEST_WINDOW_ID, code: KEY_D }),
+            ),
             ("idle", HarnessOp::advance(48)),
         ])
         .expect("release D + idle");

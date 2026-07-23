@@ -28,7 +28,9 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::mouse_button::LEFT;
-use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
+use aether_kinds::{
+    LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId,
+};
 use aether_kit_widget::{BehaviorHostSpec, PanelConfig, ScriptRef, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +65,7 @@ const CAP: f32 = 20.0;
 
 /// Slack for the float comparisons against the clamp cap.
 const EPS: f32 = 0.5;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
@@ -137,12 +140,12 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
 
 /// A left mouse-button press at `(x, y)`.
 fn press(x: f32, y: f32) -> MouseButton {
-    MouseButton { button: LEFT, x, y }
+    MouseButton { window: TEST_WINDOW_ID, button: LEFT, x, y }
 }
 
 /// A left mouse-button release at `(x, y)`.
 fn release(x: f32, y: f32) -> MouseButtonRelease {
-    MouseButtonRelease { button: LEFT, x, y }
+    MouseButtonRelease { window: TEST_WINDOW_ID, button: LEFT, x, y }
 }
 
 /// One slider drag session: press mid-track, drag to the far right, release.
@@ -153,7 +156,7 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 fn drag(panel: &str) -> Vec<(&'static str, HarnessOp)> {
     vec![
         ("press", HarnessOp::send_mail(panel, &press(110.0, 22.0))),
-        ("move", HarnessOp::send_mail(panel, &MouseMove { x: 200.0, y: 22.0 })),
+        ("move", HarnessOp::send_mail(panel, &MouseMove { window: TEST_WINDOW_ID, x: 200.0, y: 22.0 })),
         ("release", HarnessOp::send_mail(panel, &release(200.0, 22.0))),
     ]
 }

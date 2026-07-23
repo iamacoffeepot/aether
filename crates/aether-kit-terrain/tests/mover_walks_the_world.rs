@@ -33,7 +33,7 @@ use aether_input::InputCapability;
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
-    LoadResult, NamedMail, Render, WindowSize,
+    LoadResult, NamedMail, Render, WindowId, WindowSize,
 };
 use aether_kit_terrain::world::{Material, SetChunk, SetRegion};
 use aether_kit_terrain::{MoverConfig, MoverTeleport};
@@ -41,6 +41,7 @@ use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionIn
 
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 const CHUNK_EDGE: usize = 16;
 const CHUNK_AREA: usize = CHUNK_EDGE * CHUNK_EDGE;
 const HEIGHT_BREAK_ROW: usize = 8;
@@ -296,7 +297,10 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
             ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
             (
                 "retained-window-size",
-                HarnessOp::send_mail("aether.input", &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
             ("place", HarnessOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             ("settle", HarnessOp::advance(2)),
@@ -306,7 +310,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
     let before = capture_scene(&mut harness, &mover_address, &world, "opt-out-before");
     harness
         .execute(vec![
-            ("unrouted-w", HarnessOp::send_mail("aether.input", &Key { code: KEY_W })),
+            ("unrouted-w", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_W })),
             ("unrouted-advance", HarnessOp::advance(32)),
         ])
         .expect("unrouted input window");
@@ -315,9 +319,12 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
     load_mover_editor_shell(&mut harness, &widget_wasm, mover_mailbox);
     harness
         .execute(vec![
-            ("routed-w", HarnessOp::send_mail("aether.input", &Key { code: KEY_W })),
+            ("routed-w", HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_W })),
             ("routed-advance", HarnessOp::advance(32)),
-            ("routed-release", HarnessOp::send_mail("aether.input", &KeyRelease { code: KEY_W })),
+            (
+                "routed-release",
+                HarnessOp::send_mail("aether.input", &KeyRelease { window: TEST_WINDOW_ID, code: KEY_W }),
+            ),
         ])
         .expect("editor-routed input window");
     let routed = capture_scene(&mut harness, &mover_address, &world, "editor-routed");
@@ -374,7 +381,10 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
             ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
             (
                 "aspect",
-                HarnessOp::send_mail(mover.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
+                HarnessOp::send_mail(
+                    mover.as_str(),
+                    &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
+                ),
             ),
             ("place", HarnessOp::send_mail(mover.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             // Let both actors finish wiring before input begins.
@@ -389,7 +399,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
     // follow camera without crossing it.
     harness
         .execute(vec![
-            ("press_w", HarnessOp::send_mail(mover.as_str(), &Key { code: KEY_W })),
+            ("press_w", HarnessOp::send_mail(mover.as_str(), &Key { window: TEST_WINDOW_ID, code: KEY_W })),
             ("walk", HarnessOp::advance(96)),
         ])
         .expect("hold W + walk north");
@@ -400,7 +410,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
     // second stopped capture would scroll by another cell.
     harness
         .execute(vec![
-            ("release_w", HarnessOp::send_mail(mover.as_str(), &KeyRelease { code: KEY_W })),
+            ("release_w", HarnessOp::send_mail(mover.as_str(), &KeyRelease { window: TEST_WINDOW_ID, code: KEY_W })),
             ("settle_release", HarnessOp::advance(4)),
         ])
         .expect("release W + settle");

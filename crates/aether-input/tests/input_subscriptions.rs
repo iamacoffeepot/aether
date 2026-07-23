@@ -25,12 +25,13 @@ use aether_data::{Kind, KindId, MailboxId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_input::{InputCapability, SubscribeInputResult, UnsubscribeInput};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput, WindowId};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
 use std::fs;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 
 fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().with_actor::<InputCapability>(()).build().expect("boot")
@@ -60,7 +61,9 @@ fn send_keys(harness: &mut SubstrateHarness, count: usize) {
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
     let steps: Vec<(&str, HarnessOp)> = labels
         .iter()
-        .map(|label| (label.as_str(), HarnessOp::send_mail("aether.input", &Key { code: KEY_CODE })))
+        .map(|label| {
+            (label.as_str(), HarnessOp::send_mail("aether.input", &Key { window: TEST_WINDOW_ID, code: KEY_CODE }))
+        })
         .collect();
     harness.execute(steps).expect("key send sequence");
 }
@@ -125,7 +128,10 @@ fn subscribed_component_receives_published_text_input() {
     let baseline = harness.count_observed(TextInputObserved::NAME);
 
     harness
-        .execute(vec![("text", HarnessOp::send_mail("aether.input", &TextInput { text: "hi".to_owned() }))])
+        .execute(vec![(
+            "text",
+            HarnessOp::send_mail("aether.input", &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() }),
+        )])
         .expect("text send sequence");
 
     let delta = harness.count_observed(TextInputObserved::NAME) - baseline;

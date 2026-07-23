@@ -24,15 +24,19 @@
 use std::sync::{Arc, OnceLock};
 
 use aether_actor::actor;
-use aether_kinds::{
-    FocusWindow, FocusWindowResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    WindowMode,
-};
+use aether_kinds::WindowMode;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use winit::dpi::PhysicalSize;
 use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window};
+
+use super::{
+    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
+    ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
+    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowId,
+};
 
 /// The late-bound winit window handle, shared between the desktop chassis's
 /// winit `resumed` handler (which fills it exactly once after
@@ -48,6 +52,8 @@ pub type WindowCell = Arc<OnceLock<Arc<Window>>>;
 /// a config section — the cell is a runtime handle the chassis mints at
 /// Start, not an env/argv-resolved value.
 pub struct DesktopWindowParams {
+    /// Transitional engine identity for the chassis-owned boot window.
+    pub id: WindowId,
     /// The one-shot window handle the winit `resumed` handler fills.
     pub window: WindowCell,
     /// The mode the window boots into; seeds the actor state's current mode.
@@ -59,12 +65,22 @@ pub struct DesktopWindowParams {
 /// [`WindowMode`]. The addressing identity is the distinct ZST
 /// [`DesktopWindowCapability`].
 pub struct DesktopWindowCapabilityState {
+    /// Engine-owned identity of the transitional boot window.
+    id: WindowId,
     /// The late-bound window handle. `None` (`get()` empty) until the
     /// chassis's `resumed` fills the cell; handlers reply `Err` until then.
     window: WindowCell,
     /// Currently-applied window mode, updated by `on_set_mode`. Carried on
     /// the state as the natural home for a future `get_mode` query.
     current_mode: WindowMode,
+}
+
+fn unknown_window(requested: WindowId, available: WindowId) -> String {
+    format!("unknown window {requested:?}; transitional desktop bridge owns only {available:?}")
+}
+
+fn manager_pending() -> String {
+    "multi-window manager is not installed yet".to_owned()
 }
 
 /// `aether.window` desktop-runtime cap **identity** (ADR-0122 identity/runtime
@@ -98,7 +114,22 @@ impl NativeActor for DesktopWindowCapability {
         params: DesktopWindowParams,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<DesktopWindowCapabilityState, BootError> {
-        Ok(DesktopWindowCapabilityState { window: params.window, current_mode: params.initial_mode })
+        Ok(DesktopWindowCapabilityState { id: params.id, window: params.window, current_mode: params.initial_mode })
+    }
+
+    #[handler::single]
+    fn on_list(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
+        ListWindowsResult::Err { error: manager_pending() }
+    }
+
+    #[handler::single]
+    fn on_create(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: CreateWindow) -> CreateWindowResult {
+        CreateWindowResult::Err { error: manager_pending() }
+    }
+
+    #[handler::single]
+    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CloseWindow) -> CloseWindowResult {
+        CloseWindowResult::Err { window: mail.window, error: manager_pending() }
     }
 
     /// Apply a window mode (windowed / fullscreen-borderless /
@@ -108,15 +139,19 @@ impl NativeActor for DesktopWindowCapability {
     /// both runtimes hold.
     #[handler::single]
     fn on_set_mode(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowMode) -> SetWindowModeResult {
+        if mail.window != state.id {
+            return SetWindowModeResult::Err { window: mail.window, error: unknown_window(mail.window, state.id) };
+        }
         let Some(window) = state.window.get().cloned() else {
             return SetWindowModeResult::Err {
+                window: mail.window,
                 error: "set_window_mode requested before window initialized".to_owned(),
             };
         };
         let monitor = window.current_monitor();
         let fullscreen = match resolve_fullscreen(&mail.mode, monitor.as_ref()) {
             Ok(fs) => fs,
-            Err(e) => return SetWindowModeResult::Err { error: e },
+            Err(error) => return SetWindowModeResult::Err { window: mail.window, error },
         };
         window.set_fullscreen(fullscreen);
         if matches!(mail.mode, WindowMode::Windowed)
@@ -127,19 +162,23 @@ impl NativeActor for DesktopWindowCapability {
 
         state.current_mode = mail.mode.clone();
         let size = window.inner_size();
-        SetWindowModeResult::Ok { mode: mail.mode, width: size.width, height: size.height }
+        SetWindowModeResult::Ok { window: mail.window, mode: mail.mode, width: size.width, height: size.height }
     }
 
     /// Set the window title. `Err` if the window isn't created yet.
     #[handler::single]
     fn on_set_title(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowTitle) -> SetWindowTitleResult {
+        if mail.window != state.id {
+            return SetWindowTitleResult::Err { window: mail.window, error: unknown_window(mail.window, state.id) };
+        }
         let Some(window) = state.window.get() else {
             return SetWindowTitleResult::Err {
+                window: mail.window,
                 error: "set_window_title requested before window initialized".to_owned(),
             };
         };
         window.set_title(&mail.title);
-        SetWindowTitleResult::Ok { title: mail.title }
+        SetWindowTitleResult::Ok { window: mail.window, title: mail.title }
     }
 
     /// Bring the window to the foreground (iamacoffeepot/aether#1318):
@@ -148,15 +187,82 @@ impl NativeActor for DesktopWindowCapability {
     /// the full lever the substrate has. `Err` if the window isn't created
     /// yet (mail arrived before the chassis's `resumed` filled the cell).
     #[handler::single]
-    fn on_focus(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
+    fn on_focus(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FocusWindow) -> FocusWindowResult {
+        if mail.window != state.id {
+            return FocusWindowResult::Err { window: mail.window, error: unknown_window(mail.window, state.id) };
+        }
         let Some(window) = state.window.get() else {
-            return FocusWindowResult::Err { error: "focus requested before window initialized".to_owned() };
+            return FocusWindowResult::Err {
+                window: mail.window,
+                error: "focus requested before window initialized".to_owned(),
+            };
         };
         window.set_minimized(false);
         window.set_visible(true);
         window.focus_window();
-        FocusWindowResult::Ok
+        FocusWindowResult::Ok { window: mail.window }
     }
+
+    #[handler::single]
+    fn on_request_redraw(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RequestWindowRedraw,
+    ) -> RequestWindowRedrawResult {
+        if mail.window != state.id {
+            return RequestWindowRedrawResult::Err {
+                window: mail.window,
+                error: unknown_window(mail.window, state.id),
+            };
+        }
+        let Some(window) = state.window.get() else {
+            return RequestWindowRedrawResult::Err {
+                window: mail.window,
+                error: "redraw requested before window initialized".to_owned(),
+            };
+        };
+        window.request_redraw();
+        RequestWindowRedrawResult::Ok { window: mail.window }
+    }
+
+    #[handler::single]
+    fn on_subscribe(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: SubscribeWindow,
+    ) -> SubscribeWindowResult {
+        SubscribeWindowResult::Err { error: manager_pending() }
+    }
+
+    #[handler::single]
+    fn on_subscribe_self(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: SubscribeWindowSelf,
+    ) -> SubscribeWindowResult {
+        SubscribeWindowResult::Err { error: manager_pending() }
+    }
+
+    #[handler::single]
+    fn on_unsubscribe(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: UnsubscribeWindow,
+    ) -> SubscribeWindowResult {
+        SubscribeWindowResult::Err { error: manager_pending() }
+    }
+
+    #[handler::single]
+    fn on_unsubscribe_self(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: UnsubscribeWindowSelf,
+    ) -> SubscribeWindowResult {
+        SubscribeWindowResult::Err { error: manager_pending() }
+    }
+
+    #[handler::single]
+    fn on_unsubscribe_all(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UnsubscribeAllWindows) {}
 }
 
 /// Find a `VideoModeHandle` on `monitor` matching the given size + refresh

@@ -10,12 +10,14 @@ use aether_input::InputCapability;
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
-    MouseWheel, TextInput,
+    MouseWheel, TextInput, WindowId,
 };
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
+
+const TEST_WINDOW_ID: WindowId = WindowId(1);
 
 struct LoadedActor {
     mailbox_id: MailboxId,
@@ -76,6 +78,10 @@ fn drain(harness: &mut SubstrateHarness, actor: &LoadedActor, label: &'static st
         .expect("decode DrainEditorInputsResult")
 }
 
+fn input<K: Kind>(mail: &K) -> HarnessOp {
+    HarnessOp::send_mail("aether.input", mail)
+}
+
 #[test]
 fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     let (Some(kit_wasm), Some(fixtures_wasm)) =
@@ -104,24 +110,42 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 
     harness
         .execute(vec![
-            ("press-a", HarnessOp::send_mail("aether.input", &MouseButton { button: 0, x: 20.0, y: 20.0 })),
-            ("drag-b", HarnessOp::send_mail("aether.input", &MouseMove { x: 140.0, y: 25.0 })),
+            (
+                "press-a",
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 },
+                ),
+            ),
+            ("drag-b", HarnessOp::send_mail("aether.input", &MouseMove { window: TEST_WINDOW_ID, x: 140.0, y: 25.0 })),
             (
                 "release-other-b",
-                HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 1, x: 140.0, y: 25.0 }),
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &MouseButtonRelease { window: TEST_WINDOW_ID, button: 1, x: 140.0, y: 25.0 },
+                ),
             ),
             (
                 "release-owner-b",
-                HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 140.0, y: 25.0 }),
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 140.0, y: 25.0 },
+                ),
             ),
-            ("move-b", HarnessOp::send_mail("aether.input", &MouseMove { x: 150.0, y: 30.0 })),
+            ("move-b", HarnessOp::send_mail("aether.input", &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: 30.0 })),
             (
                 "release-without-owner-b",
-                HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 150.0, y: 30.0 }),
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 150.0, y: 30.0 },
+                ),
             ),
             (
                 "filtered-wheel-b",
-                HarnessOp::send_mail("aether.input", &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 }),
+                HarnessOp::send_mail(
+                    "aether.input",
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 },
+                ),
             ),
         ])
         .expect("route pointer sequence");
@@ -174,34 +198,33 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
 
     harness
         .execute(vec![
-            ("focus-a", HarnessOp::send_mail("aether.input", &MouseButton { button: 0, x: 20.0, y: 20.0 })),
-            ("release-a", HarnessOp::send_mail("aether.input", &MouseButtonRelease { button: 0, x: 20.0, y: 20.0 })),
+            ("focus-a", input(&MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
+            ("release-a", input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
         ])
         .expect("prime focus");
     let _initial_a = drain(&mut harness, &region_a, "drain-initial-a");
 
     harness
         .execute(vec![
-            ("key-a", HarnessOp::send_mail("aether.input", &Key { code: 65 })),
-            ("text-a", HarnessOp::send_mail("aether.input", &TextInput { text: "a".to_owned() })),
-            ("activate-b", HarnessOp::send_mail("aether.input", &Key { code: KEY_BACKQUOTE })),
+            ("key-a", input(&Key { window: TEST_WINDOW_ID, code: 65 })),
+            ("text-a", input(&TextInput { window: TEST_WINDOW_ID, text: "a".to_owned() })),
+            ("activate-b", input(&Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
             (
                 "ime-b",
-                HarnessOp::send_mail(
-                    "aether.input",
-                    &ImePreedit { text: "composition".to_owned(), cursor_begin: Some(1), cursor_end: Some(3) },
-                ),
+                input(&ImePreedit {
+                    window: TEST_WINDOW_ID,
+                    text: "composition".to_owned(),
+                    cursor_begin: Some(1),
+                    cursor_end: Some(3),
+                }),
             ),
-            ("text-b", HarnessOp::send_mail("aether.input", &TextInput { text: "b".to_owned() })),
-            (
-                "ctrl-b",
-                HarnessOp::send_mail("aether.input", &Modifiers { shift: false, ctrl: true, alt: false, meta: false }),
-            ),
-            ("cycle-a", HarnessOp::send_mail("aether.input", &Key { code: KEY_TAB })),
-            ("cycle-release", HarnessOp::send_mail("aether.input", &KeyRelease { code: KEY_TAB })),
-            ("clear-modifiers", HarnessOp::send_mail("aether.input", &Modifiers::default())),
-            ("plain-tab", HarnessOp::send_mail("aether.input", &Key { code: KEY_TAB })),
-            ("plain-tab-release", HarnessOp::send_mail("aether.input", &KeyRelease { code: KEY_TAB })),
+            ("text-b", input(&TextInput { window: TEST_WINDOW_ID, text: "b".to_owned() })),
+            ("ctrl-b", input(&Modifiers { window: TEST_WINDOW_ID, shift: false, ctrl: true, alt: false, meta: false })),
+            ("cycle-a", input(&Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("cycle-release", input(&KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("clear-modifiers", input(&Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() })),
+            ("plain-tab", input(&Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("plain-tab-release", input(&KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
         ])
         .expect("route keyboard sequence");
 
