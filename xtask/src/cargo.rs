@@ -17,16 +17,16 @@ use serde::Serialize;
 use crate::inventory::{BuildPlan, CHASSIS_BINS, Component};
 
 /// Wasm triple the components cross-build to.
-pub(crate) const WASM_TARGET: &str = "wasm32-unknown-unknown";
+pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum Profile {
+pub enum Profile {
     Debug,
     Release,
 }
 
 impl Profile {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Debug => "debug",
             Self::Release => "release",
@@ -46,7 +46,7 @@ impl Profile {
 /// the profile flag — every build helper starts here and appends its own
 /// package / target / bin selectors, so the `CARGO`-env fallback and the
 /// profile-flag dance have one home.
-pub(crate) fn build_command(profile: Profile) -> Command {
+pub fn build_command(profile: Profile) -> Command {
     let mut cmd = Command::new(cargo());
     cmd.arg("build");
     if let Some(flag) = profile.cargo_flag() {
@@ -57,7 +57,7 @@ pub(crate) fn build_command(profile: Profile) -> Command {
 
 /// Run `cmd` to completion, mirroring its exit status — the status-only
 /// spawn choke point. Non-zero is an error tagged with `what`.
-pub(crate) fn run_status(mut cmd: Command, what: &str) -> Result<()> {
+pub fn run_status(mut cmd: Command, what: &str) -> Result<()> {
     let status = cmd.status().with_context(|| format!("spawn cargo to {what}"))?;
     if !status.success() {
         bail!("cargo failed to {what} ({status})");
@@ -67,7 +67,7 @@ pub(crate) fn run_status(mut cmd: Command, what: &str) -> Result<()> {
 
 /// Run `cmd` to completion, capturing its stdout + stderr — the
 /// captured-output spawn choke point, the twin of [`run_status`].
-pub(crate) fn run_captured(mut cmd: Command) -> Result<Output> {
+pub fn run_captured(mut cmd: Command) -> Result<Output> {
     cmd.output().context("run command")
 }
 
@@ -80,7 +80,7 @@ fn cargo() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
-pub(crate) fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
+pub fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
     let mut cmd = build_command(profile);
     cmd.args(["--target", WASM_TARGET, "-p", &plan.package]);
     if plan.examples {
@@ -97,7 +97,7 @@ pub(crate) fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> 
     run_status(cmd, &format!("build component {label}"))
 }
 
-pub(crate) fn build_chassis(profile: Profile) -> Result<()> {
+pub fn build_chassis(profile: Profile) -> Result<()> {
     let mut cmd = build_command(profile);
     // One invocation selects every owning package plus every bin —
     // bin selectors are global across the selected packages, and the
@@ -116,7 +116,7 @@ pub(crate) fn build_chassis(profile: Profile) -> Result<()> {
 /// Build one chassis binary by `(package, bin)` selector for the host
 /// target — the package target's single-bin twin of `build_chassis`'s
 /// all-bins build.
-pub(crate) fn build_named_chassis(package: &str, bin: &str, profile: Profile) -> Result<()> {
+pub fn build_named_chassis(package: &str, bin: &str, profile: Profile) -> Result<()> {
     let mut cmd = build_command(profile);
     cmd.args(["-p", package, "--bin", bin]);
     run_status(cmd, &format!("build chassis bin {bin}"))
@@ -125,7 +125,7 @@ pub(crate) fn build_named_chassis(package: &str, bin: &str, profile: Profile) ->
 /// Source path of a component's wasm under the target tree. Example
 /// cdylibs land under `examples/`; lib cdylibs directly under the profile
 /// dir.
-pub(crate) fn wasm_artifact_path(wasm_profile_dir: &Path, component: &Component) -> PathBuf {
+pub fn wasm_artifact_path(wasm_profile_dir: &Path, component: &Component) -> PathBuf {
     let file = format!("{}.wasm", component.stem);
     if component.from_example {
         wasm_profile_dir.join("examples").join(file)
@@ -134,7 +134,7 @@ pub(crate) fn wasm_artifact_path(wasm_profile_dir: &Path, component: &Component)
     }
 }
 
-pub(crate) fn copy_artifact(src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_artifact(src: &Path, dst: &Path) -> Result<()> {
     fs::copy(src, dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     Ok(())
 }
@@ -143,7 +143,7 @@ pub(crate) fn copy_artifact(src: &Path, dst: &Path) -> Result<()> {
 /// `.exe` on Windows and leaves the bare name elsewhere. `package` never
 /// cross-compiles (no `--target`), so `cfg!(windows)` matches what cargo
 /// wrote and what the depot must carry.
-pub(crate) fn host_binary_filename(bin: &str) -> String {
+pub fn host_binary_filename(bin: &str) -> String {
     if cfg!(windows) {
         format!("{bin}.exe")
     } else {
@@ -153,7 +153,7 @@ pub(crate) fn host_binary_filename(bin: &str) -> String {
 
 /// Serialize `value` as pretty JSON with a trailing newline and write it to
 /// `path` — the one write every manifest / evidence emitter ends on.
-pub(crate) fn write_json_pretty(path: &Path, value: &impl Serialize) -> Result<()> {
+pub fn write_json_pretty(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut json = serde_json::to_string_pretty(value).context("serialize json")?;
     json.push('\n');
     fs::write(path, json).with_context(|| format!("write {}", path.display()))
