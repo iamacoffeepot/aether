@@ -334,11 +334,13 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
 ///
 /// The bytes ride a custom section keyed by the asset path — the
 /// section the host-side load window and catalog index — and are not
-/// addressable from guest code. (Toolchain caveat: rustc currently also
-/// duplicates every `#[link_section]` static's bytes into the module's
-/// linear-memory data segment, the same as the `aether.kinds` sections;
-/// see `asset.rs`. Stripping that copy is a build-pipeline concern, not
-/// a macro one.) Asset names must be unique across the final component:
+/// addressable from guest code. The static that carries them stays out
+/// of linear memory: rustc leaves an unreferenced `#[link_section]`
+/// static as a dead internal global, and this expansion withholds the
+/// `#[used]` pin, so wasm-ld's default `--gc-sections` collects it before
+/// the shipped wasm (ADR-0163 §2, "never instantiated into linear
+/// memory"); the custom section itself is emitted unconditionally. See
+/// `asset.rs`. Asset names must be unique across the final component:
 /// a second `export_asset!` of the same path — anywhere in the crate
 /// graph — fails at link time with a duplicate-symbol error rather than
 /// silently concatenating sections. On non-wasm targets no section is

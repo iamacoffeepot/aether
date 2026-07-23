@@ -440,7 +440,6 @@ macro_rules! __export_internal {
         // would otherwise stack duplicate Component records and fail
         // the substrate's manifest reader.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
             <$component>::__AETHER_INPUTS_MANIFEST;
@@ -450,7 +449,6 @@ macro_rules! __export_internal {
         // substrate reads this at load time as the default mailbox
         // name when the load payload omits an explicit `name`.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[used]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$component as $crate::Addressable>::NAMESPACE.len()] = {
             let bytes = <$component as $crate::Addressable>::NAMESPACE.as_bytes();
@@ -1004,7 +1002,6 @@ macro_rules! __export_multi_internal {
     // find the module's unconditional boot type.
     (@boot_section $boot:ty) => {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[used]
         #[unsafe(link_section = "aether.boot")]
         static __AETHER_BOOT_SECTION: [u8; <$boot as $crate::Addressable>::NAMESPACE.len()] = {
             let bytes = <$boot as $crate::Addressable>::NAMESPACE.as_bytes();

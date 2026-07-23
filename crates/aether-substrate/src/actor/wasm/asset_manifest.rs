@@ -21,11 +21,12 @@
 //! nothing payload-sized outlives the window and store eviction can never
 //! strand a live actor (ADR-0163 §3/§4).
 //!
-//! This reads the custom sections and is unaffected by the toolchain
-//! caveat in #3981 (a `#[link_section]` static also duplicating into a
-//! linear-memory data segment) — the indexer never looks at linear
-//! memory. Do not read a "not in linear memory" property out of this
-//! module; it makes no such claim.
+//! This reads the custom sections only and never looks at linear memory.
+//! `export_asset!` keeps the payload out of linear memory on its own (it
+//! withholds the `#[used]` pin, so the dead `#[link_section]` static is
+//! garbage-collected before the shipped wasm; #3981), and this indexer
+//! would be correct either way. Do not read a "not in linear memory"
+//! property out of this module; it makes no such claim.
 
 use std::ops::Range;
 use std::sync::Arc;
