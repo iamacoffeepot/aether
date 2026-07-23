@@ -22,11 +22,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # longer re-exports them (ADR-0077 / issue 552 consolidated them into this
 # crate for compile cost; aether-data forwards only the data-layer derives).
 aether-actor-derive = { path = "../aether-actor-derive" }
-# ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses
-# `aether.input.subscribe` for every `K::IS_INPUT` handler kind.
-# The wasm-shim helpers in `wasm::{io, net, log}` (folded in by issue
-# 552 stage 0) also build `aether.fs.*` / `aether.net.*` / `aether.log.*`
-# request kinds — that whole vocabulary lives in `aether-kinds`.
+# The actor SDK uses `aether-kinds` for its shared typed mail vocabulary;
+# wasm-shim helpers in `wasm::{io, net, log}` also build `aether.fs.*`,
+# `aether.net.*`, and `aether.log.*` request kinds from this crate.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { workspace = true, default-features = false }
 # Decoding typed payloads (e.g. `PriorState::decode_kind`,
@@ -55,9 +53,9 @@ aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 # emission (name, exact bytes, absence from data segments). Same version
 # aether-substrate uses for its section walks.
 wasmparser = "0.246"
-# iamacoffeepot/aether#3747: the input cap was extracted to `aether-input`;
-# the `input_logger` example addresses `InputCapability` + `SubscribeInput`.
-aether-input = { path = "../aether-input", default-features = false }
+# ADR-0164: the `input_logger` example subscribes through the typed
+# `aether.window` facade.
+aether-window = { path = "../aether-window", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
 # the `hello` example addresses `RenderCapability` + the render kinds (marker face).
 aether-render = { path = "../aether-render", default-features = false }

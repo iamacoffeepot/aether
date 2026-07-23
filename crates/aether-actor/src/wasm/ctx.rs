@@ -310,9 +310,8 @@ pub enum SpawnError {
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
 /// capability handle for FFI guests. Exposes send, reply, and the
-/// inherent [`mailbox_id`](WasmCtx::mailbox_id) so `wire`-stage explicit
-/// subscribes (sending `SubscribeInput` to the `InputCapability`) can
-/// self-address.
+/// inherent [`mailbox_id`](WasmCtx::mailbox_id) for cases that need to
+/// address this component explicitly.
 // The `Wasm` prefix carries the native/wasm split signal; bare `Ctx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmCtx<'a, M: ReplyMode = Single> {
@@ -472,9 +471,8 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     }
 
     /// The component's own mailbox id — the value the substrate uses to
-    /// address `receive` calls to this instance. `wire`-stage explicit
-    /// subscribes (sending `SubscribeInput` to the `InputCapability`)
-    /// self-address through this.
+    /// address `receive` calls to this instance. Typed subscription facades
+    /// self-address through their context-bound actor mailbox.
     #[must_use]
     pub fn mailbox_id(&self) -> MailboxId {
         MailboxId(self.mailbox)

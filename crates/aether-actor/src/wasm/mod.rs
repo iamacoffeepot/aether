@@ -463,9 +463,8 @@ macro_rules! __export_internal {
 
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.
-        /// Receives the actor's own mailbox id (ADR-0030 Phase 2) so
-        /// `#[actor]`'s synthesized `init` prologue can self-address
-        /// `subscribe_input` for every `K::IS_INPUT` handler kind.
+        /// Receives the actor's own mailbox id so the SDK can record its
+        /// lineage-aware self identity and pass it to `WasmInitCtx`.
         ///
         /// ADR-0090 (issue 1256): the substrate writes `config_len`
         /// bytes at `config_ptr` (`CONFIG_OFFSET` in the substrate's
@@ -590,9 +589,8 @@ macro_rules! __export_internal {
         /// Mail-allowed — peer mailboxes are addressable. Receives the
         /// component's own mailbox id so the SDK ctx can self-address.
         ///
-        /// Issue 703: uses `WasmCtx` (the send-capable runtime ctx) so
-        /// `Subscriber::subscribe_input::<K>()` resolves; `WasmInitCtx`
-        /// carries no send surface and can't mail.
+        /// Uses `WasmCtx`, the send-capable runtime ctx, so typed capability
+        /// facades can self-address; `WasmInitCtx` carries no send surface.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {

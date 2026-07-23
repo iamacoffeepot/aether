@@ -9,8 +9,8 @@
 //! Pre-PR-C of issue 533 these lived here. Issue 533's facade pattern
 //! (ADR-0075) put chassis cap structs in `aether-kinds`, which meant
 //! both `aether-kinds` and `aether-actor` needed to reference the
-//! markers — but `aether-actor` already depended on `aether-kinds` (for
-//! `aether.input.subscribe`), so a forward dep would cycle.
+//! markers — but `aether-actor` already depended on `aether-kinds` for its
+//! shared kind vocabulary, so a forward dep would cycle.
 //! PR C broke the cycle by moving the markers down to `aether-data`
 //! (the universal data layer both crates depend on); marked stopgap.
 //!
