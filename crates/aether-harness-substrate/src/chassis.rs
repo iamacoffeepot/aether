@@ -376,6 +376,10 @@ impl SubstrateHarnessChassis {
         // members never read env (their values were constructed directly); this
         // keeps that property. Scenario overrides ride the programmatic layer via
         // `with_actor_configured` / the builder's `with_config`.
+        // The hermetic in-process harness is a deliberate embedder: it does not
+        // adopt the `composed` seam (no aborter, hermetic sources, per-scenario
+        // compose), so it keeps its direct `Builder::new`.
+        #[allow(clippy::disallowed_methods)]
         let mut builder = Builder::<Self>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
             .with_config_sources(ConfigSources::hermetic())
             .with_workers(pool_workers)

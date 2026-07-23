@@ -325,7 +325,6 @@ dependencies = [
  "aether-kinds",
  "aether-rpc",
  "aether-substrate",
- "aether-trace",
  "anyhow",
  "clap",
  "ctrlc",
