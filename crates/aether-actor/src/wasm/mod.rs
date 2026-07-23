@@ -464,7 +464,7 @@ macro_rules! __export_internal {
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.
         /// Receives the actor's own mailbox id so the SDK can record its
-        /// lineage-aware self identity and pass it to [`WasmInitCtx`].
+        /// lineage-aware self identity and pass it to `WasmInitCtx`.
         ///
         /// ADR-0090 (issue 1256): the substrate writes `config_len`
         /// bytes at `config_ptr` (`CONFIG_OFFSET` in the substrate's
