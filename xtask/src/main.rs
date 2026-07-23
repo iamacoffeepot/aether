@@ -391,10 +391,9 @@ fn run_package(args: &PackageArgs) -> Result<()> {
 }
 
 /// Write the depot tree at `out`: copy the chassis binary to `<out>/<chassis_bin>`,
-/// hash each component's wasm into `pack/objects/<sha256>`, and write the
-/// `encode_manifest` bytes to `pack/manifest`. Regenerates `out` from
-/// scratch so a stale prior run can't leave orphaned objects. Returns the
-/// manifest it wrote.
+/// then write the `pack/` tree (content-addressed objects + `pack/manifest`)
+/// via [`write_pack`]. Regenerates `out` from scratch so a stale prior run
+/// can't leave orphaned objects. Returns the manifest it wrote.
 fn emit_depot(
     out: &Path,
     chassis_src: &Path,
@@ -405,25 +404,65 @@ fn emit_depot(
     if out.exists() {
         fs::remove_dir_all(out).with_context(|| format!("clear {}", out.display()))?;
     }
-    let objects_dir = out.join("pack").join("objects");
-    fs::create_dir_all(&objects_dir).with_context(|| format!("create {}", objects_dir.display()))?;
-
+    fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     copy_artifact(chassis_src, &out.join(chassis_bin))?;
 
-    let mut entries = Vec::with_capacity(components.len());
-    for component in components {
-        let object = write_object(&objects_dir, &component.wasm)?;
-        entries.push(PackageEntry {
-            object,
+    let pack_components: Vec<PackComponent> = components
+        .iter()
+        .map(|component| PackComponent {
+            wasm: component.wasm.clone(),
             config: None,
             name: Some(component.name.clone()),
             export: None,
             replicas: None,
+        })
+        .collect();
+    write_pack(out, &pack_components, settings)
+}
+
+/// One component about to be written into a pack: its load labels plus the
+/// wasm (and optional config) bytes that become content-addressed objects.
+struct PackComponent {
+    wasm: Vec<u8>,
+    config: Option<Vec<u8>>,
+    name: Option<String>,
+    export: Option<String>,
+    replicas: Option<u32>,
+}
+
+/// Write the `pack/` tree under `<root>/pack`: hash each component's wasm (and
+/// optional config) into `pack/objects/<sha256>` and write the
+/// [`encode_manifest`] bytes to `pack/manifest`. The `pack/` subtree is
+/// regenerated from scratch so a stale prior run can't leave orphaned objects.
+/// Shared by the depot [`emit_depot`] (which also copies the chassis binary
+/// alongside) and the standalone-bundle build (which embeds the objects into
+/// the bundle bin instead of shipping the `pack/` dir). Returns the manifest.
+fn write_pack(root: &Path, components: &[PackComponent], settings: ChassisSettings) -> Result<PackageManifest> {
+    let pack_dir = root.join("pack");
+    if pack_dir.exists() {
+        fs::remove_dir_all(&pack_dir).with_context(|| format!("clear {}", pack_dir.display()))?;
+    }
+    let objects_dir = pack_dir.join("objects");
+    fs::create_dir_all(&objects_dir).with_context(|| format!("create {}", objects_dir.display()))?;
+
+    let mut entries = Vec::with_capacity(components.len());
+    for component in components {
+        let object = write_object(&objects_dir, &component.wasm)?;
+        let config = match &component.config {
+            Some(bytes) => Some(write_object(&objects_dir, bytes)?),
+            None => None,
+        };
+        entries.push(PackageEntry {
+            object,
+            config,
+            name: component.name.clone(),
+            export: component.export.clone(),
+            replicas: component.replicas,
         });
     }
 
     let manifest = PackageManifest { settings, entries };
-    let manifest_path = out.join("pack").join("manifest");
+    let manifest_path = pack_dir.join("manifest");
     fs::write(&manifest_path, encode_manifest(&manifest))
         .with_context(|| format!("write {}", manifest_path.display()))?;
     Ok(manifest)
@@ -516,21 +555,23 @@ struct SpecComponent {
 }
 
 /// Build a standalone, hub-less executable (#1529): build each listed
-/// component for wasm32, write the pack manifest, and build the
-/// chassis's generic bundle bin with `AETHER_BUNDLE_MANIFEST` pointing
-/// at it (the chassis package's `build.rs` packs the wasms for
-/// `include_bytes!`). Reports the resulting binary.
+/// component for wasm32, emit the depot-shaped package artifact (a
+/// `pack/manifest` plus content-addressed objects), and build the chassis's
+/// generic bundle bin with `AETHER_BUNDLE_PACK` pointing at it (the chassis
+/// package's `build.rs` embeds the objects via `include_bytes!`, ADR-0163 §1).
+/// Reports the resulting binary.
 fn run_bundle(args: &BundleArgs) -> Result<()> {
     let plan = resolve_bundle_plan(args)?;
     let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
     let target_dir = metadata.target_directory.as_std_path();
 
-    // 1. Build (or locate) each component's wasm, in order. One cargo
-    // invocation per package — never batch multiple `-p` (see
-    // `inventory::build_plans` on the feature-unification trap).
-    let mut wasm_paths = Vec::new();
+    // 1. Build (or locate) each component's wasm, in order, and read its bytes
+    // plus any per-component config bytes. One cargo invocation per package —
+    // never batch multiple `-p` (see `inventory::build_plans` on the
+    // feature-unification trap).
+    let mut components = Vec::new();
     for component in &plan.components {
-        let wasm = match &component.source {
+        let wasm_path = match &component.source {
             ComponentSource::Package(package) => {
                 let mut wasm_cmd = Command::new(cargo());
                 wasm_cmd.args(["build", "--target", WASM_TARGET, "-p", package]);
@@ -554,20 +595,27 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
                 fs::canonicalize(path).with_context(|| format!("locate prebuilt component wasm {}", path.display()))?
             }
         };
-        wasm_paths.push(wasm);
+        let wasm = fs::read(&wasm_path).with_context(|| format!("read component wasm {}", wasm_path.display()))?;
+        let config = match &component.config {
+            Some(path) => Some(fs::read(path).with_context(|| format!("read component config {}", path.display()))?),
+            None => None,
+        };
+        components.push(PackComponent {
+            wasm,
+            config,
+            name: component.name.clone(),
+            export: component.export.clone(),
+            replicas: None,
+        });
     }
 
-    // 2. Write the pack manifest the chassis package's `build.rs` reads.
-    let manifest = bundle_manifest_json(&plan, &wasm_paths)?;
-    let manifest_dir = target_dir.join("bundle");
-    fs::create_dir_all(&manifest_dir).with_context(|| format!("create {}", manifest_dir.display()))?;
-    let manifest_path = manifest_dir.join(format!("{}-bundle-manifest.json", plan.chassis.as_str()));
-    let mut manifest_text = serde_json::to_string_pretty(&manifest).context("serialize bundle manifest")?;
-    manifest_text.push('\n');
-    fs::write(&manifest_path, manifest_text).with_context(|| format!("write {}", manifest_path.display()))?;
+    // 2. Emit the depot-shaped pack the chassis package's `build.rs` embeds.
+    let settings =
+        ChassisSettings { title: plan.title.clone(), window_mode: plan.window_mode.clone(), tick_hz: plan.tick_hz };
+    let pack_root = target_dir.join("bundle").join(format!("{}-pack", plan.chassis.as_str()));
+    write_pack(&pack_root, &components, settings)?;
 
-    // 3. Build the chassis's generic bundle bin with the pack staged
-    // for `include_bytes!`.
+    // 3. Build the chassis's generic bundle bin with the pack staged for embed.
     let bin = plan.chassis.bin_name();
     let mut bin_cmd = Command::new(cargo());
     bin_cmd.args(["build", "-p", BUNDLE_PACKAGE, "--bin", bin]);
@@ -577,7 +625,7 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
     if let Some(triple) = &args.target {
         bin_cmd.args(["--target", triple]);
     }
-    bin_cmd.env("AETHER_BUNDLE_MANIFEST", &manifest_path);
+    bin_cmd.env("AETHER_BUNDLE_PACK", &pack_root);
     run(bin_cmd, &format!("build bundle binary {bin}"))?;
 
     // 4. Report the output path.
@@ -681,36 +729,6 @@ fn classify_component(raw: &str) -> ComponentSource {
     }
 }
 
-/// Render the pack manifest JSON the chassis package's `build.rs`
-/// consumes (`BundleManifest` in
-/// `crates/aether-chassis/src/bundle_pack.rs` — xtask doesn't
-/// depend on the chassis crate, so keep the field names in sync).
-/// Component order is plan order; config paths are canonicalized here
-/// so the manifest carries only absolute paths.
-fn bundle_manifest_json(plan: &BundlePlan, wasm_paths: &[PathBuf]) -> Result<serde_json::Value> {
-    let mut components = Vec::new();
-    for (component, wasm) in plan.components.iter().zip(wasm_paths) {
-        let config = component
-            .config
-            .as_ref()
-            .map(|path| fs::canonicalize(path).with_context(|| format!("locate component config {}", path.display())))
-            .transpose()?;
-        components.push(serde_json::json!({
-            "wasm": wasm,
-            "config": config,
-            "name": component.name,
-            "export": component.export,
-        }));
-    }
-    Ok(serde_json::json!({
-        "chassis": plan.chassis.as_str(),
-        "title": plan.title,
-        "window_mode": plan.window_mode,
-        "tick_hz": plan.tick_hz,
-        "components": components,
-    }))
-}
-
 /// Source path of a component's wasm under the target tree. Example
 /// cdylibs land under `examples/`; lib cdylibs directly under the profile
 /// dir.
@@ -788,16 +806,13 @@ fn cargo() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
 
     use aether_chassis::bundle_pack::ChassisSettings;
     use aether_chassis::package::{Sha256, decode_manifest};
     use sha2::{Digest, Sha256 as Sha256Hasher};
 
     use super::inventory::{discover_behaviors, discover_components};
-    use super::{
-        BundleChassis, BundlePlan, ComponentSource, DepotComponent, PlannedComponent, bundle_manifest_json, emit_depot,
-    };
+    use super::{DepotComponent, PackComponent, emit_depot, write_pack};
 
     #[test]
     fn emitted_depot_round_trips_through_decoder() {
@@ -859,41 +874,66 @@ mod tests {
     }
 
     #[test]
-    fn bundle_manifest_carries_chassis_and_component_order() {
-        // The manifest is the contract between xtask and the chassis
-        // package's `build.rs`: chassis string, chassis settings, and
-        // the component list in plan (= autoload) order.
-        let plan = BundlePlan {
-            chassis: BundleChassis::Headless,
-            title: None,
-            window_mode: None,
+    fn write_pack_carries_config_object_settings_and_entry_order() {
+        // The bundle path writes richer entries than `emit_depot` exercises —
+        // a per-component config object plus the chassis settings (title /
+        // window mode / tick rate) the standalone bins apply at boot. This
+        // proves `write_pack` writes both the wasm and the config as distinct
+        // content-addressed objects, threads the config hash onto the entry,
+        // preserves entry order, and round-trips settings through the chassis's
+        // own `decode_manifest` (the oracle). The bug it catches is a dropped
+        // config object, a settings field lost on the way to the manifest, or a
+        // reordered entry list.
+        use std::env;
+        use std::fs;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("aether-xtask-writepack-{}-{seq}", process::id()));
+
+        let components = vec![
+            PackComponent {
+                wasm: vec![0x00, 0x61, 0x73, 0x6d, 1],
+                config: Some(vec![7, 8, 9]),
+                name: Some("first".to_owned()),
+                export: None,
+                replicas: Some(2),
+            },
+            PackComponent {
+                wasm: vec![0xfe, 0xff],
+                config: None,
+                name: None,
+                export: Some("alt".to_owned()),
+                replicas: None,
+            },
+        ];
+        let settings = ChassisSettings {
+            title: Some("bundle".to_owned()),
+            window_mode: Some("windowed:800x600".to_owned()),
             tick_hz: Some(30),
-            components: vec![
-                PlannedComponent {
-                    source: ComponentSource::Prebuilt(PathBuf::from("/abs/first.wasm")),
-                    config: None,
-                    name: Some("first".to_owned()),
-                    export: None,
-                },
-                PlannedComponent {
-                    source: ComponentSource::Prebuilt(PathBuf::from("/abs/second.wasm")),
-                    config: None,
-                    name: None,
-                    export: Some("alt".to_owned()),
-                },
-            ],
         };
-        let wasm_paths = vec![PathBuf::from("/abs/first.wasm"), PathBuf::from("/abs/second.wasm")];
-        let manifest = bundle_manifest_json(&plan, &wasm_paths).expect("render manifest");
-        assert_eq!(manifest["chassis"], "headless");
-        assert_eq!(manifest["tick_hz"], 30);
-        assert_eq!(manifest["title"], serde_json::Value::Null);
-        let components = manifest["components"].as_array().expect("components array");
-        assert_eq!(components.len(), 2);
-        assert_eq!(components[0]["wasm"], "/abs/first.wasm");
-        assert_eq!(components[0]["name"], "first");
-        assert_eq!(components[1]["wasm"], "/abs/second.wasm");
-        assert_eq!(components[1]["export"], "alt");
+        let manifest = write_pack(&root, &components, settings.clone()).expect("write pack");
+
+        let manifest_bytes = fs::read(root.join("pack").join("manifest")).expect("read pack/manifest");
+        let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the pack manifest");
+        assert_eq!(decoded, manifest, "the decoded manifest equals what write_pack wrote");
+        assert_eq!(decoded.settings, settings, "chassis settings round-trip");
+        assert_eq!(decoded.entries.len(), 2);
+        assert!(decoded.entries[0].config.is_some(), "the first entry carries a config object");
+        assert_eq!(decoded.entries[0].name.as_deref(), Some("first"));
+        assert_eq!(decoded.entries[0].replicas, Some(2));
+        assert_eq!(decoded.entries[1].config, None, "the config-less entry has no config hash");
+        assert_eq!(decoded.entries[1].export.as_deref(), Some("alt"));
+
+        // The first entry's wasm + config are two distinct objects; the second
+        // entry's wasm is a third — three object files, none shared.
+        let objects_dir = root.join("pack").join("objects");
+        let object_count = fs::read_dir(&objects_dir).expect("read objects dir").count();
+        assert_eq!(object_count, 3, "distinct wasm and config payloads each write one object");
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

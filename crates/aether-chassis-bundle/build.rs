@@ -1,56 +1,74 @@
-//! Stage the bundle pack the generic bundle bins embed
-//! (iamacoffeepot/aether#1529, generalizing the single-wasm #1518 stage).
+//! Stage the package artifact the standalone bundle bins embed (ADR-0163 §1,
+//! issue #3972 — retiring the #1529 inline-bytes pack blob).
 //!
-//! `aether-bundle-desktop` / `aether-bundle-headless` do
-//! `include_bytes!(concat!(env!("OUT_DIR"), "/bundle_pack.bin"))`, so a
-//! pack blob must exist in `OUT_DIR` at compile time. `cargo xtask
-//! bundle` builds the listed components for `wasm32-unknown-unknown`,
-//! writes a JSON [`BundleManifest`], and points `AETHER_BUNDLE_MANIFEST`
-//! at it; this reads the manifest, packs the wasm + config files into
-//! one indexed blob (see `src/bundle_pack.rs`, compiled in via a
-//! `#[path]` module below so the encoder and the bins' decoder are the
-//! same code), and emits it. A
-//! normal workspace build (no env set) writes an empty-pack placeholder
-//! so the bins still compile — they just boot componentless if run,
-//! which only the bundle flow ever does for real.
+//! `aether-bundle-desktop` / `aether-bundle-headless` `include!` a generated
+//! `OUT_DIR/embedded_pack.rs` that names the persisted `pack/manifest` bytes
+//! and each `pack/objects/<sha256>` object via `include_bytes!`. `cargo xtask
+//! bundle` builds the listed components, emits the depot-shaped pack
+//! (`pack/manifest` + content-addressed objects) into a build directory, and
+//! points `AETHER_BUNDLE_PACK` at that directory's root; this build script
+//! copies the pack into `OUT_DIR` and generates the include source, so the
+//! bins boot through `aether_chassis::package`'s `decode_manifest` +
+//! object-resolution path (the same one the depot boot uses). A plain
+//! workspace build (no env) writes an empty manifest and no objects, which the
+//! bins read as "no package — boot componentless".
+//!
+//! This build script owns no encoding: it copies bytes the depot tooling
+//! already produced and emits `include_bytes!` references, so the manifest
+//! byte format lives in exactly one place (`aether_chassis::package`).
 
-use std::{env, fs, path::Path, path::PathBuf};
+use std::fmt::Write as _;
+use std::{env, fs, path::PathBuf};
 
-// The pack encoder + manifest schema + reader, shared with the lib
-// (where the bundle bins decode and the chassis runtime reads
-// `AETHER_BOOT_MANIFEST`). Self-contained std+serde, so the same file
-// compiles in both contexts; `dead_code` because the build script
-// only exercises the encode + read-manifest half.
-#[allow(dead_code)]
-#[path = "../aether-chassis/src/bundle_pack.rs"]
-mod bundle_pack;
-
-use bundle_pack::{Pack, encode_pack, pack_from_manifest, read_manifest};
-
-// Build script: cargo communicates with build scripts exclusively through env
-// (OUT_DIR + the manifest path) — there is no config layer at build time.
+// Build scripts communicate with cargo through env only (OUT_DIR + the pack
+// root) — there is no config layer at build time.
 #[allow(clippy::disallowed_methods)]
 fn main() {
-    println!("cargo:rerun-if-env-changed=AETHER_BUNDLE_MANIFEST");
-    println!("cargo:rerun-if-changed=../aether-chassis/src/bundle_pack.rs");
-    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo")).join("bundle_pack.bin");
-    let pack = env::var_os("AETHER_BUNDLE_MANIFEST")
-        .map_or_else(Pack::default, |manifest_path| pack_for(Path::new(&manifest_path)));
-    fs::write(&out, encode_pack(&pack)).expect("write bundle pack blob");
-}
+    println!("cargo:rerun-if-env-changed=AETHER_BUNDLE_PACK");
 
-/// Register the manifest plus every wasm / config it names for
-/// rerun-if-changed, then read them into a [`Pack`] via the shared
-/// [`pack_from_manifest`] reader (the runtime boot path reuses the same
-/// reader, so the encode and read logic live in one place).
-fn pack_for(manifest_path: &Path) -> Pack {
-    println!("cargo:rerun-if-changed={}", manifest_path.display());
-    let manifest = read_manifest(manifest_path).unwrap_or_else(|e| panic!("{e}"));
-    for entry in &manifest.components {
-        println!("cargo:rerun-if-changed={}", entry.wasm.display());
-        if let Some(config) = &entry.config {
-            println!("cargo:rerun-if-changed={}", config.display());
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
+    let embed_objects = out_dir.join("pack").join("objects");
+    fs::create_dir_all(&embed_objects).expect("create OUT_DIR/pack/objects");
+    let embed_manifest = out_dir.join("pack").join("manifest");
+
+    let mut object_names: Vec<String> = Vec::new();
+
+    if let Some(pack_root) = env::var_os("AETHER_BUNDLE_PACK") {
+        let pack_dir = PathBuf::from(&pack_root).join("pack");
+        let src_manifest = pack_dir.join("manifest");
+        let src_objects = pack_dir.join("objects");
+        println!("cargo:rerun-if-changed={}", src_manifest.display());
+        println!("cargo:rerun-if-changed={}", src_objects.display());
+        fs::copy(&src_manifest, &embed_manifest)
+            .unwrap_or_else(|e| panic!("copy embedded pack manifest from {}: {e}", src_manifest.display()));
+        for entry in fs::read_dir(&src_objects).unwrap_or_else(|e| panic!("read {}: {e}", src_objects.display())) {
+            let entry = entry.expect("read pack/objects entry");
+            let name = entry.file_name().into_string().expect("pack object filename is UTF-8 hex");
+            println!("cargo:rerun-if-changed={}", entry.path().display());
+            fs::copy(entry.path(), embed_objects.join(&name))
+                .unwrap_or_else(|e| panic!("copy pack object {name}: {e}"));
+            object_names.push(name);
         }
+    } else {
+        // No pack staged (a plain build): an empty manifest embeds as zero
+        // bytes, which the bin reads as "no package — boot componentless". No
+        // format knowledge is duplicated here to synthesize it.
+        fs::write(&embed_manifest, []).expect("write empty embedded pack manifest");
     }
-    pack_from_manifest(manifest_path).unwrap_or_else(|e| panic!("{e}"))
+
+    // Stable object order so the generated source is deterministic.
+    object_names.sort();
+
+    // Generate the include source: the manifest bytes plus each object keyed by
+    // its hex filename, all `include_bytes!` against this same OUT_DIR (shared
+    // between this build script and the bins it compiles).
+    let mut src = String::new();
+    src.push_str("pub const MANIFEST: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/pack/manifest\"));\n");
+    src.push_str("pub const OBJECTS: &[(&str, &[u8])] = &[\n");
+    for name in &object_names {
+        writeln!(src, "    ({name:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/pack/objects/{name}\"))),")
+            .expect("write embedded object entry");
+    }
+    src.push_str("];\n");
+    fs::write(out_dir.join("embedded_pack.rs"), src).expect("write embedded_pack.rs");
 }
