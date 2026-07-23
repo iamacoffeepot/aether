@@ -162,6 +162,15 @@ opt-level = 3
 # prelude has `size_of` in scope).
 unused_qualifications = "warn"
 
+# `export!` gates its emitted entry surface on the invoking crate's
+# `library` feature (see the macro's rustdoc). Most invoking crates never
+# declare that feature — the gate is macro-embedded precisely so they
+# don't have to — so register the value as expected here; `-D warnings`
+# would otherwise fail every such crate on `unexpected_cfgs`, which is
+# not suppressed through macro expansion for feature values. The lint
+# stays live for genuine cfg typos.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("library"))'] }
+
 [workspace.lints.rustdoc]
 # Phase 5 / 5c of iamacoffeepot/aether#913 doc-comment cleanup.
 # `redundant_explicit_links` flags `[`Foo`](crate::path::to::Foo)`

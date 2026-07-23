@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use aether_chassis::autoload::boot_manifest_autoload;
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
 };
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
 use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
@@ -88,14 +88,16 @@ mod tests {
         // A hub-less headless env: no `rpc_address`, no hub connection, and
         // persistence off so the boot touches no shared on-disk state.
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
+            base: ChassisBase {
                 sources: default_sources(),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(16),
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
@@ -156,14 +158,16 @@ mod tests {
         assert_eq!(autoload.len(), 1, "one component listed in the manifest");
 
         let env = HeadlessEnv {
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
+            base: ChassisBase {
                 sources: default_sources(),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
+            },
+            common: CommonEnv {
+                namespace_roots: test_namespace_roots(sandbox),
+                runtime: RuntimeConfig::default(),
+                chassis_boot: ChassisBootConfig::default(),
             },
             tick_period: Duration::from_millis(16),
             autoload,

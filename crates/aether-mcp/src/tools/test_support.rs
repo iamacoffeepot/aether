@@ -1,4 +1,7 @@
 #![allow(clippy::wildcard_imports)]
+// The hub-shaped test fixtures are deliberate embedders: they build a bare
+// `TestChassis` via `Builder::new` rather than the `composed` boot seam.
+#![allow(clippy::disallowed_methods)]
 
 use super::*;
 pub(super) use crate::args::*;

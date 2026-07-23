@@ -26,9 +26,9 @@ use aether_http::HttpServerCapability;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_render::HeadlessRenderCapability;
-use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_window::HeadlessWindowCapability;
 
@@ -37,14 +37,12 @@ use aether_chassis::TickConfig;
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
 use aether_chassis::boot::{
-    CommonEnv, chassis_residual_knobs, load_chassis_config, tick_only_lifecycle_params, with_common_caps,
-    with_rpc_server,
+    ChassisBase, CommonEnv, chassis_residual_knobs, load_chassis_config, tick_only_lifecycle_params,
+    with_full_stack_caps, with_rpc_server,
 };
 use aether_chassis::cli::HeadlessCli;
 use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, StageArgv, validate_env};
 use aether_substrate::mail::registry::MailDispatch;
-use aether_substrate::runtime::lifecycle::FatalAborter;
-use aether_substrate::runtime::lifecycle::OutboundFatalAborter;
 use aether_substrate::runtime::log_install::apply_filter;
 
 /// Marker type for the headless chassis. Carries no fields — the
@@ -81,8 +79,11 @@ impl Chassis for HeadlessChassis {
         // `with_chassis_config_member` install re-lowers `workers` onto the builder
         // seam during `compose`.
         let workers = env.common.chassis_boot.to_workers();
-        let ring_capacities = env.common.actor_ring.to_ring_capacities();
+        let ring_capacities = env.base.actor_ring.to_ring_capacities();
         let autoload = mem::take(&mut env.autoload);
+        // Lift the base stratum out; `composed` installs the aborter + base
+        // ahead of `compose` (the leftover default `env.base` is never re-read).
+        let base = mem::take(&mut env.base);
 
         // Tick rates are bounded well below `u32::MAX` Hz (typically
         // 60-240 Hz); the `u128 → u32` narrowing is safe in practice.
@@ -98,7 +99,7 @@ impl Chassis for HeadlessChassis {
             "componentless boot — load a component via aether.component.load",
         );
 
-        let builder = Self::compose(&boot, env);
+        let builder = composed::<Self>(&boot, base, env);
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `from_env`) because the
@@ -119,8 +120,12 @@ impl Chassis for HeadlessChassis {
 }
 
 impl BootableChassis for HeadlessChassis {
-    fn resolve_env() -> Result<Self::Env, ConfigError> {
-        HeadlessEnv::from_env()
+    type Base = ChassisBase;
+
+    fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
+        let mut env = HeadlessEnv::from_env()?;
+        let base = mem::take(&mut env.base);
+        Ok((base, env))
     }
 
     fn residual_knobs() -> Vec<KnobRecord> {
@@ -141,8 +146,10 @@ impl BootableChassis for HeadlessChassis {
     /// `boot` into the timer driver afterward. The `tick_period` (driver-only)
     /// and `autoload` (drained post-build) fields ride [`HeadlessEnv`] but
     /// take no part in the claim chain, so they are ignored here.
-    fn compose(boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
-        let HeadlessEnv { common, tick_period: _, autoload: _ } = env;
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
+        // `base` is installed by `composed` before this delta runs; the leftover
+        // default here is unused.
+        let HeadlessEnv { base: _, common, tick_period: _, autoload: _ } = env;
 
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
@@ -182,32 +189,16 @@ impl BootableChassis for HeadlessChassis {
             }),
         );
 
-        let registry = Arc::clone(&boot.registry);
-        let mailer = Arc::clone(&boot.queue);
-        // ADR-0063: production chassis configures the fatal-abort
-        // aborter so a wasm guest trap exits the substrate via
-        // `lifecycle::fatal_abort` instead of unwinding.
-        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
-
-        // ADR-0071 phase B: io / http / log compose through the
-        // chassis_builder `.with()` chain. Boot order is declaration
-        // order — `with_common_caps` runs log first so other
-        // capabilities' boot tracing routes through the log capture.
-        // `into_common_boot` reads the six env-sourced `CommonBoot` fields off
-        // the shared env in one place (the teardown budget honors the same
-        // `AETHER_SETTLEMENT_CAP_SECS` knob, `0 → wait forever` sentinel and all,
-        // as the settlement gates) and threads the source stack back out.
-        let (common, sources) =
-            common.into_common_boot(aborter, component_host_params, aether_game::GameGatewayParams::default());
+        // Boot order is declaration order. `into_common_boot` reads the
+        // env-sourced `CommonBoot` fields off the shared remainder in one place;
+        // the aborter and source stack are supplied earlier by `composed` /
+        // `ChassisBase`.
+        let common = common.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the driver broadcasts
         // Tick to `aether.input` via the relay subscriber.
-        //
-        // ADR-0156 §5: hand the builder the source stack (`with_config_sources`)
-        // so it resolves each composed cap's `Config` (http / http-server /
-        // lifecycle) off it; the caps compose with `with_actor(params)` alone.
-        let builder = with_common_caps(Builder::<Self>::new(registry, mailer).with_config_sources(sources), common)
+        let builder = with_full_stack_caps(builder, common)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessClipboardCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
@@ -221,16 +212,20 @@ impl BootableChassis for HeadlessChassis {
 /// from env vars (per ADR-0070's "substrate-core never reads env" invariant);
 /// tests construct one directly.
 ///
-/// The shared config (source stack, fs roots, content-gen staging, runtime,
-/// pool / ring / scheduler / teardown knobs) lives in the embedded
-/// [`CommonEnv`]; only the headless tick cadence and the autoload list are
+/// The config source stack and the non-cap ring / scheduler / settlement members
+/// live in the embedded [`ChassisBase`]; the fs roots, runtime, and worker knobs
+/// in [`CommonEnv`]; only the headless tick cadence and the autoload list are
 /// per-chassis. ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
 /// `HttpServerConfig`, `AnthropicConfig`, `GeminiConfig`, `LifecycleConfig`) no
-/// longer ride as fields — the builder resolves each off [`CommonEnv::sources`],
+/// longer ride as fields — the builder resolves each off the base's source stack,
 /// and a test stages programmatic overrides into it (`ConfigSources::set_override`).
 pub struct HeadlessEnv {
-    /// The config fields every full-stack chassis shares (source stack, fs roots,
-    /// content-gen staging, runtime knobs, pool / ring / scheduler / teardown
+    /// The universal base stratum (config source stack + the non-cap ring /
+    /// scheduler / settlement members) `composed` installs ahead of `compose`.
+    /// Lifted out with `mem::take` on the boot and describe paths; the leftover
+    /// default is never re-read.
+    pub base: ChassisBase,
+    /// The full-stack config remainder (fs roots, runtime knobs, worker/boot
     /// knobs). Resolved by [`CommonEnv::resolve`] — the single declaration, so a
     /// shared knob can't exist on one chassis and silently not the other.
     pub common: CommonEnv,
@@ -297,12 +292,12 @@ impl HeadlessEnv {
         // arbitrary.
         let tick_period = sources.resolve::<TickConfig>()?.to_tick_period();
 
-        // The shared block (fs roots, content-gen, runtime, pool / ring /
-        // scheduler / teardown knobs) plus the boot-manifest autoload list, both
-        // resolved by the single common resolver off the same stack.
-        let (common, autoload) = CommonEnv::resolve(sources)?;
+        // The shared block (base stratum + fs roots / runtime / worker knobs)
+        // plus the boot-manifest autoload list, all resolved by the single common
+        // resolver off the same stack.
+        let (base, common, autoload) = CommonEnv::resolve(sources)?;
 
-        Ok(Self { common, tick_period, autoload })
+        Ok(Self { base, common, tick_period, autoload })
     }
 }
 
@@ -332,7 +327,7 @@ mod config_manifest_tests {
         // #3849 + #3850: the RPC port, the runtime knobs, and the frame-size knob
         // migrated off the residual hand records onto derive-`Config` members
         // (`RpcServerConfig` composed via `with_rpc_server`, `RuntimeConfig` +
-        // `FrameSizeConfig` declared in `with_common_caps`), so the composition
+        // `FrameSizeConfig` declared in `ChassisBase`), so the composition
         // walk — not `chassis_residual_knobs` — is what now claims them. Catches a
         // dropped `declare_config_member` or a de-composed RPC server reintroducing
         // a false unknown-key warning.

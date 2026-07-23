@@ -349,6 +349,25 @@ pub mod guest_alloc;
 /// `on_dehydrate` / `on_rehydrate` exports always forward to the
 /// `WasmActor` hooks, which default to no-ops unless the actor overrides
 /// them.
+///
+/// # The `library` feature: one `export!` per emitted wasm module
+///
+/// The entries this macro binds are fixed-name symbols (`init`,
+/// `receive_p32`, the manifest custom sections), so a wasm module can
+/// carry exactly one live `export!` expansion — a cdylib that links an
+/// rlib whose own `export!` is live gets duplicate entry symbols at link
+/// time and duplicate manifest records the substrate's reader rejects.
+/// The gate is built in: every emitted item is behind
+/// `cfg(not(feature = "library"))`, resolved against the *invoking*
+/// crate's features. A crate that is consumed as an actor library by
+/// another module declares `library = []` (non-default) in its
+/// `[features]`; the embedding cdylib depends on it with
+/// `features = ["library"]`, which strips the dependency's entry surface
+/// while keeping the actor impls linkable (`spawn_inline_child` and
+/// plain type reuse are unaffected). The crate's own wasm build never
+/// enables the feature, so its standalone module keeps its entries. Call
+/// sites stay a bare `export!(…)` either way; a crate nobody embeds
+/// needs no feature declaration at all.
 #[macro_export]
 macro_rules! export {
     ($component:ty) => {
@@ -418,7 +437,7 @@ macro_rules! __export_internal {
         // transitive rlib pulls of a `#[actor]`-using crate, which
         // would otherwise stack duplicate Component records and fail
         // the substrate's manifest reader.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
@@ -428,7 +447,7 @@ macro_rules! __export_internal {
         // into a sibling `aether.namespace` custom section. The
         // substrate reads this at load time as the default mailbox
         // name when the load payload omits an explicit `name`.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[used]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$component as $crate::Addressable>::NAMESPACE.len()] = {
@@ -459,7 +478,7 @@ macro_rules! __export_internal {
         /// Returns `0` on success and non-zero when the actor's `init`
         /// returned `Err(ActorInitError)` or non-empty config bytes failed
         /// to decode.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(
             mailbox_id: u64,
@@ -554,7 +573,7 @@ macro_rules! __export_internal {
         /// substrate builds that don't know about `init_with_config_p32`. Reaches
         /// into `init_with_config` with empty config bytes, resolving typed
         /// config actors through their compiled `Config::default()`.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             // SAFETY: forwarding to `init_with_config` with `config_len = 0`
@@ -574,7 +593,7 @@ macro_rules! __export_internal {
         /// Issue 703: uses `WasmCtx` (the send-capable runtime ctx) so
         /// `Subscriber::subscribe_input::<K>()` resolves; `WasmInitCtx`
         /// carries no send surface and can't mail.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -597,7 +616,7 @@ macro_rules! __export_internal {
         /// (on a replace) or the instance drop, on the dying instance
         /// (issue 584 Phase 2b, ADR-0079 amended). Mail-allowed — live
         /// peers are still addressable; sends to a dead peer warn-drop.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -614,7 +633,7 @@ macro_rules! __export_internal {
         /// the `_p32` suffix per ADR-0024 Phase 1; the trailing
         /// `recipient: u64` (ADR-0114 decision #1) widens like the other
         /// frame slots on the wasm path.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
             kind: u64,
@@ -704,7 +723,7 @@ macro_rules! __export_internal {
         /// # Safety
         /// Called by the substrate per the layout contract; see
         /// [`$crate::wasm::guest_alloc::realloc_bytes`].
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "realloc_p32")]
         pub unsafe extern "C" fn realloc_p32(
             old_ptr: u32,
@@ -730,7 +749,7 @@ macro_rules! __export_internal {
         /// immediately before a `replace_component` swap. Forwards to
         /// [`$crate::WasmActor::on_dehydrate`], a no-op unless the actor
         /// overrides it.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -784,7 +803,7 @@ macro_rules! __export_internal {
         /// Exported under the `_p32` suffix per ADR-0024 Phase 1.
         /// Forwards to [`$crate::WasmActor::on_rehydrate`], a no-op unless
         /// the actor overrides it.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -982,7 +1001,7 @@ macro_rules! __export_multi_internal {
     // presence is what the host's `read_boot_namespace_from_bytes` reads to
     // find the module's unconditional boot type.
     (@boot_section $boot:ty) => {
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[used]
         #[unsafe(link_section = "aether.boot")]
         static __AETHER_BOOT_SECTION: [u8; <$boot as $crate::Addressable>::NAMESPACE.len()] = {
@@ -1000,7 +1019,7 @@ macro_rules! __export_multi_internal {
     // `aether.namespace` section (naming `$default`) and a 3-arg
     // `init_with_config_p32` that constructs `$default`, then the shared body.
     (@default $default:ty ; @all $($component:ty),+) => {
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[used]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$default as $crate::Addressable>::NAMESPACE.len()] = {
@@ -1016,7 +1035,7 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// Existing 3-arg init ABI; constructs the default (opted-in) export.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(
             mailbox_id: u64,
@@ -1059,7 +1078,7 @@ macro_rules! __export_multi_internal {
         // `aether.namespace` section the default form emits. Its presence is
         // what lets the host distinguish a defaultless multi-actor module
         // from a legacy single-actor module.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[used]
         #[unsafe(link_section = "aether.no_default")]
         static __AETHER_NO_DEFAULT_SECTION: [u8; 1] = [1u8];
@@ -1068,7 +1087,7 @@ macro_rules! __export_multi_internal {
         /// 3-arg init ABI on a defaultless module: there is no default to
         /// construct, so stage a failure and return non-zero. This is a
         /// backstop — the host rejects a bare, defaultless load first.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(
             _mailbox_id: u64,
@@ -1109,7 +1128,7 @@ macro_rules! __export_multi_internal {
         // stream into one capability set per type. The default type is
         // first. A single-actor `export!` never reaches this arm, so
         // the boundary-free single-actor layout stays byte-identical.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         const __AETHER_MULTI_INPUTS_LEN: usize = 0usize $(
             + 1
             + $crate::__macro_internals::canonical::inputs_actor_boundary_len(
@@ -1118,7 +1137,7 @@ macro_rules! __export_multi_internal {
             + <$component>::__AETHER_INPUTS_MANIFEST_LEN
         )+;
 
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[used]
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; __AETHER_MULTI_INPUTS_LEN] = {
@@ -1168,7 +1187,7 @@ macro_rules! __export_multi_internal {
         /// ADR-0090 legacy zero-config init; forwards to the 3-arg
         /// `init_with_config` the wrapper rule (`@default` / `@no_default`)
         /// emits — construct the default, or stage the no-default failure.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             unsafe { init_with_config(mailbox_id, 0, 0) }
@@ -1177,7 +1196,7 @@ macro_rules! __export_multi_internal {
         /// # Safety
         /// ADR-0096 typed init: `type_tag` selects which exported type
         /// to construct (its `mailbox_id_from_name(NAMESPACE)`).
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_typed_p32")]
         pub unsafe extern "C" fn init_typed(
             mailbox_id: u64,
@@ -1220,7 +1239,7 @@ macro_rules! __export_multi_internal {
             1
         }
 
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1237,7 +1256,7 @@ macro_rules! __export_multi_internal {
             0
         }
 
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1255,7 +1274,7 @@ macro_rules! __export_multi_internal {
         /// `ErasedWasmActor`. Self-mailbox id derived from the live
         /// instance's namespace. The trailing `recipient: u64` (ADR-0114
         /// decision #1) carries the routed mailbox through to `Mail`.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
             kind: u64,
@@ -1331,7 +1350,7 @@ macro_rules! __export_multi_internal {
         ///
         /// # Safety
         /// Called by the substrate per the layout contract.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "realloc_p32")]
         pub unsafe extern "C" fn realloc_p32(
             old_ptr: u32,
@@ -1355,7 +1374,7 @@ macro_rules! __export_multi_internal {
         /// immediately before a `replace_component` swap. Routes through
         /// the boxed `ErasedWasmActor` to the live type's
         /// [`$crate::WasmActor::on_dehydrate`] (ADR-0101).
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1408,7 +1427,7 @@ macro_rules! __export_multi_internal {
         /// [`$crate::WasmActor::on_rehydrate`] (ADR-0101). Self-mailbox id
         /// is the captured folded id, with the live instance's namespace
         /// hash as the pre-shim fallback.
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {

@@ -293,6 +293,9 @@ impl NativeActor for FsCapability {
 }
 
 #[cfg(all(test, feature = "runtime"))]
+// These tests are deliberate embedders: they build a bare `TestChassis` via
+// `Builder::new` rather than the `composed` boot seam production chassis use.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::super::FsCapability;
     use super::super::{
