@@ -20,6 +20,11 @@
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit_commons@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
+//! - [`bundle::BundleComponent`] — the reference asset bundle (ADR-0163 §4):
+//!   carries a tile in a wasm custom section, makes it an engine resident in
+//!   the load window, draws it every frame, and destroys it symmetrically on
+//!   teardown. Selected by the `aether_kit_commons@aether.kit.bundle` export;
+//!   it has no driver kinds, so no `kinds` submodule.
 //!
 //! The terrain-authoring stack — the mark / world / terra / mover actors and
 //! their `CellPos` / `WorldPoint` / octimeter position vocabulary — was
@@ -38,6 +43,7 @@
 
 extern crate alloc;
 
+pub mod bundle;
 pub mod camera;
 pub mod console;
 pub mod mesh;
@@ -64,5 +70,6 @@ aether_actor::export!(
     default = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
-    mesh::MeshViewer
+    mesh::MeshViewer,
+    bundle::BundleComponent
 );
