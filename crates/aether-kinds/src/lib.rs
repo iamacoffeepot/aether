@@ -207,7 +207,7 @@ mod engine {
     /// the only path input is the one-time [`UploadBinary`].
     ///
     /// `boot_manifest` (when `Some`) is the absolute path to a
-    /// `BundleManifest` JSON of components to auto-load at boot; the cap
+    /// `BootManifest` JSON of components to auto-load at boot; the cap
     /// injects it as `AETHER_BOOT_MANIFEST` alongside `AETHER_RPC_PORT`,
     /// and the spawned chassis reads the listed wasm itself (spawn is
     /// single-host) so the engine comes up with those components already

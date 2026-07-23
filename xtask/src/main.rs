@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
-use aether_chassis::bundle_pack::ChassisSettings;
+use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis::package::{PackageEntry, PackageManifest, Sha256, encode_manifest};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{Metadata, MetadataCommand};
@@ -39,8 +39,8 @@ use sha2::{Digest, Sha256 as Sha256Hasher};
 
 use crate::affected::AffectedArgs;
 use crate::inventory::{
-    BUNDLE_PACKAGE, BuildPlan, CHASSIS_BINS, Component, PACKAGE_CHASSIS, PACKAGE_CHASSIS_HEADLESS,
-    behavior_build_plans, build_plans, discover_behavior_variants, discover_behaviors, discover_components,
+    BuildPlan, CHASSIS_BINS, Component, PACKAGE_CHASSIS, PACKAGE_CHASSIS_HEADLESS, behavior_build_plans, build_plans,
+    discover_behavior_variants, discover_behaviors, discover_components,
 };
 use crate::transform::TransformArgs;
 
@@ -58,9 +58,6 @@ struct Cli {
 enum Commands {
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
-    /// Build a standalone, hub-less executable: a chassis with an ordered
-    /// component set (plus configs) embedded at build time (#1529).
-    Bundle(BundleArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
     /// a persisted `pack/manifest`, and content-addressed component
     /// objects under `pack/objects/<sha256>`. The Steam depot is this
@@ -103,8 +100,8 @@ struct PackageArgs {
     out: Option<PathBuf>,
     /// Chassis the depot ships. Selects the `(package, bin)` pair from
     /// the chassis inventory; `headless` ships the headless substrate.
-    #[arg(long, value_enum, default_value_t = BundleChassis::Desktop)]
-    chassis: BundleChassis,
+    #[arg(long, value_enum, default_value_t = PackageChassis::Desktop)]
+    chassis: PackageChassis,
     /// Ordered components to select (autoload order is argument order):
     /// a workspace package name, built for wasm32 as its lib cdylib, or
     /// a path to a prebuilt artifact (recognized by the `.wasm` suffix
@@ -141,84 +138,22 @@ struct PackageArgs {
     spec: Option<PathBuf>,
 }
 
-#[derive(Args)]
-struct BundleArgs {
-    /// Cargo profile for the bundle binary and its components.
-    #[arg(long, value_enum, default_value_t = Profile::Release)]
-    profile: Profile,
-    /// Cross-compile the bundle binary for this target triple (e.g.
-    /// `x86_64-pc-windows-msvc`). Defaults to the host target.
-    #[arg(long)]
-    target: Option<String>,
-    /// Chassis the bundle boots.
-    #[arg(long, value_enum, default_value_t = BundleChassis::Desktop)]
-    chassis: BundleChassis,
-    /// Ordered components to embed (autoload order is argument order):
-    /// a workspace package name, built for wasm32 as its lib cdylib, or
-    /// a path to a prebuilt artifact (recognized by the `.wasm` suffix
-    /// — use this for `[[example]]` cdylibs).
-    #[arg(long, num_args = 1.., required_unless_present = "spec")]
-    components: Vec<String>,
-    /// Per-component init-config file (ADR-0090), paired with
-    /// `--components` by position (repeat the flag; trailing components
-    /// without a config get empty config bytes).
-    #[arg(long = "config")]
-    configs: Vec<PathBuf>,
-    /// Window title (desktop chassis only).
-    #[arg(long)]
-    title: Option<String>,
-    /// Window mode spec (desktop chassis only), same vocabulary as
-    /// `AETHER_WINDOW_MODE` (`windowed[:WxH]` / `fullscreen-borderless`
-    /// / `exclusive:WxH@HZ`).
-    #[arg(long)]
-    window_mode: Option<String>,
-    /// Tick cadence in hertz (headless chassis only).
-    #[arg(long)]
-    tick_hz: Option<u32>,
-    /// Full-fidelity bundle spec (JSON) — alternative to the component
-    /// and chassis-config flags. Carries chassis, `title` /
-    /// `window_mode` / `tick_hz`, and per-component `package`-or-`wasm` + `config` +
-    /// `name` + `export`; relative paths resolve against the spec
-    /// file's directory.
-    #[arg(
-        long,
-        conflicts_with_all = ["components", "configs", "title", "window_mode", "tick_hz"]
-    )]
-    spec: Option<PathBuf>,
-}
-
-/// Which chassis a bundle boots. Each maps to a generic bundle bin in
-/// the chassis package; the two are distinct binaries because the
-/// chassis are genuinely different link sets (desktop pulls
-/// winit/wgpu/cpal, headless none).
+/// Which chassis a package depot ships. Each selects the real host
+/// substrate binary from the chassis inventory; the two are distinct
+/// binaries because the chassis are genuinely different link sets (desktop
+/// pulls winit/wgpu/cpal, headless none).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum BundleChassis {
+enum PackageChassis {
     Desktop,
     Headless,
 }
 
-impl BundleChassis {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Desktop => "desktop",
-            Self::Headless => "headless",
-        }
-    }
-
-    /// The generic bundle bin (`[[bin]]` in the chassis package) that
-    /// embeds the pack for this chassis.
-    fn bin_name(self) -> &'static str {
-        match self {
-            Self::Desktop => "aether-bundle-desktop",
-            Self::Headless => "aether-bundle-headless",
-        }
-    }
-
+impl PackageChassis {
     /// The chassis substrate `(package, bin)` pair a `cargo xtask package`
     /// depot ships for this chassis — the real host binary from the chassis
-    /// inventory (not the standalone-bundle bin [`Self::bin_name`] returns).
-    fn package_chassis(self) -> (&'static str, &'static str) {
+    /// inventory.
+    fn substrate(self) -> (&'static str, &'static str) {
         match self {
             Self::Desktop => PACKAGE_CHASSIS,
             Self::Headless => PACKAGE_CHASSIS_HEADLESS,
@@ -267,7 +202,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Dist(args) => run_dist(&args),
-        Commands::Bundle(args) => run_bundle(&args),
         Commands::Package(args) => run_package(&args),
         Commands::Transform(args) => transform::run(&args),
         Commands::Affected(args) => affected::run(&args),
@@ -380,8 +314,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
 ///   pack/objects/<sha256>       # component wasm (+ config), content-addressed
 /// ```
 ///
-/// Two input surfaces resolve to the same emit (ported from `cargo xtask
-/// bundle`, issue #4002):
+/// Two input surfaces resolve to the same emit (issue #4002):
 ///
 /// - **No selection** — the discover-everything dev sweep: every
 ///   structurally discovered component, the desktop chassis, default
@@ -402,7 +335,7 @@ fn run_package(args: &PackageArgs) -> Result<()> {
     // emit; with neither it is the discover-everything sweep.
     let selected = args.spec.is_some() || !args.components.is_empty();
     let (chassis_bin, components, settings) = if selected {
-        let plan = resolve_bundle_plan(
+        let plan = resolve_package_plan(
             args.spec.as_deref(),
             args.chassis,
             &args.components,
@@ -411,7 +344,7 @@ fn run_package(args: &PackageArgs) -> Result<()> {
             args.window_mode.as_deref(),
             args.tick_hz,
         )?;
-        let (chassis_package, chassis_bin) = plan.chassis.package_chassis();
+        let (chassis_package, chassis_bin) = plan.chassis.substrate();
         let components = build_planned_components(&plan, target_dir, args.profile)?;
         build_named_chassis(chassis_package, chassis_bin, args.profile)?;
         let settings =
@@ -495,9 +428,8 @@ struct PackComponent {
 /// optional config) into `pack/objects/<sha256>` and write the
 /// [`encode_manifest`] bytes to `pack/manifest`. The `pack/` subtree is
 /// regenerated from scratch so a stale prior run can't leave orphaned objects.
-/// Shared by the depot [`emit_depot`] (which also copies the chassis binary
-/// alongside) and the standalone-bundle build (which embeds the objects into
-/// the bundle bin instead of shipping the `pack/` dir). Returns the manifest.
+/// Called by the depot [`emit_depot`], which also copies the chassis binary
+/// alongside the `pack/` tree. Returns the manifest.
 fn write_pack(root: &Path, components: &[PackComponent], settings: ChassisSettings) -> Result<PackageManifest> {
     let pack_dir = root.join("pack");
     if pack_dir.exists() {
@@ -557,7 +489,7 @@ fn build_named_chassis(package: &str, bin: &str, profile: Profile) -> Result<()>
     run(cmd, &format!("build chassis bin {bin}"))
 }
 
-/// One component in a resolved bundle plan: where its wasm comes from
+/// One component in a resolved package plan: where its wasm comes from
 /// plus the per-component load inputs that ride into the pack manifest.
 #[derive(Debug)]
 struct PlannedComponent {
@@ -576,24 +508,24 @@ enum ComponentSource {
     Prebuilt(PathBuf),
 }
 
-/// The normalized bundle inputs — flags and the `--spec` file both
+/// The normalized package inputs — flags and the `--spec` file both
 /// resolve to this before any cargo invocation runs.
 #[derive(Debug)]
-struct BundlePlan {
-    chassis: BundleChassis,
+struct PackagePlan {
+    chassis: PackageChassis,
     title: Option<String>,
     window_mode: Option<String>,
     tick_hz: Option<u32>,
     components: Vec<PlannedComponent>,
 }
 
-/// `--spec` file schema (JSON). Mirrors [`BundlePlan`] with
+/// `--spec` file schema (JSON). Mirrors [`PackagePlan`] with
 /// per-component `package` XOR `wasm`.
 #[derive(serde::Deserialize)]
-struct BundleSpec {
+struct PackageSpec {
     /// Overrides the `--chassis` flag when present.
     #[serde(default)]
-    chassis: Option<BundleChassis>,
+    chassis: Option<PackageChassis>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -603,7 +535,7 @@ struct BundleSpec {
     components: Vec<SpecComponent>,
 }
 
-/// One component entry in a [`BundleSpec`].
+/// One component entry in a [`PackageSpec`].
 #[derive(serde::Deserialize)]
 struct SpecComponent {
     #[serde(default)]
@@ -618,68 +550,11 @@ struct SpecComponent {
     export: Option<String>,
 }
 
-/// Build a standalone, hub-less executable (#1529): build each listed
-/// component for wasm32, emit the depot-shaped package artifact (a
-/// `pack/manifest` plus content-addressed objects), and build the chassis's
-/// generic bundle bin with `AETHER_BUNDLE_PACK` pointing at it (the chassis
-/// package's `build.rs` embeds the objects via `include_bytes!`, ADR-0163 §1).
-/// Reports the resulting binary.
-fn run_bundle(args: &BundleArgs) -> Result<()> {
-    let plan = resolve_bundle_plan(
-        args.spec.as_deref(),
-        args.chassis,
-        &args.components,
-        &args.configs,
-        args.title.as_deref(),
-        args.window_mode.as_deref(),
-        args.tick_hz,
-    )?;
-    let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
-    let target_dir = metadata.target_directory.as_std_path();
-
-    // 1. Build (or locate) each component's wasm, in order, plus its config.
-    let components = build_planned_components(&plan, target_dir, args.profile)?;
-
-    // 2. Emit the depot-shaped pack the chassis package's `build.rs` embeds.
-    let settings =
-        ChassisSettings { title: plan.title.clone(), window_mode: plan.window_mode.clone(), tick_hz: plan.tick_hz };
-    let pack_root = target_dir.join("bundle").join(format!("{}-pack", plan.chassis.as_str()));
-    write_pack(&pack_root, &components, settings)?;
-
-    // 3. Build the chassis's generic bundle bin with the pack staged for embed.
-    let bin = plan.chassis.bin_name();
-    let mut bin_cmd = Command::new(cargo());
-    bin_cmd.args(["build", "-p", BUNDLE_PACKAGE, "--bin", bin]);
-    if let Some(flag) = args.profile.cargo_flag() {
-        bin_cmd.arg(flag);
-    }
-    if let Some(triple) = &args.target {
-        bin_cmd.args(["--target", triple]);
-    }
-    bin_cmd.env("AETHER_BUNDLE_PACK", &pack_root);
-    run(bin_cmd, &format!("build bundle binary {bin}"))?;
-
-    // 4. Report the output path.
-    let profile_dir = args.target.as_ref().map_or_else(
-        || target_dir.join(args.profile.as_str()),
-        |triple| target_dir.join(triple).join(args.profile.as_str()),
-    );
-    let windows = args.target.as_deref().map_or(cfg!(windows), |t| t.contains("windows"));
-    let exe = profile_dir.join(if windows {
-        format!("{bin}.exe")
-    } else {
-        bin.to_string()
-    });
-    println!("{} bundle ({} component(s)) -> {}", plan.chassis.as_str(), plan.components.len(), exe.display());
-    Ok(())
-}
-
 /// Build (or locate) each planned component's wasm, in plan order, and read
 /// its bytes plus any per-component config bytes into a [`PackComponent`].
 /// One cargo invocation per package — never batch multiple `-p` (see
-/// `inventory::build_plans` on the feature-unification trap). Shared by
-/// `bundle` and `package`; survives the eventual `bundle` retirement.
-fn build_planned_components(plan: &BundlePlan, target_dir: &Path, profile: Profile) -> Result<Vec<PackComponent>> {
+/// `inventory::build_plans` on the feature-unification trap).
+fn build_planned_components(plan: &PackagePlan, target_dir: &Path, profile: Profile) -> Result<Vec<PackComponent>> {
     let mut components = Vec::new();
     for component in &plan.components {
         let wasm_path = match &component.source {
@@ -722,22 +597,21 @@ fn build_planned_components(plan: &BundlePlan, target_dir: &Path, profile: Profi
     Ok(components)
 }
 
-/// Normalize the pack inputs shared by `bundle` and `package`: `--spec
-/// <file>` when present, the component + chassis-config flags otherwise.
-/// Taking the input fields rather than a subcommand's args struct lets both
-/// subcommands author identical packs, and survives the eventual `bundle`
-/// retirement with `package`.
-fn resolve_bundle_plan(
+/// Normalize the `package` pack inputs: `--spec <file>` when present, the
+/// component + chassis-config flags otherwise. Taking the input fields rather
+/// than the args struct keeps the flag path and the spec path resolving to
+/// one plan shape.
+fn resolve_package_plan(
     spec: Option<&Path>,
-    chassis: BundleChassis,
+    chassis: PackageChassis,
     components: &[String],
     configs: &[PathBuf],
     title: Option<&str>,
     window_mode: Option<&str>,
     tick_hz: Option<u32>,
-) -> Result<BundlePlan> {
+) -> Result<PackagePlan> {
     if let Some(spec_path) = spec {
-        return resolve_bundle_spec(spec_path, chassis);
+        return resolve_package_spec(spec_path, chassis);
     }
     if configs.len() > components.len() {
         bail!(
@@ -756,7 +630,7 @@ fn resolve_bundle_plan(
             export: None,
         })
         .collect();
-    Ok(BundlePlan {
+    Ok(PackagePlan {
         chassis,
         title: title.map(str::to_owned),
         window_mode: window_mode.map(str::to_owned),
@@ -767,10 +641,10 @@ fn resolve_bundle_plan(
 
 /// Parse a `--spec` file into a plan. Relative paths inside the spec
 /// resolve against the spec file's directory.
-fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<BundlePlan> {
-    let text = fs::read_to_string(spec_path).with_context(|| format!("read bundle spec {}", spec_path.display()))?;
-    let spec: BundleSpec =
-        serde_json::from_str(&text).with_context(|| format!("parse bundle spec {}", spec_path.display()))?;
+fn resolve_package_spec(spec_path: &Path, chassis_flag: PackageChassis) -> Result<PackagePlan> {
+    let text = fs::read_to_string(spec_path).with_context(|| format!("read package spec {}", spec_path.display()))?;
+    let spec: PackageSpec =
+        serde_json::from_str(&text).with_context(|| format!("parse package spec {}", spec_path.display()))?;
     let spec_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
     let anchor = |path: &Path| -> PathBuf {
         if path.is_absolute() {
@@ -785,7 +659,7 @@ fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<
             (Some(package), None) => ComponentSource::Package(package.clone()),
             (None, Some(wasm)) => ComponentSource::Prebuilt(anchor(wasm)),
             _ => {
-                bail!("bundle spec component {i}: exactly one of `package` or `wasm` is required")
+                bail!("package spec component {i}: exactly one of `package` or `wasm` is required")
             }
         };
         components.push(PlannedComponent {
@@ -796,9 +670,9 @@ fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<
         });
     }
     if components.is_empty() {
-        bail!("bundle spec {} lists no components", spec_path.display());
+        bail!("package spec {} lists no components", spec_path.display());
     }
-    Ok(BundlePlan {
+    Ok(PackagePlan {
         chassis: spec.chassis.unwrap_or(chassis_flag),
         title: spec.title,
         window_mode: spec.window_mode,
@@ -896,7 +770,7 @@ fn cargo() -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use aether_chassis::bundle_pack::ChassisSettings;
+    use aether_chassis::boot_manifest::ChassisSettings;
     use aether_chassis::package::{Sha256, decode_manifest};
     use sha2::{Digest, Sha256 as Sha256Hasher};
 
@@ -904,8 +778,8 @@ mod tests {
 
     use super::inventory::{discover_behaviors, discover_components};
     use super::{
-        BundleChassis, ComponentSource, PackComponent, Profile, build_planned_components, emit_depot,
-        resolve_bundle_plan, write_pack,
+        ComponentSource, PackComponent, PackageChassis, Profile, build_planned_components, emit_depot,
+        resolve_package_plan, write_pack,
     };
 
     #[test]
@@ -1077,11 +951,11 @@ mod tests {
         fs::write(&spec_path, spec).expect("write spec");
 
         // `--chassis desktop` is the flag default; the spec's `headless` wins.
-        let plan = resolve_bundle_plan(Some(&spec_path), BundleChassis::Desktop, &[], &[], None, None, None)
+        let plan = resolve_package_plan(Some(&spec_path), PackageChassis::Desktop, &[], &[], None, None, None)
             .expect("resolve spec plan");
-        assert_eq!(plan.chassis, BundleChassis::Headless, "spec chassis overrides the flag default");
+        assert_eq!(plan.chassis, PackageChassis::Headless, "spec chassis overrides the flag default");
 
-        let (_, chassis_bin) = plan.chassis.package_chassis();
+        let (_, chassis_bin) = plan.chassis.substrate();
         assert_eq!(chassis_bin, "aether-substrate-headless", "headless selection ships the headless bin");
 
         let components = build_planned_components(&plan, Path::new("unused-for-prebuilt"), Profile::Release)
@@ -1121,7 +995,7 @@ mod tests {
         let components = vec!["aether-kit-commons".to_owned(), "build/probe.wasm".to_owned()];
         let configs = vec![PathBuf::from("camera.cfg")];
         let plan =
-            resolve_bundle_plan(None, BundleChassis::Desktop, &components, &configs, Some("loco"), None, Some(60))
+            resolve_package_plan(None, PackageChassis::Desktop, &components, &configs, Some("loco"), None, Some(60))
                 .expect("resolve flag plan");
 
         assert_eq!(plan.title.as_deref(), Some("loco"));
@@ -1137,7 +1011,7 @@ mod tests {
         assert_eq!(plan.components[1].config, None, "the trailing component is config-less");
 
         let excess = vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
-        let err = resolve_bundle_plan(None, BundleChassis::Desktop, &components, &excess, None, None, None)
+        let err = resolve_package_plan(None, PackageChassis::Desktop, &components, &excess, None, None, None)
             .expect_err("more configs than components is rejected");
         assert!(err.to_string().contains("pair by position"), "excess configs are rejected: {err}");
     }
@@ -1158,13 +1032,13 @@ mod tests {
 
         let both = dir.join("both.json");
         fs::write(&both, r#"{ "components": [ { "package": "p", "wasm": "p.wasm" } ] }"#).expect("write both spec");
-        let err = resolve_bundle_plan(Some(&both), BundleChassis::Desktop, &[], &[], None, None, None)
+        let err = resolve_package_plan(Some(&both), PackageChassis::Desktop, &[], &[], None, None, None)
             .expect_err("package and wasm together is rejected");
         assert!(err.to_string().contains("exactly one of"), "package+wasm rejected: {err}");
 
         let neither = dir.join("neither.json");
         fs::write(&neither, r#"{ "components": [ { "name": "n" } ] }"#).expect("write neither spec");
-        let err = resolve_bundle_plan(Some(&neither), BundleChassis::Desktop, &[], &[], None, None, None)
+        let err = resolve_package_plan(Some(&neither), PackageChassis::Desktop, &[], &[], None, None, None)
             .expect_err("neither package nor wasm is rejected");
         assert!(err.to_string().contains("exactly one of"), "neither package nor wasm rejected: {err}");
 

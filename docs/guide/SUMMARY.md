@@ -73,7 +73,7 @@
 - [Choose the owning extension point](building/extension-points.md)
 - [Capability module anatomy](capability-anatomy.md)
 - [Writing guest code](writing-guest-code.md)
-- [Distribution and standalone bundles](building/distribution.md)
+- [Distribution and packaging](building/distribution.md)
 - [Recipes](recipes.md)
   - [Authoring terrain](recipes/authoring-terrain.md)
   - [Adding a config knob](recipes/adding-a-config-knob.md)

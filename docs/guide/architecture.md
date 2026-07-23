@@ -71,7 +71,7 @@ project replies.
 | Guest SDK | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
-| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition over one shared layer; packaging in `aether-chassis-bundle` |
+| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition over one shared layer; the shippable package depot comes from `cargo xtask package` |
 | Product actors | `aether-kit-*`, `aether-mesh` | camera, UI, world/terrain, sim, geometry authoring |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Build/test tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, bundles, compatibility fixtures, fuzz targets |

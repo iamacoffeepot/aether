@@ -31,12 +31,6 @@ const BEHAVIOR_DEP: &str = "aether-behavior";
 /// [`discover_behaviors`] excludes on.
 const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 
-/// Cargo package owning the standalone bundle binaries (`cargo xtask
-/// bundle` builds them with the component pack staged); the chassis
-/// binaries themselves live in the per-chassis crates listed in
-/// [`CHASSIS_BINS`].
-pub const BUNDLE_PACKAGE: &str = "aether-chassis-bundle";
-
 /// Chassis (host-target) binaries packaged into `dist/bin/`, as
 /// `(package, bin)` pairs — the by-chassis bundle split (issues
 /// #3809-#3816) spreads them over per-chassis crates. Each bin name is

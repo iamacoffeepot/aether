@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/aether-substrate",
     "crates/aether-chassis",
-    "crates/aether-chassis-bundle",
     "crates/aether-chassis-desktop",
     "crates/aether-chassis-headless",
     "crates/aether-chassis-harness",

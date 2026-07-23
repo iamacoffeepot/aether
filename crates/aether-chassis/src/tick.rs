@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aether_substrate::config::{ConfigError, ConfigSources};
 
-use crate::bundle_pack::ChassisSettings;
+use crate::boot_manifest::ChassisSettings;
 
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
