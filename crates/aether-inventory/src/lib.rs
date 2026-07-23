@@ -39,11 +39,15 @@
 //!   `aether.render`, …) surfaces its `In -> Out` the way
 //!   `describe_component` surfaces a wasm component's.
 //!
-//! There is no local `kinds.rs` by design (the ADR-0121 harness
-//! must-stay rule): the `Manifest` / `Resolve` / `ListKinds` /
-//! `ListHandlers` kind family is consumed upstream by `aether-mcp`,
-//! which is barred from a cap-crate dependency, so the
-//! family stays whole in `aether-kinds`.
+//! The `Manifest` / `Resolve` / `ListKinds` / `ListHandlers` family is
+//! owned here in [`kinds`], per the `capability-anatomy.md` rule. Its one
+//! upstream consumer, `aether-mcp`, takes this crate identity-only
+//! (`default-features = false`) exactly as it takes `aether-fs` — the
+//! kinds' `Kind`-derived inventory submissions land in the harness's
+//! static `descriptors::all()` vocabulary through that link.
+//! [`KindDescriptorWire`](aether_kinds::KindDescriptorWire) is the one
+//! holdout in `aether-kinds`: `aether-fleet` uses it for component config
+//! descriptors, so it is shared vocabulary rather than cap-owned.
 //!
 //! The cap is stateless. `ListKinds` reads the engine's `Registry`
 //! through the handler ctx (`NativeCtx::mailer().registry()`) — the same
@@ -61,9 +65,11 @@
 // markers always-on, outside the `feature = "runtime"` gate. The reply
 // kinds are named only by the gated handler bodies, so they ride the
 // runtime gate below.
-use aether_kinds::{ListHandlers, ListKinds, Manifest, Resolve};
+use kinds::{ListHandlers, ListKinds, Manifest, Resolve};
 
 use aether_actor::actor;
+
+pub mod kinds;
 
 /// `aether.inventory` cap **identity** (ADR-0122 identity/runtime split,
 /// ADR-0088 §6, widened by ADR-0091 §5). A ZST carrying only the
@@ -72,7 +78,9 @@ use aether_actor::actor;
 /// `#[runtime] impl` lives behind the one `feature = "runtime"` gate, so
 /// a transport-only build never pulls `aether_substrate` through this cap.
 ///
-/// The cap carries no runtime state (`type State = Self`). The
+/// The cap carries no runtime state — `InventoryCapabilityState` is a
+/// ZST, named only because a struct-hosted split identity cannot use
+/// `type State = Self` (that spelling selects the un-split shape). The
 /// `Manifest`, `Resolve`, and `ListHandlers` arms read process-global
 /// tables — the link-time inventories and the runtime name registry —
 /// directly. The `ListKinds` arm reads the engine's `Registry` off the
@@ -90,7 +98,7 @@ pub struct InventoryCapability;
 // helpers, the `aether_substrate`-typed imports, and the state struct
 // sit behind the one `feature = "runtime"` gate.
 #[cfg(not(target_family = "wasm"))]
-use aether_kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
+use kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
 
 // The runtime half — the wire-projection helpers (nested as
 // `runtime/manifest.rs` / `runtime/resolve.rs`), the

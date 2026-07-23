@@ -31,11 +31,12 @@ use aether_data::{
     validate_scope_path,
 };
 use aether_data::{EnumVariant, Primitive, SchemaType};
+use aether_inventory::kinds::{ListKinds, ListKindsResult};
 #[cfg(test)]
 use aether_kinds::KindDescriptorWire;
 use aether_kinds::{
-    ComponentCapabilities, ComponentSelector, DeathReason, FallbackCapability, HandlerCapability, ListKinds,
-    ListKindsResult, NamedMail, ResolveComponent, ResolveComponentResult, trace::MailNodeWire,
+    ComponentCapabilities, ComponentSelector, DeathReason, FallbackCapability, HandlerCapability, NamedMail,
+    ResolveComponent, ResolveComponentResult, trace::MailNodeWire,
 };
 use aether_rpc::{MailEnvelope, MailboxAddress};
 #[cfg(test)]
@@ -57,8 +58,8 @@ use crate::args::{
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
+use aether_inventory::kinds::{Manifest, ManifestResult, Resolve, ResolveResult};
 use aether_kinds::descriptors;
-use aether_kinds::{Manifest, ManifestResult, Resolve, ResolveResult};
 #[cfg(test)]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(test)]

@@ -7,9 +7,9 @@
 //! engine's own [`Registry`]. The `#[runtime] impl` in `runtime/mod.rs`
 //! delegates here.
 
+use crate::kinds::ResolvedName;
 use aether_data::tagged_id::{self, Tag};
 use aether_data::{KindId, MailboxId};
-use aether_kinds::ResolvedName;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::runtime::thread_name::resolve_runtime;
 
