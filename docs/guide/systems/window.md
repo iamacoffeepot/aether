@@ -1,169 +1,220 @@
 # Window
 
-> **Governing ADR:** [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md)
+> **Governing ADRs:** [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md)
 > (the substrate/chassis split) and
 > [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
 > (the application-scoped multi-window manager).
 
-An actor never touches the OS window directly. Like everything else it does, a
-window change crosses the mail boundary: the desktop runtime owns the live
-windows, and an actor reaches it by mailing a request to the `aether.window`
-mailbox and handling the reply. Window identities are explicit `WindowId`
-values. The manager lists, creates, closes, and controls multiple windows and
-owns selector-aware publication of the events originating from them.
+`aether-window` is the bespoke home of window behavior. One application-scoped
+actor owns every live window, translates native window events, routes the
+resulting Aether kinds, and exposes window lifecycle and control over mail.
+Callers use the platform-neutral `WindowCapability` identity and explicit
+`WindowId` values; they never hold a native window handle or address a
+desktop-, headless-, or test-specific implementation.
 
-That reply is the part to hold onto. A window request is advisory: the OS can
-adjust a mode, clamp a size, or decline to honor a focus call exactly as asked.
-So the reply carries the resolved state, not an echo of what you sent — the reply
-is the truth about what the window now is.
+The desktop chassis still owns the application thread and the call to winit's
+event loop. That is thread ownership, not window-domain ownership:
+
+```text
+aether-chassis-desktop
+    EventLoop::run_app(...)
+        └── DesktopWindowApplication       // aether-window
+              ├── winit ApplicationHandler
+              ├── PumpedSlot<DesktopWindowCapability>
+              ├── WindowId ↔ winit WindowId maps
+              └── DesktopWindowIntegration // semantic chassis seam
+                    ├── attach/detach render target
+                    ├── mark windows dirty
+                    └── request process shutdown
+```
 
 ## Why it exists
 
-Window management has to run on one specific thread — the OS event-loop thread
-the desktop chassis already pumps — and only the desktop chassis has a window at
-all. Routing it through mail keeps both facts behind the same boundary every
-other subsystem uses: an actor mails `aether.window` exactly as it mails
-`aether.render` or `aether.fs`, and the chassis is the one party that knows
-whether a window exists and which thread may touch it. Production headless
-installs a fail-fast companion. `SubstrateHarness` instead installs a
-deterministic in-memory synthetic runtime so tests can exercise window
-lifecycle, selectors, and event routing without an OS window. The hub does not
-install a window mailbox at all; verify the selected chassis rather than
-assuming every profile has the stub.
+Window toolkits require their event loop and window mutations to remain on one
+specific thread. Actors, render surfaces, and callers still need an ordinary
+mail boundary. A pumped window actor satisfies both constraints: winit
+callbacks enter its state synchronously through same-thread host ingress, while
+actor requests arrive through the normal mailbox and settlement graph.
 
-The reply-with-applied-value contract exists because a window op can't promise to
-do exactly what it's told. The window manager owns the final say on geometry and
-focus, so the only honest answer is the state after the change landed. Returning
-it on every reply means a caller learns the resolved mode or title in the same
-exchange, with no follow-up query.
+Keeping the whole native application in `aether-window` also gives
+multi-window behavior one owner. The manager allocates stable engine
+`WindowId`s, maps them to platform ids, retains per-window cursor/IME/focus
+state, publishes events with their source id, and coordinates the matching
+render target. The chassis composes this application with render, lifecycle,
+and shutdown; it does not interpret raw winit events.
 
-## What it does
+## The public surface
 
-**One mailbox, three operations.** Everything addresses the `aether.window`
-mailbox. Each request kind pairs with a reply kind that names the same operation:
-
-| Request | Fields | Reply | `Ok` carries |
-|---|---|---|---|
-| `aether.window.set_mode` | `mode`, `width?`, `height?` | `aether.window.set_mode_result` | `mode`, `width`, `height` |
-| `aether.window.set_title` | `title` | `aether.window.set_title_result` | `title` |
-| `aether.window.focus` | — (none) | `aether.window.focus_result` | — (`Ok` ack) |
-
-Each reply is an `Ok` / `Err` enum. The `Ok` arm carries the resolved state; the
-`Err` arm carries a reason string and means nothing changed.
-
-**`set_mode` switches presentation mode.** `mode` is one of three shapes:
-
-- **`Windowed`** — a normal window. The optional `width` / `height` request a
-  size in physical pixels; they apply only in this mode, and fullscreen modes
-  size themselves.
-- **`FullscreenBorderless`** — borderless fullscreen on the current monitor,
-  sized to it.
-- **`FullscreenExclusive { width, height, refresh_mhz }`** — exclusive
-  fullscreen at one specific video mode. The substrate matches the triple against
-  the monitor's supported modes and replies `Err` if none matches exactly — it
-  fails loud rather than silently falling back. The reply's `Ok` carries the
-  resolved `mode`, `width`, and `height`, so a caller reads back the size the
-  window manager actually gave it (which a tiling manager or a clamp may shrink).
-
-**`set_title` updates the title bar.** Send the new `title`; the `Ok` reply
-echoes the applied text. Setting a title is infallible on a real window, so on
-desktop this always succeeds.
-
-**`focus` brings the window to the front.** It takes no fields — focus is a
-single imperative. The desktop chassis un-minimizes the window, shows it if
-hidden, and raises and focuses it. The motivating use is `capture_frame`: a
-backgrounded, minimized, or hidden window has nothing to read back, and `focus`
-is the lever that foregrounds it first. (Per the platform, raising-to-front is
-best-effort — the `Ok` ack means the chassis applied the calls, not that the
-window manager honored every one.)
-
-**Explicit non-desktop behavior.** Only the desktop chassis owns OS windows.
-Production headless registers `aether.window` with handlers that reply `Err`
-("unsupported on this chassis — no window peripheral") immediately. The
-test-only synthetic feature is different: `SubstrateHarness` composes
-`SyntheticWindowCapability`, whose monotonic in-memory `WindowId` map models
-list/create/close/control requests and whose selector table routes injected
-events through the real scheduler and settlement graph. The hub omits the
-mailbox, so direct window mail there is unresolved. Render/capture availability
-is a separate chassis choice; inspect its handler instead of inferring it from
-the window policy.
-
-**The window mailbox is drained by hand, on the event-loop thread.** Window
-operations have to run on the OS event-loop thread rather than a pool worker, so
-the desktop chassis claims `aether.window` as an inbox the event loop drains
-itself between frames. The claim hands the driver a `ClaimedInbox`, so the finish
-obligation a pooled actor gets for free is carried by construction here too: each
-inbound mail arrives as a guard that records `Finished` and replies along the
-caller's chain when it falls out of scope, whether the op applied cleanly, the
-payload failed to decode, or the kind was unrecognised. The driver applies the op
-and replies; the settle rides the guard. It's the lead example of the
-claimed-mailbox drain, covered in detail on
-[Tracing & settlement](tracing-and-settlement.md#the-obligation-guard).
-
-## How to use it
-
-**From an agent over MCP.** `send_mail` rides settlement and hands back the
-correlated reply, so a window change is a single call: mail `aether.window.set_title`
-to `aether.window` and the applied title comes back with it. The move you'll reach
-for before a `capture_frame` against a window that isn't in front is `focus`:
-
-```text
-send_mail  aether.window.focus  → aether.window   (no params)
-capture_frame …
-```
-
-`describe_kinds` carries the exact param schema for each of the three kinds —
-including the `WindowMode` enum's three arms — if you need to build `set_mode`
-params by hand. Because these are desktop-only, run them against a desktop
-substrate; on headless they reply `Err` rather than hanging.
-
-**From a component.** `aether.window` is a chassis-owned mailbox, so a component
-addresses it by name rather than through a guest-side capability facade. Send the
-request kind to that mailbox and receive the reply kind like any other mail:
+Consumers address the neutral identity and use `WindowMailboxExt`:
 
 ```rust
-#[handler::single]
-fn on_set_mode_result(&mut self, ctx: &mut WasmCtx<'_>, result: SetWindowModeResult) {
-    match result {
-        SetWindowModeResult::Ok { mode, width, height } => { /* the resolved state */ }
-        SetWindowModeResult::Err { error } => { /* nothing changed */ }
-    }
+use aether_kinds::{Key, WindowMode};
+use aether_window::{
+    WindowCapability, WindowMailboxExt, WindowSelector, WindowSizeRequest,
+    WindowSpec,
+};
+
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    let windows = ctx.actor::<WindowCapability>();
+
+    windows.list();
+    windows.create(WindowSpec {
+        title: "Inspector".to_owned(),
+        mode: WindowMode::Windowed,
+        size: Some(WindowSizeRequest { width: 960, height: 540 }),
+    });
+    windows.subscribe::<Key>(WindowSelector::All);
 }
 ```
 
-The request and reply kinds live in `aether-kinds`. Match on the reply kind to
-learn the resolved state — never assume the window is exactly what you asked for.
+The request/reply families are:
 
-**Boot defaults.** The initial mode and title come from `AETHER_WINDOW_MODE` and
-`AETHER_WINDOW_TITLE` at boot, the same values `set_mode` / `set_title` change at
-runtime. `AETHER_WINDOW_MODE` parses as `windowed` (optionally `windowed:WxH`) /
-`fullscreen-borderless` / `exclusive:WxH@HZ`; an unparseable value warns and falls
-back to `Windowed`. These knobs, and where they sit in the layered config, are
-covered under [Configuration](configuration.md).
+| Operation | Target or input | Successful reply |
+|---|---|---|
+| `list` | none | every live `WindowInfo`, ordered by `WindowId` |
+| `create` | `WindowSpec` | the attached window's `WindowInfo` |
+| `close` | `WindowId` | the window whose close began |
+| `set_mode` | `WindowId`, mode, optional windowed size | resolved mode and size |
+| `set_title` | `WindowId`, title | applied title |
+| `focus` | `WindowId` | acknowledgement |
+| `request_redraw` | `WindowId` | acknowledgement |
 
-## How to extend or reuse it
+Every targeted operation rejects an unknown or already-closing id. Window
+requests are advisory: an OS may clamp a size or decline to focus exactly as
+asked, so callers should treat the reply's applied state as authoritative.
+There is no implicit primary, focused, or current target. The boot window is
+simply the first `WindowSpec` realized after winit resumes.
 
-The surface is intentionally small — three operations on one mailbox — and the
-seam is the chassis. A new window operation is a new request/reply kind pair in
-`aether-kinds` plus a handler on the desktop driver that applies it on the
-event-loop thread and records the inbound mail `Finished`. The fail-fast
-companions gain a matching `Err` handler. Profiles that omit the capability,
-such as the hub, should keep that omission explicit rather than accidentally
-claiming a partial surface.
+`WindowInfo` reports:
 
-The boundary not to cross is the OS toolkit itself. The window-manager specifics
-churn and are platform-dependent; the mail surface — the three kinds and the
-applied-value replies — is the contract a caller writes against, and it stays put
-when the platform layer underneath moves.
+```rust
+pub struct WindowInfo {
+    pub id: WindowId,
+    pub title: String,
+    pub mode: WindowMode,
+    pub width: u32,
+    pub height: u32,
+    pub focused: bool,
+    pub occluded: bool,
+}
+```
+
+`WindowMode::Windowed` may request a physical-pixel size.
+`FullscreenBorderless` follows the current monitor.
+`FullscreenExclusive { width, height, refresh_mhz }` must match a supported
+video mode exactly and fails instead of silently choosing another one.
+
+## Window-originated streams
+
+The window actor is also the source and router for keyboard, pointer,
+resize, text, IME, focus, redraw, opened, and closed events. Every per-window
+kind carries a `WindowId`. A subscriber chooses one window or all current and
+future windows:
+
+```rust
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    let windows = ctx.actor::<WindowCapability>();
+    windows.subscribe::<WindowOpened>(WindowSelector::All);
+    windows.subscribe::<WindowSize>(WindowSelector::All);
+    windows.subscribe::<MouseMove>(WindowSelector::One(self.viewport));
+}
+```
+
+`WindowSelector::All` is prospective. If the same mailbox subscribes through
+both `All` and `One(id)`, recipient lookup unions the sets and sends one copy.
+The common reflexive methods subscribe the sending actor. Explicit
+`subscribe_for`/`unsubscribe_for` forms exist for forwarding to another local
+mailbox; the manager validates and monitors that mailbox, and removes all of
+its rows when it departs.
+
+Publication uses each kind's compile-time `K::ID`. There is no registry lookup,
+central input-kind list, or relay actor to update when a window event kind is
+added. See [Input streams](input.md) for the event vocabulary and text/IME
+semantics.
+
+## Desktop threading
+
+`DesktopWindowApplication<I>` implements winit's `ApplicationHandler` in the
+window crate. A callback runs in this order:
+
+```text
+drain actor mail on the owning thread
+    → host_turn(|state, ctx| state.window_event(...))
+    → apply queued native WindowHostAction values
+    → apply semantic WindowHostEffect values through I
+    → pump render while settlement requires progress
+```
+
+`host_turn` does not move the actor or create another thread. It is available
+only through the `!Send` pumped slot on its owner thread, is non-reentrant, and
+starts fresh external-event roots for outbound mail. Native operations that
+need winit's `ActiveEventLoop`, such as window creation, are returned as host
+actions and applied after the actor turn.
+
+Render receives only semantic attachment and dirty-window calls. It owns one
+surface/configuration bundle per `WindowId`; the window manager owns native
+window lifecycle and asks the integration to attach or detach the
+corresponding render target. The native `Arc<Window>` remains same-thread host
+state and never becomes a wire payload.
+
+## Runtime variants
+
+All variants claim the one shared window namespace:
+
+- `DesktopWindowCapability` is pumped by `DesktopWindowApplication` and owns
+  real winit state.
+- `WindowCapability`'s production headless runtime fails every request
+  immediately because there is no window peripheral.
+- `SyntheticWindowCapability`, declared with
+  `#[actor(singleton, runtime::synthetic)]`, is test-only. It keeps a
+  deterministic in-memory window map and the same selector-aware routing
+  behavior.
+- The hub installs no window actor.
+
+The neutral `WindowCapability` is the only identity consumer code should name.
+The runtime identities share one namespace constant inside `aether-window`;
+variants do not repeat a namespace literal.
+
+The initial desktop window still reads `AETHER_WINDOW_MODE` and
+`AETHER_WINDOW_TITLE`. `AETHER_WINDOW_MODE` accepts `windowed`,
+`windowed:WxH`, `fullscreen-borderless`, or `exclusive:WxH@HZ`; invalid input
+warns and falls back to windowed mode. See [Configuration](configuration.md).
+
+## Testing and extension
+
+`SubstrateHarness` composes the synthetic runtime. Use typed actor operations
+for controls and `HarnessOp::window_event` for an event:
+
+```rust
+let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
+    &SubscribeWindow {
+        selector: WindowSelector::One(window),
+        kind: Key::ID,
+        mailbox: observer,
+    },
+);
+
+let press = HarnessOp::window_event(
+    window,
+    &Key { window, code: keycode::KEY_ENTER },
+);
+```
+
+Synthetic injection is not a headless production API. The headless runtime
+stays fail-fast so tests cannot accidentally turn unsupported production
+behavior into an implicit mock.
+
+To add a window-originated event, define the kind with a `WindowId`, emit it
+from window state, and let selector routing publish `K::ID`. Do not add a
+chassis kind cache or a generic input relay. A future non-window device such
+as a gamepad or raw HID source should have its own concrete source actor.
 
 ## Where to read more
 
-- The substrate/chassis split that makes window an opt-in desktop capability —
-  [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md).
-- How the claimed window mailbox settles its finish obligation by construction,
-  and the guard that backs the relay seams —
-  [Tracing & settlement](tracing-and-settlement.md#the-obligation-guard).
-- Why a single `send_mail` returns the applied value, and the `capture_frame`
-  that pairs with `focus` — [The MCP harness](../mcp-harness.md).
-- Where `AETHER_WINDOW_MODE` / `AETHER_WINDOW_TITLE` sit among the config layers —
-  [Configuration](configuration.md).
+- The full ownership and threading decision —
+  [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md).
+- Window-originated event routing — [Input streams](input.md).
+- Pumped actors, external roots, and settlement —
+  [Tracing & settlement](tracing-and-settlement.md).
+- The deterministic runtime and typed injection —
+  [SubstrateHarness and FleetHarness](../testing/substrateharness-and-fleetharness.md).

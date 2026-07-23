@@ -1,194 +1,174 @@
 # Input streams
 
 > **Governing ADRs:** [ADR-0021](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0021-input-stream-subscriptions.md)
-> (publish/subscribe routing), [ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)
-> (subscribers keyed by `KindId`). The model — subscribe by kind, fan out to
-> every subscriber — is **stable**. This page covers the input interrupts
-> (key, mouse, window-size). The per-frame `Tick` is a frame-lifecycle stage:
-> a component subscribes it on `aether.lifecycle`, not here — the
-> [frame lifecycle](lifecycle.md) owns it.
+> (publish/subscribe routing),
+> [ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)
+> (subscribers keyed by `KindId`), and
+> [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
+> (window-owned input publication).
 
-The substrate owns the window, the keyboard, and the mouse. The events they
-produce — a key down, the cursor moving, a resize — reach actors as ordinary
-mail through one mailbox, `aether.input`, on a publish/subscribe model. An actor
-that wants a stream **subscribes** to it; the substrate fans each event out to
-every subscriber. Nothing is pushed at an actor that didn't ask; a stream with
-no subscribers is dropped at the source.
+Keyboard, pointer, resize, text, and IME events originate at windows, so the
+window actor owns their translation and routing. There is no generic input
+actor or extra relay mailbox. A consumer subscribes through
+`WindowCapability`, chooses which windows it cares about, and receives the
+event kind directly from the window actor.
 
-When you author a component, this is how it feels the world — you subscribe to
-`Key` to react to keystrokes, to `MouseMove` to follow the cursor, to
-`WindowSize` to track the viewport. When you drive over MCP, input normally
-originates at the platform layer, but you can inject a synthetic event by mailing
-its kind to `aether.input`, which fans it out to whoever subscribed.
+`Tick` is not input. It is a frame-lifecycle stage subscribed through
+`LifecycleCapability`; see [Frame lifecycle](lifecycle.md).
 
-## Why it exists
+## Why the window actor owns these streams
 
-Several actors can want the same input at once. A gameplay actor and a debug
-overlay might both watch keystrokes; a HUD and a renderer might both want resize
-events. Routing input to a single
-owner would force the extra listeners to fan out through that one — the
-incidental coupling the mail-first design exists to avoid. So the substrate keeps
-a subscriber *set* per stream and broadcasts to every member, the same shape
-observation mail already uses to reach every attached session. There's no default
-recipient and no focus primitive; a component that wants exclusive input gets it
-by being the sole subscriber.
+Several actors can observe the same event. Gameplay, an editor overlay, and a
+debug console may all need a key press, while render and layout consumers may
+both need a resize. Selector-aware publish/subscribe keeps those consumers
+independent without losing the source window.
 
-Streams are keyed by **`KindId`** ([ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)) — the same identifier the mail
-wire, dispatch, and the SDK already use for every kind. One identifier space, so
-adding a new input is a one-line kind declaration plus the line that emits it;
-there's no parallel enum or bridge table to keep in sync.
+The window manager already owns the facts needed to translate native events:
+the engine/platform id mapping, per-window cursor position, modifiers, IME
+composition, focus, occlusion, and lifecycle. Publishing there avoids an
+encode/decode/encode relay and keeps multi-window routing in one place.
 
-## What it does
+Streams remain keyed by `KindId`, the same schema-derived identifier used by
+mail and dispatch. The manager publishes `K::ID` directly. It does not resolve
+or cache a hand-maintained list of recognized input kinds.
 
-**One mailbox, a set of streams.** Everything addresses `aether.input`, owned by
-the `InputCapability` actor — the sole owner of the subscriber table
-(`KindId → set of mailboxes`). The platform-driven streams:
+## Event vocabulary
 
-| Kind | Fires on |
+Every event below carries its source `WindowId`:
+
+| Kind | Additional data |
 |---|---|
-| `aether.key` | a key press |
-| `aether.key_release` | a key release (paired with `key` for hold-to-act) |
-| `aether.mouse_move` | cursor movement |
-| `aether.mouse_button` | a mouse-button press |
-| `aether.mouse_button_release` | a mouse-button release |
-| `aether.mouse_wheel` | scroll-wheel / trackpad delta |
-| `aether.window_size` | a resize |
-| `aether.text_input` | committed, layout-resolved characters (typing / IME commit) |
-| `aether.ime_preedit` | in-flight IME composition (the underlined text being composed) |
-| `aether.modifiers` | the held modifier keys changed (Shift / Ctrl / Alt / Meta) |
+| `Key` | physical key `code` on press |
+| `KeyRelease` | the matching physical key `code` |
+| `MouseMove` | cursor `x`, `y` in window coordinates |
+| `MouseButton` | button plus cursor position at press |
+| `MouseButtonRelease` | button plus cursor position at release |
+| `MouseWheel` | normalized deltas plus cursor position |
+| `WindowSize` | physical-pixel width and height |
+| `TextInput` | committed, layout-resolved text |
+| `ImePreedit` | in-flight composition text and optional byte-offset span |
+| `Modifiers` | Shift, Ctrl, Alt, and Meta state |
 
-**`Tick` lives on the lifecycle, not here.** The per-frame advance is the
-substrate's frame-lifecycle state machine (`aether.lifecycle.tick`), so a
-component subscribes the `Tick` stage directly on `aether.lifecycle` —
-`ctx.actor::<LifecycleCapability>().subscribe::<Tick>()` (ADR-0082), the same
-subscribe shape as the input streams below. `Key`, `MouseMove`, and the rest are
-genuine input interrupts and stay on `aether.input`.
+The window actor also publishes `WindowOpened` and `WindowClosed` through the
+same selector machinery. Lifecycle/control events and user input therefore
+share one source identity without pretending they are all one generic
+peripheral.
 
-**Subscribe and unsubscribe are mail.** Control kinds on `aether.input`:
+## Subscribe by kind and window
 
-- `aether.input.subscribe_self { kind }` — subscribe the *sending* actor to
-  `kind`. The cap reads the subscriber off the inbound's host-stamped `Source`
-  (ADR-0083), so the caller names neither the kind id nor its own mailbox. This
-  is the common form. Idempotent. Replies `aether.input.subscribe_result`
-  (`Ok` / `Err { error }`); a sender with no local mailbox (an external session
-  or another engine) gets `Err`.
-- `aether.input.unsubscribe_self { kind }` — the reflexive unsubscribe twin.
-- `aether.input.subscribe { kind, mailbox }` — add an *explicit* `mailbox` to
-  the set for `kind`. The rare cross-mailbox form. Idempotent; same reply.
-- `aether.input.unsubscribe { kind, mailbox }` — remove it. Idempotent; same
-  reply.
-- `aether.input.unsubscribe_all { mailbox }` — drop `mailbox` from every stream.
-  No reply; the bulk cleanup form.
-
-A named (`subscribe` / `unsubscribe`) subscribe is validated: the mailbox must
-name a live, dispatchable actor — a dropped or unknown id is rejected with
-`Err`. The reflexive (`*_self`) forms need no such check: the host-stamped
-`Source` already names the live sending actor.
-
-**Fan-out, and the empty case.** A driver pushes each platform event as a single
-mail to `aether.input`; the cap then sends one copy per subscriber, carrying the
-inbound mail's lineage so a trace shows the copies fanning out under one parent.
-If a stream has no subscribers, the fan-out reaches no one and the event is
-dropped before it's ever enqueued.
-
-**Subscriptions are keyed by mailbox, so they belong to the component across
-instances.** A `replace_component` keeps the same mailbox id, so the new instance
-inherits the old one's subscriptions with nothing to redo. A `drop` is the end of
-them — the cap monitors each subscribing mailbox and purges its rows when the
-substrate signals the mailbox vacated (ADR-0079), so a torn-down mailbox can't
-keep receiving fan-out.
-
-**Text entry rides its own streams.** `aether.key` carries a physical scancode —
-which key moved, not which character it produces — so a text field would need a
-keyboard-layout table and its own shift tracking to turn a keypress into a
-character, wrong on every layout but US and impossible for CJK input. The
-substrate already resolves the character through the active layout and IME, so a
-field consumes that directly on three streams:
-
-- **`aether.text_input { text }`** delivers committed characters — the text the
-  user actually entered, one or more per event, already layout- and IME-resolved.
-  A field inserts `text` at its caret. Unlike `Key`, this stream forwards key
-  repeats, so holding a key types a run of characters. The desktop chassis dedupes
-  its two sources (a plain keystroke and an IME commit) behind a composition gate,
-  so a character arrives exactly once.
-- **`aether.ime_preedit { text, cursor_begin, cursor_end }`** carries the in-flight
-  composition an IME is still assembling — the underlined text to render inline
-  while the user composes, with the byte-offset cursor span the IME reports (both
-  offsets `None` when it gives no span). An empty `text` clears the preedit.
-- **`aether.modifiers { shift, ctrl, alt, meta }`** is a latest-wins state stream:
-  it fires whenever the held modifier keys change, and a field caches the last
-  value and consults it on a `Key` (to tell Ctrl+C from a bare C). `meta` is the
-  platform "super" key — Command on macOS, the Windows key elsewhere. This mirrors
-  how a component caches `WindowSize`; a late subscriber holds the all-false
-  default until the first change arrives.
-
-Editing commands compose from the `aether.key` scancodes paired with the cached
-modifiers; there's no separate kind for them. The stable
-`aether_kinds::keycode` constants a text-editing field matches on are
-`KEY_BACKSPACE`, `KEY_DELETE`, `KEY_LEFT` / `KEY_RIGHT` / `KEY_UP` / `KEY_DOWN`,
-`KEY_HOME`, `KEY_END`, `KEY_PAGE_UP`, `KEY_PAGE_DOWN`, and `KEY_ENTER`. These
-three streams come from the desktop chassis only; the headless and hub chassis
-have no window and publish none of them, the same as `Key`.
-
-## How to use it
-
-**From a component — subscribe in `wire`.** `init` can't send mail (its context
-is resolver-only), so subscriptions go in the `wire` hook, which runs post-init
-with mail allowed. Address the cap by type and name the stream as a type
-parameter — the cap subscribes the calling actor:
+Subscribe in `wire`, where mail is allowed, through the neutral window
+identity:
 
 ```rust
+use aether_kinds::{Key, MouseMove, WindowSize};
+use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    let input = ctx.actor::<InputCapability>();
-    input.subscribe::<Key>();
-    input.subscribe::<WindowSize>();
+    let windows = ctx.actor::<WindowCapability>();
+
+    windows.subscribe::<Key>(WindowSelector::All);
+    windows.subscribe::<WindowSize>(WindowSelector::All);
+    windows.subscribe::<MouseMove>(WindowSelector::One(self.editor_window));
 }
 ```
 
-To subscribe a *different* mailbox (the rare cross-mailbox case) use the named
-form: `input.subscribe_for::<Key>(other_mailbox)`.
+`WindowSelector::One(id)` receives the kind only from that window.
+`WindowSelector::All` includes all current windows and windows created later.
+If one mailbox matches both selectors, it receives one copy.
 
-Then handle each stream as its kind, like any other mail:
+Then handle the event as ordinary mail and inspect its source id:
 
 ```rust
 #[handler::single]
-fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) { /* react to a keystroke */ }
+fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
+    if key.window == self.editor_window {
+        self.handle_editor_key(key.code);
+    }
+}
 ```
 
-`aether-kit-commons`'s `camera` export subscribes `WindowSize` this way to track the
-viewport, and subscribes the `Tick` and `Render` lifecycle stages on
-`aether.lifecycle` to advance and submit each frame. You don't unsubscribe on the
-way out — the host clears your subscriptions when the component drops.
+The reflexive `subscribe`/`unsubscribe` facade methods use the sending actor's
+host-stamped mailbox and are the normal component API. The rare
+`subscribe_for`/`unsubscribe_for` methods name another local mailbox. The
+runtime validates and monitors explicit subscribers; when a monitored mailbox
+departs, all of its selector rows are removed. Replacing a component preserves
+its mailbox id and therefore its subscriptions.
 
-**From an agent over MCP.** Input originates at the platform layer, so the usual
-way you see it is through a subscribed component's behavior or its logs. To drive
-a component without a real keyboard — in a test, or on the headless chassis — mail
-the event's kind straight to `aether.input` (`aether.key`, `aether.mouse_move`,
-…) and the cap fans it out to subscribers just as a platform event would. The
-per-frame `Tick` is not an input stream: it is a frame-lifecycle stage on
-`aether.lifecycle`, advanced by the lifecycle driver, so you don't pump it
-through `aether.input` by hand.
+If a kind has no matching subscribers, the event is dropped at its source. A
+fan-out copy retains the external event's lineage, so settlement and traces
+include every subscribed descendant.
 
-## How to extend or reuse it
+## Text and IME
 
-- **A new input stream** is a new kind plus an emitter. Declare the kind, mark it
-  an input, and have the platform driver send it to `aether.input`; the cap fans
-  it out by `KindId` with no enum to widen and no bridge table to edit
-  ([ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)). A single-window assumption holds today; a per-window
-  stream would carry a window id.
-- **Any actor can subscribe**, not just components — a native capability that
-  needs the tick or a resize subscribes through the same mail. Subscription is
-  reachability: what an actor receives is exactly the streams it asked for.
+`Key` is a physical scancode edge, not a character. Text fields should consume
+the platform's layout- and IME-resolved streams:
+
+- `TextInput { window, text }` contains committed characters. It forwards key
+  repeats. The desktop runtime deduplicates plain key text and IME commits
+  behind its per-window composition state.
+- `ImePreedit { window, text, cursor_begin, cursor_end }` contains the
+  not-yet-committed composition. The cursor values are optional byte offsets;
+  empty text clears the preedit.
+- `Modifiers { window, shift, ctrl, alt, meta }` is latest-wins state. Cache it
+  per window and combine it with `Key`; `meta` is Command on macOS and the
+  Windows/super key elsewhere.
+
+Editing commands still use the stable `aether_kinds::keycode` constants:
+`KEY_BACKSPACE`, `KEY_DELETE`, the arrow keys, `KEY_HOME`, `KEY_END`,
+`KEY_PAGE_UP`, `KEY_PAGE_DOWN`, and `KEY_ENTER`.
+
+Pointer button and wheel kinds include the cursor coordinates captured for that
+same event, so click, drag, and zoom behavior does not need to correlate a
+separate `MouseMove`.
+
+## Synthetic events in tests
+
+Production headless has no window peripheral and publishes no window events.
+`SubstrateHarness` deliberately composes the test-only
+`SyntheticWindowCapability`, which models windows and uses the same
+selector-aware fan-out as desktop:
+
+```rust
+let event = Key { window, code: keycode::KEY_W };
+let op = HarnessOp::window_event(window, &event);
+```
+
+`window_event` accepts any `K: Kind`, encodes it once, and wraps it for the
+synthetic runtime with `K::ID`. Neither the harness nor the window actor
+declares a list of injectable kinds. The event's embedded `WindowId` should
+match the source passed to `window_event`.
+
+This is test injection, not a production headless fallback and not a route for
+MCP clients to invent native input. Tests that need window behavior opt into
+the deterministic runtime; unsupported production profiles fail fast.
+
+## Extending input
+
+For another window-originated stream:
+
+```text
+define Kind { window: WindowId, ... }
+    → translate the native event in aether-window
+    → publish K::ID through WindowSelector routing
+```
+
+No chassis cache, registry lookup, central input enum, or relay actor is part of
+that path.
+
+Do not force unrelated devices into the window actor. A gamepad, raw HID
+device, or network controller should introduce a concrete source actor with
+its own ownership and subscription policy. The rule is that source actors
+publish their own events, not that every possible input belongs to windows.
 
 ## Where to read more
 
-- The publish/subscribe decision and the no-ownership rationale —
-  [ADR-0021](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0021-input-stream-subscriptions.md);
-  keying by `KindId` —
+- Window lifecycle, control, runtime variants, and thread ownership —
+  [Window](window.md).
+- Publish/subscribe and kind-id decisions —
+  [ADR-0021](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0021-input-stream-subscriptions.md)
+  and
   [ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md).
-- The `wire` hook, `init` versus `wire`, and writing handlers —
+- `wire`, handlers, and component replacement —
   [Components & lifecycle](components.md).
-- What drives the per-frame `Tick`, and the frame stages around it — the
-  [frame lifecycle](lifecycle.md).
-- `KindId`, the fan-out lineage, and addressing by kind —
+- Mail lineage and settlement —
   [Mail, kinds & scheduling](mail-and-kinds.md).

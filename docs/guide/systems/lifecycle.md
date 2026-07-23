@@ -123,11 +123,12 @@ world is going away" finaliser. The two aren't interchangeable.
 
 **The interrupt/stage split.** Key presses, mouse movement, and resizes are
 asynchronous *interrupts* — they arrive whenever the platform produces them, on
-`aether.input`. `Tick`, `Render`, and `Present` are frame *stages* — they fire in
-declared order, paced by the chassis, on `aether.lifecycle`. Both reach an actor
-as ordinary mail in arrival order on its single dispatcher thread, and both use the
-same subscribe shape, but they're different mailboxes for a reason: one is the
-frame, the other is everything that interrupts it.
+the window actor's selector-aware streams. `Tick`, `Render`, and `Present` are
+frame *stages* — they fire in declared order, paced by the chassis, on
+`aether.lifecycle`. Both reach an actor as ordinary mail in arrival order on
+its single dispatcher thread, and both use typed subscription helpers, but
+they have different owners: lifecycle owns the frame graph; window owns events
+originating from each `WindowId`.
 
 ## How to use it
 
@@ -225,7 +226,7 @@ needs a two-pass boot broadcast adds them to its own graph.
   [ADR-0082](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0082-application-declared-lifecycle-sequence.md).
 - How a stage advance waits on its whole chain, and what "settled" means —
   [Tracing & settlement](tracing-and-settlement.md).
-- The interrupt side of the split — `Key`, `MouseMove`, `WindowSize` on
-  `aether.input` — [Input streams](input.md).
+- The interrupt side of the split — `Key`, `MouseMove`, and `WindowSize`
+  published by the window actor — [Input streams](input.md).
 - The `wire` hook, `init` versus `wire`, and writing handlers —
   [Components & lifecycle](components.md).

@@ -26,7 +26,7 @@ It still uses the real:
 - filesystem capability when the builder is given namespace roots (the default
   `SubstrateHarness` omits `aether.fs`);
 - offscreen render/capture path;
-- lifecycle driver and input/tick stages;
+- lifecycle driver plus synthetic window-event and tick stages;
 - deterministic synthetic windows and selector-aware window-event routing;
 - logging/tracing rings and typed replies.
 

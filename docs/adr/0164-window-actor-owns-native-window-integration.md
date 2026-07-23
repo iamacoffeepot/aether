@@ -1,6 +1,6 @@
 # ADR-0164: Window actor owns native window integration
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the window-owned application, multi-window vocabulary, keyed render targets, consumer migration, desktop delegation, and `aether-input` retirement are on `main`)
 - **Date:** 2026-07-23
 
 ## Context
@@ -371,7 +371,7 @@ ADR-0160's one-shot `WindowCell` decision and ADR-0161's single-surface
 
 ### 6. Implementation slices
 
-Land the implementation as independently green slices after this ADR:
+The implementation landed as independently green slices after this ADR:
 
 1. **Host ingress:** add `PumpedSlot::host_turn`, external-root semantics,
    non-reentrancy, outbound-send, and thread-identity tests.
@@ -389,8 +389,9 @@ Land the implementation as independently green slices after this ADR:
    `WindowCell`, and desktop `InputCapability`; update headless companions,
    harnesses, examples, and guides.
 
-The ADR remains Proposed until all slices land, following ADR-0160 and
-ADR-0161 convention.
+The ADR remained Proposed until every slice landed, following ADR-0160 and
+ADR-0161 convention. The complete chain is now on `main`, so this record is
+Accepted.
 
 ## Consequences
 
@@ -412,10 +413,9 @@ ADR-0161 convention.
 - The public input and window wire shapes break. Schema-hashed kind ids make
   stale producers fail loudly, but all components, examples, scenarios, MCP
   tooling, and documentation must migrate atomically.
-- `aether-input` no longer owns desktop input subscriptions. If no
-  non-window source remains after the migration, the leaf crate and
-  `aether.input` namespace can be deleted; otherwise they must be narrowed and
-  renamed around that concrete source rather than kept as a generic relay.
+- `aether-input` no longer exists. A future gamepad, raw HID, or network
+  controller belongs to its concrete source actor and must not recreate a
+  generic relay between source actors and subscribers.
 - `aether-render` carries one surface/configuration bundle per live window and
   must define failure behavior per target. GPU memory and present work scale
   with window count.
