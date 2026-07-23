@@ -125,7 +125,7 @@ what was generated and reclaim those artifacts when no longer needed.
 Validate a bundle at the boundary it changes:
 
 - component discovery changes: inspect `dist/manifest.json` and fixture set;
-- pack format changes: round-trip `bundle_pack` tests;
+- package manifest format changes: round-trip `aether_chassis::package` tests;
 - autoload changes: boot a bundle with multiple/export-selected components;
 - chassis option changes: test the matching desktop or headless binary;
 - release workflow changes: verify the workflow artifact, not only local Cargo.
@@ -134,7 +134,8 @@ Validate a bundle at the boundary it changes:
 
 - Discovery and commands: `xtask/src/{main,inventory}.rs`
 - Autoload: `crates/aether-chassis/src/autoload.rs`
-- Pack format: `crates/aether-chassis/src/bundle_pack.rs`
+- Boot manifest schema: `crates/aether-chassis/src/bundle_pack.rs`
+- Package manifest + store-backed boot: `crates/aether-chassis/src/package.rs`
 - Generic launchers: `crates/aether-chassis-bundle/src/bin/aether-bundle-*.rs`
 - Current hosted artifact job: `.github/workflows/release.yml`
 - Related decisions: ADR-0090, ADR-0115, ADR-0116; ADR-0092 is Proposed

@@ -5,13 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 # Standalone bundle builds (issue #3815; #1529, generalizing #1518):
-# chassis binaries that auto-load the component pack embedded at build
-# time, so the binary runs hub-less. `build.rs` stages the pack the
-# bins embed via `include_bytes!`; `cargo xtask bundle --chassis
-# {desktop|headless}` builds the component wasms and drives this. The
-# pack format itself lives in `aether_chassis::bundle_pack` — the build
-# script compiles the same source in via `#[path]` so encoder and
-# decoder stay one file.
+# chassis binaries that auto-load the component package embedded at
+# build time, so the binary runs hub-less. `build.rs` stages the
+# depot-shaped package artifact (`pack/manifest` + content-addressed
+# objects) into `OUT_DIR` and generates the `include_bytes!` source the
+# bins embed; `cargo xtask bundle --chassis {desktop|headless}` builds
+# the component wasms, emits the pack, and points `AETHER_BUNDLE_PACK`
+# at it. The manifest byte format + decode-and-resolve path live in
+# `aether_chassis::package` (ADR-0163 §1), so the bundle bins reuse the
+# same reading path the depot boot uses.
 
 [[bin]]
 name = "aether-bundle-desktop"
@@ -28,14 +30,6 @@ aether-chassis-headless = { path = "../aether-chassis-headless" }
 aether-substrate = { path = "../aether-substrate" }
 anyhow = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
-
-[build-dependencies]
-# `build.rs` parses the `AETHER_BUNDLE_MANIFEST` JSON and encodes the
-# bundle pack through `aether-chassis`'s bundle_pack.rs (compiled in
-# via `#[path]`), so the build script needs serde + serde_json in
-# build scope.
-serde = { workspace = true, features = ["derive", "std"] }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

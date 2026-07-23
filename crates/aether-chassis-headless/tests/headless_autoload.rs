@@ -6,8 +6,8 @@
 //! and asserts the component's trampoline comes up. The component list
 //! rides an encode→decode round trip of the pack format first, so this
 //! also covers the embed path the `aether-bundle-headless` bin runs:
-//! pack → `AutoloadComponent` → `aether.component.load` mail → live
-//! trampoline.
+//! embedded `pack/manifest` → object resolution → `AutoloadComponent` →
+//! `aether.component.load` mail → live trampoline.
 //!
 //! Skipped when the probe wasm isn't pre-built (no wgpu gate — the
 //! headless chassis needs no adapter); `AETHER_REQUIRE_RUNTIME=1`
@@ -29,8 +29,11 @@ use aether_chassis::autoload::boot_manifest_autoload;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
 };
-use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
-use aether_chassis_headless::{AutoloadComponent, HeadlessChassis};
+use aether_chassis::bundle_pack::ChassisSettings;
+use aether_chassis::package::{
+    EmbeddedObjectStore, PackageEntry, PackageManifest, Sha256, embedded_autoload, encode_manifest,
+};
+use aether_chassis_headless::HeadlessChassis;
 use aether_component::WasmTrampoline;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::{HttpConfig, HttpServerConfig};
@@ -71,19 +74,27 @@ mod tests {
         };
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
 
-        // Round-trip the component through the pack format — the same
-        // bytes the bundle bin would embed and decode at boot.
-        let pack = Pack {
-            chassis: ChassisSettings::default(),
-            components: vec![PackedComponent {
-                wasm,
-                config: Vec::new(),
+        // Resolve the component through the embedded-package path — the same
+        // decode + object-resolution the `aether-bundle-headless` bin runs on
+        // its `include_bytes!`'d artifact. The object is keyed by a manifest
+        // hash into an in-memory object store (the chassis never re-hashes
+        // bytes — integrity is the store's job — so any consistent key works).
+        let object = Sha256([0x11; 32]);
+        let manifest = PackageManifest {
+            settings: ChassisSettings::default(),
+            entries: vec![PackageEntry {
+                object,
+                config: None,
                 name: Some("probe".to_owned()),
                 export: None,
                 replicas: None,
             }],
         };
-        let decoded = decode_pack(&encode_pack(&pack)).expect("pack round trip");
+        let manifest_bytes = encode_manifest(&manifest);
+        let object_hex = object.to_hex();
+        let objects: &[(&str, &[u8])] = &[(object_hex.as_str(), wasm.as_slice())];
+        let (_settings, autoload) =
+            embedded_autoload(&manifest_bytes, &EmbeddedObjectStore::new(objects)).expect("embedded autoload");
 
         // A hub-less headless env: no `rpc_address`, no hub connection, and
         // persistence off so the boot touches no shared on-disk state. The tick
@@ -99,7 +110,7 @@ mod tests {
             namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
-            autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
+            autoload,
         };
 
         // `build` queues the autoload mail; the worker pool (up after

@@ -229,8 +229,6 @@ dependencies = [
  "aether-chassis-headless",
  "aether-substrate",
  "anyhow",
- "serde",
- "serde_json",
  "tracing",
 ]
 
