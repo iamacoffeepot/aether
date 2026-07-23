@@ -44,6 +44,7 @@ use aether_trace::TraceDispatchCapability;
 
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload};
 use crate::cli::{ChassisCli, ChassisMeta};
+use crate::package::package_autoload;
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -395,6 +396,16 @@ pub struct ChassisBootConfig {
     /// matching `boot_manifest_from_env`.
     #[config(cli_long = "boot-manifest")]
     pub boot_manifest: Option<String>,
+    /// Path to a package directory whose `pack/manifest` is resolved against
+    /// its `pack/objects` store at boot (ADR-0163 §1).
+    ///
+    /// The store-backed twin of `boot_manifest`: instead of a JSON manifest
+    /// of file paths read into inline bytes, the chassis decodes the
+    /// persisted package manifest and pulls each component's wasm + config
+    /// bytes from the content-addressed object store. `boot_manifest` takes
+    /// precedence when both are set. `Option<String>` filters empty → `None`.
+    #[config(cli_long = "package")]
+    pub package: Option<String>,
 }
 
 impl ChassisBootConfig {
@@ -862,14 +873,16 @@ impl CommonEnv {
         // cannot pull the knob itself.
         install_frame_size(&mut sources)?;
 
-        // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved through
-        // `ChassisBootConfig`). When set, the listed components' wasm + config are
-        // read into the autoload list `Chassis::build` drains into
-        // `aether.component.load`; an unreadable manifest aborts boot (ADR-0090
-        // §4) via `ConfigError`.
-        let autoload = match chassis_boot.boot_manifest.clone() {
-            Some(path) => boot_manifest_autoload(Path::new(&path))?,
-            None => Vec::new(),
+        // Boot source: argv wins over env (resolved through `ChassisBootConfig`).
+        // A `boot_manifest` (JSON of file paths, inline bytes) takes precedence
+        // over a `package` (ADR-0163 §1: the persisted manifest resolved against
+        // the local object store); either fills the autoload list `Chassis::build`
+        // drains into `aether.component.load`. An unreadable/undecodable source
+        // aborts boot (ADR-0090 §4) via `ConfigError`.
+        let autoload = match (chassis_boot.boot_manifest.clone(), chassis_boot.package.clone()) {
+            (Some(path), _) => boot_manifest_autoload(Path::new(&path))?,
+            (None, Some(root)) => package_autoload(Path::new(&root))?,
+            (None, None) => Vec::new(),
         };
 
         // The base stratum (`ChassisBase`) carries the source stack and the three
