@@ -116,8 +116,8 @@ impl BloomeryEnv {
     /// ADR-0090 unit d: resolve every knob argv > `AETHER_*` env > default.
     /// `--rpc-port` shadows `AETHER_RPC_PORT` and `--store-path` shadows
     /// `AETHER_STORE_PATH`, each riding the derive-`Config` argv-then-env path
-    /// (no naked env reads). Mirrors the hub's `HubEnv::resolve`; takes
-    /// `&BloomeryCli` by reference so the bin keeps `cli` for its
+    /// (no naked env reads). Like the other chassis it resolves off the source
+    /// stack; takes `&BloomeryCli` by reference so the bin keeps `cli` for its
     /// `--describe` branch.
     ///
     /// # Errors
@@ -147,7 +147,7 @@ impl Chassis for BloomeryChassis {
         // still routes through `composed`, so it gets the framework-minted
         // `OutboundFatalAborter` by construction (previously the implicit
         // `PanicAborter`).
-        let builder = composed::<Self>(&boot, (), env);
+        let builder = composed::<Self>(&boot, (), env)?;
         // The driver owns the boot and drops it on the shutdown signal — it
         // moves in here, after `compose` finished borrowing it.
         let driver = BloomeryDriverCapability { boot };
@@ -194,7 +194,7 @@ impl BootableChassis for BloomeryChassis {
     /// `TraceDispatchCapability` in this delta; the aborter is supplied by
     /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
     /// move the same `boot` into the driver afterward.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Builder<Self> {
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
@@ -215,7 +215,7 @@ impl BootableChassis for BloomeryChassis {
         // on every chassis, so bloomery gets the aborter by construction. The
         // aborter behavior #3947 guards (control-core boot replay fatal-aborting on
         // a bad journal record) is preserved — see `tests/recovery.rs`.
-        builder
+        Ok(builder
             .with_actor::<TraceDispatchCapability>(())
             .with_actor_configured::<StoreCapability>((), store)
             // The single-writer control core (ADR-0149 §The control core): owns the
@@ -274,7 +274,7 @@ impl BootableChassis for BloomeryChassis {
                 (),
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
             )
-            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file })
+            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file }))
     }
 }
 

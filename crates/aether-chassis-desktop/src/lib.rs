@@ -14,7 +14,7 @@ pub mod chassis;
 pub mod cli;
 pub mod driver;
 
-pub use chassis::{DesktopChassis, DesktopEnv, UserEvent};
+pub use chassis::{DesktopChassis, UserEvent};
 pub use cli::DesktopCli;
 pub use driver::{DesktopDriverCapability, DesktopDriverRunning};
 

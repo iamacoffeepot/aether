@@ -127,11 +127,11 @@ aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # the whole bundle to the headless chassis alone. A permitted
 # test-target dev-dep cycle.
 aether-chassis-headless = { path = "../aether-chassis-headless" }
-# The boot-manifest autoload entries the test's `HeadlessEnv` carries
+# The boot-manifest autoload entries the test's `CommonEnv` carries
 # moved to the shared chassis layer (issue #3809).
 aether-chassis = { path = "../aether-chassis" }
-# The test's `HeadlessEnv` carries a `LifecycleConfig` (ADR-0156 §3 relocated
-# the lifecycle advance-timeout knob onto the lifecycle cap's own config).
+# The test stages a `LifecycleConfig` (ADR-0156 §3 relocated the lifecycle
+# advance-timeout knob onto the lifecycle cap's own config).
 aether-lifecycle = { path = "../aether-lifecycle" }
 # `locate_component_wasm` / `init_save_sandbox` / `test_namespace_roots`
 # — the shared wasm-discovery + sandbox helpers the test boots with.

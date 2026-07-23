@@ -35,11 +35,10 @@ use aether_window::HeadlessWindowCapability;
 use aether_chassis::TickConfig;
 
 use super::driver::HeadlessTimerDriverCapability;
-use aether_chassis::autoload::{AutoloadComponent, autoload_mail};
+use aether_chassis::autoload::autoload_mail;
 use aether_chassis::boot::{
     ChassisBase, CommonEnv, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps, with_rpc_server,
 };
-use aether_chassis::cli::ChassisCli;
 use aether_substrate::config::{ConfigError, KnobRecord, validate_env};
 
 use crate::cli::HeadlessCli;
@@ -55,7 +54,7 @@ pub struct HeadlessChassis;
 impl Chassis for HeadlessChassis {
     const PROFILE: &'static str = "headless";
     type Driver = HeadlessTimerDriverCapability;
-    type Env = HeadlessEnv;
+    type Env = CommonEnv;
 
     /// Build the headless chassis: stand up substrate-core internals,
     /// compose the capability chain via [`BootableChassis::compose`], then
@@ -67,23 +66,26 @@ impl Chassis for HeadlessChassis {
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
         // `info`) now so a filter set only in the config file takes effect.
-        apply_filter(&env.common.runtime.log_filter);
+        apply_filter(&env.runtime.log_filter);
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let mailer = Arc::clone(&boot.queue);
 
-        // Driver-only / post-build fields, read out before `compose` consumes
-        // `env`: the tick cadence rides the timer driver, the autoload list is
-        // drained after build. The `Copy` knobs also feed the boot log line.
-        let tick_period = env.tick_period;
+        // ADR-0162 §config-at-its-seam: the tick cadence is driver config — its
+        // consumer is the std-timer driver's loop period, not a composed cap — so
+        // it resolves HERE, off the base's source stack, at the seam that
+        // constructs the timer driver rather than pre-resolved into a per-chassis
+        // env bag. `TickConfig`'s `nonzero` lowering maps 0 to the default (60 Hz).
+        let tick_period = env.base.sources.resolve::<TickConfig>()?.to_tick_period();
         // #3930: the non-cap members ride as resolved structs now; lower the two
         // the boot log line reports (the same lowered values as before). The fused
         // `with_chassis_config_member` install re-lowers `workers` onto the builder
         // seam during `compose`.
-        let workers = env.common.chassis_boot.to_workers();
+        let workers = env.chassis_boot.to_workers();
         let ring_capacities = env.base.actor_ring.to_ring_capacities();
+        // The autoload list is drained after build; lift the base stratum out so
+        // `composed` installs the aborter + base ahead of `compose` (the leftover
+        // default `env.base` is never re-read).
         let autoload = mem::take(&mut env.autoload);
-        // Lift the base stratum out; `composed` installs the aborter + base
-        // ahead of `compose` (the leftover default `env.base` is never re-read).
         let base = mem::take(&mut env.base);
 
         // Tick rates are bounded well below `u32::MAX` Hz (typically
@@ -100,10 +102,10 @@ impl Chassis for HeadlessChassis {
             "componentless boot — load a component via aether.component.load",
         );
 
-        let builder = composed::<Self>(&boot, base, env);
+        let builder = composed::<Self>(&boot, base, env)?;
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
-        // residual hand records. Runs here (not in `from_env`) because the
+        // residual hand records. Runs here (not in `resolve_env`) because the
         // per-chassis known keys come from the composed builder's manifest.
         validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
         let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
@@ -123,8 +125,13 @@ impl Chassis for HeadlessChassis {
 impl BootableChassis for HeadlessChassis {
     type Base = ChassisBase;
 
+    /// Resolve the shared env off the source stack (ADR-0162): the lone
+    /// per-chassis token is the `HeadlessCli` type. `CommonEnv::resolve` embeds
+    /// the base stratum; splitting it out is what the describe / config helpers
+    /// hand `composed`, while `Chassis::build` keeps it embedded so it can resolve
+    /// the tick driver knob off `base.sources` first.
     fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
-        let mut env = HeadlessEnv::from_env()?;
+        let mut env = CommonEnv::resolve(HeadlessCli::default())?;
         let base = mem::take(&mut env.base);
         Ok((base, env))
     }
@@ -144,14 +151,11 @@ impl BootableChassis for HeadlessChassis {
     /// config helpers read the claim / config terminals off it.
     ///
     /// Takes the boot handle by reference — [`Chassis::build`] moves the same
-    /// `boot` into the timer driver afterward. The `tick_period` (driver-only)
-    /// and `autoload` (drained post-build) fields ride [`HeadlessEnv`] but
-    /// take no part in the claim chain, so they are ignored here.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: HeadlessEnv) -> Builder<Self> {
-        // `base` is installed by `composed` before this delta runs; the leftover
-        // default here is unused.
-        let HeadlessEnv { base: _, common, tick_period: _, autoload: _ } = env;
-
+    /// `boot` into the timer driver afterward. The tick cadence is driver config
+    /// that [`Chassis::build`] resolves at the driver seam (ADR-0162), so it
+    /// takes no part in this claim chain. Headless's delta resolves nothing
+    /// itself, so it returns `Ok`.
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: CommonEnv) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
@@ -191,10 +195,10 @@ impl BootableChassis for HeadlessChassis {
         );
 
         // Boot order is declaration order. `into_common_boot` reads the
-        // env-sourced `CommonBoot` fields off the shared remainder in one place;
-        // the aborter and source stack are supplied earlier by `composed` /
-        // `ChassisBase`.
-        let common = common.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
+        // env-sourced `CommonBoot` fields off the shared env in one place; the
+        // aborter and source stack are supplied earlier by `composed` /
+        // `ChassisBase` (the base + autoload were lifted out in `Chassis::build`).
+        let common = env.into_common_boot(component_host_params, aether_game::GameGatewayParams::default());
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);
         // the timer pushes `LifecycleAdvance` and the driver broadcasts
@@ -205,92 +209,7 @@ impl BootableChassis for HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
-        with_rpc_server(builder).with_actor::<HttpServerCapability>(())
-    }
-}
-
-/// Bag of build-time inputs the headless chassis takes. `main()` populates it
-/// from env vars (per ADR-0070's "substrate-core never reads env" invariant);
-/// tests construct one directly.
-///
-/// The config source stack and the non-cap ring / scheduler / settlement members
-/// live in the embedded [`ChassisBase`]; the fs roots, runtime, and worker knobs
-/// in [`CommonEnv`]; only the headless tick cadence and the autoload list are
-/// per-chassis. ADR-0156 §5: the operator-resolvable cap `Config`s (`HttpConfig`,
-/// `HttpServerConfig`, `AnthropicConfig`, `GeminiConfig`, `LifecycleConfig`) no
-/// longer ride as fields — the builder resolves each off the base's source stack,
-/// and a test stages programmatic overrides into it (`ConfigSources::set_override`).
-pub struct HeadlessEnv {
-    /// The universal base stratum (config source stack + the non-cap ring /
-    /// scheduler / settlement members) `composed` installs ahead of `compose`.
-    /// Lifted out with `mem::take` on the boot and describe paths; the leftover
-    /// default is never re-read.
-    pub base: ChassisBase,
-    /// The full-stack config remainder (fs roots, runtime knobs, worker/boot
-    /// knobs). Resolved by [`CommonEnv::resolve`] — the single declaration, so a
-    /// shared knob can't exist on one chassis and silently not the other.
-    pub common: CommonEnv,
-    /// Headless tick cadence (the std-timer driver's period). Resolved through
-    /// `TickConfig` (argv > env > default 60 Hz); its `nonzero` lowering maps 0
-    /// to the default. Driver-only — the desktop chassis frame-drives instead.
-    pub tick_period: Duration,
-    /// Components to auto-load on boot, in order. A bundled standalone build
-    /// populates this so the components come up with no hub; the normal
-    /// headless bin leaves it empty and loads components over the hub instead.
-    pub autoload: Vec<AutoloadComponent>,
-}
-
-impl HeadlessEnv {
-    /// Read every chassis-relevant env var into a fresh `HeadlessEnv`.
-    /// The single env-reading edge for the headless chassis (per
-    /// issue 464). Tests bypass this by constructing `HeadlessEnv`
-    /// directly.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] when a known `AETHER_*` env var holds
-    /// an unparseable value (ADR-0090 §4); an unknown `AETHER_*` var
-    /// only warns (non-fatal).
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::resolve(HeadlessCli::default())
-    }
-
-    /// ADR-0090 unit d (issue 1258): resolve every cap config through
-    /// the argv-then-env overlay. `cli` carries `Option<T>` flags;
-    /// unset fields fall through to env-only resolution, so an empty
-    /// argv (the path the integration tests and existing `from_env`
-    /// callers exercise) is byte-identical to the pre-d behaviour.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] when a known `AETHER_*` env var (or an
-    /// argv overlay value) holds an unparseable value (ADR-0090 §4).
-    pub fn resolve(cli: HeadlessCli) -> Result<Self, ConfigError> {
-        // ADR-0156 §4: the unknown-`AETHER_*` sweep moved to `Chassis::build`,
-        // where the composed builder's `config_manifest` supplies the
-        // per-chassis known-key set (headless no longer "knows" the window /
-        // audio / render knobs it never composes).
-        //
-        // `ChassisCli::into_sources` opens the source stack: it loads the
-        // `--config` file and stages every cap member's typed argv overlay in
-        // one derived `StageArgv` call off the CLI declaration itself. The bin
-        // handles `--print-config` / `--describe` (print + exit) before this
-        // resolver runs.
-        let mut sources = cli.into_sources()?;
-
-        // Headless-only tick cadence: resolved through `TickConfig` (argv > env >
-        // default) off the shared stack. `nonzero` maps 0 to the default (60 Hz);
-        // a garbage value hard-errors. Resolved before the shared block: these
-        // are independent reads off the same stack, so the interleaving order is
-        // arbitrary.
-        let tick_period = sources.resolve::<TickConfig>()?.to_tick_period();
-
-        // The shared block (base stratum + fs roots / runtime / worker knobs)
-        // plus the boot-manifest autoload list, all resolved by the single common
-        // resolver off the same stack.
-        let (base, common, autoload) = CommonEnv::resolve(sources)?;
-
-        Ok(Self { base, common, tick_period, autoload })
+        Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
     }
 }
 

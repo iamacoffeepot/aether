@@ -46,7 +46,7 @@ impl From<PackedComponent> for AutoloadComponent {
 /// one from a compile-time pack of bytes), which `Chassis::build` drains
 /// into `aether.component.load`.
 ///
-/// Reached from `DesktopEnv::resolve` / its headless twin
+/// Reached from `CommonEnv::resolve` (the shared desktop / headless resolver)
 /// when `AETHER_BOOT_MANIFEST` (or `--boot-manifest`) is set; the engines
 /// cap injects that env var at the fork so a `spawn_substrate` carrying a
 /// component list comes up with those components already loading.

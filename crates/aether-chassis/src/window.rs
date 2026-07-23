@@ -45,8 +45,8 @@ pub struct WindowConfig {
     pub wireframe: Option<String>,
 }
 
-/// The typed settings the window opens with — the unit `DesktopEnv.window`
-/// carries and the chassis threads to the desktop driver and the bundle bins.
+/// The typed settings the window opens with — resolved in the desktop
+/// `Chassis::build` off the source stack and threaded to the desktop driver.
 /// Mirrors the other embedded knob groups (`RingCapacities`,
 /// `SchedulerTuning`, `RenderTuningConfig`) rather than riding as loose
 /// fields. Produced by [`WindowConfig::lower`].
@@ -65,7 +65,7 @@ pub struct WindowSettings {
 
 impl WindowConfig {
     /// Lower the resolved window knobs into the [`WindowSettings`] unit the
-    /// chassis threads into `DesktopEnv`. Subsumes the mode + title lowering:
+    /// desktop `Chassis::build` threads to the driver. Subsumes the mode + title lowering:
     /// `mode` delegates to [`parse_window_mode_env`], and a present-but-bad
     /// `AETHER_WINDOW_MODE` value hard-errors the boot (ADR-0090 §4) rather
     /// than silently defaulting; an absent value resolves to `Windowed`.

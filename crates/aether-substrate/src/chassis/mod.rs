@@ -163,9 +163,19 @@ impl<C: Chassis> ComposeBase<C> for () {
 /// The aborter is [`OutboundFatalAborter`] on every chassis (ADR-0063): a wasm
 /// guest trap exits the substrate via `lifecycle::fatal_abort` instead of
 /// unwinding. It is supplied here so no chassis hand-constructs it.
+///
+/// [`BootableChassis::compose`] is fallible (ADR-0162 §config-at-its-seam): a
+/// chassis now resolves the config members its own delta consumes — the hub's
+/// RPC bind port, a driver knob — inside `compose`, so a parse fault there
+/// propagates out as a [`BootError`] rather than being pre-resolved into a
+/// per-chassis env bag.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when the chassis's `compose` delta fails (a seam config
+/// member fails to resolve).
 #[cfg(feature = "wasm")]
-#[must_use]
-pub fn composed<C: BootableChassis>(boot: &SubstrateBoot, base: C::Base, env: C::Env) -> Builder<C> {
+pub fn composed<C: BootableChassis>(boot: &SubstrateBoot, base: C::Base, env: C::Env) -> Result<Builder<C>, BootError> {
     // The sole sanctioned `Builder::new` on the boot path: `composed` is the one
     // minting point the `clippy.toml` `disallowed-methods` entry funnels every
     // chassis through, so a `compose` delta can only extend a based builder.
@@ -221,7 +231,18 @@ pub trait BootableChassis: Chassis {
     /// so the manifest roster and config aggregate can never drift from what
     /// boots. Takes the boot handle by reference; `build` moves the same `boot`
     /// into the driver afterward, while the describe / config helpers drop it.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: Self::Env) -> Builder<Self>;
+    ///
+    /// Fallible (ADR-0162 §config-at-its-seam): a chassis resolves the config
+    /// members its own delta consumes — the hub's always-bind RPC port off the
+    /// source stack — right here, so a parse fault propagates as a [`BootError`]
+    /// instead of forcing the value to be pre-resolved into a per-chassis env
+    /// bag. A chassis whose delta resolves nothing simply returns `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when a seam config member the delta resolves fails
+    /// to parse (ADR-0090 §4).
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: Self::Env) -> Result<Builder<Self>, BootError>;
 
     /// The residual hand-registered knobs the composition-derived
     /// [`ConfigManifest`] can't own, folded into the known-keys sweep and the
@@ -248,7 +269,7 @@ pub trait BootableChassis: Chassis {
 pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError> {
     let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
-    composed::<C>(&boot, base, env).claim_namespaces()
+    composed::<C>(&boot, base, env)?.claim_namespaces()
 }
 
 /// The ADR-0156 §4 composition-derived config aggregate: resolve the env,
@@ -264,7 +285,7 @@ pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError
 pub fn config_manifest<C: BootableChassis>() -> Result<ConfigManifest, BootError> {
     let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
-    Ok(composed::<C>(&boot, base, env).config_manifest())
+    Ok(composed::<C>(&boot, base, env)?.config_manifest())
 }
 
 /// A chassis binary's build provenance — the `build.rs`-baked facts a
@@ -320,7 +341,7 @@ pub struct BuildProvenance {
 pub fn describe_manifest<C: BootableChassis>(provenance: &BuildProvenance) -> Result<BinaryManifest, BootError> {
     let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
     let boot = SubstrateBoot::build()?;
-    let builder = composed::<C>(&boot, base, env);
+    let builder = composed::<C>(&boot, base, env)?;
 
     let config = builder.config_manifest();
     let mut env_keys: Vec<String> = config.known_keys(&C::residual_knobs()).iter().map(str::to_owned).collect();
@@ -449,7 +470,11 @@ mod prelude_tests {
         fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
             panic!("prelude ran the config ceremony with no discovery flag set");
         }
-        fn compose(_builder: Builder<Self>, _boot: &SubstrateBoot, _env: Self::Env) -> Builder<Self> {
+        fn compose(
+            _builder: Builder<Self>,
+            _boot: &SubstrateBoot,
+            _env: Self::Env,
+        ) -> Result<Builder<Self>, BootError> {
             panic!("prelude composed the capability chain with no discovery flag set");
         }
     }

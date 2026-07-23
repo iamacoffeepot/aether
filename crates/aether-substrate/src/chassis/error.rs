@@ -66,3 +66,16 @@ impl From<wasmtime::Error> for BootError {
         Self::Other(Box::new(io::Error::other(format!("{e}"))))
     }
 }
+
+/// Forward a [`ConfigError`](crate::config::ConfigError) into
+/// [`BootError::Other`]. A chassis `compose` / `build` that resolves a driver
+/// or seam config member at its own seam (the RPC bind port, the window / tick
+/// driver knobs) surfaces a parse fault the same shape a wasmtime boot fault
+/// takes, so those `sources.resolve::<C>()?` sites need no per-call `.map_err`
+/// glue.
+#[cfg(feature = "wasm")]
+impl From<crate::config::ConfigError> for BootError {
+    fn from(e: crate::config::ConfigError) -> Self {
+        Self::Other(Box::new(e))
+    }
+}

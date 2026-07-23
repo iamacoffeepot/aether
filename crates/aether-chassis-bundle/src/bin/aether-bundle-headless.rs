@@ -7,13 +7,13 @@
 //! `AETHER_BUNDLE_MANIFEST`); a plain build embeds an empty-pack
 //! placeholder.
 
-use std::time::Duration;
-
 use anyhow::Context as _;
 
+use aether_chassis::TickConfig;
 use aether_chassis::autoload::expand_replicas;
+use aether_chassis::boot::CommonEnv;
 use aether_chassis::bundle_pack::decode_pack;
-use aether_chassis_headless::{HeadlessChassis, HeadlessEnv};
+use aether_chassis_headless::{HeadlessChassis, HeadlessCli};
 use aether_substrate::Chassis;
 
 /// The component pack, embedded at build time. `build.rs` stages it
@@ -26,9 +26,13 @@ fn main() -> anyhow::Result<()> {
     // Resolve the chassis env as the headless bin does — so an injected
     // `AETHER_RPC_PORT` still wires up — then overlay the pack's chassis
     // settings and queue the embedded components.
-    let mut env = HeadlessEnv::from_env()?;
+    let mut env = CommonEnv::resolve(HeadlessCli::default())?;
+    // ADR-0162: the tick cadence resolves in `Chassis::build` off the base's
+    // source stack, so the pack's `tick_hz` overlays as a top-priority
+    // programmatic `TickConfig` override on that stack (`build` lowers it to the
+    // timer period).
     if let Some(hz) = pack.chassis.tick_hz.filter(|hz| *hz > 0) {
-        env.tick_period = Duration::from_nanos(1_000_000_000 / u64::from(hz));
+        env.base.sources.set_override(TickConfig { hz });
     }
     if pack.chassis.title.is_some() || pack.chassis.window_mode.is_some() {
         tracing::warn!(

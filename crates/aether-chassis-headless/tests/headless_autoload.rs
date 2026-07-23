@@ -30,7 +30,7 @@ use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
 };
 use aether_chassis::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
-use aether_chassis_headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
+use aether_chassis_headless::{AutoloadComponent, HeadlessChassis};
 use aether_component::WasmTrampoline;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::{HttpConfig, HttpServerConfig};
@@ -44,7 +44,7 @@ mod tests {
 
     /// ADR-0156 §5: the cap configs a hub-less headless autoload boot needs,
     /// staged as programmatic overrides on the builder's source stack — the
-    /// in-code equivalent of the argv/env/file layers `HeadlessEnv::from_env`
+    /// in-code equivalent of the argv/env/file layers `CommonEnv::resolve`
     /// assembles. The builder resolves each composed cap's `Config` off this.
     fn default_sources() -> ConfigSources {
         let mut sources = ConfigSources::new(None);
@@ -86,20 +86,19 @@ mod tests {
         let decoded = decode_pack(&encode_pack(&pack)).expect("pack round trip");
 
         // A hub-less headless env: no `rpc_address`, no hub connection, and
-        // persistence off so the boot touches no shared on-disk state.
-        let env = HeadlessEnv {
+        // persistence off so the boot touches no shared on-disk state. The tick
+        // cadence resolves in `build` off `base.sources` (default 60 Hz here); this
+        // test drives autoload off the worker pool, not ticks.
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: default_sources(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(16),
+            namespace_roots: test_namespace_roots(init_save_sandbox("headless-autoload")),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
         };
 
@@ -157,19 +156,16 @@ mod tests {
         let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
         assert_eq!(autoload.len(), 1, "one component listed in the manifest");
 
-        let env = HeadlessEnv {
+        let env = CommonEnv {
             base: ChassisBase {
                 sources: default_sources(),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
                 settlement: SettlementConfig::default(),
             },
-            common: CommonEnv {
-                namespace_roots: test_namespace_roots(sandbox),
-                runtime: RuntimeConfig::default(),
-                chassis_boot: ChassisBootConfig::default(),
-            },
-            tick_period: Duration::from_millis(16),
+            namespace_roots: test_namespace_roots(sandbox),
+            runtime: RuntimeConfig::default(),
+            chassis_boot: ChassisBootConfig::default(),
             autoload,
         };
 

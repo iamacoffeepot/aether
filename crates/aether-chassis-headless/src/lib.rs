@@ -8,7 +8,7 @@ pub mod chassis;
 pub mod cli;
 pub mod driver;
 
-pub use chassis::{HeadlessChassis, HeadlessEnv};
+pub use chassis::HeadlessChassis;
 pub use cli::HeadlessCli;
 
 pub use aether_chassis::autoload::AutoloadComponent;
