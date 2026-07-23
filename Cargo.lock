@@ -727,6 +727,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-kit-workbench"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-data",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-input",
+ "aether-kinds",
+ "aether-kit",
+ "aether-kit-terrain",
+ "aether-kit-widget",
+ "aether-lifecycle",
+ "aether-math",
+ "aether-render",
+ "aether-text",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "aether-lifecycle"
 version = "0.3.0-alpha"
 dependencies = [

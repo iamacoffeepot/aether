@@ -25,7 +25,7 @@ useful for intentionally live edits, but they are not the preview-first path.
 
 > **Verify against current code.** The public kinds live in
 > `crates/aether-kit-terrain/src/{mark,terra,world}/` and
-> `crates/aether-kit/src/workbench/`; the task adapters are
+> `crates/aether-kit-workbench/src/`; the task adapters are
 > `crates/aether-mcp/src/{args.rs,tools/terrain.rs,tools/mod.rs}`. The design
 > contracts are [ADR-0142](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0142-terrain-mark-identity-and-revisions.md)
 > and [ADR-0143](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0143-terrain-proposal-commit-transaction.md). If a
@@ -34,14 +34,14 @@ useful for intentionally live edits, but they are not the preview-first path.
 ## Load the peer set and retain its identities
 
 Load the exports in this order — the mark, world, and terra actors from the
-`aether-kit-terrain` module, the workbench from `aether-kit`:
+`aether-kit-terrain` module, the workbench from `aether-kit-workbench`:
 
 1. `aether_kit_terrain@aether.kit.mark`, named exactly `aether.kit.mark` for the
    workbench's overlay refresh.
 2. `aether_kit_terrain@aether.kit.world`.
 3. `aether_kit_terrain@aether.kit.terra`, configured with the MarkBook's returned
    `mailbox_id` as `TerraConfig.mark_book_mailbox`.
-4. `aether_kit@aether.kit.workbench`, configured with the three returned mailbox
+4. `aether_kit_workbench@aether.kit.workbench`, configured with the three returned mailbox
    ids in `WorkbenchConfig { mark_book_mailbox, terra_mailbox, world_mailbox, ... }`
    and a non-overlapping `WorkbenchLayout`.
 
@@ -351,7 +351,7 @@ reversed after readback.
 
 The executable evidence is deliberately in-tree:
 
-- `crates/aether-kit/tests/terrain_workbench_scenario.rs` drives raw input
+- `crates/aether-kit-workbench/tests/terrain_workbench_scenario.rs` drives raw input
   through the real workbench, checks `WorkbenchQueryResult`, then uses
   `SubstrateHarness`, `HarnessOp::capture_with_mails`, `ArtifactGuard`, and
   `aether_harness_substrate_capture::visual::{decode_png, run_checks, target_color_stats}`

@@ -281,7 +281,7 @@ The terrain annotation workbench is the concrete peer-first assembly of this
 model. Load the mark book under the exact default component name
 `aether.kit.mark`, load `aether.kit.world`, then load
 `aether.kit.terra` with the mark-book mailbox. Finally load
-`aether_kit@aether.kit.workbench` with those three returned mailbox ids and a
+`aether_kit_workbench@aether.kit.workbench` with those three returned mailbox ids and a
 named `WorkbenchLayout { tools, viewport, console }`. The workbench spawns a
 specialized `TerrainToolPanel`, a camera-owning `TerrainViewport`, a
 non-input-owning `ConsoleOverlay`, and the one `EditorShell` that routes their

@@ -350,7 +350,7 @@ Load the workbench only after `aether.kit.mark`, `aether.kit.world`, and the
 configured `aether.kit.terra` peer. The mark book must use the exact component
 name `aether.kit.mark`: `WorldView` currently resolves overlay refreshes by that
 loaded name even though Terra and the workbench receive its mailbox id. Load the
-root with selector `aether_kit@aether.kit.workbench`. Its inspection flow uses
+root with selector `aether_kit_workbench@aether.kit.workbench`. Its inspection flow uses
 only the present proposal lifecycle: `aether.kit.world.propose`,
 `aether.kit.world.set_proposal_preview`,
 `aether.kit.world.commit_proposal`, and
