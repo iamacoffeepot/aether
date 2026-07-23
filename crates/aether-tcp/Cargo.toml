@@ -66,11 +66,11 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The load probe's driver/snapshot kinds (`ConfigureTcpLoadProbe`,
 # `TcpLoadSnapshot`, …) the test sends and decodes.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # The tcp_load_probe wasm the test loads by stem
 # (`aether_test_fixtures_bundle.wasm`, issue #3766): declared so the wasm
 # coupling is cargo-visible even though nothing links the host rlib.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 # `aether_codec::frame::max_frame_size` bounds the test's frame bodies
 # against the active max frame size cap.
 aether-codec = { path = "../aether-codec" }

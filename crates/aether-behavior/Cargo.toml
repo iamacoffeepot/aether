@@ -76,7 +76,7 @@ aether-kinds = { path = "../aether-kinds" }
 # The script wasms the gate loads by example stem (`intercept_slider`,
 # `intercept_slider_v2`, `trap_script`, issue #3766): declared so the wasm
 # coupling is cargo-visible even though nothing links the host rlib.
-aether-test-fixtures-behavior = { path = "../aether-test-fixtures/aether-test-fixtures-behavior" }
+aether-test-fixtures-behavior = { path = "../aether-test-fixtures-behavior" }
 
 # The script-wasm coupling above is load-by-stem only — no source import —
 # so the source-scanning unused-deps gate cannot see it.

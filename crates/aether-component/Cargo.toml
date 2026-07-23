@@ -92,17 +92,17 @@ aether-kinds = { path = "../aether-kinds" }
 # The shared `Kind` definitions the tests decode + assert against; also
 # pinned (`use … as _`) so the fixture kinds' `inventory::submit!`
 # descriptor entries land in each test binary.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # iamacoffeepot/aether#3766: the fixture crates whose wasm these tests
 # load, declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when a fixture changes, and xtask's
 # wasm-consumer rule fires the dist pre-build. The tests locate the
 # built wasm by stem, so the code never imports these crates.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
-aether-test-fixtures-boot = { path = "../aether-test-fixtures/aether-test-fixtures-boot" }
-aether-test-fixtures-defaultless = { path = "../aether-test-fixtures/aether-test-fixtures-defaultless" }
-aether-test-fixtures-stateful-typed = { path = "../aether-test-fixtures/aether-test-fixtures-stateful-typed" }
-aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures/aether-test-fixtures-stateful-reshaped" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
+aether-test-fixtures-boot = { path = "../aether-test-fixtures-boot" }
+aether-test-fixtures-defaultless = { path = "../aether-test-fixtures-defaultless" }
+aether-test-fixtures-stateful-typed = { path = "../aether-test-fixtures-stateful-typed" }
+aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures-stateful-reshaped" }
 # `dispatch_decode_failure` drives the `Probe` fixture directly through
 # the pub `Component::instantiate` / `deliver` API, which needs the
 # substrate types and `wasmtime::{Engine, Linker, Module}` in test scope

@@ -17,10 +17,8 @@ mod tests {
     /// `export_asset!("asset_fixture.txt")`, read at compile time so the
     /// length + checksum assertions are computed tripwires against the exact
     /// bytes the guest should receive.
-    const ASSET_FIXTURE: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../aether-test-fixtures/aether-test-fixtures-bundle/src/asset_fixture.txt"
-    ));
+    const ASSET_FIXTURE: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../aether-test-fixtures-bundle/src/asset_fixture.txt"));
 
     /// The same wrapping-sum checksum the fixture computes in `wire`, over
     /// the source bytes — a content-sensitive fingerprint, so a corrupt or

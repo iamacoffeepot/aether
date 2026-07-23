@@ -114,7 +114,7 @@ rules:
     tier: auto
   - glob: "crates/aether-mesh/**"
     tier: auto
-  - glob: "crates/aether-test-fixtures/**"
+  - glob: "crates/aether-test-fixtures-*/**"
     tier: auto
   - glob: "scripts/**"
     tier: auto

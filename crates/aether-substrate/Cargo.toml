@@ -143,7 +143,7 @@ aether-fs = { path = "../aether-fs" }
 # The shared fixture `Kind` definitions the tests assert against, pinned
 # (`use … as _`) so the fixture kinds' descriptor entries land in each
 # test binary.
-aether-test-fixtures-kinds = { path = "../aether-test-fixtures/aether-test-fixtures-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # The cap-registry replace test swaps the probe wasm for aether-kit-commons's
 # camera export and asserts on `aether_kit_commons::camera::CameraCreate`.
 aether-kit-commons = { path = "../aether-kit-commons" }
@@ -152,7 +152,7 @@ aether-kit-commons = { path = "../aether-kit-commons" }
 # determinator re-runs these tests when the fixture changes, and xtask's
 # wasm-consumer rule fires the dist pre-build. The tests locate the built
 # wasm by stem, so the code never imports the crate.
-aether-test-fixtures-bundle = { path = "../aether-test-fixtures/aether-test-fixtures-bundle" }
+aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 
 # cargo-machete's source-only scan cannot see the wasm-coupling dev-dep:
 # the tests load the fixture's built wasm by stem rather than importing

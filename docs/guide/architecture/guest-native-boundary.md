@@ -128,7 +128,7 @@ Before changing a public boundary, ask:
 7. Do MCP JSON encoding and live descriptors agree with the new schema?
 8. Is an ADR required because the boundary or compatibility policy changed?
 
-Integration fixtures under `crates/aether-test-fixtures/` cover several
+Integration fixtures under `crates/aether-test-fixtures-*/` cover several
 load/replace and multi-actor cases. Use them before inventing a new one-off
 example.
 
