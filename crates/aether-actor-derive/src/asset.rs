@@ -17,7 +17,7 @@
 //! no section attribute — two copies from codegen onward. The custom
 //! section is unconditional: rustc emits the metadata whenever it codegens
 //! the static, and wasm-ld copies custom sections from every linked object.
-//! The linear-memory copy is a dead internal global, so LLVM GlobalDCE (in
+//! The linear-memory copy is a dead internal global, so LLVM `GlobalDCE` (in
 //! release) and wasm-ld `--gc-sections` (in debug) drop it before it
 //! reaches the shipped wasm. Omitting `#[used]` — which would pin the dead
 //! global as a no-strip symbol — is what delivers ADR-0163 §2's "never
