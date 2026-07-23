@@ -9,7 +9,6 @@
 
 mod application;
 mod input;
-mod subscribers;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -31,7 +30,6 @@ use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
 use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
-use self::subscribers::WindowSubscribers;
 use super::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
     ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
@@ -39,6 +37,7 @@ use super::{
     UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowClosed, WindowId, WindowInfo, WindowOpened,
     WindowSpec,
 };
+use crate::subscribers::WindowSubscribers;
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
 
@@ -515,7 +514,7 @@ impl NativeActor for DesktopWindowCapability {
     type Config = ();
     type Params = DesktopWindowParams;
 
-    const NAMESPACE: &'static str = "aether.window";
+    const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
 
     fn init(
         (): (),

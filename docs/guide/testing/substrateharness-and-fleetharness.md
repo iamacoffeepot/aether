@@ -27,6 +27,7 @@ It still uses the real:
   `SubstrateHarness` omits `aether.fs`);
 - offscreen render/capture path;
 - lifecycle driver and input/tick stages;
+- deterministic synthetic windows and selector-aware window-event routing;
 - logging/tracing rings and typed replies.
 
 It is not a mock engine. The simplification is process/transport ownership.
@@ -83,6 +84,33 @@ the harness owns ordering.
 
 Use `CaptureWithMails` when geometry must land in the same frame as readback;
 separate send/capture steps describe a different temporal contract.
+
+Root actors also have a typed operation sender. It resolves the recipient from
+the actor identity and lets the event kind infer from `&mail`:
+
+```rust
+HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
+    selector: WindowSelector::All,
+    kind: Key::ID,
+    mailbox: observer,
+});
+```
+
+The constructor accepts only root identities and `send` compiles only when the
+actor handles that direct kind. Synthetic window events deliberately use a
+separate generic convenience constructor:
+
+```rust
+HarnessOp::window_event(WindowId(2), &Key { window: WindowId(2), code: keycode });
+```
+
+`window_event` accepts any `K: Kind`, encodes it once, and hands the runtime its
+`KindId`; neither the harness nor `aether-window` maintains a table of input
+kinds. The synthetic actor unions and deduplicates `All` and `One(window)`
+subscribers, then emits tracked descendant envelopes. When `execute` returns,
+inline observers and any other descendants have settled. This is test behavior:
+the production headless chassis remains fail-fast for every window request and
+does not expose synthetic injection.
 
 ## Visual evidence
 

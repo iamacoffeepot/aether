@@ -1,15 +1,16 @@
 # Window
 
 > **Governing ADR:** [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md)
-> (the substrate/chassis split). The window surface is desktop-only — it lives
-> behind the chassis that owns a real OS window — and the contract is **stable**.
+> (the substrate/chassis split) and
+> [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
+> (the application-scoped multi-window manager).
 
 An actor never touches the OS window directly. Like everything else it does, a
-window change crosses the mail boundary: the desktop chassis owns the window, and
-an actor reaches it by mailing a request to the `aether.window` mailbox and
-handling the reply. Three operations — switch presentation mode, set the title,
-bring the window to the front — and each one replies with the value actually
-applied.
+window change crosses the mail boundary: the desktop runtime owns the live
+windows, and an actor reaches it by mailing a request to the `aether.window`
+mailbox and handling the reply. Window identities are explicit `WindowId`
+values. The manager lists, creates, closes, and controls multiple windows and
+owns selector-aware publication of the events originating from them.
 
 That reply is the part to hold onto. A window request is advisory: the OS can
 adjust a mode, clamp a size, or decline to honor a focus call exactly as asked.
@@ -23,9 +24,12 @@ the desktop chassis already pumps — and only the desktop chassis has a window 
 all. Routing it through mail keeps both facts behind the same boundary every
 other subsystem uses: an actor mails `aether.window` exactly as it mails
 `aether.render` or `aether.fs`, and the chassis is the one party that knows
-whether a window exists and which thread may touch it. Headless and SubstrateHarness
-install a fail-fast companion. The hub does not install a window mailbox at all;
-verify the selected chassis rather than assuming every profile has the stub.
+whether a window exists and which thread may touch it. Production headless
+installs a fail-fast companion. `SubstrateHarness` instead installs a
+deterministic in-memory synthetic runtime so tests can exercise window
+lifecycle, selectors, and event routing without an OS window. The hub does not
+install a window mailbox at all; verify the selected chassis rather than
+assuming every profile has the stub.
 
 The reply-with-applied-value contract exists because a window op can't promise to
 do exactly what it's told. The window manager owns the final say on geometry and
@@ -73,14 +77,16 @@ is the lever that foregrounds it first. (Per the platform, raising-to-front is
 best-effort — the `Ok` ack means the chassis applied the calls, not that the
 window manager honored every one.)
 
-**Desktop-only, with explicit non-desktop behavior.** Only the desktop chassis owns a window.
-Headless and SubstrateHarness register `aether.window` with handlers that reply `Err`
-("unsupported on this chassis — no window peripheral") immediately. The hub
-omits the mailbox, so direct window mail there is unresolved.
-That's deliberate: a caller waiting on a window reply gets a fast, located
-failure instead of a request that hangs forever on those profiles. Render/capture
-availability is a separate chassis choice; inspect its handler instead of
-inferring it from the window policy.
+**Explicit non-desktop behavior.** Only the desktop chassis owns OS windows.
+Production headless registers `aether.window` with handlers that reply `Err`
+("unsupported on this chassis — no window peripheral") immediately. The
+test-only synthetic feature is different: `SubstrateHarness` composes
+`SyntheticWindowCapability`, whose monotonic in-memory `WindowId` map models
+list/create/close/control requests and whose selector table routes injected
+events through the real scheduler and settlement graph. The hub omits the
+mailbox, so direct window mail there is unresolved. Render/capture availability
+is a separate chassis choice; inspect its handler instead of inferring it from
+the window policy.
 
 **The window mailbox is drained by hand, on the event-loop thread.** Window
 operations have to run on the OS event-loop thread rather than a pool worker, so

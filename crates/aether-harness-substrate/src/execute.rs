@@ -22,9 +22,12 @@
 use std::collections::HashMap;
 use std::error;
 use std::fmt;
+use std::marker::PhantomData;
 
+use aether_actor::{Addressable, HandlesKind, One};
 use aether_data::{Kind, KindId};
 use aether_kinds::NamedMail;
+use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
 
 use super::harness::{SubstrateHarness, SubstrateHarnessError};
 
@@ -68,6 +71,28 @@ pub enum HarnessOp {
     CaptureWithMails { pre: Vec<NamedMail>, after: Vec<NamedMail> },
 }
 
+/// Typed root-actor sender for declarative harness operations.
+///
+/// Construct one with [`HarnessOp::actor`]. The actor identity determines the
+/// recipient, while [`Self::send`] infers the kind from the borrowed mail and
+/// compile-checks that the actor handles it.
+pub struct HarnessActor<R>(PhantomData<fn() -> R>);
+
+impl<R> HarnessActor<R>
+where
+    R: Addressable<Resolver = One>,
+{
+    /// Build a fire-and-settle operation for a kind handled by `R`.
+    #[must_use]
+    pub fn send<K>(&self, mail: &K) -> HarnessOp
+    where
+        K: Kind,
+        R: HandlesKind<K>,
+    {
+        HarnessOp::send_mail(R::NAMESPACE, mail)
+    }
+}
+
 impl HarnessOp {
     /// Run `ticks` complete frames.
     #[must_use]
@@ -86,6 +111,39 @@ impl HarnessOp {
     #[must_use]
     pub fn capture_with_mails(pre: Vec<NamedMail>, after: Vec<NamedMail>) -> Self {
         Self::CaptureWithMails { pre, after }
+    }
+
+    /// Bind a root actor identity for a compile-checked typed send.
+    ///
+    /// Only root identities using [`One`] can be constructed because a
+    /// declarative operation has no parent carry or instance key with which to
+    /// resolve nested or instanced actors.
+    ///
+    /// Unsupported direct kinds fail at compile time:
+    ///
+    /// ```compile_fail
+    /// use aether_harness_substrate::HarnessOp;
+    /// use aether_kinds::Tick;
+    /// use aether_window::SyntheticWindowCapability;
+    ///
+    /// let _ = HarnessOp::actor::<SyntheticWindowCapability>().send(&Tick);
+    /// ```
+    #[must_use]
+    pub fn actor<R>() -> HarnessActor<R>
+    where
+        R: Addressable<Resolver = One>,
+    {
+        HarnessActor(PhantomData)
+    }
+
+    /// Inject any typed event as originating from `window`.
+    ///
+    /// `K` is inferred from `event`; the synthetic runtime forwards its
+    /// already-encoded payload without a maintained window-event kind list.
+    #[must_use]
+    pub fn window_event<K: Kind>(window: WindowId, event: &K) -> Self {
+        let injection = InjectWindowEvent { window, kind: K::ID, payload: event.encode_into_bytes() };
+        Self::actor::<SyntheticWindowCapability>().send(&injection)
     }
 
     /// Fire-and-settle a typed mail (no reply awaited). Encodes `mail`
