@@ -18,7 +18,7 @@
 //! placement-or-behavior bug class it catches and does not re-assert what the
 //! three sibling scenarios already prove.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit_widget` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure. Rendered
 //! output can only be asserted on the GPU path, so this is correctly `SubstrateHarness`
@@ -64,7 +64,7 @@ use aether_kinds::{
     FrameReduction, FrameVerdict, ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers,
     MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
-use aether_kit::{
+use aether_kit_widget::{
     ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
     RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
     TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, WidgetChildSpec, WidgetConfig,
@@ -991,7 +991,7 @@ fn assert_row_contained(row: &TextRow, result: &FrameCheckResult) {
 /// is scored here.
 #[test]
 fn panel_renders_every_text_row_inside_its_frame() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1061,7 +1061,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
 /// committed value (that is `widget_set`'s proof).
 #[test]
 fn slider_drag_renders_fill_at_track_fraction() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1107,7 +1107,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
 #[test]
 fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     let (Some(kit_wasm_path), Some(fixtures_wasm_path)) =
-        (require_runtime("aether_kit"), require_runtime("aether_test_fixtures_bundle"))
+        (require_runtime("aether_kit_widget"), require_runtime("aether_test_fixtures_bundle"))
     else {
         return;
     };
@@ -1159,7 +1159,7 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
 /// from the others. It does not re-read the index.
 #[test]
 fn radio_click_moves_marker_into_clicked_row() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1220,7 +1220,7 @@ fn radio_click_moves_marker_into_clicked_row() {
 /// committed value.
 #[test]
 fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1303,7 +1303,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
 /// ring.
 #[test]
 fn button_press_renders_pressed_state_and_reports_click() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1363,7 +1363,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
 /// top edge and gone from the slider's.
 #[test]
 fn focus_ring_follows_tab() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1425,7 +1425,7 @@ fn focus_ring_follows_tab() {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive place → select → compose → commit acceptance run
 fn text_field_selection_and_ime_render_measured_bands_and_commit() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1627,7 +1627,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive multiline edit/render/commit acceptance run
 fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -1867,7 +1867,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
 /// derived roles, and validation plus focus remain two ordered outlines.
 #[test]
 fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -2116,7 +2116,7 @@ fn assert_advanced_control_raster(harness: &mut SubstrateHarness) {
 /// bounded raster evidence all exercise the real wasm actors together.
 #[test]
 fn toggle_segmented_and_numeric_complete_the_real_panel_contract() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -2133,7 +2133,7 @@ fn toggle_segmented_and_numeric_complete_the_real_panel_contract() {
 
 #[test]
 fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -2170,7 +2170,7 @@ fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
 
 #[test]
 fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -2236,7 +2236,7 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
 #[test]
 #[allow(clippy::too_many_lines)] // one end-to-end nested ownership + clipping matrix
 fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -2415,7 +2415,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive bounded-window/state/render acceptance run
 fn virtual_list_bounds_realization_and_renders_selection_state() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

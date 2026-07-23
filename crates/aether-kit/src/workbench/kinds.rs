@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::console::ConsoleConfig;
 use crate::mark::MarkRef;
 use crate::terra::TerraError;
-use crate::widget::EditorRegionRect;
-use crate::widget::theme::Theme;
 use crate::world::{
     AutomatonRule, BrushParameters, MAX_TERRAIN_PICK_DISTANCE_METERS, OperatorBudget, ProposalDigest, ProposalError,
     ProposalId, TerrainPickError, WorldPoint, WorldPositionMeters,
 };
+use aether_kit_widget::EditorRegionRect;
+use aether_kit_widget::theme::Theme;
 
 /// Three independently-routed regions assembled by the workbench.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]

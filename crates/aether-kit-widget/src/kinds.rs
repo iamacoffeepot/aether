@@ -36,7 +36,7 @@ use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
 use serde::{Deserialize, Serialize};
 
-use crate::widget::theme::Theme;
+use crate::theme::Theme;
 
 /// `aether.kit.widget.collect` — a per-frame poll a compositing node
 /// sends to each of its children in layout order. The child answers with
@@ -117,8 +117,14 @@ impl WidgetClipRect {
 /// Result of composing two optional widget clips. Two absent clips are
 /// unbounded, while an explicit invalid, empty, disjoint, or edge-touching
 /// rectangle is empty and omits the item.
+// Crate-internal geometry helper, kept out of the public API. `kinds` is a
+// private module glob-re-exported by the crate root (`pub use kinds::*`), so
+// `pub` would leak this into the public surface; `pub(crate)` is deliberate and
+// `super` is the crate root here, which is why the nursery lint sees it as
+// redundant.
+#[allow(clippy::redundant_pub_crate)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum WidgetClipIntersection {
+pub(crate) enum WidgetClipIntersection {
     Unbounded,
     Finite { rect: WidgetClipRect },
     Empty,
@@ -919,7 +925,7 @@ pub struct EditorRegionRect {
     pub height_pixels: f32,
 }
 
-/// Raw input lanes an editor region accepts from [`EditorShell`](crate::widget::EditorShell).
+/// Raw input lanes an editor region accepts from [`EditorShell`](crate::EditorShell).
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RegionInputLanes {
@@ -975,7 +981,7 @@ pub struct RegionSpec {
 }
 
 /// `aether.kit.widget.editor.config` — ordered peer regions routed by an
-/// input-only [`EditorShell`](crate::widget::EditorShell).
+/// input-only [`EditorShell`](crate::EditorShell).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.kit.widget.editor.config")]
 pub struct EditorConfig {
@@ -1009,7 +1015,7 @@ pub struct PanelConfig {
     pub theme: Theme,
     pub children: Vec<WidgetChildSpec>,
     /// Whether this standalone panel subscribes the raw interactive streams.
-    /// Set false when an [`EditorShell`](crate::widget::EditorShell) owns them.
+    /// Set false when an [`EditorShell`](crate::EditorShell) owns them.
     #[serde(default = "owns_input_by_default")]
     pub owns_input: bool,
 }

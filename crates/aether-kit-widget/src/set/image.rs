@@ -15,10 +15,10 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
 
-use crate::widget::set::apply_static_control_state;
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{Collect, ImageConfig, ImageFit, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::set::apply_static_control_state;
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{Collect, ImageConfig, ImageFit, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// Pure fit output. Destination fields are widget-local pixels; UV fields are
 /// normalized texture coordinates. Keeping each semantic named avoids the
@@ -292,8 +292,8 @@ impl WasmActor for ImageWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::WidgetControlState;
-    use crate::widget::theme::ThemeState;
+    use crate::WidgetControlState;
+    use crate::theme::ThemeState;
 
     fn image(fit: ImageFit) -> ImageWidget {
         ImageWidget {

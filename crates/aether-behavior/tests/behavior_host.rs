@@ -17,7 +17,7 @@
 //! Minimal composition (issue #3764): the component host on the harness basics —
 //! every assertion reads the log ring, so no render cap (and no wgpu gate) is
 //! composed; the widgets' draw mail warn-drops harmlessly. Skipped when the
-//! `behavior`-feature kit wasm / the fixture script wasm has not been pre-built
+//! `behavior`-feature widget wasm / the fixture script wasm has not been pre-built
 //! (the `require_wasm` gate). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn the
 //! skip into a hard failure.
 
@@ -29,8 +29,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
-use aether_kit::widget::{BehaviorHostSpec, ScriptRef};
-use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
+use aether_kit_widget::{BehaviorHostSpec, PanelConfig, ScriptRef, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
 use serde::{Deserialize, Serialize};
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
@@ -87,7 +86,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
         step: 1.0,
         initial: 40.0,
         theme: Theme::DEFAULT,
-        state: aether_kit::WidgetControlState::default(),
+        state: aether_kit_widget::WidgetControlState::default(),
     }
     .encode_into_bytes();
     let host_spec = BehaviorHostSpec {
@@ -216,10 +215,10 @@ fn swap_script(harness: &mut SubstrateHarness, label: &str, bytes: Vec<u8>) {
 /// already covers.
 #[test]
 fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
-    // The host-carrying kit variant (`--features behavior`, wasmi linked in),
-    // built to its own stem by `cargo xtask dist` so the stock `aether_kit.wasm`
-    // the other scenarios load stays lean (issue 2688).
-    let Some(kit_path) = require_wasm("aether_kit_behavior") else {
+    // The host-carrying widget variant (`--features behavior`, wasmi linked in),
+    // built to its own stem by `cargo xtask dist` so the stock
+    // `aether_kit_widget.wasm` the other scenarios load stays lean (issue 2688).
+    let Some(kit_path) = require_wasm("aether_kit_widget_behavior") else {
         return;
     };
     let Some(intercept_path) = require_wasm("intercept_slider") else {

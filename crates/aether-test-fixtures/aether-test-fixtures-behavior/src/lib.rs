@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Twin of `aether_kit::widget::SliderChanged` — the value-up event the
+/// Twin of `aether_kit_widget::SliderChanged` — the value-up event the
 /// scripts intercept. Same wire name and field shape as
 /// `crates/aether-kit/src/widget/kinds.rs`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct SliderChanged {
     pub committed: bool,
 }
 
-/// Twin of `aether_kit::widget::RadioSelected` — carries a `u32` up the panel
+/// Twin of `aether_kit_widget::RadioSelected` — carries a `u32` up the panel
 /// lane, which the scripts reuse as an observable effect (`ctx.panel().emit`)
 /// to surface their authored `count` where the panel logs it. Same wire name
 /// and field shape as `crates/aether-kit/src/widget/kinds.rs`.

@@ -17,10 +17,10 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_control_outlines, quad, release_left, reply_with_draw_items, text_origin_y};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
+use crate::set::{push_control_outlines, quad, release_left, reply_with_draw_items, text_origin_y};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, VirtualListConfig, VirtualListSelected,
     WidgetControlState, WidgetDrawItem, WidgetFrame,
 };
@@ -376,8 +376,8 @@ fn valid_frame(frame: &WidgetFrame) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::theme::ThemeState;
-    use crate::widget::{WidgetDrawItem, WidgetValidation};
+    use crate::theme::ThemeState;
+    use crate::{WidgetDrawItem, WidgetValidation};
     use alloc::format;
     use alloc::vec;
 

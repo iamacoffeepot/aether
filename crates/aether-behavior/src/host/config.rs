@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 /// `ActorTypeTag(type_tag)` at the spawn call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema, Default)]
 pub struct ChildSpec {
-    /// `hash(NAMESPACE)` of the wrapped actor type. For a stock `aether-kit`
-    /// widget, `aether_kit::widgets::WidgetKind::type_tag()` produces this
-    /// value without linking the kit's `runtime` feature.
+    /// `hash(NAMESPACE)` of the wrapped actor type. For a stock
+    /// `aether-kit-widget` widget, `aether_kit_widget::WidgetKind::type_tag()`
+    /// produces this value without linking that crate's `runtime` feature.
     pub type_tag: u64,
     /// The wrapped child's subname within the cluster.
     pub subname: String,
@@ -71,9 +71,9 @@ pub struct HostConfig {
     pub disable_after_traps: u32,
     /// The kind id whose arrival down-lane the host maps onto the reserved
     /// FRAME sentinel (the script's per-frame hook). `0` disables the frame
-    /// mapping. Configurable rather than hard-wired to a kit kind so the SDK
-    /// keeps no `aether-kit` dependency — the kit arm sets this to its own
-    /// `Collect` id.
+    /// mapping. Configurable rather than hard-wired to a widget kind so the SDK
+    /// keeps no `aether-kit-widget` dependency — the widget crate's
+    /// `WidgetKind::BehaviorHost` arm sets this to its own `Collect` id.
     pub frame_trigger: u64,
     /// Low-rate mirror-kind ids always offered to SDK dispatch even when the
     /// script manifest does not declare a handler for them.

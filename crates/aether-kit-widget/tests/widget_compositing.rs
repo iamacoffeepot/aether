@@ -22,7 +22,7 @@
 //!   under its own children — the depth-first order the tree structure
 //!   encodes, read straight off the captured pixels by hue dominance.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has
+//! Skipped when no wgpu adapter is available or the `aether_kit_widget` wasm has
 //! not been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
 
@@ -40,7 +40,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace};
-use aether_kit::{
+use aether_kit_widget::{
     PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, Theme, WidgetChildSpec, WidgetClipRect, WidgetConfig,
     WidgetDrawItem, WidgetKind,
 };
@@ -234,7 +234,7 @@ fn dominant(pixel: [u8; 3], channel: usize) -> bool {
 /// it overlaps — chrome-first structural order.
 #[test]
 fn flat_panel_is_one_sender_with_chrome_under_children() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -310,7 +310,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
 /// own children.
 #[test]
 fn nested_tree_draws_in_depth_first_order() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -404,7 +404,7 @@ fn nested_tree_draws_in_depth_first_order() {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive nested clip structural + pixel acceptance run
 fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -491,7 +491,7 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive typed snapshot + raster acceptance scenario
 fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
@@ -688,7 +688,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive exact-layout + four-edge pixel proof
 fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
+    let Some(wasm_path) = require_runtime("aether_kit_widget") else {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");

@@ -18,7 +18,7 @@
 //!
 //! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
-//! [`Collect`](crate::widget::Collect) with a
+//! [`Collect`](crate::Collect) with a
 //! [`WidgetDrawList`] drawn in its own local
 //! coordinates (colors resolved through [`Theme::fill`]),
 //! and reports value changes up to its parent. Widgets never subscribe to
@@ -61,10 +61,10 @@ use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease
 use aether_math::Rgba;
 use aether_text::{FontMetricsRequest, FontRef, TextCapability};
 
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};
-use crate::widget::theme::{Theme, ThemeState};
-use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};
+use crate::theme::{Theme, ThemeState};
+use crate::{WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyboardArm {

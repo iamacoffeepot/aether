@@ -13,10 +13,10 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 
-use crate::widget::set::{apply_static_control_state, reply_if_hidden, text_origin_y};
-use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{Collect, LabelConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::set::{apply_static_control_state, reply_if_hidden, text_origin_y};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::theme::{SetTheme, Theme};
+use crate::{Collect, LabelConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// A static text label. Holds the text plus the cached theme / frame.
 pub struct LabelWidget {
