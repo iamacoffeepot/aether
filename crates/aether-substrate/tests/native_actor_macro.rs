@@ -18,6 +18,9 @@
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
+// A deliberate embedder: the macro-codegen gate builds a bare `TestChassis` via
+// `Builder::new` rather than the `composed` boot seam.
+#![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
