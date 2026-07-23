@@ -29,15 +29,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
+use aether_chassis::bundle_pack::ChassisSettings;
+use aether_chassis::package::{PackageEntry, PackageManifest, Sha256, encode_manifest};
 use anyhow::{Context, Result, bail};
 use cargo_metadata::MetadataCommand;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use sha2::{Digest, Sha256 as Sha256Hasher};
 
 use crate::affected::AffectedArgs;
 use crate::inventory::{
-    BUNDLE_PACKAGE, BuildPlan, CHASSIS_BINS, Component, behavior_build_plans, build_plans, discover_behavior_variants,
-    discover_behaviors, discover_components,
+    BUNDLE_PACKAGE, BuildPlan, CHASSIS_BINS, Component, PACKAGE_CHASSIS, behavior_build_plans, build_plans,
+    discover_behavior_variants, discover_behaviors, discover_components,
 };
 use crate::transform::TransformArgs;
 
@@ -58,6 +61,11 @@ enum Commands {
     /// Build a standalone, hub-less executable: a chassis with an ordered
     /// component set (plus configs) embedded at build time (#1529).
     Bundle(BundleArgs),
+    /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
+    /// a persisted `pack/manifest`, and content-addressed component
+    /// objects under `pack/objects/<sha256>`. The Steam depot is this
+    /// directory uploaded verbatim.
+    Package(PackageArgs),
     /// ADR-0149 §Execution's portable execution unit: run one typed
     /// mechanical-verify command (`verify.fmt` / `verify.clippy` /
     /// `verify.docs`) — the same cargo invocation CI runs — and write
@@ -79,6 +87,20 @@ struct DistArgs {
     /// path for callers that only need the component wasm.
     #[arg(long)]
     no_bins: bool,
+}
+
+#[derive(Args)]
+struct PackageArgs {
+    /// Cargo profile to build and package. A depot ships release
+    /// artifacts, so the package target defaults to release (unlike
+    /// `dist`, whose consumers are test harnesses).
+    #[arg(long, value_enum, default_value_t = Profile::Release)]
+    profile: Profile,
+    /// Output directory for the depot layout. Defaults to
+    /// `target/package/`. The directory is regenerated from scratch each
+    /// run so the manifest stays authoritative.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -198,6 +220,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Dist(args) => run_dist(&args),
         Commands::Bundle(args) => run_bundle(&args),
+        Commands::Package(args) => run_package(&args),
         Commands::Transform(args) => transform::run(&args),
         Commands::Affected(args) => affected::run(&args),
     }
@@ -297,6 +320,141 @@ fn run_dist(args: &DistArgs) -> Result<()> {
         println!("dist: {} behavior script(s) built into target/: {}", stems.len(), stems.join(", "));
     }
     Ok(())
+}
+
+/// One resolved component about to be written into the depot: its load
+/// `name` label and the wasm bytes that become a content-addressed object.
+struct DepotComponent {
+    name: String,
+    wasm: Vec<u8>,
+}
+
+/// Emit the shippable depot layout (ADR-0163 §1). Discovers the component
+/// set (the same structural sweep `run_dist` uses), cross-builds each
+/// component's wasm and the desktop chassis binary, then writes:
+///
+/// ```text
+/// <out>/
+///   aether-substrate            # desktop chassis binary
+///   pack/manifest               # `encode_manifest` output
+///   pack/objects/<sha256>       # component wasm, content-addressed
+/// ```
+///
+/// The component set and its `name` labels mirror `dist` (the wasm stems);
+/// each object is referenced from the manifest by its sha256 hash, so
+/// identity is the content and a name is a label. Config objects are not
+/// emitted in this slice — the discovered set carries no per-component
+/// init config, and a package-description file (which would carry configs,
+/// exports, replicas) is out of scope (issue #3972).
+fn run_package(args: &PackageArgs) -> Result<()> {
+    let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
+
+    let mut components = discover_components(&metadata);
+    if components.is_empty() {
+        bail!("no wasm component crates discovered (cdylib target + aether-actor dep)");
+    }
+    // Stable emit order: the manifest entry order is the sorted stem order,
+    // so a rebuild of the same sources yields byte-identical `pack/manifest`.
+    components.sort_by(|a, b| a.stem.cmp(&b.stem));
+
+    let target_dir = metadata.target_directory.as_std_path();
+    let wasm_profile_dir = target_dir.join(WASM_TARGET).join(args.profile.as_str());
+
+    // Build each component package in its own cargo invocation — never
+    // batch multiple `-p` (see `inventory::build_plans`).
+    for plan in build_plans(&components) {
+        build_component(&plan, args.profile)?;
+    }
+    let (chassis_package, chassis_bin) = PACKAGE_CHASSIS;
+    build_named_chassis(chassis_package, chassis_bin, args.profile)?;
+
+    let depot_components = components
+        .iter()
+        .map(|component| {
+            let src = wasm_artifact_path(&wasm_profile_dir, component);
+            let wasm = fs::read(&src).with_context(|| format!("read component wasm {}", src.display()))?;
+            Ok(DepotComponent { name: component.stem.clone(), wasm })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let out = args.out.clone().unwrap_or_else(|| target_dir.join("package"));
+    let chassis_src = target_dir.join(args.profile.as_str()).join(chassis_bin);
+    let manifest = emit_depot(&out, &chassis_src, chassis_bin, &depot_components, ChassisSettings::default())?;
+
+    println!(
+        "package: {} component object(s) + {} chassis bin -> {}",
+        manifest.entries.len(),
+        chassis_bin,
+        out.display(),
+    );
+    Ok(())
+}
+
+/// Write the depot tree at `out`: copy the chassis binary to `<out>/<chassis_bin>`,
+/// hash each component's wasm into `pack/objects/<sha256>`, and write the
+/// `encode_manifest` bytes to `pack/manifest`. Regenerates `out` from
+/// scratch so a stale prior run can't leave orphaned objects. Returns the
+/// manifest it wrote.
+fn emit_depot(
+    out: &Path,
+    chassis_src: &Path,
+    chassis_bin: &str,
+    components: &[DepotComponent],
+    settings: ChassisSettings,
+) -> Result<PackageManifest> {
+    if out.exists() {
+        fs::remove_dir_all(out).with_context(|| format!("clear {}", out.display()))?;
+    }
+    let objects_dir = out.join("pack").join("objects");
+    fs::create_dir_all(&objects_dir).with_context(|| format!("create {}", objects_dir.display()))?;
+
+    copy_artifact(chassis_src, &out.join(chassis_bin))?;
+
+    let mut entries = Vec::with_capacity(components.len());
+    for component in components {
+        let object = write_object(&objects_dir, &component.wasm)?;
+        entries.push(PackageEntry {
+            object,
+            config: None,
+            name: Some(component.name.clone()),
+            export: None,
+            replicas: None,
+        });
+    }
+
+    let manifest = PackageManifest { settings, entries };
+    let manifest_path = out.join("pack").join("manifest");
+    fs::write(&manifest_path, encode_manifest(&manifest))
+        .with_context(|| format!("write {}", manifest_path.display()))?;
+    Ok(manifest)
+}
+
+/// Hash `bytes` and write them to `<objects_dir>/<lowercase-hex>`, the
+/// content-addressed object name the manifest references and the chassis
+/// resolves against. Objects are immutable and content-keyed, so an
+/// already-present object (a second component with identical bytes) is not
+/// rewritten. Returns the [`Sha256`] identity.
+fn write_object(objects_dir: &Path, bytes: &[u8]) -> Result<Sha256> {
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(bytes);
+    let object = Sha256(hasher.finalize().into());
+    let path = objects_dir.join(object.to_hex());
+    if !path.exists() {
+        fs::write(&path, bytes).with_context(|| format!("write object {}", path.display()))?;
+    }
+    Ok(object)
+}
+
+/// Build one chassis binary by `(package, bin)` selector for the host
+/// target — the package target's single-bin twin of `build_chassis`'s
+/// all-bins build.
+fn build_named_chassis(package: &str, bin: &str, profile: Profile) -> Result<()> {
+    let mut cmd = Command::new(cargo());
+    cmd.args(["build", "-p", package, "--bin", bin]);
+    if let Some(flag) = profile.cargo_flag() {
+        cmd.arg(flag);
+    }
+    run(cmd, &format!("build chassis bin {bin}"))
 }
 
 /// One component in a resolved bundle plan: where its wasm comes from
@@ -632,8 +790,73 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    use aether_chassis::bundle_pack::ChassisSettings;
+    use aether_chassis::package::{Sha256, decode_manifest};
+    use sha2::{Digest, Sha256 as Sha256Hasher};
+
     use super::inventory::{discover_behaviors, discover_components};
-    use super::{BundleChassis, BundlePlan, ComponentSource, PlannedComponent, bundle_manifest_json};
+    use super::{
+        BundleChassis, BundlePlan, ComponentSource, DepotComponent, PlannedComponent, bundle_manifest_json, emit_depot,
+    };
+
+    #[test]
+    fn emitted_depot_round_trips_through_decoder() {
+        // Tripwire: the depot xtask writes must be readable by the chassis's
+        // own `decode_manifest`, and every manifest reference must resolve
+        // against `pack/objects` and re-hash to its filename. This catches
+        // the emit bugs the target owns — a wrong object filename, a dropped
+        // entry, a hash/bytes mismatch, or an encode that its own decoder
+        // can't read — using the merged decoder as the oracle. It does not
+        // re-test `encode_manifest`/`decode_manifest` symmetry (owned and
+        // tested in aether-chassis); it tests that xtask's on-disk layout is
+        // what that decoder consumes.
+        use std::env;
+        use std::fs;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let out = env::temp_dir().join(format!("aether-xtask-package-{}-{seq}", process::id()));
+
+        let chassis_src = env::temp_dir().join(format!("aether-xtask-chassis-{}-{seq}", process::id()));
+        fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis binary");
+
+        // Two distinct components plus a third sharing bytes with the first —
+        // the shared-bytes case exercises content-address dedup (one object
+        // file, two entries pointing at it).
+        let components = vec![
+            DepotComponent { name: "alpha".to_owned(), wasm: vec![0x00, 0x61, 0x73, 0x6d, 1, 2, 3] },
+            DepotComponent { name: "beta".to_owned(), wasm: vec![9, 9, 9, 9] },
+            DepotComponent { name: "alpha_twin".to_owned(), wasm: vec![0x00, 0x61, 0x73, 0x6d, 1, 2, 3] },
+        ];
+        let manifest =
+            emit_depot(&out, &chassis_src, "aether-substrate", &components, ChassisSettings::default()).expect("emit");
+
+        assert!(out.join("aether-substrate").exists(), "chassis binary copied into the depot root");
+
+        let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read pack/manifest");
+        let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
+        assert_eq!(decoded, manifest, "the decoded manifest equals what emit_depot wrote");
+
+        let objects_dir = out.join("pack").join("objects");
+        for entry in &decoded.entries {
+            let object_path = objects_dir.join(entry.object.to_hex());
+            let disk = fs::read(&object_path).unwrap_or_else(|_| panic!("object {} exists", entry.object.to_hex()));
+            let mut hasher = Sha256Hasher::new();
+            hasher.update(&disk);
+            let recomputed = Sha256(hasher.finalize().into());
+            assert_eq!(recomputed, entry.object, "object file content hashes to its filename");
+        }
+
+        // The shared-bytes entries resolve to one object; the two distinct
+        // components plus the shared object make two object files.
+        let object_count = fs::read_dir(&objects_dir).expect("read objects dir").count();
+        assert_eq!(object_count, 2, "content-address dedup writes one file per distinct payload");
+
+        fs::remove_dir_all(&out).ok();
+        fs::remove_file(&chassis_src).ok();
+    }
 
     #[test]
     fn bundle_manifest_carries_chassis_and_component_order() {

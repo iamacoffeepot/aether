@@ -7593,6 +7593,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "xtask"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-chassis",
  "anyhow",
  "cargo_metadata",
  "clap",
@@ -7600,6 +7601,7 @@ dependencies = [
  "guppy",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
