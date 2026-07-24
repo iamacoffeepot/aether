@@ -673,7 +673,7 @@ impl GrowingWasmArena {
         self.capacity = chunks * self.chunk_slots;
         self.ensure_memory()?;
         if self.touch_reserved {
-            self.touch_capacity();
+            self.touch_capacity(0);
         }
         let elapsed = started.elapsed();
         for _ in 0..chunks {
@@ -685,10 +685,11 @@ impl GrowingWasmArena {
     fn spawn(&mut self, actor: usize, seed: u64) -> Result<()> {
         if actor == self.capacity {
             let started = Instant::now();
+            let previous_capacity = self.capacity;
             self.capacity += self.chunk_slots;
             self.ensure_memory()?;
             if self.touch_reserved {
-                self.touch_capacity();
+                self.touch_capacity(previous_capacity);
             }
             self.growth.record(false, started.elapsed());
         }
@@ -713,10 +714,11 @@ impl GrowingWasmArena {
         Ok(())
     }
 
-    fn touch_capacity(&mut self) {
+    fn touch_capacity(&mut self, first_actor: usize) {
+        let start = WASM_STATE_BASE + first_actor * self.state_bytes;
         let end = WASM_STATE_BASE + self.capacity * self.state_bytes;
         let memory = self.memory.data_mut(&mut self.store);
-        for byte in (WASM_STATE_BASE..end).step_by(4_096) {
+        for byte in (start..end).step_by(4_096) {
             memory[byte] = memory[byte].wrapping_add(1);
         }
     }
@@ -1015,5 +1017,25 @@ mod tests {
         assert_eq!(report.incremental_chunks, 0);
         assert!(report.wasm_memory_grow_calls > 0);
         assert_eq!(report.completed_updates, 2_200);
+    }
+
+    #[test]
+    fn wasm_touched_growth_does_not_retouch_live_actor_state() {
+        let mut exact = config();
+        exact.target = PreallocationTarget::Wasm;
+        exact.actors = 2_048;
+        exact.capacity_hint = 2_048;
+        exact.touch_reserved = true;
+        let exact = run_preallocation_trial(exact).expect("exact touched trial");
+
+        let mut underestimated = config();
+        underestimated.target = PreallocationTarget::Wasm;
+        underestimated.actors = 2_048;
+        underestimated.capacity_hint = 1_024;
+        underestimated.touch_reserved = true;
+        let underestimated = run_preallocation_trial(underestimated).expect("incremental touched trial");
+
+        assert_eq!(underestimated.completed_updates, exact.completed_updates);
+        assert_eq!(underestimated.checksum, exact.checksum);
     }
 }
