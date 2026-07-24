@@ -47,13 +47,16 @@ This ADR therefore defines both the shared-state ownership rule and the storage-
 
 A handler’s relationship to state is classified by ownership. Each class has one access shape:
 
-1. **Own state**  
+1. **Own state**
+
    The actor’s `&mut A::State`. The inbox serializes mutation. This remains unchanged.
 
-2. **Read-dominated shared state**  
+2. **Read-dominated shared state**
+
    One owner mutates the working state. Other code reads published snapshots through views and requests mutation through staged effects.
 
-3. **Write-hot shared state**  
+3. **Write-hot shared state**
+
    Writes remain local and are periodically folded or aggregated. The existing `CostCell` hot path remains in this class.
 
 If an owner becomes hot enough to limit the workload, or a true synchronous commit requirement emerges, the state must be reclassified or the owner sharded from measurement. Callers must not bypass the ownership model.
