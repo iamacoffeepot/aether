@@ -94,6 +94,7 @@ struct CellStatistics {
     median_spawn_nanos_per_actor: f64,
     spawn_iqr_nanos_per_actor: f64,
     median_cold_nanos_per_actor: f64,
+    cold_iqr_nanos_per_actor: f64,
     median_incremental_growth_p95_nanos: f64,
     median_incremental_growth_p99_nanos: f64,
     median_maximum_incremental_growth_nanos: f64,
@@ -327,24 +328,31 @@ fn add_wasm_cells(cells: &mut Vec<Cell>, args: &Args) {
 }
 
 fn add_diagnostic_cells(cells: &mut Vec<Cell>, args: &Args) {
+    let campaign = if args.touch_reserved {
+        "forced page-touch diagnostic"
+    } else if args.instrument_allocations {
+        "allocation diagnostic"
+    } else {
+        "diagnostic subset"
+    };
     for percent in [50, 100, 200] {
         cells.push(Cell {
             name: format!("diagnostic-native-hint-{percent:03}"),
-            campaign: "allocation diagnostic",
+            campaign,
             config: base_config(args, PreallocationTarget::Native, percent_hint(args.actors, percent), 16),
         });
     }
     for growth_pages in [1, 16, 64] {
         cells.push(Cell {
             name: format!("diagnostic-native-pages-{growth_pages:02}"),
-            campaign: "allocation diagnostic",
+            campaign,
             config: base_config(args, PreallocationTarget::Native, percent_hint(args.actors, 75), growth_pages),
         });
     }
     for percent in [50, 100, 200] {
         cells.push(Cell {
             name: format!("diagnostic-wasm-hint-{percent:03}"),
-            campaign: "allocation diagnostic",
+            campaign,
             config: base_config(args, PreallocationTarget::Wasm, percent_hint(args.actors, percent), 16),
         });
     }
@@ -470,6 +478,7 @@ fn aggregate(cell: &Cell, samples: &[PreallocationReport]) -> Result<CellReport>
             median_spawn_nanos_per_actor: percentile(&spawn, 0.5),
             spawn_iqr_nanos_per_actor: iqr(&spawn),
             median_cold_nanos_per_actor: percentile(&cold, 0.5),
+            cold_iqr_nanos_per_actor: iqr(&cold),
             median_incremental_growth_p95_nanos: percentile(&growth_p95, 0.5),
             median_incremental_growth_p99_nanos: percentile(&growth_p99, 0.5),
             median_maximum_incremental_growth_nanos: percentile(&growth, 0.5),
@@ -555,12 +564,24 @@ fn iqr(values: &[f64]) -> f64 {
 
 #[allow(clippy::cast_precision_loss, reason = "bounded counts intentionally become human-readable percentages and MiB")]
 fn markdown_report(report: &MatrixReport) -> String {
+    let first = &report.cells[0].config;
     let mut markdown = format!(
         "# Actor arena preallocation matrix\n\n\
          Each cell has {} fresh-process samples. Cell order rotates by an evenly distributed stride and alternates \
          forward/reverse between rounds. Cold rates include capacity reservation plus actor state initialization. \
-         Hot rates follow a warm/reset phase and contain bullet updates only.\n\n",
-        report.rounds
+        Hot rates follow a warm/reset phase and contain bullet updates only.\n\n\
+        Forced reserved-page touching: **{}**. Allocation instrumentation: **{}**.\n\n",
+        report.rounds,
+        if first.touch_reserved {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if first.instrument_allocations {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     let mut campaign = "";
 
@@ -570,9 +591,9 @@ fn markdown_report(report: &MatrixReport) -> String {
             let _ = write!(
                 markdown,
                 "## {campaign}\n\n\
-                 | # | Cell | Target | Hint | Growth pages | Live | Sweep | Cold ns/actor | Spawn ns/actor | \
+                 | # | Cell | Target | Hint | Growth pages | Live | Sweep | Cold ns/actor | Cold IQR | Spawn ns/actor | \
                  Growth p99 µs | Max growth µs | Hot ns/update | Hot IQR | Capacity | Unused MiB | Peak RSS MiB |\n\
-                 |---:|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+                 |---:|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
             );
         }
         let hint_percent = cell.config.capacity_hint as f64 / cell.config.actors as f64 * 100.0;
@@ -580,7 +601,7 @@ fn markdown_report(report: &MatrixReport) -> String {
         let _ = writeln!(
             markdown,
             "| {index} | `{}` | {} | {hint_percent:.1}% | {} | {}% {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | \
-             {:.3} | {:.3} | {} | {:.2} | {:.2} |",
+             {:.2} | {:.3} | {:.3} | {} | {:.2} | {:.2} |",
             cell.name,
             target_name(cell.config.target),
             cell.config.growth_pages,
@@ -588,6 +609,7 @@ fn markdown_report(report: &MatrixReport) -> String {
             hole_name(cell.config.hole_pattern),
             sweep_name(cell.config.sweep_mode),
             stats.median_cold_nanos_per_actor,
+            stats.cold_iqr_nanos_per_actor,
             stats.median_spawn_nanos_per_actor,
             stats.median_incremental_growth_p99_nanos / 1_000.0,
             stats.median_maximum_incremental_growth_nanos / 1_000.0,
@@ -602,18 +624,36 @@ fn markdown_report(report: &MatrixReport) -> String {
     markdown.push_str(
         "\n## Interpretation limits\n\n\
          - Reserve time and spawn time are separate. Native reserve allocates stable chunks; Wasm reserve performs \
-           one host `memory.grow` to the estimated size after module/store construction.\n\
-         - `touch-reserved=false` leaves spare native and Wasm pages eligible for lazy physical backing. Logical \
-           reserved/live byte counts therefore carry more meaning than small RSS differences.\n\
-         - Allocation instrumentation is absent unless explicitly requested; its global atomics perturb cold timing.\n\
-         - `live-bitmap` traverses a two-level live-page hierarchy and live slot words. `capacity-scan` deliberately \
-           models the failure mode that visits every reserved page.\n\
+           one host `memory.grow` to the estimated size after module/store construction.\n",
+    );
+    if first.touch_reserved {
+        markdown.push_str(
+            "- Reserved state is forcibly touched once per 4 KiB host page before actor initialization. This \
+             diagnoses physical commitment and intentionally perturbs cold timing.\n",
+        );
+    } else {
+        markdown.push_str(
+            "- Spare state is not explicitly touched. It can remain lazily physically backed, so logical \
+             reserved/live byte counts carry more meaning than small RSS differences.\n",
+        );
+    }
+    if first.instrument_allocations {
+        markdown.push_str(
+            "- Global allocation counting is enabled only around reserve and spawn. Its atomics intentionally make \
+             this a diagnostic rather than a primary timing pass.\n",
+        );
+    } else {
+        markdown.push_str("- Global allocation counting is disabled so its atomics cannot perturb primary timing.\n");
+    }
+    markdown.push_str(
+        "- `live-bitmap` traverses a two-level live-page hierarchy and live slot words. `capacity-scan` deliberately \
+         models the failure mode that visits every reserved page.\n\
          - Wasm hot cells execute a real guest sweep over packed live state. Sparse Wasm state is excluded because \
-           it would require choosing a production live-set ABI that this capacity test is not intended to decide.\n\
+         it would require choosing a production live-set ABI that this capacity test is not intended to decide.\n\
          - Fresh processes prevent allocator and Wasmtime state from leaking between cells. Rotated order reduces \
-           thermal and frequency bias; medians and IQRs remain descriptive rather than inferential statistics.\n\
+         thermal and frequency bias; medians and IQRs remain descriptive rather than inferential statistics.\n\
          - Checksums and exact update counts are verified within every cell and across cells that declare equivalent \
-           logical work.\n",
+         logical work.\n",
     );
     markdown
 }
@@ -621,15 +661,16 @@ fn markdown_report(report: &MatrixReport) -> String {
 fn matrix_csv(report: &MatrixReport) -> String {
     let mut csv = String::from(
         "index,campaign,cell,target,actors,capacity_hint,growth_pages,live_percent,hole_pattern,sweep_mode,\
-         cold_ns_per_actor,spawn_ns_per_actor,growth_p95_ns,growth_p99_ns,max_growth_ns,hot_ns_per_update,\
-         hot_iqr_ns,reserved_capacity,\
-         unused_state_bytes,peak_rss_bytes,allocation_calls,allocated_bytes\n",
+         touch_reserved,instrument_allocations,cold_ns_per_actor,cold_iqr_ns,spawn_ns_per_actor,growth_p95_ns,\
+         growth_p99_ns,max_growth_ns,hot_ns_per_update,hot_iqr_ns,reserved_capacity,unused_state_bytes,\
+         peak_rss_bytes,allocation_calls,allocated_bytes\n",
     );
     for (index, cell) in report.cells.iter().enumerate() {
         let stats = &cell.statistics;
         let _ = writeln!(
             csv,
-            "{index},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.3},{:.3},{:.6},{:.6},{},{},{:.3},{},{}",
+            "{index},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.3},{:.3},{:.3},{:.6},{:.6},{},{},\
+             {:.3},{},{}",
             cell.campaign,
             cell.name,
             target_name(cell.config.target),
@@ -639,7 +680,10 @@ fn matrix_csv(report: &MatrixReport) -> String {
             cell.config.live_percent,
             hole_name(cell.config.hole_pattern),
             sweep_name(cell.config.sweep_mode),
+            cell.config.touch_reserved,
+            cell.config.instrument_allocations,
             stats.median_cold_nanos_per_actor,
+            stats.cold_iqr_nanos_per_actor,
             stats.median_spawn_nanos_per_actor,
             stats.median_incremental_growth_p95_nanos,
             stats.median_incremental_growth_p99_nanos,
