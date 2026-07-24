@@ -101,7 +101,7 @@ use aether_kinds::MonitorNotice;
 /// monitors them, and replies to unbind requests on their close. It holds its
 /// own `MailboxId → ListenerEntry` map; it does NOT walk the chassis-wide
 /// actor registry to enumerate children.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct TcpCapability;
 
 // The `#[actor]` attribute path stays always-on (the macro divides what it

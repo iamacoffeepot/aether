@@ -18,7 +18,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced};
-use aether_data::{ActorId, Kind, MailId, RequestId, Tag, fold_lineage, with_tag};
+use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 
@@ -118,18 +118,10 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         NativeActorMailboxWithContext { mailbox: *self, context }
     }
 
-    /// The transport binding this handle dispatches through. Not part of
-    /// the public API; a cap-owned ext facade that composes a
-    /// non-trivial id (e.g. a multi-step lineage fold for a grandchild)
-    /// rewraps it onto the same binding via [`Self::__new`].
-    #[doc(hidden)]
-    #[must_use]
-    pub fn binding(&self) -> &'a NativeBinding {
-        self.binding
-    }
-
-    /// Rewrap a precomputed `mailbox` id as another recipient type while
-    /// retaining this handle's binding and in-flight causal context.
+    /// Rewrap this physical `mailbox` id as another recipient type while
+    /// retaining this handle's binding and in-flight causal context. Use this
+    /// after a typed [`Self::resolve`] chain when the physical actor hosts a
+    /// different logical recipient interface.
     #[must_use]
     pub fn at<Recipient>(&self, mailbox: u64) -> NativeActorMailbox<'a, Recipient> {
         NativeActorMailbox::__new_in_flight(mailbox, self.binding, self.parent, self.root)
@@ -149,25 +141,6 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         Child: ChildOf<R> + Instanced,
     {
         self.at(Child::resolve(self.mailbox_id().0, name).0)
-    }
-
-    /// Resolve a child mailbox of *this* actor, where the child is the
-    /// instanced node `scope:segment` (ADR-0099 §3). The child's id folds
-    /// that node's `ActorId` onto this actor's lineage carry, so a cap
-    /// that hosts children — the component host reaching a loaded
-    /// component, a socket listener reaching a session — composes the
-    /// registered fold id without allocating a name. `self.mailbox` is
-    /// the parent carry (exact for a root-pinned cap, depth-1). Threads
-    /// the existing `'a` binding ref from the parent handle.
-    #[must_use]
-    pub fn resolve_peer_scoped<Peer: Addressable>(&self, scope: &str, segment: &str) -> NativeActorMailbox<'a, Peer> {
-        let node = ActorId::instanced(scope, segment);
-        NativeActorMailbox::__new_in_flight(
-            with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)),
-            self.binding,
-            self.parent,
-            self.root,
-        )
     }
 }
 
