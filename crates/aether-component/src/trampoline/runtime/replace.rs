@@ -55,7 +55,9 @@ impl WasmTrampolineState {
             // it indexes its own asset load window from the same content.
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
-        if let Err(e) = ctx.spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config, ()).finish() {
+        if let Err(e) =
+            ctx.spawn_child::<WasmTrampoline, WasmTrampoline>(Subname::Named(&pending.subname), config, ()).finish()
+        {
             tracing::warn!(
                 target: "aether_component",
                 parent = %self.mailbox,

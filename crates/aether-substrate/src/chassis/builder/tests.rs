@@ -12,7 +12,7 @@ use crate::mail::MailboxId;
 use crate::mail::registry;
 use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, Chassis, NativeActor, NativeInitCtx};
-use aether_actor::{Addressable, HandlesKind};
+use aether_actor::{Addressable, ChildOf, HandlesKind};
 use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -804,7 +804,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
 }
 
 /// Issue 607 Phase 3b verify: a singleton parent's handler calls
-/// `ctx.spawn_child::<Child>(...)` to launch an instanced actor.
+/// `ctx.spawn_child::<Parent, Child>(...)` to launch an instanced actor.
 /// Asserts the child's `MailboxId` lands in the chassis's
 /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
 /// `after_init` mail dispatches as the child's first envelope.
@@ -848,6 +848,7 @@ fn ctx_spawn_child_routes_through_handler() {
     impl NativeActor for ParentCap {
         type State = Self;
     }
+    impl ChildOf<ParentCap> for ChildCap {}
     impl Dispatch<Self> for ParentCap {
         fn dispatch(
             state: &mut Self,
@@ -858,7 +859,7 @@ fn ctx_spawn_child_routes_through_handler() {
             if kind.0 == Hatch::ID.0 {
                 let _ = Hatch::decode_from_bytes(payload)?;
                 let _id = ctx
-                    .spawn_child::<ChildCap>(Subname::Counter, (), Arc::clone(&state.child_received))
+                    .spawn_child::<Self, ChildCap>(Subname::Counter, (), Arc::clone(&state.child_received))
                     .after_init(Ping { tag: 42 })
                     .finish()
                     .expect("spawn_child must succeed");
@@ -879,7 +880,7 @@ fn ctx_spawn_child_routes_through_handler() {
         .expect("ParentCap boots");
 
     // Push Hatch at the parent's mailbox; the parent's handler
-    // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
+    // calls `ctx.spawn_child::<ParentCap, ChildCap>` which in turn pushes a
     // Ping at the new child via the after_init bootstrap.
     let parent_id = registry.lookup(<ParentCap as Addressable>::NAMESPACE).expect("ParentCap claimed");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
@@ -910,6 +911,292 @@ fn ctx_spawn_child_routes_through_handler() {
     assert!(
         chassis.actor_registry().is_live(child_id),
         "spawned child should be Live in the actor registry under the lineage-folded id"
+    );
+
+    drop(chassis);
+}
+
+#[test]
+fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
+    use crate::actor::native::spawn::{SpawnError, Subname};
+    use crate::mail::registry::MailboxEntry;
+    use aether_data::Kind;
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    pod_kind!(Hatch { tag: u32 }, "test.checked_spawn.hatch", 0x4058_0000_0000_0001);
+
+    struct DeclaredParent;
+    impl Addressable for DeclaredParent {
+        const NAMESPACE: &'static str = "test.checked_spawn.declared";
+        type Resolver = aether_actor::One;
+    }
+
+    struct Child;
+    impl Addressable for Child {
+        const NAMESPACE: &'static str = "test.checked_spawn.child";
+        type Resolver = aether_actor::Many;
+    }
+    impl ChildOf<DeclaredParent> for Child {}
+    impl aether_actor::Lifecycle<Self> for Child {
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), init_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            init_count.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Self)
+        }
+    }
+    impl NativeActor for Child {
+        type State = Self;
+    }
+    impl Dispatch<Self> for Child {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    struct ActualParent {
+        init_count: Arc<AtomicU32>,
+        mismatch_observed: Arc<AtomicBool>,
+        invalid_subname_observed: Arc<AtomicBool>,
+    }
+    impl Addressable for ActualParent {
+        const NAMESPACE: &'static str = "test.checked_spawn.actual";
+        type Resolver = aether_actor::One;
+    }
+    impl HandlesKind<Hatch> for ActualParent {}
+    impl aether_actor::Lifecycle<Self> for ActualParent {
+        type Config = ();
+        type Params = (Arc<AtomicU32>, Arc<AtomicBool>, Arc<AtomicBool>);
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init(
+            (): (),
+            (init_count, mismatch_observed, invalid_subname_observed): Self::Params,
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
+            Ok(Self { init_count, mismatch_observed, invalid_subname_observed })
+        }
+    }
+    impl NativeActor for ActualParent {
+        type State = Self;
+    }
+    impl Dispatch<Self> for ActualParent {
+        fn dispatch(
+            state: &mut Self,
+            ctx: &mut NativeCtx<'_, crate::Manual>,
+            kind: KindId,
+            payload: &[u8],
+        ) -> Option<()> {
+            if kind.0 != Hatch::ID.0 {
+                return None;
+            }
+            let mail = Hatch::decode_from_bytes(payload)?;
+            if mail.tag == 2 {
+                let error = ctx
+                    .spawn_child::<DeclaredParent, Child>(
+                        Subname::Named("invalid:name"),
+                        (),
+                        Arc::clone(&state.init_count),
+                    )
+                    .finish()
+                    .expect_err("the invalid subname must be rejected");
+                if matches!(error, SpawnError::SubnameInvalid(_)) {
+                    state.invalid_subname_observed.store(true, AtomicOrdering::SeqCst);
+                }
+                return Some(());
+            }
+            let error = ctx
+                .spawn_child::<DeclaredParent, Child>(Subname::Named("never-built"), (), Arc::clone(&state.init_count))
+                .finish()
+                .expect_err("the executing binding is not DeclaredParent");
+            if let SpawnError::ParentTypeMismatch { declared_namespace, actual_logical, actual_canonical_name } = error
+                && declared_namespace == DeclaredParent::NAMESPACE
+                && actual_logical == aether_data::ActorId::singleton(Self::NAMESPACE)
+                && &*actual_canonical_name == Self::NAMESPACE
+            {
+                state.mismatch_observed.store(true, AtomicOrdering::SeqCst);
+            }
+            Some(())
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let init_count = Arc::new(AtomicU32::new(0));
+    let mismatch_observed = Arc::new(AtomicBool::new(false));
+    let invalid_subname_observed = Arc::new(AtomicBool::new(false));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<ActualParent>((
+            Arc::clone(&init_count),
+            Arc::clone(&mismatch_observed),
+            Arc::clone(&invalid_subname_observed),
+        ))
+        .build_passive()
+        .expect("ActualParent boots");
+
+    let parent_id = registry.lookup(ActualParent::NAMESPACE).expect("ActualParent claimed");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("parent sink") else {
+        panic!("expected parent inbox");
+    };
+    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !mismatch_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(mismatch_observed.load(AtomicOrdering::SeqCst), "mismatch facts should name both parent identities");
+    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "a false parent must not construct or init the child");
+    assert!(
+        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:never-built").is_none(),
+        "a false parent must not mutate the mailbox registry",
+    );
+
+    let bytes = (Hatch { tag: 2 }).encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !invalid_subname_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        invalid_subname_observed.load(AtomicOrdering::SeqCst),
+        "named subname validation must precede runtime parent comparison",
+    );
+    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "invalid subname and false parent must not init the child");
+
+    drop(chassis);
+}
+
+#[test]
+fn ctx_spawn_child_accepts_a_distinct_parent_type_with_the_same_logical_namespace() {
+    use crate::actor::native::spawn::Subname;
+    use crate::mail::registry::MailboxEntry;
+    use aether_data::Kind;
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    pod_kind!(Hatch { tag: u32 }, "test.shared_parent.hatch", 0x4058_0000_0000_0002);
+
+    struct DeclaredParent;
+    impl Addressable for DeclaredParent {
+        const NAMESPACE: &'static str = "test.shared_parent";
+        type Resolver = aether_actor::One;
+    }
+
+    struct OtherPermittedParent;
+    impl Addressable for OtherPermittedParent {
+        const NAMESPACE: &'static str = "test.other_permitted_parent";
+        type Resolver = aether_actor::One;
+    }
+
+    struct Child;
+    impl Addressable for Child {
+        const NAMESPACE: &'static str = "test.shared_parent.child";
+        type Resolver = aether_actor::Many;
+    }
+    impl ChildOf<DeclaredParent> for Child {}
+    impl ChildOf<OtherPermittedParent> for Child {}
+    impl aether_actor::Lifecycle<Self> for Child {
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), init_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            init_count.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Self)
+        }
+    }
+    impl NativeActor for Child {
+        type State = Self;
+    }
+    impl Dispatch<Self> for Child {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    struct RuntimeParent {
+        init_count: Arc<AtomicU32>,
+    }
+    impl Addressable for RuntimeParent {
+        const NAMESPACE: &'static str = DeclaredParent::NAMESPACE;
+        type Resolver = aether_actor::One;
+    }
+    impl HandlesKind<Hatch> for RuntimeParent {}
+    impl aether_actor::Lifecycle<Self> for RuntimeParent {
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), init_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { init_count })
+        }
+    }
+    impl NativeActor for RuntimeParent {
+        type State = Self;
+    }
+    impl Dispatch<Self> for RuntimeParent {
+        fn dispatch(
+            state: &mut Self,
+            ctx: &mut NativeCtx<'_, crate::Manual>,
+            kind: KindId,
+            payload: &[u8],
+        ) -> Option<()> {
+            if kind.0 != Hatch::ID.0 {
+                return None;
+            }
+            let _ = Hatch::decode_from_bytes(payload)?;
+            ctx.spawn_child::<DeclaredParent, Child>(Subname::Named("accepted"), (), Arc::clone(&state.init_count))
+                .finish()
+                .expect("logical namespace equality, not Rust type identity, authorizes the parent");
+            Some(())
+        }
+    }
+
+    fn assert_permitted<P: Addressable, C: ChildOf<P>>() {}
+    assert_permitted::<DeclaredParent, Child>();
+    assert_permitted::<OtherPermittedParent, Child>();
+
+    let (registry, mailer) = bare_substrate();
+    let init_count = Arc::new(AtomicU32::new(0));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<RuntimeParent>(Arc::clone(&init_count))
+        .build_passive()
+        .expect("RuntimeParent boots");
+
+    let parent_id = registry.lookup(RuntimeParent::NAMESPACE).expect("RuntimeParent claimed");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("parent sink") else {
+        panic!("expected parent inbox");
+    };
+    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while init_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 1);
+    assert!(
+        registry.lookup("test.shared_parent/test.shared_parent.child:accepted").is_some(),
+        "the canonical child name must derive from the captured runtime parent identity",
     );
 
     drop(chassis);
@@ -1763,7 +2050,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
 }
 
 /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
-/// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
+/// `ctx.spawn_child::<Parent, Grandchild>(...)` to launch an instanced
 /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
 /// every spawned actor's transport precisely so this works; this
 /// test is the first end-to-end coverage of the instanced→instanced
@@ -1855,6 +2142,7 @@ fn instanced_can_spawn_grandchild() {
     impl NativeActor for Parent {
         type State = Self;
     }
+    impl ChildOf<Parent> for Grandchild {}
     impl Dispatch<Self> for Parent {
         fn dispatch(
             state: &mut Self,
@@ -1869,7 +2157,7 @@ fn instanced_can_spawn_grandchild() {
                 // first envelope dispatches without an external
                 // mail step.
                 let _id = ctx
-                    .spawn_child::<Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
+                    .spawn_child::<Self, Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
                     .after_init(Ping { tag: 0xCAFE })
                     .finish()
                     .expect("recursive spawn must succeed");
@@ -1938,6 +2226,11 @@ fn instanced_can_spawn_grandchild() {
     // Verify it resolves and matches the registry id.
     let resolved = chassis.resolve_actor::<Grandchild>("only").expect("resolve_actor must find the grandchild");
     assert_eq!(resolved, grandchild_id, "resolve_actor returns the matching MailboxId");
+    assert_eq!(
+        registry.lookup("test.recursive.parent:p1/test.recursive.grandchild:only"),
+        Some(grandchild_id),
+        "the recursive child canonical name must extend the captured parent identity",
+    );
     // The grandchild is alive (verifies the dispatcher's Arc<AtomicU32>
     // is the same one passed in via config — the test's `received`
     // counter sees handler dispatches against the live instance).

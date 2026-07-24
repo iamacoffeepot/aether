@@ -216,7 +216,7 @@ impl NativeActor for TcpCapability {
                         }
                     };
                     match ctx
-                        .spawn_child::<TcpSessionActor>(
+                        .spawn_child::<TcpCapability, TcpSessionActor>(
                             Subname::Named(&session_name),
                             TcpSessionConfig {
                                 stream: Some(stream),
@@ -281,7 +281,7 @@ impl NativeActor for TcpCapability {
         let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
 
         let listener_id = match ctx
-            .spawn_child::<TcpListenerActor>(
+            .spawn_child::<TcpCapability, TcpListenerActor>(
                 Subname::Named(&subname_str),
                 TcpListenerConfig {
                     listener: Some(listener),

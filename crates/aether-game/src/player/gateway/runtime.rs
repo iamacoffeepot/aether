@@ -206,7 +206,7 @@ impl NativeActor for GameGatewayCapability {
             reason: "player session supervision failed".into(),
         };
         let child = match ctx
-            .spawn_child::<PlayerSessionActor>(
+            .spawn_child::<GameGatewayCapability, PlayerSessionActor>(
                 Subname::Named(&session_name),
                 PlayerSessionConfig {
                     listener_name: state.listener_name.clone(),

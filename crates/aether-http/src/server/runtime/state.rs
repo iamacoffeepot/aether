@@ -206,7 +206,10 @@ impl HttpSupervisorState {
                 next_stream_id: Arc::clone(&self.next_stream_id),
             };
             let subname = format!("shard-{index}");
-            match ctx.spawn_child::<HttpDispatchShard>(Subname::Named(&subname), seed, ()).finish() {
+            match ctx
+                .spawn_child::<HttpServerCapability, HttpDispatchShard>(Subname::Named(&subname), seed, ())
+                .finish()
+            {
                 Ok(mailbox) => self.shards.push(WakeSink {
                     inbound_tx,
                     mailer: Arc::clone(&self.mailer),

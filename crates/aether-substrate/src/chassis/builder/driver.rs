@@ -311,10 +311,11 @@ where
     // binding's disjoint reply-id space (ADR-0160 §1 / issue 1695). A
     // root-pinned chassis capability (depth-1), so its lineage carry is its
     // own `ActorId.0` == `mailbox_id.0`.
-    let transport = Arc::new(NativeBinding::new(
+    let transport = Arc::new(NativeBinding::new::<A>(
         Arc::clone(mailer),
         mailbox_id,
         mailbox_id.0,
+        Arc::from(A::NAMESPACE),
         Arc::clone(spawner.aborter()),
         Some(Arc::clone(spawner)),
     ));

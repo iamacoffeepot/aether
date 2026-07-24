@@ -350,7 +350,7 @@ impl NativeActor for FleetServer {
             // failure, kills the child it was handed — so a failed
             // spawn never leaves an orphan for the cap to clean up.
             let result = ctx
-                .spawn_child::<FleetProxy>(
+                .spawn_child::<FleetServer, FleetProxy>(
                     Subname::Named(&subname),
                     FleetProxyConfig {
                         engine_id,
