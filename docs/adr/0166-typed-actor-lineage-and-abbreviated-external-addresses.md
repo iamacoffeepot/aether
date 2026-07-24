@@ -47,8 +47,8 @@ That spelling is useful for durable identity and diagnosis but cumbersome for
 an operator who already chose the component root and only wants the `camera`
 instance. ADR-0099 explicitly permits alternate display spellings because the
 string is not the identity, but there is no shared abbreviation mechanism
-today. Hard-coding an alias in MCP or on each capability would duplicate
-namespace ownership and let clients disagree.
+today. Teaching MCP or each capability a separate shortened root name would
+duplicate namespace ownership and let clients disagree.
 
 The window arc is the forcing future consumer: a root window manager should
 spawn and resolve per-window actors, and different managers must be able to
@@ -59,19 +59,19 @@ sender sides.
 
 Constraints:
 
-- Rust callers continue to resolve through actor ZSTs. External aliases do not
-  become an SDK routing language.
+- Rust callers continue to resolve through actor ZSTs. External abbreviations
+  do not become an SDK routing language.
 - `Addressable::NAMESPACE` remains declared only by its owning actor. Neither
-  relationships nor aliases repeat namespace strings.
+  relationships nor abbreviations repeat namespace strings.
 - An actor may be allowed beneath more than one parent. A relationship is a
   placement permission, not one global topology or a claim that the placement
   is always live.
 - Canonical lineage, `MailboxId`, registration names, and reverse lookup remain
-  authoritative. An alias must expand to a canonical lineage before hashing or
-  lookup.
+  authoritative. An abbreviated address must expand to a canonical lineage
+  before hashing or lookup.
 - Shared logical identities remain valid. Runtime variants with the same
   namespace and future embedding mechanisms sharing the embedding-host class
-  are one address node, not an alias ambiguity.
+  are one address node, not a child ambiguity.
 
 ## Decision
 
@@ -232,31 +232,33 @@ selected parent. Multiple `ChildEntry` records naturally represent branching
 and multiple allowed parents. Records with the same logical actor tags and
 namespaces deduplicate, which preserves shared runtime variants.
 
-### 5. External aliases are computed from those facts
+### 5. External abbreviations retain the canonical root namespace
 
-Aliases exist only at string-addressed boundaries. Rust actor code continues
-to use ZSTs and typed mailboxes.
+Abbreviated paths exist only at string-addressed boundaries. Rust actor code
+continues to use ZSTs and typed mailboxes.
 
 The external grammar is:
 
 ```text
 address          := canonical-path | abbreviated-path
-abbreviated-path := root-alias "://" relative-path?
+abbreviated-path := root-namespace "://" relative-path?
 relative-path    := relative-segment ( "/" relative-segment )*
 relative-segment := discriminator | canonical-segment
 ```
 
-The root alias is computed from the final atom of a root actor's
-`NAMESPACE`. A namespace with no `.` is already its own alias. No actor
-declares a second string:
+`root-namespace` is the exact `NAMESPACE` of a declared `Root`. The `://`
+delimiter says that the remaining segments are relative to that canonical
+root; it does not introduce a URL scheme or a second actor name:
 
 ```text
-root namespace  -> root alias
-aether.component -> component
+aether.component://camera
+aether.window://main
 ```
 
 The boundary resolver walks generated lineage records from that root:
 
+- The prefix before `://` selects a root by its canonical namespace, so no
+  root-alias derivation, registration, or uniqueness check exists.
 - A canonical segment (`namespace` or `namespace:discriminator`) selects that
   declared child namespace explicitly.
 - A bare discriminator may omit the child namespace only when exactly one
@@ -265,14 +267,12 @@ The boundary resolver walks generated lineage records from that root:
   choice because their canonical address node is identical.
 - Several distinct child namespaces make the abbreviation ambiguous. The
   caller must provide the canonical child segment.
-- Root-alias collisions between distinct root namespaces are also ambiguous.
-  The full canonical path remains available.
 - Expansion is iterative and retains ADR-0099's path depth and byte limits.
 
 For the first consumer:
 
 ```text
-component://camera
+aether.component://camera
     ->
 aether.component/aether.embedded:camera
 ```
@@ -281,7 +281,7 @@ If the component host admitted two distinct child namespaces, the short form
 would fail with candidates and the explicit form would remain valid:
 
 ```text
-component://aether.embedded:camera
+aether.component://aether.embedded:camera
 ```
 
 Raw MCP, CLI, configuration, and manifest strings cannot fail Rust
@@ -293,20 +293,21 @@ relationship is absent; naming the type removes the textual ambiguity:
 host.resolve::<WasmTrampoline>("camera");
 ```
 
-Alias expansion happens once in the shared mailbox-name resolution seam,
-before the existing canonical path validation, `mailbox_id_from_path` fold,
-and exact registered-name check:
+Abbreviation expansion happens once in the shared mailbox-name resolution
+seam, before the existing canonical path validation,
+`mailbox_id_from_path` fold, and exact registered-name check:
 
 ```rust
 let canonical = addresses.expand(input)?;
 let mailbox = registry.lookup_canonical(&canonical);
 ```
 
-An alias is never registered, stored as the mailbox name, reverse-mapped as
-the canonical identity, or hashed directly. Existing canonical inputs remain
-valid. MCP and other clients do not carry their own alias tables; inventory
-may expose the generated root and child records for discovery and
-autocomplete, while the engine remains the resolver of record.
+An abbreviated spelling is never registered, stored as the mailbox name,
+reverse-mapped as the canonical identity, or hashed directly. Existing
+canonical inputs remain valid. MCP and other clients do not carry their own
+abbreviation tables; inventory may expose the generated root and child records
+for discovery and autocomplete, while the engine remains the resolver of
+record.
 
 ### 6. The component host and trampoline are the first consumer
 
@@ -333,7 +334,7 @@ Regression coverage proves all three spellings land on the same
 ```text
 typed host -> trampoline resolution
 canonical external path
-component://camera
+aether.component://camera
 ```
 
 The window manager and per-window actors adopt the mechanism only after this
@@ -350,11 +351,10 @@ smaller root/child path is working.
   in the child type or in a global route manifest.
 - Rust retains static, lookup-free ZST addressing. Human and declarative
   clients gain concise addresses through one engine-owned boundary resolver.
-- Namespace strings remain single-owner. Root aliases and child expansions are
-  derived from `Addressable::NAMESPACE`, never copied into examples or helper
-  constants in implementation code.
-- Canonical lineage and `MailboxId` do not change, so aliases can evolve
-  without a wire migration.
+- Namespace strings remain single-owner. Root qualification and child
+  expansions read `Addressable::NAMESPACE`, never copied helper constants.
+- Canonical lineage and `MailboxId` do not change, so abbreviation rules can
+  evolve without a wire migration.
 - The same model fits component hosts, per-window actors, component trees,
   session actors, and other nested capabilities.
 
@@ -369,8 +369,6 @@ smaller root/child path is working.
 - Textual abbreviations are resolved at runtime. An ambiguous MCP or config
   string returns an error rather than receiving Rust's compile-time
   diagnostic.
-- Deriving a root alias from the namespace leaf can collide. Collisions are
-  deliberate errors, not silently selected winners.
 - The initial child-resolution surface covers the instanced children supported
   by current spawn APIs. A true keyless singleton beneath a native parent
   requires a relative singleton resolver and a deliberate extension.
@@ -387,19 +385,20 @@ smaller root/child path is working.
   replace canonical identity fields without a separate compatibility
   decision.
 - The implementation arc lands core traits and macro metadata, typed
-  resolution/spawn enforcement, the component consumer plus alias expansion,
-  and then the window manager/per-window consumer.
+  resolution/spawn enforcement, the component consumer plus abbreviation
+  expansion, and then the window manager/per-window consumer.
 
 ## Alternatives considered
 
 - **A named `actor_routes!` topology.** Rejected because it restates
   relationships in a central manifest, selects parents too early, and creates
   a second place for actor namespaces to drift.
-- **`const ALIAS: &str` on every root.** Rejected because the useful
-  abbreviation is computable from the actor-owned namespace and a second
-  string would need collision and rename synchronization.
-- **Use `component://...` inside Rust actor code.** Rejected because typed ZST
-  resolution is already stronger, allocation-free, and compile-checked.
+- **A shortened root alias such as `component://`.** Rejected because retaining
+  the canonical root as `aether.component://` removes the alias declaration,
+  derivation, uniqueness check, and rename synchronization.
+- **Use `aether.component://...` inside Rust actor code.** Rejected because
+  typed ZST resolution is already stronger, allocation-free, and
+  compile-checked.
 - **Resolve a tuple of actor types and instance keys in one call.** Rejected
   because an existing mailbox already carries the lineage fold; chained
   `resolve::<Child>(key)` calls compose naturally and produce better local
