@@ -1,14 +1,12 @@
-#![allow(clippy::self_named_module_files)] // ADR-0123 path is intentionally `runtime::synthetic`.
-
 //! Fail-fast runtime for chassis without a window peripheral.
 
 use aether_actor::runtime;
 
 use super::{
-    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
-    ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowCapability,
+    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult,
+    HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
+    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -22,7 +20,7 @@ fn unsupported() -> String {
 }
 
 #[runtime]
-impl NativeActor for WindowCapability {
+impl NativeActor for HeadlessWindowCapability {
     type State = HeadlessWindowCapabilityState;
     type Config = ();
 
@@ -113,3 +111,9 @@ impl NativeActor for WindowCapability {
 
 #[cfg(feature = "synthetic")]
 pub mod synthetic;
+
+#[cfg(feature = "desktop")]
+pub mod desktop;
+
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+mod subscribers;

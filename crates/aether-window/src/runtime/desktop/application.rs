@@ -16,9 +16,9 @@ use winit::window::{Window, WindowId as WinitWindowId};
 use crate::{WindowId, WindowMode, WindowSpec};
 
 use super::{
-    DesktopWindowCapability, DesktopWindowCapabilityState, DesktopWindowLifecycle, WindowHostAction, WindowHostEffect,
-    resolve_fullscreen,
+    DesktopWindowCapabilityState, DesktopWindowLifecycle, WindowHostAction, WindowHostEffect, resolve_fullscreen,
 };
+use crate::DesktopWindowCapability;
 
 /// Semantic seam between the window application and chassis-owned render,
 /// settlement, and process-lifecycle integration.

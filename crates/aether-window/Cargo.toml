@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 # `aether.window` capability, extracted by the arc that dissolved the
-# capabilities monolith (iamacoffeepot/aether#3717) as a per-cap crate. Owns the chassis-without-window companion:
-# the `HeadlessWindowCapability` identity + its fail-fast `Err`-replying
-# runtime (`runtime`). The crate also owns the public multi-window request,
+# capabilities monolith (iamacoffeepot/aether#3717) as a per-cap crate. Owns
+# the concrete `HeadlessWindowCapability` identity + its fail-fast
+# `Err`-replying default runtime (`runtime/mod.rs`), with desktop and synthetic
+# alternatives under keyed runtime children. The crate also owns the public multi-window request,
 # reply, lifecycle, selector, and sender-facade surface; only the shared
 # `WindowId` and `WindowMode` values live in `aether-kinds`.
 #
@@ -19,7 +20,7 @@ license.workspace = true
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity + `HandlesKind` markers compile always-on; the
 # `aether_substrate`-typed runtime half is gated so a marker-only wasm
-# guest can address `ctx.actor::<HeadlessWindowCapability>()` without
+# guest can address `ctx.actor::<WindowCapability>()` without
 # dragging the substrate through.
 
 [features]

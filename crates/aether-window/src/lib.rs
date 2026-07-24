@@ -1,7 +1,7 @@
 //! Public `aether.window` actor identity, wire vocabulary, and sender facade.
 //!
-//! [`WindowCapability`] is the platform-neutral address callers use. A
-//! chassis installs its fail-fast headless runtime, the
+//! [`WindowCapability`] is the neutral alias callers use. A chassis installs
+//! its concrete fail-fast headless runtime, the
 //! [`DesktopWindowCapability`] implementation behind `desktop`, or the
 //! [`SyntheticWindowCapability`] test implementation behind `synthetic`.
 //! Every implementation claims the same `aether.window` mailbox.
@@ -17,21 +17,35 @@ pub use kinds::*;
 
 use aether_actor::{WasmActorMailbox, actor};
 use aether_data::{Kind, MailboxId};
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+use aether_kinds::MonitorNotice;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
 const WINDOW_NAMESPACE: &str = "aether.window";
 
-/// Platform-neutral addressing identity for the `aether.window` actor.
+/// Fail-fast headless identity for the `aether.window` actor.
 ///
-/// Consumers use `ctx.actor::<WindowCapability>()` regardless of which
-/// chassis-specific runtime owns the mailbox.
+/// This default runtime replies that no window peripheral is available.
 #[actor(singleton)]
-pub struct WindowCapability;
+pub struct HeadlessWindowCapability;
 
-/// Compatibility name for chassis code that installs the fail-fast
-/// no-window runtime.
-pub use WindowCapability as HeadlessWindowCapability;
+/// Platform-neutral compatibility alias for the headless window identity.
+///
+/// Consumers use `ctx.actor::<WindowCapability>()` regardless of the
+/// chassis-specific runtime that owns the shared mailbox namespace.
+pub use HeadlessWindowCapability as WindowCapability;
+
+/// Desktop implementation identity for the `aether.window` mailbox.
+#[cfg(feature = "desktop")]
+#[actor(singleton, runtime::desktop)]
+pub struct DesktopWindowCapability;
+
+/// Deterministic in-memory implementation identity for the `aether.window`
+/// mailbox.
+#[cfg(feature = "synthetic")]
+#[actor(singleton, runtime::synthetic)]
+pub struct SyntheticWindowCapability;
 
 /// Sender-side convenience methods for the multi-window request surface.
 pub trait WindowMailboxExt {
@@ -176,21 +190,14 @@ impl WindowMailboxExt for NativeActorMailbox<'_, WindowCapability> {
 #[cfg(feature = "runtime")]
 mod runtime;
 
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-mod subscribers;
-
 #[cfg(feature = "desktop")]
-mod desktop;
-#[cfg(feature = "desktop")]
-pub use desktop::{
-    DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
-    DesktopWindowUserEvent, WindowHostAction, WindowHostEffect, resolve_fullscreen,
+pub use runtime::desktop::{
+    DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowParams, DesktopWindowUserEvent, WindowHostAction,
+    WindowHostEffect, resolve_fullscreen,
 };
 
 #[cfg(feature = "synthetic")]
-mod synthetic;
-#[cfg(feature = "synthetic")]
-pub use synthetic::{InjectWindowEvent, SyntheticWindowCapability};
+pub use kinds::InjectWindowEvent;
 
 #[cfg(test)]
 mod tests {

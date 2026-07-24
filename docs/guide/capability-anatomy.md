@@ -75,16 +75,25 @@ multi-runtime exemplar:
 
 ```rust
 #[actor(singleton)]
-pub struct WindowCapability;
+pub struct HeadlessWindowCapability;
+
+pub use HeadlessWindowCapability as WindowCapability;
+
+#[cfg(feature = "desktop")]
+#[actor(singleton, runtime::desktop)]
+pub struct DesktopWindowCapability;
 
 #[actor(singleton, runtime::synthetic)]
 pub struct SyntheticWindowCapability;
 ```
 
-Desktop, fail-fast headless, and synthetic window runtimes all claim one
-crate-owned namespace constant. Consumers name only
-`ctx.actor::<WindowCapability>()`; runtime variants must not repeat a namespace
-literal in their declarations or leak platform identity into callers.
+The concrete headless, desktop, and synthetic window identities all claim one
+crate-owned namespace constant. `WindowCapability` remains the neutral alias
+that consumers name through `ctx.actor::<WindowCapability>()`; runtime
+variants must not repeat a namespace literal in their declarations or leak
+platform identity into callers. The headless implementation lives in the
+default `runtime/mod.rs`; keyed alternatives live in `runtime/desktop/` and
+`runtime/synthetic.rs`.
 
 ## State in the runtime half
 
@@ -209,11 +218,11 @@ gate as the primary runtime. The module-path argument tells the struct-hosted
 `#[actor]` harvest which file to read, resolved relative to the invoking file.
 `aether-render` and `aether-clipboard` are exemplars.
 
-Window deliberately uses a neutral `WindowCapability` as both the consumer
-identity and fail-fast runtime identity, plus desktop and
-`runtime::synthetic` implementation types claiming the same shared namespace.
-That shape is appropriate when callers must remain platform-neutral and
-multiple runtimes are mutually exclusive chassis choices.
+Window deliberately uses the concrete `HeadlessWindowCapability` as the
+fail-fast default runtime, with `WindowCapability` retained as its neutral
+consumer alias. Desktop and `runtime::synthetic` implementation types claim
+the same shared namespace. That shape is appropriate when callers must remain
+platform-neutral and multiple runtimes are mutually exclusive chassis choices.
 
 Do not create a stub for fire-and-forget traffic unless it produces useful
 diagnostics and avoids misleading success. The goal is bounded failure, not
