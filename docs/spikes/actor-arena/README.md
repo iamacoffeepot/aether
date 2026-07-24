@@ -15,10 +15,11 @@ discussion:
 1. typed state locality;
 2. route endpoint simplification;
 3. page-granularity scheduling;
-4. persistent Wasm linear-memory state; and
+4. persistent Wasm linear-memory state;
 5. packed host-to-guest delivery;
-6. reserve–initialize–retire lifecycle churn; and
-7. approximate population hints and chunked arena growth.
+6. reserve–initialize–retire lifecycle churn;
+7. approximate population hints and chunked arena growth; and
+8. full host↔Wasm state copies versus resident guest state.
 
 The result can establish a performance ceiling or reject an idea. It cannot,
 by itself, prove the end-to-end runtime gain.
@@ -59,6 +60,7 @@ work out of the signal.
 | `wasm-inline` | one real Wasmtime memory; shuffled records behind a pointer table | guest pointer lookup | one write + entry per mail |
 | `wasm-arena` | one real Wasmtime memory; directly indexed contiguous records | guest slot arithmetic | one write + entry per mail |
 | `wasm-batch` | same contiguous guest arena | packed `{actor, value}` records | one write + entry per packed batch |
+| `wasm-copy-roundtrip` | host-authoritative contiguous buffer copied into the guest arena before every sweep and back afterward | same direct slot arithmetic as `wasm-arena` | one entry plus two complete state-buffer copies per sweep |
 
 All arms execute the same deterministic state transition. Warmup is followed
 by a state reset. The timed interval contains delivery only; setup, compilation,
@@ -91,6 +93,30 @@ the workload asks what a scene system can gain once it already has the
 namespace/kind cohort and wants to advance every bullet. Namespace-local bitmap
 shards allow the fixture to exceed one 4,096-slot two-level root without adding
 an arena id to the actor coordinate.
+
+For the Wasm state-transfer follow-up, `scene-sweep` also compares
+`wasm-arena` with `wasm-copy-roundtrip`. Both arms execute the same real
+Wasmtime `run_sweep` function once per complete actor population, mutate the
+same first eight 64-bit words, and produce the same full-state checksum. The
+resident arm leaves state in linear memory. The copied arm keeps the
+authoritative bytes in one host `Vec<u8>`, performs one safe `Memory::write`
+before each sweep, runs the identical guest function, and performs one safe
+`Memory::read` afterward.
+
+This is deliberately the most favorable useful copy case:
+
+- state is already flat and contiguous, so no `Kind` encoding or allocation is
+  timed;
+- host entry count and guest instructions are identical between the pair;
+- transfer is one bulk operation per direction, never one copy per actor; and
+- compilation, state construction, warmup, reset, and checksum remain outside
+  the timed interval.
+
+The predeclared primary cell is 65,536 actors × 64 bytes, 80 complete sweeps,
+and eight warmup sweeps. Population sensitivity covers 4,096 through 131,072
+actors while holding total updates and transfer volume approximately constant.
+Cold-state sensitivity keeps the update in the first 64 bytes while increasing
+the copied record to 256, 1,024, and 4,096 bytes.
 
 ## Preallocation study
 
@@ -218,6 +244,8 @@ cargo build --release -p aether-harness-actor-arena --bins
 scripts/actor-arena-measure.sh /tmp/actor-arena-results
 
 scripts/actor-arena-preallocation-measure.sh /tmp/actor-arena-preallocation
+
+scripts/actor-arena-wasm-state-transfer-measure.sh /tmp/actor-arena-wasm-state-transfer
 
 target/release/aether-actor-arena-compare \
   --base boxed-current \

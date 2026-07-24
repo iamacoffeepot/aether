@@ -45,12 +45,18 @@ pub enum Backend {
     WasmArena,
     /// The contiguous Wasm arena with packed host-to-guest delivery batches.
     WasmBatch,
+    /// A host-authoritative state buffer copied into and back out of the
+    /// contiguous Wasm arena around every complete scene sweep.
+    WasmCopyRoundtrip,
 }
 
 impl Backend {
     #[must_use]
     pub const fn is_wasm(self) -> bool {
-        matches!(self, Self::WasmDetached | Self::WasmInline | Self::WasmArena | Self::WasmBatch)
+        matches!(
+            self,
+            Self::WasmDetached | Self::WasmInline | Self::WasmArena | Self::WasmBatch | Self::WasmCopyRoundtrip
+        )
     }
 }
 
@@ -120,11 +126,19 @@ impl TrialConfig {
             bail!("lifecycle-churn supports boxed-current and arena-state");
         }
         if self.workload == Workload::SceneSweep {
-            if self.backend.is_wasm() {
-                bail!("scene-sweep currently measures the native actor arms");
+            let Ok(actor_count) = u64::try_from(self.actors) else {
+                bail!("actor population does not fit in the scene-sweep counter");
+            };
+            if self.backend.is_wasm() && !matches!(self.backend, Backend::WasmArena | Backend::WasmCopyRoundtrip) {
+                bail!("Wasm scene-sweep supports wasm-arena and wasm-copy-roundtrip");
             }
             if self.pattern != AccessPattern::Sequential || self.mails_per_activation != 1 {
                 bail!("scene-sweep requires sequential access and one mail per activation");
+            }
+            if self.backend.is_wasm()
+                && (!self.mails.is_multiple_of(actor_count) || !self.warmup_mails.is_multiple_of(actor_count))
+            {
+                bail!("Wasm scene-sweep work and warmup counts must be whole actor-population sweeps");
             }
         }
 
@@ -161,6 +175,8 @@ pub struct MechanismCounters {
     pub scheduled_items: u64,
     pub host_entries: u64,
     pub host_to_guest_bytes: u64,
+    pub guest_to_host_bytes: u64,
+    pub state_round_trips: u64,
     pub guest_linear_memory_bytes: u64,
     pub allocator_cas_retries: u64,
 }

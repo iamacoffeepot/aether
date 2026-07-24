@@ -292,11 +292,7 @@ fn percentile(values: &[f64], quantile: f64) -> f64 {
 fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
     let stats = &report.statistics;
     let first = &report.pairs[0];
-    let unit = match args.workload {
-        Workload::Dispatch => "mail",
-        Workload::LifecycleChurn => "lifecycle op",
-        Workload::SceneSweep => "entity update",
-    };
+    let unit = work_unit(args.workload);
     let mut markdown = format!(
         "# Actor arena paired comparison\n\n\
          Base: `{}`  \n\
@@ -311,11 +307,11 @@ fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
          | Relative median change | {:+.2}% |\n\
          | Median speedup | {:.3}× |\n\
          | Directional consistency | {:.1}% |\n\
-         | ADR-0085 noise floor | {:.3} ns/mail |\n\n\
+         | ADR-0085 noise floor | {:.3} ns/{unit} |\n\n\
          Configuration: `{}` workload, {} actors, {} work units, {} bytes/state, {} mails/activation, \
          {} slots/page, `{}` access, seed `{}`.\n\n\
          ## Pairs\n\n\
-         | Pair | Order | Base ns/mail | Candidate ns/mail | Delta | Speedup |\n\
+         | Pair | Order | Base ns/{unit} | Candidate ns/{unit} | Delta | Speedup |\n\
          |---:|---|---:|---:|---:|---:|\n",
         backend_name(report.base),
         backend_name(report.candidate),
@@ -364,6 +360,8 @@ fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
          | Scheduled items | {} | {} |\n\
          | Host entries | {} | {} |\n\
          | Host-to-guest bytes | {} | {} |\n\
+         | Guest-to-host bytes | {} | {} |\n\
+         | State round trips | {} | {} |\n\
          | Guest linear memory bytes | {} | {} |\n\
          | Peak RSS bytes | {} | {} |\n\n\
          ## Interpretation limits\n\n\
@@ -383,6 +381,10 @@ fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
         first.candidate.counters.host_entries,
         first.base.counters.host_to_guest_bytes,
         first.candidate.counters.host_to_guest_bytes,
+        first.base.counters.guest_to_host_bytes,
+        first.candidate.counters.guest_to_host_bytes,
+        first.base.counters.state_round_trips,
+        first.candidate.counters.state_round_trips,
         first.base.counters.guest_linear_memory_bytes,
         first.candidate.counters.guest_linear_memory_bytes,
         first.base.peak_rss_bytes,
@@ -397,6 +399,7 @@ fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
     reason = "small integer plot coordinates intentionally become floating-point SVG coordinates"
 )]
 fn delta_svg(report: &ComparisonReport) -> String {
+    let unit = work_unit(report.workload);
     let width = 900.0;
     let height = 360.0;
     let margin = 55.0;
@@ -427,7 +430,7 @@ fn delta_svg(report: &ComparisonReport) -> String {
 <line x1="{margin}" y1="{}" x2="{}" y2="{}" stroke="#c44" stroke-dasharray="5 5"/>
 <polyline points="{points}" fill="none" stroke="#2468a2" stroke-width="2"/>
 <g fill="#2468a2">{circles}</g>
-<text x="{margin}" y="24" font-family="sans-serif" font-size="16">candidate − base paired delta (ns/mail)</text>
+<text x="{margin}" y="24" font-family="sans-serif" font-size="16">candidate − base paired delta (ns/{unit})</text>
 <text x="8" y="{}" font-family="sans-serif" font-size="12">0</text>
 <text x="8" y="{}" font-family="sans-serif" font-size="12">faster</text>
 <text x="8" y="{}" font-family="sans-serif" font-size="12">slower</text>
@@ -444,6 +447,14 @@ fn delta_svg(report: &ComparisonReport) -> String {
         height - 12.0,
         18.0,
     )
+}
+
+const fn work_unit(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Dispatch => "mail",
+        Workload::LifecycleChurn => "lifecycle op",
+        Workload::SceneSweep => "entity update",
+    }
 }
 
 fn reproduction_command(args: &Args, executable: &Path) -> String {
@@ -526,6 +537,7 @@ const fn backend_name(backend: Backend) -> &'static str {
         Backend::WasmInline => "wasm-inline",
         Backend::WasmArena => "wasm-arena",
         Backend::WasmBatch => "wasm-batch",
+        Backend::WasmCopyRoundtrip => "wasm-copy-roundtrip",
     }
 }
 

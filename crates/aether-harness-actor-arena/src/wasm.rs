@@ -10,15 +10,15 @@ use crate::{
 
 pub enum WasmExperiment {
     Detached(DetachedExperiment),
-    Shared(SharedExperiment),
+    Shared(Box<SharedExperiment>),
 }
 
 impl WasmExperiment {
     pub fn new(config: &TrialConfig) -> Result<Self> {
         match config.backend {
             Backend::WasmDetached => Ok(Self::Detached(DetachedExperiment::new(config)?)),
-            Backend::WasmInline | Backend::WasmArena | Backend::WasmBatch => {
-                Ok(Self::Shared(SharedExperiment::new(config)?))
+            Backend::WasmInline | Backend::WasmArena | Backend::WasmBatch | Backend::WasmCopyRoundtrip => {
+                Ok(Self::Shared(Box::new(SharedExperiment::new(config)?)))
             }
             _ => unreachable!("Wasm experiment constructed for native backend"),
         }
@@ -147,10 +147,13 @@ pub struct SharedExperiment {
     memory: Memory,
     run: TypedFunc<(i32, i32), i64>,
     run_batch: TypedFunc<(i32, i32), i64>,
+    run_sweep: TypedFunc<(i32, i64), i64>,
     addresses: Vec<usize>,
+    state_base: usize,
     payload_offset: usize,
     batch_capacity: usize,
     batch_bytes: Vec<u8>,
+    host_state: Option<Vec<u8>>,
     state_bytes: usize,
     batched: bool,
 }
@@ -159,7 +162,7 @@ impl SharedExperiment {
     fn new(config: &TrialConfig) -> Result<Self> {
         let mode = match config.backend {
             Backend::WasmInline => AddressMode::PointerTable,
-            Backend::WasmArena | Backend::WasmBatch => AddressMode::Arena,
+            Backend::WasmArena | Backend::WasmBatch | Backend::WasmCopyRoundtrip => AddressMode::Arena,
             _ => unreachable!("shared Wasm experiment backend"),
         };
         let pointer_table_bytes = if matches!(mode, AddressMode::PointerTable) {
@@ -186,6 +189,9 @@ impl SharedExperiment {
         let run_batch = instance
             .get_typed_func::<(i32, i32), i64>(&mut store, "run_batch")
             .map_err(|error| anyhow::anyhow!("shared module batch export: {error}"))?;
+        let run_sweep = instance
+            .get_typed_func::<(i32, i64), i64>(&mut store, "run_sweep")
+            .map_err(|error| anyhow::anyhow!("shared module sweep export: {error}"))?;
 
         if matches!(mode, AddressMode::PointerTable) {
             let mut pointer_table = Vec::with_capacity(config.actors * 4);
@@ -202,10 +208,13 @@ impl SharedExperiment {
             memory,
             run,
             run_batch,
+            run_sweep,
             addresses,
+            state_base,
             payload_offset,
             batch_capacity,
             batch_bytes: Vec::with_capacity(batch_capacity * 16),
+            host_state: (config.backend == Backend::WasmCopyRoundtrip).then(|| initial_states(config)),
             state_bytes: config.state_bytes,
             batched: config.backend == Backend::WasmBatch,
         };
@@ -214,11 +223,64 @@ impl SharedExperiment {
     }
 
     fn deliver(&mut self, config: &TrialConfig, trace: &[usize]) -> Result<DeliveryOutcome> {
-        if self.batched {
+        if config.workload == crate::Workload::SceneSweep {
+            self.deliver_scene_sweeps(config, trace)
+        } else if self.batched {
             self.deliver_batched(config, trace)
         } else {
             self.deliver_one_at_a_time(config, trace)
         }
+    }
+
+    fn deliver_scene_sweeps(&mut self, config: &TrialConfig, trace: &[usize]) -> Result<DeliveryOutcome> {
+        let state_len = config.actors * self.state_bytes;
+        let mut host_entries = 0_u64;
+        let mut copied_each_way = 0_u64;
+
+        for (sweep, actors) in trace.chunks_exact(config.actors).enumerate() {
+            if let Some(host_state) = &self.host_state {
+                self.memory
+                    .write(&mut self.store, self.state_base, host_state)
+                    .context("copy host actor state into Wasm arena")?;
+                copied_each_way += u64::try_from(state_len).expect("state arena byte length fits in u64");
+            }
+
+            let frame_stamp = i64::from_le_bytes(mail_value(config.seed, sweep, 0).to_le_bytes());
+            black_box(
+                self.run_sweep
+                    .call(
+                        &mut self.store,
+                        (i32::try_from(actors.len()).expect("actor population fits Wasm i32"), frame_stamp),
+                    )
+                    .map_err(|error| anyhow::anyhow!("call Wasm actor state sweep: {error}"))?,
+            );
+
+            if let Some(host_state) = &mut self.host_state {
+                self.memory
+                    .read(&self.store, self.state_base, host_state)
+                    .context("copy Wasm actor state back to host")?;
+            }
+            host_entries += 1;
+        }
+
+        let state_round_trips = if self.host_state.is_some() {
+            host_entries
+        } else {
+            0
+        };
+
+        Ok(DeliveryOutcome {
+            completed_mails: u64::try_from(trace.len()).expect("scene update count fits in u64"),
+            counters: MechanismCounters {
+                scheduled_items: host_entries,
+                host_entries,
+                host_to_guest_bytes: copied_each_way,
+                guest_to_host_bytes: copied_each_way,
+                state_round_trips,
+                guest_linear_memory_bytes: self.memory.data_size(&self.store) as u64,
+                ..MechanismCounters::default()
+            },
+        })
     }
 
     fn deliver_one_at_a_time(&mut self, config: &TrialConfig, trace: &[usize]) -> Result<DeliveryOutcome> {
@@ -314,6 +376,12 @@ impl SharedExperiment {
     }
 
     fn reset(&mut self, config: &TrialConfig) -> Result<()> {
+        if let Some(host_state) = &mut self.host_state {
+            *host_state = initial_states(config);
+            self.memory.write(&mut self.store, self.state_base, host_state).context("reset copied Wasm actor state")?;
+            return Ok(());
+        }
+
         for (actor, address) in self.addresses.iter().copied().enumerate() {
             self.memory
                 .write(&mut self.store, address, &initial_state(config, actor))
@@ -323,6 +391,13 @@ impl SharedExperiment {
     }
 
     fn checksum(&self) -> u64 {
+        if let Some(host_state) = &self.host_state {
+            return fold_checksum((0..self.addresses.len()).map(|actor| {
+                let address = actor * self.state_bytes;
+                state_checksum(&host_state[address..address + self.state_bytes], actor)
+            }));
+        }
+
         let memory = self.memory.data(&self.store);
         fold_checksum(
             self.addresses
@@ -441,15 +516,86 @@ fn module_wat(mode: AddressMode, memory_pages: usize, state_bytes: usize, state_
                         br $next
                     end
                 end
-                local.get $checksum))
+                local.get $checksum)
+            {SWEEP_WAT})
         "#
     )
 }
+
+const SWEEP_WAT: &str = r#"
+    (func (export "run_sweep") (param $count i32) (param $frame i64) (result i64)
+        (local $actor i32)
+        (local $state i32)
+        (local $checksum i64)
+        block $done
+            loop $next
+                local.get $actor
+                local.get $count
+                i32.ge_u
+                br_if $done
+                local.get $actor
+                call $address
+                local.set $state
+                local.get $state
+                local.get $state
+                i64.load
+                local.get $state
+                i64.load offset=24
+                i64.add
+                i64.store
+                local.get $state
+                local.get $state
+                i64.load offset=8
+                local.get $state
+                i64.load offset=32
+                i64.add
+                i64.store offset=8
+                local.get $state
+                local.get $state
+                i64.load offset=16
+                local.get $state
+                i64.load offset=40
+                i64.add
+                i64.store offset=16
+                local.get $state
+                local.get $state
+                i64.load offset=48
+                i64.const 1
+                i64.sub
+                i64.store offset=48
+                local.get $state
+                local.get $state
+                i64.load offset=56
+                local.get $frame
+                i64.xor
+                i64.store offset=56
+                local.get $checksum
+                local.get $state
+                i64.load
+                i64.xor
+                local.set $checksum
+                local.get $actor
+                i32.const 1
+                i32.add
+                local.set $actor
+                br $next
+            end
+        end
+        local.get $checksum)
+"#;
 
 fn initial_state(config: &TrialConfig, actor: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(config.state_bytes);
     for word in 0..config.state_bytes / 8 {
         bytes.extend_from_slice(&mail_value(config.seed ^ 0x8ebc_6af0_9c88_c6e3, actor, word).to_le_bytes());
+    }
+    bytes
+}
+
+fn initial_states(config: &TrialConfig) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(config.actors * config.state_bytes);
+    for actor in 0..config.actors {
+        bytes.extend_from_slice(&initial_state(config, actor));
     }
     bytes
 }
@@ -511,5 +657,32 @@ mod tests {
             assert_eq!(report.checksum, reports[0].checksum);
         }
         assert!(reports[3].counters.host_entries < reports[2].counters.host_entries);
+    }
+
+    #[test]
+    fn resident_and_roundtrip_wasm_sweeps_complete_identical_work() {
+        let scene = |backend| TrialConfig {
+            backend,
+            workload: Workload::SceneSweep,
+            actors: 128,
+            mails: 128 * 5,
+            mails_per_activation: 1,
+            page_slots: 64,
+            state_bytes: 256,
+            pattern: AccessPattern::Sequential,
+            seed: 101,
+            warmup_mails: 128 * 2,
+            instrument_allocations: false,
+        };
+        let [resident, copied] = [Backend::WasmArena, Backend::WasmCopyRoundtrip]
+            .map(|backend| run_trial(scene(backend)).expect("Wasm scene sweep"));
+
+        assert_eq!(resident.completed_mails, 128 * 5);
+        assert_eq!(resident.checksum, copied.checksum);
+        assert_eq!(resident.counters.host_entries, 5);
+        assert_eq!(resident.counters.state_round_trips, 0);
+        assert_eq!(copied.counters.state_round_trips, 5);
+        assert_eq!(copied.counters.host_to_guest_bytes, 128 * 256 * 5);
+        assert_eq!(copied.counters.guest_to_host_bytes, 128 * 256 * 5);
     }
 }
