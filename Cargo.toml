@@ -36,6 +36,7 @@ members = [
     "crates/aether-fleet",
     "crates/aether-harness-fleet",
     "crates/aether-harness-perf",
+    "crates/aether-harness-actor-arena",
     "crates/aether-clipboard",
     "crates/aether-window",
     "crates/aether-lifecycle",

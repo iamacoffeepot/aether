@@ -492,6 +492,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-harness-actor-arena"
+version = "0.3.0-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
 name = "aether-harness-fleet"
 version = "0.3.0-alpha"
 dependencies = [
