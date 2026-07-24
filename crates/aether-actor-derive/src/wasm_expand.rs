@@ -9,7 +9,9 @@ use crate::handler_parse::{
     parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
     validate_fallback_sig,
 };
-use crate::manifest::{build_inputs_manifest_consts, build_kinds_section_retention_statics};
+use crate::manifest::{
+    build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
+};
 use crate::opts::{ActorCardinality, ActorOpts};
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -312,6 +314,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let config_kind_ty: Option<&Type> = config_type.as_ref().map(|it| &it.ty);
     let inputs_manifest_consts =
         build_inputs_manifest_consts(&handlers, fallback.as_ref(), component_doc.as_ref(), config_kind_ty);
+    let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
@@ -350,6 +353,17 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
     };
+    let root_impl = opts.root.then(|| {
+        quote! {
+            impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
+        }
+    });
+    let child_impls = opts.child_of.iter().map(|parent| {
+        quote! {
+            impl #impl_generics ::aether_actor::ChildOf<#parent>
+                for #self_ty #where_clause {}
+        }
+    });
 
     // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
     // kind. Auto-generated marker impls gate
@@ -485,6 +499,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
     Ok(quote! {
         #actor_impl
+        #root_impl
+        #(#child_impls)*
 
         #(#handles_kind_impls)*
 
@@ -541,6 +557,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
 
             #inputs_manifest_consts
+            #lineage_manifest_consts
 
             #(#handler_methods_tokens)*
             #fallback_method_tokens

@@ -3,6 +3,7 @@ use quote::quote;
 use syn::Type;
 
 use crate::handler_parse::{FallbackFn, HandlerClass, HandlerFn};
+use crate::opts::ActorOpts;
 
 //noinspection DuplicatedCode -- proc-macro crates intentionally do not depend on one another for this leaf helper.
 fn to_screaming_snake_case(s: &str) -> String {
@@ -16,34 +17,25 @@ fn to_screaming_snake_case(s: &str) -> String {
     out
 }
 
-/// Emit two associated consts inside the component's inherent impl —
-/// `__AETHER_INPUTS_MANIFEST_LEN: usize` and
-/// `__AETHER_INPUTS_MANIFEST: [u8; …LEN]` — carrying the
-/// concatenated `aether.kinds.inputs` record bytes. Each record is
-/// `[INPUTS_SECTION_VERSION (0x05), ..wire(InputsRecord)..]`,
-/// assembled at const-eval via the hub-protocol const-fn encoders.
-/// `aether_actor::export!()` reads these consts and emits the
-/// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
-/// cdylib root crate. Keeping the section emission out of this macro
-/// is what prevents the section from stacking when a `#[actor]`-
-/// using crate is pulled in as a wasm32 rlib by another cdylib (a
-/// rlib that doesn't call `export!()` contributes no section bytes).
-fn emit_inputs_copy_block(rec_len_expr: &TokenStream2, rec_bytes_expr: &TokenStream2) -> TokenStream2 {
+/// Emit one version-framed manifest record into the surrounding const writer.
+/// The caller supplies the section version and the aether-wire record body,
+/// so inputs and actor-lineage manifests share one framing protocol.
+fn emit_record_copy_block(
+    section_version_expr: &TokenStream2,
+    record_len_expr: &TokenStream2,
+    record_bytes_expr: &TokenStream2,
+) -> TokenStream2 {
     quote! {
         {
-            const REC_LEN: usize = #rec_len_expr;
-            const REC_BYTES: [u8; REC_LEN] = #rec_bytes_expr;
-            // Per-record section version byte — a token reference to
-            // `INPUTS_SECTION_VERSION` (ADR-0118 / issue 1984: the record
-            // is the owned aether-wire encoding) so the writer folds from
-            // the same source of truth the reader reads.
-            out[pos] = ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION;
+            const RECORD_LEN: usize = #record_len_expr;
+            const RECORD_BYTES: [u8; RECORD_LEN] = #record_bytes_expr;
+            out[pos] = #section_version_expr;
             pos += 1;
-            let mut i = 0;
-            while i < REC_LEN {
-                out[pos] = REC_BYTES[i];
+            let mut index = 0;
+            while index < RECORD_LEN {
+                out[pos] = RECORD_BYTES[index];
                 pos += 1;
-                i += 1;
+                index += 1;
             }
         }
     }
@@ -58,6 +50,9 @@ pub fn build_inputs_manifest_consts(
 ) -> TokenStream2 {
     let mut len_terms: Vec<TokenStream2> = Vec::new();
     let mut copy_blocks: Vec<TokenStream2> = Vec::new();
+    let section_version = quote! {
+        ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION
+    };
 
     for h in handlers {
         let k = &h.kind_ty;
@@ -91,7 +86,8 @@ pub fn build_inputs_manifest_consts(
                 #reply_id_expr,
             ))
         });
-        copy_blocks.push(emit_inputs_copy_block(
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
             &quote! {
                 ::aether_actor::__macro_internals::canonical::inputs_handler_len(
                     <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
@@ -102,7 +98,7 @@ pub fn build_inputs_manifest_consts(
                 )
             },
             &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
+                ::aether_actor::__macro_internals::canonical::write_inputs_handler::<RECORD_LEN>(
                     <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
                     <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                     #doc_expr,
@@ -118,12 +114,13 @@ pub fn build_inputs_manifest_consts(
         len_terms.push(quote! {
             (1 + ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
         });
-        copy_blocks.push(emit_inputs_copy_block(
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
             &quote! {
                 ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr)
             },
             &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr)
+                ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<RECORD_LEN>(#doc_expr)
             },
         ));
     }
@@ -133,12 +130,13 @@ pub fn build_inputs_manifest_consts(
         len_terms.push(quote! {
             (1 + ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit))
         });
-        copy_blocks.push(emit_inputs_copy_block(
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
             &quote! {
                 ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit)
             },
             &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit)
+                ::aether_actor::__macro_internals::canonical::write_inputs_component::<RECORD_LEN>(#doc_lit)
             },
         ));
     }
@@ -155,7 +153,8 @@ pub fn build_inputs_manifest_consts(
                 <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
             ))
         });
-        copy_blocks.push(emit_inputs_copy_block(
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
             &quote! {
                 ::aether_actor::__macro_internals::canonical::inputs_config_len(
                     <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
@@ -163,7 +162,7 @@ pub fn build_inputs_manifest_consts(
                 )
             },
             &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_config::<REC_LEN>(
+                ::aether_actor::__macro_internals::canonical::write_inputs_config::<RECORD_LEN>(
                     <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                     <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
                 )
@@ -188,6 +187,100 @@ pub fn build_inputs_manifest_consts(
         pub const __AETHER_INPUTS_MANIFEST: [u8; Self::__AETHER_INPUTS_MANIFEST_LEN] = {
             let mut out = [0u8; Self::__AETHER_INPUTS_MANIFEST_LEN];
             let mut pos: usize = 0usize;
+            #(#copy_blocks)*
+            let _ = pos;
+            out
+        };
+    }
+}
+
+/// Emit hidden per-actor lineage bytes as associated consts. As with the
+/// inputs manifest, `#[actor]` owns only const data; `export!` is the sole
+/// custom-section retention point so metadata from transitive wasm rlibs
+/// cannot stack in the final module.
+pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> TokenStream2 {
+    let actor_namespace = quote! { <#self_ty as ::aether_actor::Addressable>::NAMESPACE };
+    let actor_tag = quote! {
+        ::aether_actor::__macro_internals::ActorId::singleton(#actor_namespace).0
+    };
+    let mut len_terms = Vec::new();
+    let mut copy_blocks = Vec::new();
+    let section_version = quote! {
+        ::aether_actor::__macro_internals::ACTOR_LINEAGE_SECTION_VERSION
+    };
+
+    if opts.root {
+        len_terms.push(quote! {
+            1 + ::aether_actor::__macro_internals::actor_lineage_root_len(
+                #actor_tag,
+                #actor_namespace,
+            )
+        });
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
+            &quote! {
+                ::aether_actor::__macro_internals::actor_lineage_root_len(
+                    #actor_tag,
+                    #actor_namespace,
+                )
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::write_actor_lineage_root::<RECORD_LEN>(
+                    #actor_tag,
+                    #actor_namespace,
+                )
+            },
+        ));
+    }
+
+    for parent in &opts.child_of {
+        let parent_namespace = quote! { <#parent as ::aether_actor::Addressable>::NAMESPACE };
+        let parent_tag = quote! {
+            ::aether_actor::__macro_internals::ActorId::singleton(#parent_namespace).0
+        };
+        len_terms.push(quote! {
+            1 + ::aether_actor::__macro_internals::actor_lineage_child_len(
+                #parent_tag,
+                #actor_tag,
+                #parent_namespace,
+                #actor_namespace,
+            )
+        });
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
+            &quote! {
+                ::aether_actor::__macro_internals::actor_lineage_child_len(
+                    #parent_tag,
+                    #actor_tag,
+                    #parent_namespace,
+                    #actor_namespace,
+                )
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::write_actor_lineage_child::<RECORD_LEN>(
+                    #parent_tag,
+                    #actor_tag,
+                    #parent_namespace,
+                    #actor_namespace,
+                )
+            },
+        ));
+    }
+
+    let len_expr = if len_terms.is_empty() {
+        quote! { 0usize }
+    } else {
+        quote! { #(#len_terms)+* }
+    };
+
+    quote! {
+        #[doc(hidden)]
+        pub const __AETHER_LINEAGE_MANIFEST_LEN: usize = #len_expr;
+
+        #[doc(hidden)]
+        pub const __AETHER_LINEAGE_MANIFEST: [u8; Self::__AETHER_LINEAGE_MANIFEST_LEN] = {
+            let mut out = [0u8; Self::__AETHER_LINEAGE_MANIFEST_LEN];
+            let mut pos = 0usize;
             #(#copy_blocks)*
             let _ = pos;
             out

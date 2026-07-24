@@ -154,6 +154,22 @@ pub trait Addressable: Sized + Send + 'static {
     }
 }
 
+/// Placement permission for an actor identity that may appear without an
+/// actor parent (ADR-0166).
+///
+/// This is independent of cardinality and runtime liveness: a root actor may
+/// be singleton or instanced, and implementing this trait does not mean that
+/// an instance currently exists.
+pub trait Root: Addressable {}
+
+/// Placement permission for an actor identity that may appear directly
+/// beneath logical parent `P` (ADR-0166).
+///
+/// This describes a legal edge, not ownership, supervision, or liveness. A
+/// child may implement `ChildOf` for several distinct parents and may also
+/// implement [`Root`] when both placements are meaningful.
+pub trait ChildOf<P: Addressable>: Addressable {}
+
 /// The boot/teardown capability an actor composes onto its identity
 /// (iamacoffeepot/aether#2048). The lifecycle was declared twice —
 /// once on [`crate::WasmActor`] (wasm/guest) and once on
@@ -428,6 +444,28 @@ mod tests {
         }
         fn requires_instanced<T: Instanced>() {}
         requires_instanced::<PerThing>();
+    }
+
+    #[test]
+    fn placement_markers_are_independent_permissions() {
+        struct Manager;
+        impl Addressable for Manager {
+            const NAMESPACE: &'static str = "test.placement.manager";
+            type Resolver = One;
+        }
+
+        struct Worker;
+        impl Addressable for Worker {
+            const NAMESPACE: &'static str = "test.placement.worker";
+            type Resolver = Many;
+        }
+        impl Root for Worker {}
+        impl ChildOf<Manager> for Worker {}
+
+        fn requires_root<T: Root>() {}
+        fn requires_child<T: ChildOf<Manager>>() {}
+        requires_root::<Worker>();
+        requires_child::<Worker>();
     }
 
     /// ADR-0099 §5 / ADR-0119: the [`One`] resolver ignores the caller's

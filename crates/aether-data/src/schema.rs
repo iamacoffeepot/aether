@@ -808,6 +808,112 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// independently and happen to share a number at this revision.
 pub const INPUTS_SECTION_VERSION: u8 = 0x05;
 
+/// One anonymous actor-placement fact in the `aether.actor.lineage` wasm
+/// custom section (ADR-0166).
+///
+/// Actor tags are `ActorId::singleton(Addressable::NAMESPACE).0`; namespaces
+/// ride alongside them so hosts can diagnose and discover relationships
+/// without reverse-hashing an id. The generated macro metadata reads both
+/// values from the actor types and never copies a namespace literal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActorLineageRecord {
+    /// The actor may be placed without an actor parent.
+    Root { actor: u64, namespace: Cow<'static, str> },
+    /// The child may be placed directly beneath the parent.
+    Child { parent: u64, child: u64, parent_namespace: Cow<'static, str>, child_namespace: Cow<'static, str> },
+}
+
+/// Custom-section name for anonymous actor placement facts (ADR-0166).
+pub const ACTOR_LINEAGE_SECTION: &str = "aether.actor.lineage";
+
+/// Version byte prefixing every [`ActorLineageRecord`] in the
+/// `aether.actor.lineage` custom section.
+pub const ACTOR_LINEAGE_SECTION_VERSION: u8 = 0x01;
+
+const fn actor_lineage_str_len(value: &str) -> usize {
+    4 + value.len()
+}
+
+const fn actor_lineage_write_u32(value: u32, out: &mut [u8], cursor: usize) -> usize {
+    let bytes = value.to_le_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        out[cursor + index] = bytes[index];
+        index += 1;
+    }
+    cursor + bytes.len()
+}
+
+const fn actor_lineage_write_u64(value: u64, out: &mut [u8], cursor: usize) -> usize {
+    let bytes = value.to_le_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        out[cursor + index] = bytes[index];
+        index += 1;
+    }
+    cursor + bytes.len()
+}
+
+#[allow(clippy::cast_possible_truncation)] // asserted against u32::MAX immediately below
+const fn actor_lineage_write_str(value: &str, out: &mut [u8], cursor: usize) -> usize {
+    assert!(value.len() <= u32::MAX as usize, "actor lineage namespace exceeds u32::MAX bytes");
+    let mut pos = actor_lineage_write_u32(value.len() as u32, out, cursor);
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        out[pos] = bytes[index];
+        pos += 1;
+        index += 1;
+    }
+    pos
+}
+
+/// Byte length of an aether-wire [`ActorLineageRecord::Root`] body.
+#[must_use]
+pub const fn actor_lineage_root_len(_actor: u64, namespace: &str) -> usize {
+    4 + 8 + actor_lineage_str_len(namespace)
+}
+
+/// Const-encode an aether-wire [`ActorLineageRecord::Root`] body.
+#[must_use]
+pub const fn write_actor_lineage_root<const N: usize>(actor: u64, namespace: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = actor_lineage_write_u32(0, &mut out, 0);
+    pos = actor_lineage_write_u64(actor, &mut out, pos);
+    pos = actor_lineage_write_str(namespace, &mut out, pos);
+    let _ = pos;
+    out
+}
+
+/// Byte length of an aether-wire [`ActorLineageRecord::Child`] body.
+#[must_use]
+pub const fn actor_lineage_child_len(
+    _parent: u64,
+    _child: u64,
+    parent_namespace: &str,
+    child_namespace: &str,
+) -> usize {
+    4 + 8 + 8 + actor_lineage_str_len(parent_namespace) + actor_lineage_str_len(child_namespace)
+}
+
+/// Const-encode an aether-wire [`ActorLineageRecord::Child`] body.
+#[must_use]
+pub const fn write_actor_lineage_child<const N: usize>(
+    parent: u64,
+    child: u64,
+    parent_namespace: &str,
+    child_namespace: &str,
+) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = actor_lineage_write_u32(1, &mut out, 0);
+    pos = actor_lineage_write_u64(parent, &mut out, pos);
+    pos = actor_lineage_write_u64(child, &mut out, pos);
+    pos = actor_lineage_write_str(parent_namespace, &mut out, pos);
+    pos = actor_lineage_write_str(child_namespace, &mut out, pos);
+    let _ = pos;
+    out
+}
+
 /// Version byte the `aether.kinds` wasm custom section opens with —
 /// the single source of truth both the derive's writers and the
 /// substrate reader share. A format bump is a one-line edit here that

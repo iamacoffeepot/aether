@@ -560,7 +560,21 @@ struct Pong {
 /// submits a link-time `HandlerEntry` declaring `Greet -> Pong`.
 struct ReplyMacroCap;
 
-#[aether_actor::actor]
+struct ReplyParentA;
+
+impl Addressable for ReplyParentA {
+    const NAMESPACE: &'static str = "test.macro_native_actor.parent_a";
+    type Resolver = aether_actor::One;
+}
+
+struct ReplyParentB;
+
+impl Addressable for ReplyParentB {
+    const NAMESPACE: &'static str = "test.macro_native_actor.parent_b";
+    type Resolver = aether_actor::One;
+}
+
+#[aether_actor::actor(root, child_of(ReplyParentA), child_of(ReplyParentB))]
 impl NativeActor for ReplyMacroCap {
     type Config = ();
     const NAMESPACE: &'static str = "test.macro_native_actor.reply";
@@ -601,6 +615,35 @@ fn macro_emits_native_handler_reply_manifest() {
         Some(<Pong as Kind>::ID),
         "the `-> Pong` return type is captured as the reply contract (In -> Out)",
     );
+}
+
+#[test]
+fn macro_emits_native_lineage_inventory_from_actor_types() {
+    use aether_data::ActorId;
+    use aether_data::name_inventory::{child_entries, root_entries};
+
+    fn root<T: aether_actor::Root>() {}
+    fn child_a<T: aether_actor::ChildOf<ReplyParentA>>() {}
+    fn child_b<T: aether_actor::ChildOf<ReplyParentB>>() {}
+    root::<ReplyMacroCap>();
+    child_a::<ReplyMacroCap>();
+    child_b::<ReplyMacroCap>();
+
+    let root = root_entries()
+        .find(|entry| entry.namespace == ReplyMacroCap::NAMESPACE)
+        .expect("the macro should submit a RootEntry");
+    assert_eq!(root.actor, ActorId::singleton(ReplyMacroCap::NAMESPACE));
+
+    let mut parents = child_entries()
+        .filter(|entry| entry.child_namespace == ReplyMacroCap::NAMESPACE)
+        .map(|entry| {
+            assert_eq!(entry.child, ActorId::singleton(ReplyMacroCap::NAMESPACE));
+            assert_eq!(entry.parent, ActorId::singleton(entry.parent_namespace));
+            entry.parent_namespace
+        })
+        .collect::<Vec<_>>();
+    parents.sort_unstable();
+    assert_eq!(parents, vec![ReplyParentA::NAMESPACE, ReplyParentB::NAMESPACE]);
 }
 
 // ADR-0109 deferred reply contract (#1805): a `-> Pending<R>` request

@@ -445,6 +445,15 @@ macro_rules! __export_internal {
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
             <$component>::__AETHER_INPUTS_MANIFEST;
 
+        // ADR-0166: pin only this exported actor's anonymous placement facts.
+        // The actor macro emits associated const data; retention stays at the
+        // cdylib-root `export!` call so transitive rlibs contribute no custom
+        // section of their own.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(link_section = "aether.actor.lineage")]
+        static __AETHER_LINEAGE_SECTION: [u8; <$component>::__AETHER_LINEAGE_MANIFEST_LEN] =
+            <$component>::__AETHER_LINEAGE_MANIFEST;
+
         // Issue 525 Phase 1B: pin the actor's `Addressable::NAMESPACE` bytes
         // into a sibling `aether.namespace` custom section. The
         // substrate reads this at load time as the default mailbox
@@ -1171,6 +1180,36 @@ macro_rules! __export_multi_internal {
                         out[pos] = MANIFEST_BYTES[j];
                         pos += 1;
                         j += 1;
+                    }
+                }
+            )+
+            let _ = pos;
+            out
+        };
+
+        // ADR-0166: concatenate the associated lineage bytes for exactly the
+        // types selected by this `export!` invocation. Unlike inputs, lineage
+        // records carry both actor tags and namespaces, so no boundary record
+        // is needed.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        const __AETHER_MULTI_LINEAGE_LEN: usize =
+            0usize $(+ <$component>::__AETHER_LINEAGE_MANIFEST_LEN)+;
+
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(link_section = "aether.actor.lineage")]
+        static __AETHER_LINEAGE_SECTION: [u8; __AETHER_MULTI_LINEAGE_LEN] = {
+            let mut out = [0u8; __AETHER_MULTI_LINEAGE_LEN];
+            let mut pos = 0usize;
+            $(
+                {
+                    const MANIFEST_LEN: usize = <$component>::__AETHER_LINEAGE_MANIFEST_LEN;
+                    const MANIFEST_BYTES: [u8; MANIFEST_LEN] =
+                        <$component>::__AETHER_LINEAGE_MANIFEST;
+                    let mut index = 0;
+                    while index < MANIFEST_LEN {
+                        out[pos] = MANIFEST_BYTES[index];
+                        pos += 1;
+                        index += 1;
                     }
                 }
             )+

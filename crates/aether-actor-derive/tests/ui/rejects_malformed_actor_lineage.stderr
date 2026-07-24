@@ -1,0 +1,5 @@
+error: `child_of` expects exactly one actor type path; repeat `child_of(...)` for another parent
+ --> tests/ui/rejects_malformed_actor_lineage.rs:6:23
+  |
+6 | #[actor(child_of(First, Second))]
+  |                       ^
