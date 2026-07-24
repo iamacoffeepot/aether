@@ -323,7 +323,7 @@ impl Mcp {
     /// Resolve `params` against the engine's live schema for `kind_name`
     /// and schema-encode them, refreshing the per-engine kind cache once
     /// on a staleness signal (ADR-0091 §3). The single shared encode path
-    /// behind `send_mail` ([`Self::build_mail_envelope`]) and every
+    /// behind `send_mail` ([`Self::prepare_direct_mail`]) and every
     /// engine-fixed bundle surface ([`Self::encode_mail_bundle`]).
     ///
     /// Two staleness triggers refresh the cache from
