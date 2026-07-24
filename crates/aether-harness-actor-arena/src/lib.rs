@@ -9,6 +9,7 @@ mod allocator;
 mod churn;
 mod metrics;
 mod native;
+mod preallocation;
 mod trace;
 mod wasm;
 
@@ -20,6 +21,9 @@ use serde::{Deserialize, Serialize};
 
 pub use allocator::{ActorCoordinate, HierarchicalBitmap};
 pub use metrics::{AllocationSnapshot, begin_allocation_counting, peak_rss_bytes};
+pub use preallocation::{
+    HolePattern, PreallocationConfig, PreallocationReport, PreallocationTarget, SweepMode, run_preallocation_trial,
+};
 
 /// Experimental backend selected once, before the timed loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]

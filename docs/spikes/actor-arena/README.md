@@ -14,8 +14,9 @@ discussion:
 2. route endpoint simplification;
 3. page-granularity scheduling;
 4. persistent Wasm linear-memory state; and
-5. packed host-to-guest delivery; and
-6. reserve–initialize–retire lifecycle churn.
+5. packed host-to-guest delivery;
+6. reserve–initialize–retire lifecycle churn; and
+7. approximate population hints and chunked arena growth.
 
 The result can establish a performance ceiling or reject an idea. It cannot,
 by itself, prove the end-to-end runtime gain.
@@ -88,6 +89,51 @@ the workload asks what a scene system can gain once it already has the
 namespace/kind cohort and wants to advance every bullet. Namespace-local bitmap
 shards allow the fixture to exceed one 4,096-slot two-level root without adding
 an arena id to the actor coordinate.
+
+## Preallocation study
+
+The original scene and lifecycle cells begin with an exactly sized, completely
+populated arena. That is the ideal-forecast ceiling, not evidence that
+approximate forecasts are harmless. The separate preallocation runner measures
+the missing phases without changing those original comparisons:
+
+1. reserve stable arena chunks from a per-namespace actor-count hint;
+2. spawn and initialize the actual peak population, growing when the hint is
+   too small;
+3. retire a packed suffix or deterministic random actors to establish the hot
+   occupancy; and
+4. execute repeated bullet sweeps either through a two-level live-page bitmap
+   or by deliberately visiting every allocated page.
+
+Native chunks contain 1, 4, 16, or 64 arena pages. Each page has 64 actor slots,
+so a growth operation reserves 64 through 4,096 actors. State is one stable
+boxed slab per chunk; page run-token mutexes, live slot words, and the
+availability bitmap are separate metadata. Spare slots are reserved but never
+constructed as actors.
+
+The primary matrix contains these predeclared campaigns:
+
+- forecast error: 50%, 75%, 100%, 125%, 200%, and 400% of the actual peak;
+- chunk sensitivity: 1, 4, 16, and 64 pages at 75%, 100%, and 125% hints;
+- hot occupancy: 25%, 50%, 75%, 90%, and 100%, using packed and random holes;
+- exact chunk boundaries: `capacity - 1`, `capacity`, and `capacity + 1`; and
+- Wasm forecast and chunk cells using one persistent real Wasmtime memory.
+
+The Wasm arm constructs its engine, module, store, and initial one-page memory
+before the cold timer. Reserve then performs one host `memory.grow` to the
+estimated capacity. Underestimation grows again at arena-chunk boundaries.
+After initialization, a real guest function sweeps packed 64-byte bullet state.
+Sparse Wasm cells are intentionally absent: they would require choosing a
+production live-set ABI, while this experiment is only testing capacity
+policy.
+
+Every fresh process reports reserve time, spawn time, cold nanoseconds per
+actor, incremental growth count and total, p95/p99/maximum growth pauses,
+logical reserved/live/unused bytes, Wasm pages and growth calls, RSS,
+live/visited arena pages, hot nanoseconds per update, exact completion, and a
+full-state checksum. Allocation counters and forced physical page touching are
+separate three-sample diagnostic campaigns because each perturbs the primary
+cold result.
 
 ## Allocator mechanism
 
@@ -166,6 +212,8 @@ cargo build --release -p aether-harness-actor-arena --bins
 
 scripts/actor-arena-measure.sh /tmp/actor-arena-results
 
+scripts/actor-arena-preallocation-measure.sh /tmp/actor-arena-preallocation
+
 target/release/aether-actor-arena-compare \
   --base boxed-current \
   --candidate arena-state \
@@ -179,6 +227,19 @@ target/release/aether-actor-arena-compare \
   --state-bytes 256 \
   --pattern random \
   --warmup-mails 250000
+
+target/release/aether-actor-arena-preallocation-trial \
+  --target native \
+  --actors 65536 \
+  --capacity-hint 49152 \
+  --growth-pages 16 \
+  --page-slots 64 \
+  --state-bytes 64 \
+  --live-percent 75 \
+  --hole-pattern random \
+  --sweep-mode live-bitmap \
+  --sweeps 80 \
+  --burst-actors 4096
 ```
 
 Each artifact directory contains:
@@ -189,6 +250,13 @@ Each artifact directory contains:
 - `report.md`: result, mechanism counters, and interpretation limits;
 - `paired-deltas.svg`: pair drift and direction;
 - `reproduce.txt`: the exact comparison arguments.
+
+The preallocation matrix similarly retains `raw/<cell>/sample-NN.json`,
+`matrix.json`, `matrix.csv`, `environment.json`, `report.md`,
+`hot-update.svg`, `growth-pause.svg`, and `reproduce.txt`. Its cells run in
+fresh processes with order rotated and reversed between rounds. Medians and
+IQRs describe the seven samples; logically equivalent cells must agree on
+their checksum and exact update count before an aggregate is written.
 
 ## Gate after the spike
 

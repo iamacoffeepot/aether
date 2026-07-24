@@ -13,6 +13,14 @@ path = "src/bin/trial.rs"
 name = "aether-actor-arena-compare"
 path = "src/bin/compare.rs"
 
+[[bin]]
+name = "aether-actor-arena-preallocation-trial"
+path = "src/bin/preallocation_trial.rs"
+
+[[bin]]
+name = "aether-actor-arena-preallocation-matrix"
+path = "src/bin/preallocation_matrix.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
