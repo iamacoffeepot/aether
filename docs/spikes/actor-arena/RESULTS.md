@@ -4,6 +4,8 @@ Core measured revision: `fade4b593993644b87694c332dedb7d8047cf749`
 
 Preallocation measured revision: `a907975fce9d19f2ce957b13abf4b646c86b6f4a`
 
+Wasm state-transfer measured revision: `051de9931f1580d8e883113f574e50ba6fc2c4ad`
+
 Machine: Apple M4 Pro, 12 logical CPUs, aarch64 macOS 26 / Darwin 25.5
 
 Toolchain: rustc 1.96.0, Wasmtime 44
@@ -32,6 +34,14 @@ transparently without changing hot throughput, provided cohort iteration walks
 live pages rather than reserved capacity. The consequential variable is active
 page density, not estimate precision.
 
+The Wasm state-transfer follow-up rejects complete copy-in/copy-out as the
+default ownership model. Even a best-case flat 64-byte record made the focused
+loop 90.9% slower, although the absolute penalty was only 99.8 µs for a
+65,536-actor sweep. Copying cold record bytes scaled to a 28.1× slowdown at
+4 KiB. Wasm actor arenas should therefore remain resident in guest linear
+memory, with state crossing the boundary at explicit serialization and query
+projection points.
+
 ## Primary results
 
 | Mechanism isolated | Base → candidate | Base | Candidate | Result |
@@ -47,6 +57,7 @@ page density, not estimate precision.
 | Wasm instance/storage ceiling | detached → persistent arena | 20.000 ns/mail | 17.468 ns/mail | 1.139×, improvement |
 | Wasm state placement | pointer table → direct arena | 17.788 ns/mail | 17.678 ns/mail | neutral |
 | Wasm host boundary | per-mail → packed batch | 17.461 ns/mail | 3.995 ns/mail | 4.385×, improvement |
+| Wasm state ownership, 65,536 bullets | resident guest → full round trip | 1.676 ns/update | 3.200 ns/update | +90.9%, regression |
 
 Adjacent rows are independent paired comparisons, so their base medians need
 not be identical. Classification uses the predeclared ADR-0085-style noise
@@ -157,6 +168,20 @@ instance consolidation and host-boundary batching:
   mail;
 - the 4-KiB-state batching sensitivity cell remained 4.388× faster.
 
+Keeping the arena resident also beat copying the complete state into and out
+of Wasm around every update. At 65,536 64-byte bullets, the resident loop took
+109.8 µs per full sweep and the copied loop took 209.7 µs. A ten-times-longer
+confirmation reproduced the result within one percentage point. When only the
+first 64 bytes remained hot but complete records grew to 256 bytes, 1 KiB, and
+4 KiB, the copied loop became 4.08×, 9.33×, and 28.1× as slow as resident
+state.
+
+This was already the favorable copy case: one contiguous operation in each
+direction, no `Kind` encoding, identical guest instructions, and identical
+host-entry counts. The result supports persistent guest arenas plus selective
+host metadata, projections, deltas, and boundary snapshots—not mandatory
+whole-state transfer per scene update.
+
 The resident-memory population curve also strongly favors persistent arenas:
 
 | Actors | Detached median RSS | Arena median RSS | Detached guest memory | Arena guest memory |
@@ -176,6 +201,8 @@ Evidence:
 - [detached versus arena report](results/fade4b59/wasm-detached-arena/report.md)
 - [packed batch report](results/fade4b59/wasm-batch/report.md)
 - [512-actor memory point](results/fade4b59/memory-wasm-512/comparison.json)
+- [complete state-transfer result](WASM_STATE_TRANSFER_RESULTS.md)
+- [state-transfer primary report](results/051de993/wasm-state-transfer/primary-65536-state64/report.md)
 
 ## Measurement limits
 
@@ -196,6 +223,9 @@ Evidence:
   in the production vertical slice.
 - Wasm arms execute real Wasmtime code and memory writes, but use a core-Wasm
   fixture rather than Aether's complete component ABI.
+- The state-transfer follow-up uses already-flat contiguous bytes and therefore
+  excludes `Kind` encoding. It is a lower bound for complete copy-in/copy-out,
+  not an end-to-end component-state result.
 - Hardware instruction, cache, and TLB counters were unavailable in the
   portable runner. Wall time cannot prove that a gain came from L2 behavior.
 - All primary reports use exact completion counts and full-state checksums,
@@ -219,8 +249,9 @@ not a broad actor migration:
    serializing the namespace;
 8. allocation reuses holes, reclaims empty chunks, and reports actors/page so
    random retirement cannot silently destroy density;
-9. Wasm pre-grows persistent cells/shards lazily and uses a packed delivery ABI
-   as a separate mechanism; and
+9. Wasm pre-grows persistent guest cells/shards lazily, keeps actor state
+   resident, uses a packed delivery ABI, and mirrors only routing/query metadata
+   or explicit state projections to the host; and
 10. the real-runtime comparison repeats this scene, random mail, churn,
     density, and worker-scaling matrix before an ADR commits the architecture.
 

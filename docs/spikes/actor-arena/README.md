@@ -5,7 +5,9 @@ Status: disposable measurement spike; not a runtime design decision.
 [Core measured results and recommendation](RESULTS.md) are recorded from
 revision `fade4b593993644b87694c332dedb7d8047cf749`. The
 [preallocation follow-up](PREALLOCATION_RESULTS.md) is recorded from revision
-`a907975fce9d19f2ce957b13abf4b646c86b6f4a`.
+`a907975fce9d19f2ce957b13abf4b646c86b6f4a`. The
+[Wasm state-transfer follow-up](WASM_STATE_TRANSFER_RESULTS.md) is recorded
+from revision `051de9931f1580d8e883113f574e50ba6fc2c4ad`.
 
 This spike asks whether namespace-owned actor arenas are valuable enough to
 justify a production vertical slice. It deliberately leaves the substrate

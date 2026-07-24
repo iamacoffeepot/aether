@@ -1,0 +1,74 @@
+{
+  "index": 3,
+  "order": "candidate-base",
+  "base": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-arena",
+      "workload": "scene-sweep",
+      "actors": 4096,
+      "mails": 5242880,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 64,
+      "pattern": "sequential",
+      "seed": 6840227784451616781,
+      "warmup_mails": 131072,
+      "instrument_allocations": false
+    },
+    "elapsed_nanos": 8614291,
+    "completed_mails": 5242880,
+    "nanos_per_mail": 1.6430456161499023,
+    "mails_per_second": 608625828.8697236,
+    "checksum": "94040485a377bbae",
+    "peak_rss_bytes": 53624832,
+    "allocations": null,
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 1280,
+      "host_entries": 1280,
+      "host_to_guest_bytes": 0,
+      "guest_to_host_bytes": 0,
+      "state_round_trips": 0,
+      "guest_linear_memory_bytes": 327680,
+      "allocator_cas_retries": 0
+    }
+  },
+  "candidate": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-copy-roundtrip",
+      "workload": "scene-sweep",
+      "actors": 4096,
+      "mails": 5242880,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 64,
+      "pattern": "sequential",
+      "seed": 6840227784451616781,
+      "warmup_mails": 131072,
+      "instrument_allocations": false
+    },
+    "elapsed_nanos": 16334625,
+    "completed_mails": 5242880,
+    "nanos_per_mail": 3.1155824661254883,
+    "mails_per_second": 320967270.4454495,
+    "checksum": "94040485a377bbae",
+    "peak_rss_bytes": 53903360,
+    "allocations": null,
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 1280,
+      "host_entries": 1280,
+      "host_to_guest_bytes": 335544320,
+      "guest_to_host_bytes": 335544320,
+      "state_round_trips": 1280,
+      "guest_linear_memory_bytes": 327680,
+      "allocator_cas_retries": 0
+    }
+  },
+  "paired_delta_nanos_per_mail": 1.472536849975586,
+  "speedup": 0.5273638666329958
+}

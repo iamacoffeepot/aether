@@ -1,0 +1,3 @@
+/Users/hadynfitzgerald/workspace/aether/.agents/worktrees/codex-019f90fe-cd9a-7510-a5c9-5938f9b00bca/target/release/aether-actor-arena-compare --base wasm-arena --candidate wasm-copy-roundtrip --workload scene-sweep --pairs 7 --artifact-dir <output> --actors 16384 --mails 5242880 --mails-per-activation 1 --page-slots 64 --state-bytes 64 --pattern sequential --seed 6840227784451616781 --warmup-mails 262144
+
+Trial executable used: /Users/hadynfitzgerald/workspace/aether/.agents/worktrees/codex-019f90fe-cd9a-7510-a5c9-5938f9b00bca/target/release/aether-actor-arena-trial

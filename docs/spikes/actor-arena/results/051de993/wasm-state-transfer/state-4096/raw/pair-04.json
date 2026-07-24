@@ -1,0 +1,74 @@
+{
+  "index": 4,
+  "order": "base-candidate",
+  "base": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-arena",
+      "workload": "scene-sweep",
+      "actors": 16384,
+      "mails": 131072,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 4096,
+      "pattern": "sequential",
+      "seed": 6840227784451616781,
+      "warmup_mails": 32768,
+      "instrument_allocations": false
+    },
+    "elapsed_nanos": 724083,
+    "completed_mails": 131072,
+    "nanos_per_mail": 5.524314880371094,
+    "mails_per_second": 181017921.9785577,
+    "checksum": "bd412054e337f331",
+    "peak_rss_bytes": 78725120,
+    "allocations": null,
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 8,
+      "host_entries": 8,
+      "host_to_guest_bytes": 0,
+      "guest_to_host_bytes": 0,
+      "state_round_trips": 0,
+      "guest_linear_memory_bytes": 67174400,
+      "allocator_cas_retries": 0
+    }
+  },
+  "candidate": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-copy-roundtrip",
+      "workload": "scene-sweep",
+      "actors": 16384,
+      "mails": 131072,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 4096,
+      "pattern": "sequential",
+      "seed": 6840227784451616781,
+      "warmup_mails": 32768,
+      "instrument_allocations": false
+    },
+    "elapsed_nanos": 20353542,
+    "completed_mails": 131072,
+    "nanos_per_mail": 155.2852020263672,
+    "mails_per_second": 6439763.653913408,
+    "checksum": "bd412054e337f331",
+    "peak_rss_bytes": 213368832,
+    "allocations": null,
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 8,
+      "host_entries": 8,
+      "host_to_guest_bytes": 536870912,
+      "guest_to_host_bytes": 536870912,
+      "state_round_trips": 8,
+      "guest_linear_memory_bytes": 67174400,
+      "allocator_cas_retries": 0
+    }
+  },
+  "paired_delta_nanos_per_mail": 149.7608871459961,
+  "speedup": 0.03557528217938676
+}

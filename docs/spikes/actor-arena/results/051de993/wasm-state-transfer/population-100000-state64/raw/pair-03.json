@@ -1,0 +1,74 @@
+{
+  "index": 3,
+  "order": "candidate-base",
+  "base": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-arena",
+      "workload": "scene-sweep",
+      "actors": 100000,
+      "mails": 5000000,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 64,
+      "pattern": "sequential",
+      "seed": 6840227784451616781,
+      "warmup_mails": 800000,
+      "instrument_allocations": false
+    },
+    "elapsed_nanos": 8324459,
+    "completed_mails": 5000000,
+    "nanos_per_mail": 1.6648918,
+    "mails_per_second": 600639633.1581428,
+    "checksum": "80c424f348da2c40",
+    "peak_rss_bytes": 58392576,
+    "allocations": null,
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 50,
+      "host_entries": 50,
+      "host_to_guest_bytes": 0,
+      "guest_to_host_bytes": 0,
+      "state_round_trips": 0,
+      "guest_linear_memory_bytes": 6422528,
+      "allocator_cas_retries": 0
+    }
+  },
+  "candidate": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-copy-roundtrip",
+      "workload": "scene-sweep",
+      "actors": 100000,
+      "mails": 5000000,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 64,
+      "pattern": "sequential",
+      "seed": 6840227784451616781,
+      "warmup_mails": 800000,
+      "instrument_allocations": false
+    },
+    "elapsed_nanos": 15952458,
+    "completed_mails": 5000000,
+    "nanos_per_mail": 3.1904916,
+    "mails_per_second": 313431321.9943911,
+    "checksum": "80c424f348da2c40",
+    "peak_rss_bytes": 71532544,
+    "allocations": null,
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 50,
+      "host_entries": 50,
+      "host_to_guest_bytes": 320000000,
+      "guest_to_host_bytes": 320000000,
+      "state_round_trips": 50,
+      "guest_linear_memory_bytes": 6422528,
+      "allocator_cas_retries": 0
+    }
+  },
+  "paired_delta_nanos_per_mail": 1.5255998000000002,
+  "speedup": 0.5218292378516213
+}
