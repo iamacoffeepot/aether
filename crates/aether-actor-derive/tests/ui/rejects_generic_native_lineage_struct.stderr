@@ -1,0 +1,5 @@
+error: #[actor] `root` and `child_of(...)` require a concrete native actor identity; generic native actors cannot emit monomorphic RootEntry/ChildEntry inventory facts
+ --> tests/ui/rejects_generic_native_lineage_struct.rs:6:20
+  |
+6 | pub struct Generic<T>(T);
+  |                    ^
