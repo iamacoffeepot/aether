@@ -290,8 +290,7 @@ fn percentile(values: &[f64], quantile: f64) -> f64 {
 }
 
 fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
-    let stats = &report.statistics;
-    let first = &report.pairs[0];
+    let (stats, first) = (&report.statistics, &report.pairs[0]);
     let unit = work_unit(args.workload);
     let mut markdown = format!(
         "# Actor arena paired comparison\n\n\
