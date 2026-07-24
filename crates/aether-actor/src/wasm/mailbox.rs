@@ -2,7 +2,8 @@
 // wasm32 host-fn ABI (`_p32` convention, ADR-0024).
 #![allow(clippy::cast_possible_truncation)]
 
-//! [`WasmActorMailbox`] — actor-typed sender handle for FFI guests.
+//! [`WasmActorMailbox`] and [`WasmActorMailboxWithContext`] — actor-typed
+//! sender handles for FFI guests.
 //!
 //! Issue 665 split the prior parametric `ActorMailbox<'a, R, T>` into
 //! per-side types so the `MailTransport` trait can retire. Issue 1987
@@ -66,6 +67,25 @@ impl<R> Clone for WasmActorMailbox<'_, R> {
     }
 }
 
+/// A [`WasmActorMailbox`] with one typed request context bound for subsequent
+/// sends.
+///
+/// Built by [`WasmActorMailbox::with_context`]. The underlying mailbox is
+/// copied into the adapter while `context` stays borrowed, so callers can use
+/// capability facades without rebuilding the context at every send.
+#[allow(clippy::module_name_repetitions)]
+pub struct WasmActorMailboxWithContext<'mailbox, 'context, R, C: Kind> {
+    mailbox: WasmActorMailbox<'mailbox, R>,
+    context: &'context C,
+}
+
+impl<R, C: Kind> Copy for WasmActorMailboxWithContext<'_, '_, R, C> {}
+impl<R, C: Kind> Clone for WasmActorMailboxWithContext<'_, '_, R, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<'a, R> WasmActorMailbox<'a, R> {
     /// Not part of the public API; the ctx-level constructors go
     /// through here so the fields stay private. `sender` is the
@@ -82,6 +102,18 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     #[must_use]
     pub fn mailbox_id(&self) -> MailboxId {
         MailboxId(self.mailbox)
+    }
+
+    /// Bind one typed request context to this mailbox.
+    ///
+    /// The returned adapter's [`WasmActorMailboxWithContext::send`] stores the
+    /// context under each send's minted correlation id.
+    #[must_use]
+    pub fn with_context<'context, C: Kind>(
+        &self,
+        context: &'context C,
+    ) -> WasmActorMailboxWithContext<'a, 'context, R, C> {
+        WasmActorMailboxWithContext { mailbox: *self, context }
     }
 
     /// Rewrap a precomputed `mailbox` id as a typed peer handle that
@@ -109,6 +141,19 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     pub fn resolve_peer_scoped<Peer: Addressable>(&self, scope: &str, segment: &str) -> WasmActorMailbox<'a, Peer> {
         let node = ActorId::instanced(scope, segment);
         WasmActorMailbox::__new(with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)), self.sender, self.inline)
+    }
+}
+
+impl<R: Addressable, C: Kind> WasmActorMailboxWithContext<'_, '_, R, C> {
+    /// Send a request with the bound context and return the host-minted
+    /// correlation id.
+    #[must_use]
+    pub fn send<K>(&self, payload: &K) -> RequestId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        self.mailbox.send_with_context(payload, self.context)
     }
 }
 

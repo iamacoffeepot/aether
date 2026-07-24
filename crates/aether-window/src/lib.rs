@@ -15,10 +15,10 @@ pub mod kinds;
 pub use aether_kinds::{WindowId, WindowMode};
 pub use kinds::*;
 
-use aether_actor::{WasmActorMailbox, actor};
+use aether_actor::{HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext, actor};
 use aether_data::{Kind, MailboxId};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::NativeActorMailbox;
+use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
 
 const WINDOW_NAMESPACE: &str = "aether.window";
 
@@ -33,143 +33,118 @@ pub struct WindowCapability;
 /// no-window runtime.
 pub use WindowCapability as HeadlessWindowCapability;
 
-/// Sender-side convenience methods for the multi-window request surface.
-pub trait WindowMailboxExt {
-    /// Request every live window in ascending id order.
-    fn list(&self);
-
-    /// Request creation of a new window.
-    fn create(&self, spec: WindowSpec);
-
-    /// Request closure of one explicit window.
-    fn close(&self, window: WindowId);
-
-    /// Change one window's presentation mode.
-    fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>);
-
-    /// Change one window's title.
-    fn set_title(&self, window: WindowId, title: &str);
-
-    /// Bring one window to the foreground.
-    fn focus(&self, window: WindowId);
-
-    /// Ask the platform to schedule one window for redraw.
-    fn request_redraw(&self, window: WindowId);
-
-    /// Subscribe the calling actor to kind `K` for `selector`.
-    fn subscribe<K: Kind>(&self, selector: WindowSelector);
-
-    /// Subscribe an explicit mailbox to kind `K` for `selector`.
-    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId);
-
-    /// Remove the calling actor's kind-`K` subscription for `selector`.
-    fn unsubscribe<K: Kind>(&self, selector: WindowSelector);
-
-    /// Remove an explicit mailbox's kind-`K` subscription for `selector`.
-    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId);
-
-    /// Remove an explicit mailbox from every window-event subscription.
-    fn unsubscribe_all(&self, mailbox: MailboxId);
+trait WindowMailboxForward {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowCapability: HandlesKind<K>,
+        K: Kind;
 }
 
-impl WindowMailboxExt for WasmActorMailbox<'_, WindowCapability> {
+/// Sender-side convenience methods for the multi-window request surface.
+#[allow(private_bounds)]
+pub trait WindowMailboxExt: WindowMailboxForward {
+    /// Request every live window in ascending id order.
     fn list(&self) {
-        self.send(&ListWindows);
+        self.forward(&ListWindows);
     }
 
+    /// Request creation of a new window.
     fn create(&self, spec: WindowSpec) {
-        self.send(&CreateWindow { spec });
+        self.forward(&CreateWindow { spec });
     }
 
+    /// Request closure of one explicit window.
     fn close(&self, window: WindowId) {
-        self.send(&CloseWindow { window });
+        self.forward(&CloseWindow { window });
     }
 
+    /// Change one window's presentation mode.
     fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
-        self.send(&SetWindowMode { window, mode, width, height });
+        self.forward(&SetWindowMode { window, mode, width, height });
     }
 
+    /// Change one window's title.
     fn set_title(&self, window: WindowId, title: &str) {
-        self.send(&SetWindowTitle { window, title: title.to_owned() });
+        self.forward(&SetWindowTitle { window, title: title.to_owned() });
     }
 
+    /// Bring one window to the foreground.
     fn focus(&self, window: WindowId) {
-        self.send(&FocusWindow { window });
+        self.forward(&FocusWindow { window });
     }
 
+    /// Ask the platform to schedule one window for redraw.
     fn request_redraw(&self, window: WindowId) {
-        self.send(&RequestWindowRedraw { window });
+        self.forward(&RequestWindowRedraw { window });
     }
 
+    /// Subscribe the calling actor to kind `K` for `selector`.
     fn subscribe<K: Kind>(&self, selector: WindowSelector) {
-        self.send(&SubscribeWindowSelf { selector, kind: K::ID });
+        self.forward(&SubscribeWindowSelf { selector, kind: K::ID });
     }
 
+    /// Subscribe an explicit mailbox to kind `K` for `selector`.
     fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
-        self.send(&SubscribeWindow { selector, kind: K::ID, mailbox });
+        self.forward(&SubscribeWindow { selector, kind: K::ID, mailbox });
     }
 
+    /// Remove the calling actor's kind-`K` subscription for `selector`.
     fn unsubscribe<K: Kind>(&self, selector: WindowSelector) {
-        self.send(&UnsubscribeWindowSelf { selector, kind: K::ID });
+        self.forward(&UnsubscribeWindowSelf { selector, kind: K::ID });
     }
 
+    /// Remove an explicit mailbox's kind-`K` subscription for `selector`.
     fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
-        self.send(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
+        self.forward(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
     }
 
+    /// Remove an explicit mailbox from every window-event subscription.
     fn unsubscribe_all(&self, mailbox: MailboxId) {
-        self.send(&UnsubscribeAllWindows { mailbox });
+        self.forward(&UnsubscribeAllWindows { mailbox });
+    }
+}
+
+impl<T: WindowMailboxForward> WindowMailboxExt for T {}
+
+impl WindowMailboxForward for WasmActorMailbox<'_, WindowCapability> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
+    }
+}
+
+impl<C: Kind> WindowMailboxForward for WasmActorMailboxWithContext<'_, '_, WindowCapability, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
     }
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl WindowMailboxExt for NativeActorMailbox<'_, WindowCapability> {
-    fn list(&self) {
-        self.send(&ListWindows);
+impl WindowMailboxForward for NativeActorMailbox<'_, WindowCapability> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
     }
+}
 
-    fn create(&self, spec: WindowSpec) {
-        self.send(&CreateWindow { spec });
-    }
-
-    fn close(&self, window: WindowId) {
-        self.send(&CloseWindow { window });
-    }
-
-    fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
-        self.send(&SetWindowMode { window, mode, width, height });
-    }
-
-    fn set_title(&self, window: WindowId, title: &str) {
-        self.send(&SetWindowTitle { window, title: title.to_owned() });
-    }
-
-    fn focus(&self, window: WindowId) {
-        self.send(&FocusWindow { window });
-    }
-
-    fn request_redraw(&self, window: WindowId) {
-        self.send(&RequestWindowRedraw { window });
-    }
-
-    fn subscribe<K: Kind>(&self, selector: WindowSelector) {
-        self.send(&SubscribeWindowSelf { selector, kind: K::ID });
-    }
-
-    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
-        self.send(&SubscribeWindow { selector, kind: K::ID, mailbox });
-    }
-
-    fn unsubscribe<K: Kind>(&self, selector: WindowSelector) {
-        self.send(&UnsubscribeWindowSelf { selector, kind: K::ID });
-    }
-
-    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
-        self.send(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
-    }
-
-    fn unsubscribe_all(&self, mailbox: MailboxId) {
-        self.send(&UnsubscribeAllWindows { mailbox });
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+impl<C: Kind> WindowMailboxForward for NativeActorMailboxWithContext<'_, '_, WindowCapability, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
     }
 }
 
@@ -194,18 +169,20 @@ pub use synthetic::{InjectWindowEvent, SyntheticWindowCapability};
 
 #[cfg(test)]
 mod tests {
-    use super::{WasmActorMailbox, WindowCapability, WindowMailboxExt};
+    use super::{ListWindows, WasmActorMailbox, WasmActorMailboxWithContext, WindowCapability, WindowMailboxExt};
 
     fn assert_facade<T: WindowMailboxExt>() {}
 
     #[test]
     fn neutral_facade_is_available_to_wasm_senders() {
         assert_facade::<WasmActorMailbox<'static, WindowCapability>>();
+        assert_facade::<WasmActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     #[test]
     fn neutral_facade_is_available_to_native_senders() {
         assert_facade::<super::NativeActorMailbox<'static, WindowCapability>>();
+        assert_facade::<super::NativeActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
     }
 }

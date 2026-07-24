@@ -1,4 +1,5 @@
-//! [`NativeActorMailbox`] — actor-typed sender handle for native ctxs.
+//! [`NativeActorMailbox`] and [`NativeActorMailboxWithContext`] — actor-typed
+//! sender handles for native ctxs.
 //!
 //! Issue 665 split the prior parametric `aether_actor::ActorMailbox<'a, R, T>`
 //! into per-side types so the `MailTransport` trait can retire. The
@@ -51,6 +52,24 @@ impl<R> Clone for NativeActorMailbox<'_, R> {
     }
 }
 
+/// A [`NativeActorMailbox`] with one typed request context bound for
+/// subsequent sends.
+///
+/// Built by [`NativeActorMailbox::with_context`]. The underlying mailbox is
+/// copied into the adapter while `context` stays borrowed, so callers can use
+/// capability facades without rebuilding the context at every send.
+pub struct NativeActorMailboxWithContext<'mailbox, 'context, R, C: Kind> {
+    mailbox: NativeActorMailbox<'mailbox, R>,
+    context: &'context C,
+}
+
+impl<R, C: Kind> Copy for NativeActorMailboxWithContext<'_, '_, R, C> {}
+impl<R, C: Kind> Clone for NativeActorMailboxWithContext<'_, '_, R, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<'a, R> NativeActorMailbox<'a, R> {
     /// Not part of the public API; external cap-owned ext facades that
     /// hold only a binding (no in-flight ctx) build a **detached**
@@ -87,6 +106,18 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         aether_data::MailboxId(self.mailbox)
     }
 
+    /// Bind one typed request context to this mailbox.
+    ///
+    /// The returned adapter's [`NativeActorMailboxWithContext::send`] stores
+    /// the context under each send's minted correlation id.
+    #[must_use]
+    pub fn with_context<'context, C: Kind>(
+        &self,
+        context: &'context C,
+    ) -> NativeActorMailboxWithContext<'a, 'context, R, C> {
+        NativeActorMailboxWithContext { mailbox: *self, context }
+    }
+
     /// The transport binding this handle dispatches through. Not part of
     /// the public API; a cap-owned ext facade that composes a
     /// non-trivial id (e.g. a multi-step lineage fold for a grandchild)
@@ -114,6 +145,18 @@ impl<'a, R> NativeActorMailbox<'a, R> {
             self.parent,
             self.root,
         )
+    }
+}
+
+impl<R: Addressable, C: Kind> NativeActorMailboxWithContext<'_, '_, R, C> {
+    /// Send a request with the bound context and return the minted mail id.
+    #[must_use]
+    pub fn send<K>(&self, payload: &K) -> MailId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        self.mailbox.send_with_context(payload, self.context)
     }
 }
 
