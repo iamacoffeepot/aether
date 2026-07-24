@@ -117,13 +117,14 @@ path by joining an entry back under the prefix you listed.
 **Replies carry domain echoes and mail correlation.** A handler dispatches on
 the reply *kind*, which on its own erases *which* request a given reply answers.
 Namespace operations echo `namespace` and `path` (`prefix` for `list`), while
-`copy` echoes `from` and `to`, restoring readable domain context. Those fields
-distinguish ordinary requests; duplicate concurrent operations against the
-same domain address should use the tracked request id and `ctx.in_reply_to()`
-rather than arrival order. For `write` and `delete`, whose `Ok` arms add nothing
-else, that echo *is* the result: the ack tells you a specific path landed or was
-removed. The one deliberate omission is the write bytes — a `write` reply doesn't
-echo them back, so persisting a megabyte still produces a small reply.
+`copy` echoes `from` and `to`, preserving readable domain context. Per
+[ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md),
+those fields are informational rather than a duplicate-safe demultiplexing key.
+Bind a typed context with `.with_context(&context)` before sending and recover it
+once with `ctx.take_context::<Context>()` in the reply handler. For `write` and
+`delete`, whose `Ok` arms add nothing else, the echo still describes what landed
+or was removed. The one deliberate omission is the write bytes — a `write` reply
+doesn't echo them back, so persisting a megabyte still produces a small reply.
 
 **`FsError` is one of four shapes.** `NotFound` (no such file or directory);
 `Forbidden` (a read-only namespace, or a path rejected by the adapter's lexical
@@ -142,7 +143,7 @@ unaddressed name.
 **From a component.** Address the cap by type and call the operation:
 
 ```rust
-ctx.actor::<FsCapability>().write("save", "slot1.bin", &bytes);
+ctx.actor::<FsCapability>().write("save", "slot1.bin", bytes);
 ctx.actor::<FsCapability>().read("save", "slot1.bin");
 ```
 
@@ -153,17 +154,34 @@ receive like any other kind:
 #[handler::single]
 fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
     match result {
-        ReadResult::Ok { path, bytes, .. } => { /* path tells you which read */ }
-        ReadResult::Err { path, error, .. } => { /* branch on error */ }
+        ReadResult::Ok { path, bytes, .. } => { /* path supplies readable domain context */ }
+        ReadResult::Err { path, error, .. } => { /* path supplies readable domain context */ }
     }
 }
 ```
 
-Because the reply echoes `namespace` + `path`, a component with several reads
-outstanding tells them apart by the echoed fields — match them against whatever
-state you were waiting to fill. (The request and reply kinds live in
-`aether-fs/src/kinds.rs`; you can also `send` a `Read` / `Write` kind to `aether.fs`
-directly instead of going through the facade.)
+The echoed `namespace` + `path` fields make logs and MCP replies readable, but
+they do not uniquely identify duplicate concurrent reads. For duplicate-safe
+one-shot matching, derive `Kind` for a small context, bind it once, and take it
+from the matching reply:
+
+```rust
+let context = FontLoadContext { source: ctx.reply_target() };
+ctx.actor::<FsCapability>()
+    .with_context(&context)
+    .read(namespace, path);
+
+// In the ReadResult handler:
+let Some(context) = ctx.take_context::<FontLoadContext>() else {
+    return;
+};
+```
+
+The contextual facade remains fire-and-forget. If the caller also needs the
+minted `RequestId` or `MailId`, use the adapter's generic
+`.with_context(&context).send(&Read { .. })` method directly. (The request and
+reply kinds live in `aether-fs/src/kinds.rs`; base mailboxes can likewise
+`send` a `Read` / `Write` kind directly instead of using the facade.)
 
 **From an agent over MCP.** `send_mail` rides settlement and hands back the
 correlated reply, so a read is a single call: mail `aether.fs.read` to `aether.fs`

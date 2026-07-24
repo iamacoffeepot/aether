@@ -31,7 +31,7 @@
 //! the guest holds only the small bookkeeping contexts between legs.
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_fs::{FsCapability, Read, ReadResult, Write, WriteResult};
+use aether_fs::{FsCapability, FsMailboxExt, ReadResult, WriteResult};
 use aether_http::{Fetch, FetchResult, HttpCapability, HttpError, HttpHeader, HttpMethod};
 use aether_kinds::Usage;
 use serde::{Deserialize, Serialize};
@@ -447,9 +447,8 @@ impl GeminiComponent {
     /// Banana request from the accumulated bytes and dispatch the fetch.
     fn step_reference_reads(&self, ctx: &mut WasmCtx<'_, Manual>, read_ctx: ReadContext) {
         if let Some((next, rest)) = read_ctx.remaining_paths.split_first() {
-            let read = Read { namespace: String::from(SAVE_NAMESPACE), path: next.clone() };
             let stash = ReadContext { remaining_paths: rest.to_vec(), ..read_ctx };
-            let _ = ctx.actor::<FsCapability>().send_with_context(&read, &stash);
+            ctx.actor::<FsCapability>().with_context(&stash).read(SAVE_NAMESPACE, next.clone());
             return;
         }
 
@@ -501,13 +500,12 @@ impl GeminiComponent {
             parsed.grounding.map(|(search_queries, source_urls)| GroundingMetadata { search_queries, source_urls });
 
         let path = self.next_name(request_id, "png");
-        let write = Write { namespace: String::from(SAVE_NAMESPACE), path, bytes: parsed.bytes };
         let write_ctx = WriteContext {
             reply,
             request_id,
             flow: WriteFlow::Nanobanana { model_used, thought_signature, grounding },
         };
-        let _ = ctx.actor::<FsCapability>().send_with_context(&write, &write_ctx);
+        ctx.actor::<FsCapability>().with_context(&write_ctx).write(SAVE_NAMESPACE, path, parsed.bytes);
     }
 
     /// Parse the Lyria response into clips and begin staging them one at a time.
@@ -543,10 +541,9 @@ impl GeminiComponent {
     ) {
         let clip = remaining_clips.remove(0);
         let path = self.next_name(request_id, "wav");
-        let write = Write { namespace: String::from(SAVE_NAMESPACE), path, bytes: clip };
         let write_ctx =
             WriteContext { reply, request_id, flow: WriteFlow::Lyria { model_used, remaining_clips, acc_paths } };
-        let _ = ctx.actor::<FsCapability>().send_with_context(&write, &write_ctx);
+        ctx.actor::<FsCapability>().with_context(&write_ctx).write(SAVE_NAMESPACE, path, clip);
     }
 
     /// Reply the flow's `_result::Err` to the original caller (if any).

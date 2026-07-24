@@ -23,7 +23,7 @@ use aether_actor::{
     WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_data::KindId;
-use aether_fs::{FsCapability, Read, ReadResult};
+use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use wasmi::Engine;
 
 use crate::envelope::EffectTarget;
@@ -130,13 +130,12 @@ impl WasmActor for BehaviorHost {
         }
 
         if let ScriptSource::FsRef { namespace, path } = self.script_source.clone() {
-            let read = Read { namespace: namespace.clone(), path: path.clone() };
             let context = ScriptLoadContext {
                 reply: None,
                 origin: ScriptLoadOrigin::Boot,
-                source: ScriptSource::FsRef { namespace, path },
+                source: ScriptSource::FsRef { namespace: namespace.clone(), path: path.clone() },
             };
-            let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+            ctx.actor::<FsCapability>().with_context(&context).read(namespace, path);
         }
 
         if self.slot.is_some() {
@@ -187,13 +186,12 @@ impl WasmActor for BehaviorHost {
     #[allow(clippy::needless_pass_by_value)]
     #[handler::manual]
     fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: LoadScript) {
-        let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
         let context = ScriptLoadContext {
             reply: ctx.reply_target(),
             origin: ScriptLoadOrigin::Runtime,
-            source: ScriptSource::FsRef { namespace: msg.namespace, path: msg.path },
+            source: ScriptSource::FsRef { namespace: msg.namespace.clone(), path: msg.path.clone() },
         };
-        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+        ctx.actor::<FsCapability>().with_context(&context).read(msg.namespace, msg.path);
     }
 
     /// The fs read reply for a `load_script` (or the boot `FsRef` fetch). Swaps
