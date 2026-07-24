@@ -50,7 +50,7 @@ class ResolverFixture:
 
         files = {
             ".agents/skills/approve/SKILL.md": "approve\n",
-            ".github/approval-policy.yml": policy,
+            "bloomery/approval-policy.yml": policy,
             "Cargo.toml": "[workspace]\n",
             "Cargo.lock": "# lock\n",
             "crates/aether-capabilities/src/lib.rs": "cap\n",
