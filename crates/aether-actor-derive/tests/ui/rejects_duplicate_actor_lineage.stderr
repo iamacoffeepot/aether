@@ -1,0 +1,5 @@
+error: duplicate identical `child_of` declaration in #[actor]
+ --> tests/ui/rejects_duplicate_actor_lineage.rs:5:27
+  |
+5 | #[actor(child_of(Parent), child_of(Parent))]
+  |                           ^^^^^^^^^^^^^^^^

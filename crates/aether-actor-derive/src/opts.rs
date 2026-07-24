@@ -1,6 +1,8 @@
 use proc_macro2::TokenStream as TokenStream2;
+use quote::ToTokens;
 use syn::meta;
 use syn::parse::Parser;
+use syn::token::Paren;
 
 #[derive(Default, Clone)]
 pub struct ActorOpts {
@@ -24,6 +26,12 @@ pub struct ActorOpts {
     /// `runtime`. Only consulted on the struct-hosted path; the impl-hosted
     /// path ignores it.
     pub runtime_module: Option<syn::Path>,
+    /// ADR-0166: this actor may be placed at the actor-tree root.
+    pub root: bool,
+    /// ADR-0166: actor types that may directly parent this actor. Repetition
+    /// is intentional so one child identity can be permitted beneath several
+    /// logical parents.
+    pub child_of: Vec<syn::TypePath>,
 }
 
 pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -51,6 +59,32 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             let lit: syn::LitStr = value.parse()?;
             opts.runtime_feature = Some(lit.value());
             Ok(())
+        } else if meta.path.is_ident("root") {
+            if opts.root {
+                return Err(meta.error("duplicate `root` declaration in #[actor]"));
+            }
+            if meta.input.peek(Paren) || meta.input.peek(syn::Token![=]) {
+                return Err(meta.error("`root` takes no arguments"));
+            }
+            opts.root = true;
+            Ok(())
+        } else if meta.path.is_ident("child_of") {
+            let content;
+            syn::parenthesized!(content in meta.input);
+            let parent: syn::TypePath = content.parse().map_err(|_| {
+                content.error("`child_of` expects exactly one actor type path, for example `child_of(Manager)`")
+            })?;
+            if !content.is_empty() {
+                return Err(content.error(
+                    "`child_of` expects exactly one actor type path; repeat `child_of(...)` for another parent",
+                ));
+            }
+            let parent_tokens = parent.to_token_stream().to_string();
+            if opts.child_of.iter().any(|existing| existing.to_token_stream().to_string() == parent_tokens) {
+                return Err(meta.error("duplicate identical `child_of` declaration in #[actor]"));
+            }
+            opts.child_of.push(parent);
+            Ok(())
         } else if !meta.input.peek(syn::Token![=]) {
             // ADR-0123: a bare positional module path names the runtime module
             // the struct-hosted `#[actor]` reads off disk (default `runtime`) —
@@ -69,7 +103,8 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `runtime_feature = \"name\"`, or a bare runtime module path",
+                 `root`, `child_of(TypePath)`, `runtime_feature = \"name\"`, \
+                 or a bare runtime module path",
             ))
         }
     });

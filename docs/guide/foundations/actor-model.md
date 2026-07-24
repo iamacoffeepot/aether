@@ -4,7 +4,7 @@
 > components are one model, not two) with [ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md) (the lifecycle stages)
 > and [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the `#[actor]` macro), extended by [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (a wasm module exports several
 > actor types), [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its siblings), and [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (actor
-> identity and addressing). This model is **stable**; it's the
+> identity and addressing), plus [ADR-0166](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0166-typed-actor-lineage-and-abbreviated-external-addresses.md) (declared placement permissions). This model is **stable**; it's the
 > spine everything else hangs off. Signatures here were read from the current SDK
 > (`aether-actor`) and runtime (`aether-substrate`).
 
@@ -161,6 +161,35 @@ compiles only if that actor actually handles the payload's kind, and both the
 mailbox id and kind id resolve at compile time. The handler takes the decoded mail
 **by value** and gets `&mut self` because nothing else can touch the state
 concurrently.
+
+### Declaring placement
+
+Actor identities declare where they may legally appear with `root` and
+`child_of(...)` arguments on the same `#[actor]` attribute:
+
+```rust
+#[actor(singleton, root)]
+pub struct ComponentManager;
+
+#[actor(
+    instanced,
+    child_of(ComponentManager),
+    child_of(TestComponentManager),
+)]
+pub struct ComponentWorker;
+```
+
+`root` implements the `Root` marker: the actor may be placed without an actor
+parent. Each `child_of(Parent)` implements `ChildOf<Parent>` and records one
+permitted direct parent edge. The argument may be repeated for distinct parent
+types, and an actor may be both a root and a permitted child.
+
+These are placement permissions, not runtime facts. They do not say that an
+instance is live, that a parent owns or supervises a child, or that the actor
+has singleton versus instanced cardinality. The actor's own
+`Addressable::NAMESPACE` remains the only namespace declaration; generated
+native inventory and wasm manifest records derive names and type tags from the
+actor types rather than copying string literals.
 
 ## Reply classes
 

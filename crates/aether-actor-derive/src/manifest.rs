@@ -3,6 +3,7 @@ use quote::quote;
 use syn::Type;
 
 use crate::handler_parse::{FallbackFn, HandlerClass, HandlerFn};
+use crate::opts::ActorOpts;
 
 //noinspection DuplicatedCode -- proc-macro crates intentionally do not depend on one another for this leaf helper.
 fn to_screaming_snake_case(s: &str) -> String {
@@ -188,6 +189,111 @@ pub fn build_inputs_manifest_consts(
         pub const __AETHER_INPUTS_MANIFEST: [u8; Self::__AETHER_INPUTS_MANIFEST_LEN] = {
             let mut out = [0u8; Self::__AETHER_INPUTS_MANIFEST_LEN];
             let mut pos: usize = 0usize;
+            #(#copy_blocks)*
+            let _ = pos;
+            out
+        };
+    }
+}
+
+/// Emit hidden per-actor lineage bytes as associated consts. As with the
+/// inputs manifest, `#[actor]` owns only const data; `export!` is the sole
+/// custom-section retention point so metadata from transitive wasm rlibs
+/// cannot stack in the final module.
+pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> TokenStream2 {
+    let actor_namespace = quote! { <#self_ty as ::aether_actor::Addressable>::NAMESPACE };
+    let actor_tag = quote! {
+        ::aether_actor::__macro_internals::ActorId::singleton(#actor_namespace).0
+    };
+    let mut len_terms = Vec::new();
+    let mut copy_blocks = Vec::new();
+
+    if opts.root {
+        len_terms.push(quote! {
+            1 + ::aether_actor::__macro_internals::actor_lineage_root_len(
+                #actor_tag,
+                #actor_namespace,
+            )
+        });
+        copy_blocks.push(quote! {
+            {
+                const REC_LEN: usize =
+                    ::aether_actor::__macro_internals::actor_lineage_root_len(
+                        #actor_tag,
+                        #actor_namespace,
+                    );
+                const REC_BYTES: [u8; REC_LEN] =
+                    ::aether_actor::__macro_internals::write_actor_lineage_root::<REC_LEN>(
+                        #actor_tag,
+                        #actor_namespace,
+                    );
+                out[pos] = ::aether_actor::__macro_internals::ACTOR_LINEAGE_SECTION_VERSION;
+                pos += 1;
+                let mut index = 0;
+                while index < REC_LEN {
+                    out[pos] = REC_BYTES[index];
+                    pos += 1;
+                    index += 1;
+                }
+            }
+        });
+    }
+
+    for parent in &opts.child_of {
+        let parent_namespace = quote! { <#parent as ::aether_actor::Addressable>::NAMESPACE };
+        let parent_tag = quote! {
+            ::aether_actor::__macro_internals::ActorId::singleton(#parent_namespace).0
+        };
+        len_terms.push(quote! {
+            1 + ::aether_actor::__macro_internals::actor_lineage_child_len(
+                #parent_tag,
+                #actor_tag,
+                #parent_namespace,
+                #actor_namespace,
+            )
+        });
+        copy_blocks.push(quote! {
+            {
+                const REC_LEN: usize =
+                    ::aether_actor::__macro_internals::actor_lineage_child_len(
+                        #parent_tag,
+                        #actor_tag,
+                        #parent_namespace,
+                        #actor_namespace,
+                    );
+                const REC_BYTES: [u8; REC_LEN] =
+                    ::aether_actor::__macro_internals::write_actor_lineage_child::<REC_LEN>(
+                        #parent_tag,
+                        #actor_tag,
+                        #parent_namespace,
+                        #actor_namespace,
+                    );
+                out[pos] = ::aether_actor::__macro_internals::ACTOR_LINEAGE_SECTION_VERSION;
+                pos += 1;
+                let mut index = 0;
+                while index < REC_LEN {
+                    out[pos] = REC_BYTES[index];
+                    pos += 1;
+                    index += 1;
+                }
+            }
+        });
+    }
+
+    let len_expr = if len_terms.is_empty() {
+        quote! { 0usize }
+    } else {
+        quote! { #(#len_terms)+* }
+    };
+
+    quote! {
+        #[doc(hidden)]
+        pub const __AETHER_LINEAGE_MANIFEST_LEN: usize = #len_expr;
+
+        #[doc(hidden)]
+        pub const __AETHER_LINEAGE_MANIFEST: [u8; Self::__AETHER_LINEAGE_MANIFEST_LEN] = {
+            let mut out = [0u8; Self::__AETHER_LINEAGE_MANIFEST_LEN];
+            let mut pos = 0usize;
             #(#copy_blocks)*
             let _ = pos;
             out

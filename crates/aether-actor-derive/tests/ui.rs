@@ -19,6 +19,9 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/accepts_minimal_actor.rs");
+    t.pass("tests/ui/accepts_actor_lineage_wasm.rs");
+    t.compile_fail("tests/ui/rejects_duplicate_actor_lineage.rs");
+    t.compile_fail("tests/ui/rejects_malformed_actor_lineage.rs");
     // ADR-0112: the manual reply class compiles. The native manual-class
     // behavior is covered by the `manual_handler_replies_through_ctx`
     // integration test in `aether-substrate` (this proc-macro crate has no

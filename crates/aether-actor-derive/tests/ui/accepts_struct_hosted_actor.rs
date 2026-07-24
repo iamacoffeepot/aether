@@ -5,7 +5,7 @@
 //! markers plus the gap-3 `include_bytes!` rebuild edge — all of which must
 //! compile. The `Ping` kind the harvest lifts must resolve in this bin's scope.
 
-use aether_actor::actor;
+use aether_actor::{Addressable, ChildOf, One, Root, actor};
 
 #[repr(C)]
 #[derive(
@@ -21,7 +21,19 @@ struct Ping {
     seq: u32,
 }
 
-#[actor(singleton, rt_ok)]
+pub struct Parent;
+
+impl Addressable for Parent {
+    const NAMESPACE: &'static str = "test.struct_hosted_parent";
+    type Resolver = One;
+}
+
+#[actor(singleton, root, child_of(Parent), rt_ok)]
 pub struct Cap;
 
-fn main() {}
+fn main() {
+    fn root<T: Root>() {}
+    fn child<T: ChildOf<Parent>>() {}
+    root::<Cap>();
+    child::<Cap>();
+}

@@ -56,7 +56,7 @@ use alloc::string::{String, ToString};
 
 use crate::__inventory::DescriptorEntry;
 use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
-use crate::ids::KindId;
+use crate::ids::{ActorId, KindId};
 use crate::tagged_id::{Tag, with_tag};
 use crate::transform::TransformEntry;
 
@@ -202,6 +202,44 @@ inventory::collect!(HandlerEntry);
 /// Iterate every native [`HandlerEntry`] collected at link time.
 pub fn handler_entries() -> impl Iterator<Item = &'static HandlerEntry> {
     inventory::iter::<HandlerEntry>.into_iter()
+}
+
+/// A native actor identity that may be placed without an actor parent
+/// (ADR-0166). Generated submissions derive both fields from the actor's
+/// `Addressable::NAMESPACE`.
+pub struct RootEntry {
+    /// The actor-type tag, `ActorId::singleton(namespace)`.
+    pub actor: ActorId,
+    /// The actor-owned namespace.
+    pub namespace: &'static str,
+}
+
+inventory::collect!(RootEntry);
+
+/// A native actor placement permission collected at link time (ADR-0166).
+/// Repeated entries naturally represent a child that permits several parent
+/// identities; they are anonymous facts rather than a named topology.
+pub struct ChildEntry {
+    /// The logical parent actor's type tag.
+    pub parent: ActorId,
+    /// The logical child actor's type tag.
+    pub child: ActorId,
+    /// The parent actor's owned namespace.
+    pub parent_namespace: &'static str,
+    /// The child actor's owned namespace.
+    pub child_namespace: &'static str,
+}
+
+inventory::collect!(ChildEntry);
+
+/// Iterate every native [`RootEntry`] collected at link time.
+pub fn root_entries() -> impl Iterator<Item = &'static RootEntry> {
+    inventory::iter::<RootEntry>.into_iter()
+}
+
+/// Iterate every native [`ChildEntry`] collected at link time.
+pub fn child_entries() -> impl Iterator<Item = &'static ChildEntry> {
+    inventory::iter::<ChildEntry>.into_iter()
 }
 
 /// Map a byte-domain prefix to the ADR-0064 [`Tag`] a reconstructed id

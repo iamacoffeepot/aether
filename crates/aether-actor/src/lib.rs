@@ -64,8 +64,8 @@ pub use local::Local;
 pub use model::ctx::{Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
-    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Singleton, Subname, validate_namespace_segment,
+    Actor, Addressable, ChildOf, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
+    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Root, Singleton, Subname, validate_namespace_segment,
 };
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
@@ -117,11 +117,14 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_data::{Kind, Schema, mailbox_id_from_name};
+    pub use aether_data::{ActorId, Kind, Schema, mailbox_id_from_name};
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.
-    pub use aether_data::{INPUTS_SECTION_VERSION, KINDS_SECTION_VERSION, LABELS_SECTION_VERSION};
+    pub use aether_data::{
+        ACTOR_LINEAGE_SECTION_VERSION, INPUTS_SECTION_VERSION, KINDS_SECTION_VERSION, LABELS_SECTION_VERSION,
+        actor_lineage_child_len, actor_lineage_root_len, write_actor_lineage_child, write_actor_lineage_root,
+    };
     // ADR-0096: the multi-actor `export!` arm stores the instance as
     // `Box<dyn ErasedWasmActor>`; re-export `Box` so the emitted code
     // doesn't depend on the guest crate's prelude exposing `alloc`.

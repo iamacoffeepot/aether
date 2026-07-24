@@ -21,9 +21,12 @@
 // `&mut self` to match the dispatch ABI but don't read state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Addressable, Manual, One, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
-use aether_data::{INPUTS_SECTION_VERSION, InputsRecord, ReplyContract, wire};
+use aether_data::{
+    ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, INPUTS_SECTION_VERSION, InputsRecord, ReplyContract,
+    wire,
+};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -61,7 +64,21 @@ struct Poke {
 // component in the workspace.
 struct ManifestProbe;
 
-#[actor]
+struct FirstParent;
+
+impl Addressable for FirstParent {
+    const NAMESPACE: &'static str = "manifest.parent.first";
+    type Resolver = One;
+}
+
+struct SecondParent;
+
+impl Addressable for SecondParent {
+    const NAMESPACE: &'static str = "manifest.parent.second";
+    type Resolver = One;
+}
+
+#[actor(root, child_of(FirstParent), child_of(SecondParent))]
 impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
@@ -94,6 +111,22 @@ impl WasmActor for ManifestProbe {
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
     fn unwire(&mut self, _ctx: &mut WasmCtx<'_>) {}
+}
+
+fn parse_lineage_section(bytes: &[u8]) -> Vec<ActorLineageRecord> {
+    let mut out = Vec::new();
+    let mut cursor = bytes;
+    while !cursor.is_empty() {
+        assert_eq!(
+            cursor[0], ACTOR_LINEAGE_SECTION_VERSION,
+            "every lineage record must start with the section version byte"
+        );
+        let (record, rest) =
+            wire::take_from_bytes::<ActorLineageRecord>(&cursor[1..]).expect("wire decode of lineage record failed");
+        out.push(record);
+        cursor = rest;
+    }
+    out
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
@@ -174,5 +207,40 @@ fn manifest_const_round_trips_to_expected_records() {
         tick_doc.as_deref(),
         Some("Increments the tick counter."),
         "rustdoc # Agent body should land on the Tick handler"
+    );
+}
+
+#[test]
+fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
+    let records = parse_lineage_section(&ManifestProbe::__AETHER_LINEAGE_MANIFEST);
+    let actor = ActorId::singleton(ManifestProbe::NAMESPACE).0;
+    let first = ActorId::singleton(FirstParent::NAMESPACE).0;
+    let second = ActorId::singleton(SecondParent::NAMESPACE).0;
+
+    assert_eq!(
+        records,
+        vec![
+            ActorLineageRecord::Root { actor, namespace: ManifestProbe::NAMESPACE.into() },
+            ActorLineageRecord::Child {
+                parent: first,
+                child: actor,
+                parent_namespace: FirstParent::NAMESPACE.into(),
+                child_namespace: ManifestProbe::NAMESPACE.into(),
+            },
+            ActorLineageRecord::Child {
+                parent: second,
+                child: actor,
+                parent_namespace: SecondParent::NAMESPACE.into(),
+                child_namespace: ManifestProbe::NAMESPACE.into(),
+            },
+        ]
+    );
+
+    let expected_root = ActorLineageRecord::Root { actor, namespace: ManifestProbe::NAMESPACE.into() };
+    let runtime = wire::to_vec(&expected_root).expect("runtime lineage encoding");
+    assert_eq!(
+        &ManifestProbe::__AETHER_LINEAGE_MANIFEST[1..=runtime.len()],
+        runtime,
+        "const encoder must match the runtime aether-wire vocabulary"
     );
 }

@@ -304,7 +304,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 self_ty,
                 generics,
                 namespace_expr,
-                opts.cardinality,
+                opts,
                 &handler_kinds,
                 fallback.is_some(),
                 // The name-inventory entry is split-only (an un-split cap
@@ -729,6 +729,68 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 /// reply kind read off the handler's return type (`None` for `-> ()`).
 type HandlerMarker = (Type, Option<Type>);
 
+/// Emit ADR-0166 placement marker impls and their native link-time inventory
+/// records. Generic actor identities can carry marker impls but cannot submit
+/// a monomorphic inventory static.
+fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &ActorOpts) -> TokenStream2 {
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let root_impl = opts.root.then(|| {
+        quote! {
+            impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
+        }
+    });
+    let child_impls = opts.child_of.iter().map(|parent| {
+        quote! {
+            impl #impl_generics ::aether_actor::ChildOf<#parent>
+                for #self_ty #where_clause {}
+        }
+    });
+    let inventory = if generics.params.is_empty() {
+        let root_entry = opts.root.then(|| {
+            quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::RootEntry {
+                        actor: ::aether_data::ActorId::singleton(
+                            <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                        ),
+                        namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                    }
+                }
+            }
+        });
+        let child_entries = opts.child_of.iter().map(|parent| {
+            quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::ChildEntry {
+                        parent: ::aether_data::ActorId::singleton(
+                            <#parent as ::aether_actor::Addressable>::NAMESPACE,
+                        ),
+                        child: ::aether_data::ActorId::singleton(
+                            <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                        ),
+                        parent_namespace: <#parent as ::aether_actor::Addressable>::NAMESPACE,
+                        child_namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                    }
+                }
+            }
+        });
+        quote! {
+            #root_entry
+            #(#child_entries)*
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        #root_impl
+        #(#child_impls)*
+        #inventory
+    }
+}
+
 /// Emit the always-on native addressing markers shared by the impl-hosted
 /// `#[actor]` path (ADR-0122) and the struct-hosted one (ADR-0123): the
 /// `Addressable` impl (`NAMESPACE` + the cardinality resolver), one
@@ -743,7 +805,7 @@ fn emit_native_identity_markers(
     self_ty: &Type,
     generics: &syn::Generics,
     namespace_expr: &Expr,
-    cardinality: Option<ActorCardinality>,
+    opts: &ActorOpts,
     handler_kinds: &[HandlerMarker],
     has_fallback: bool,
     emit_name_entry: bool,
@@ -752,7 +814,7 @@ fn emit_native_identity_markers(
 
     // ADR-0119: cardinality picks the resolver — `One` (default / `singleton`)
     // or `Many` (`instanced`). `Singleton` / `Instanced` derive from it.
-    let resolver_ty = if matches!(cardinality, Some(ActorCardinality::Instanced)) {
+    let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! { ::aether_actor::Many }
     } else {
         quote! { ::aether_actor::One }
@@ -765,6 +827,7 @@ fn emit_native_identity_markers(
             type Resolver = #resolver_ty;
         }
     };
+    let lineage_markers = emit_native_lineage_markers(self_ty, generics, opts);
 
     // Issue 576 + issue 603: a fallback-only (true catch-all) cap emits a single
     // blanket `impl<K: Kind> HandlesKind<K>` so any typed
@@ -798,7 +861,7 @@ fn emit_native_identity_markers(
     // transport build but never the wasm header build.
     let name_entry = if !emit_name_entry {
         quote! {}
-    } else if matches!(cardinality, Some(ActorCardinality::Instanced)) {
+    } else if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! {
             #[cfg(not(target_family = "wasm"))]
             ::aether_data::name_inventory::inventory::submit! {
@@ -851,9 +914,9 @@ fn emit_native_identity_markers(
     } else {
         quote! {}
     };
-
     quote! {
         #actor_impl
+        #lineage_markers
         #(#handles_kind_impls)*
         #name_entry
         #handler_inventory
@@ -894,7 +957,7 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
         &self_ty,
         &item.generics,
         &namespace_expr,
-        opts.cardinality,
+        opts,
         &handler_kinds,
         has_fallback,
         // The struct-hosted form is always a split identity, so it always
