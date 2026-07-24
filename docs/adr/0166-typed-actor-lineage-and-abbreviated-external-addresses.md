@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-24
 - **Accepted:** 2026-07-24
+- **Last amended:** 2026-07-24
 
 ## Context
 
@@ -203,6 +204,33 @@ Wasm sibling spawn applies the same rule to exported actor identities. Dynamic
 by-tag spawn validates against the relationship metadata described below
 instead of bypassing the typed rule.
 
+**Reusable Wasm module children.** Every Wasm actor is physically embedded
+behind the embedding-host class through its `Embedded` or `EmbeddedMany`
+resolver. That physical address rule, including its `aether.embedded` segment,
+is distinct from permission to be spawned beneath another logical Wasm actor.
+Exact guest relationships use `ChildOf<P>` normally. A reusable actor library
+may instead declare `#[actor(composable)]`, which implements `ModuleChild` and
+supplies `ChildOf<P>` for every `P: WasmActor`. The permission is confined to
+actors executing from one resident module; it is not native placement,
+cross-module loading, ownership, supervision, liveness, or security
+isolation. This is an application-correctness contract inside one resident
+module, not hostile isolation inside a shared Store.
+
+`composable` is valid only for an instanced Wasm actor and is mutually
+exclusive with explicit `child_of(...)` declarations on that actor. The Wasm
+lineage section records `ActorLineageRecord::ModuleChild { child, namespace }`
+separately from exact `Child` edges. Typed spawn retains the
+`C: ChildOf<P> + Instanced` bound and runtime parent-tag check. Dynamic by-tag
+spawn validates exported membership, generated instanced cardinality, and the
+generated exact-or-module-child fact before allocating an alias or staging a
+detached spawn.
+
+`Addressable::NAMESPACE` remains the logical actor type key.
+`aether.embedded` remains owned by the resolver and never becomes a prefix
+inside actor namespace declarations. A loaded module entry is embedded, not an
+actor-tree `Root`; `export!` membership and load selection control entry
+placement independently.
+
 ### 4. The macro emits anonymous lineage metadata
 
 `#[actor(root)]` and `#[actor(child_of(...))]` emit discoverable records
@@ -358,6 +386,9 @@ smaller root/child path is working.
   evolve without a wire migration.
 - The same model fits component hosts, per-window actors, component trees,
   session actors, and other nested capabilities.
+- Reusable Wasm actor libraries can remain below their assembly crates:
+  same-module composition no longer forces reverse dependencies, copied parent
+  namespaces, or fake adapter identities.
 
 ### Negative
 
@@ -373,6 +404,10 @@ smaller root/child path is working.
 - The initial child-resolution surface covers the instanced children supported
   by current spawn APIs. A true keyless singleton beneath a native parent
   requires a relative singleton resolver and a deliberate extension.
+- A `ModuleChild` deliberately permits more parents than an exact
+  `ChildOf<P>` edge. It cannot contribute a globally exact external
+  abbreviation edge, and actors needing restricted topology must use exact
+  declarations.
 
 ### Neutral and follow-on
 
@@ -420,6 +455,17 @@ smaller root/child path is working.
   types.** Rejected by Rust's orphan rules and by the semantic concern: that
   would patch placement policy onto identities whose owners did not declare
   it. A local adapter identity is the explicit composition escape hatch.
+- **Encode embedding or parent scope inside `NAMESPACE`.** Rejected because
+  `NAMESPACE` is the logical actor type key while the resolver owns physical
+  placement. Combining them changes type tags across placements, breaks
+  multi-parent reuse, and duplicates `EMBEDDED_SCOPE`.
+- **Create adapter parent identities in every lower-level child crate.**
+  Rejected because the adapters exist only to invert Cargo dependencies,
+  either duplicate or forward higher-level namespaces, and turn a reusable
+  module permission into fictional exact topology.
+- **Treat every Wasm actor as an unrestricted module child.** Rejected because
+  physical embedding is universal but logical composition is not. Exact
+  application actors should still fail to compile beneath undeclared parents.
 
 ## Related
 
