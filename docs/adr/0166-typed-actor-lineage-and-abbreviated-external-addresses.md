@@ -218,8 +218,10 @@ module, not hostile isolation inside a shared Store.
 
 `composable` is valid only for an instanced Wasm actor and is mutually
 exclusive with explicit `child_of(...)` declarations on that actor. The Wasm
-lineage section records `ActorLineageRecord::ModuleChild { child, namespace }`
-separately from exact `Child` edges. Typed spawn retains the
+lineage section records
+`ActorLineageRecord::ModuleChild { child, child_namespace }` separately from
+exact `Child` edges and bumps `ACTOR_LINEAGE_SECTION_VERSION`; malformed or
+version-mismatched metadata fails closed. Typed spawn retains the
 `C: ChildOf<P> + Instanced` bound and runtime parent-tag check. Dynamic by-tag
 spawn validates exported membership, generated instanced cardinality, and the
 generated exact-or-module-child fact before allocating an alias or staging a
@@ -229,7 +231,8 @@ detached spawn.
 `aether.embedded` remains owned by the resolver and never becomes a prefix
 inside actor namespace declarations. A loaded module entry is embedded, not an
 actor-tree `Root`; `export!` membership and load selection control entry
-placement independently.
+placement independently. `ModuleChild` supplies no globally exact parent edge,
+so only exact `Root` and `Child` records participate in external abbreviation.
 
 ### 4. The macro emits anonymous lineage metadata
 
