@@ -36,7 +36,7 @@ mod kinds;
 pub use kinds::*;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_fs::{FsCapability, Read, ReadResult};
+use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
@@ -142,15 +142,14 @@ impl WasmActor for MeshViewer {
     #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
-        let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
         let context = MeshLoadContext { reply: ctx.reply_target(), namespace: msg.namespace, path: msg.path };
         tracing::info!(
             target: "aether_kit_commons",
-            namespace = %read.namespace,
-            path = %read.path,
+            namespace = %context.namespace,
+            path = %context.path,
             "load requested; issuing read",
         );
-        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+        ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the request

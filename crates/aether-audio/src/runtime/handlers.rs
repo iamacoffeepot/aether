@@ -4,14 +4,19 @@ use aether_actor::OutboundReply;
 
 use super::{
     AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
-    FsCapability, Manual, NativeCtx, Read, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
+    FsCapability, Manual, NativeCtx, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
     TrackDecodeContext, sender_mailbox_id,
 };
+// Keep the runtime trampoline's existing `Read` re-export live after the
+// operation sites move from raw request construction to `FsMailboxExt`.
+#[allow(unused_imports)]
+use super::Read as _;
 use crate::kinds::{
     LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule, ScheduleResult,
     SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult,
     StopTrack,
 };
+use aether_fs::FsMailboxExt;
 
 impl AudioCapabilityState {
     pub fn handle_note_on(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
@@ -161,8 +166,7 @@ impl AudioCapabilityState {
         // where `on_read_result` recovers this request context. Keeping
         // the read on the fs cap means the audio cap never grows a second
         // namespace registry (ADR-0103 §2).
-        let read = Read { namespace: mail.namespace, path: mail.path };
-        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+        ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
     }
 
     pub fn handle_read_result(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
@@ -277,8 +281,7 @@ impl AudioCapabilityState {
         // Forward the `.sfz` read to the single fs resolver (ADR-0041);
         // the `ReadResult` routes back to `on_read_result`, which parses
         // it and fans out the sample reads (ADR-0103 §2/§5).
-        let read = Read { namespace: mail.namespace, path: mail.path };
-        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+        ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
     }
 
     pub fn handle_instrument_assembled(

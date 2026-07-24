@@ -19,6 +19,8 @@ pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx,
 pub use aether_substrate::chassis::error::BootError;
 
 use crate::MEMORY_FONT_NAMESPACE;
+use aether_fs::FsMailboxExt;
+#[allow(unused_imports)]
 pub use aether_fs::{FsCapability, Read, ReadResult};
 pub use aether_render::{
     CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad, UpdateTexture,
@@ -148,8 +150,7 @@ impl TextCapabilityState {
         // Forward the read to the single fs resolver (ADR-0041); the
         // `ReadResult` routes back to `on_read_result`, which parses
         // it.
-        let read = Read { namespace, path };
-        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+        ctx.actor::<FsCapability>().with_context(&context).read(namespace, path);
     }
 
     /// Parse caller-supplied font bytes off the hot path, then resume through

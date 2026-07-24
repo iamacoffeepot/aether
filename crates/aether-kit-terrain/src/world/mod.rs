@@ -68,7 +68,7 @@ use aether_actor::{
 use aether_component::ComponentHostCapability;
 use aether_component::component::ComponentHostWasmExt;
 use aether_data::Source;
-use aether_fs::{FsCapability, Read, ReadResult};
+use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::Render;
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_render::{DrawTriangle, RenderCapability};
@@ -722,15 +722,14 @@ impl WasmActor for WorldView {
     #[allow(clippy::unused_self)]
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: WorldLoad) {
-        let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
         let context = WorldLoadContext { namespace: msg.namespace, path: msg.path };
         tracing::info!(
             target: "aether_kit_terrain",
-            namespace = %read.namespace,
-            path = %read.path,
+            namespace = %context.namespace,
+            path = %context.path,
             "world load requested; issuing read",
         );
-        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
+        ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
     }
 
     /// Consume the `aether.fs` read reply. On `Ok`, decode the bytes with

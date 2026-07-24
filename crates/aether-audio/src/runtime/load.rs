@@ -10,8 +10,9 @@ use super::sample::{
 };
 use super::sfz::parse_sfz;
 use super::track::{DecodeOutput, TrackDecodeContext};
-use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx, Read};
+use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx};
 use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
+use aether_fs::FsMailboxExt;
 
 /// Context stored under each `aether.fs.read` request correlation while an
 /// audio load is in flight. One enum covers the shared `ReadResult` handler's
@@ -136,9 +137,8 @@ impl AudioCapabilityState {
         // so each `ReadResult` settles back into it.
         let fs = ctx.actor::<FsCapability>();
         for (slot, fs_path) in fs_paths {
-            let read = Read { namespace: namespace.clone(), path: fs_path };
             let context = AudioLoadContext::Sample { assembly_id, slot };
-            let _ = fs.send_with_context(&read, &context);
+            fs.with_context(&context).read(namespace.clone(), fs_path);
         }
     }
 
