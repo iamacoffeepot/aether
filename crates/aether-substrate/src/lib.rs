@@ -102,7 +102,10 @@ pub use config::{
 };
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
-pub use mail::registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Registry};
+pub use mail::registry::{
+    ActorAddressInventoryError, AddressResolutionError, InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch,
+    Registry, ResolvedAddress,
+};
 pub use mail::{KindId, Mail, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
 pub use runtime::panic_hook::init_panic_hook;
 

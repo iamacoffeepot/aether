@@ -229,6 +229,43 @@ assert_ne!(
 typed `resolve` step checks one declared direct edge, and the mailbox carried
 from the previous step supplies the canonical lineage and identity fold.
 
+### External actor addresses
+
+Rust actor code continues to resolve peers by type. String-addressed
+boundaries such as MCP, configuration, and harness calls may additionally use
+an ADR-0166 abbreviation rooted in an actor namespace:
+
+```text
+aether.component://camera
+```
+
+The substrate expands that spelling from the generated `Root` and `ChildOf`
+inventory before it performs the ordinary canonical registry lookup. With the
+component host's one instanced child family, the address above expands to:
+
+```text
+aether.component/aether.embedded:camera
+```
+
+An explicit child namespace is always accepted when the declared edge and
+cardinality match:
+
+```text
+aether.component://aether.embedded:camera
+```
+
+A bare discriminator is allowed only when the current actor has exactly one
+logical instanced-child namespace. If several instanced child namespaces are
+possible, resolution returns a deterministic ambiguity error listing the
+explicit segments the caller can use. Exact singleton child namespaces take
+precedence over discriminator elision.
+
+Abbreviations are boundary input, never actor identity. The registry expands
+them before hashing and stores, lists, and reverse-reports only the canonical
+path. Unknown roots, illegal segments, ambiguous children, path-limit
+violations, and a valid expansion with no live mailbox remain distinct
+resolution errors.
+
 ## Reply classes
 
 A handler declares how it answers through its class marker

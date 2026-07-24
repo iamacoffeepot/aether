@@ -16,6 +16,7 @@
 // `get` and the dependent action. Writes are rare, contention is low.
 #![allow(clippy::significant_drop_tightening)]
 
+mod address;
 mod dispatch;
 mod errors;
 mod handlers;
@@ -29,6 +30,7 @@ mod names;
 )]
 mod tests;
 
+pub use address::{ActorAddressInventoryError, AddressResolutionError, ResolvedAddress};
 pub use dispatch::{MailDispatch, OwnedDispatch};
 #[cfg(test)]
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};

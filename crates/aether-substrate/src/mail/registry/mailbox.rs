@@ -5,12 +5,16 @@ use rustc_hash::FxHashMap;
 
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{
-    KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, mailbox_id_from_path, validate_scope_path,
+    KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, ScopePathError, mailbox_id_from_path,
+    validate_scope_path,
 };
 
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::names::categorise_mailbox_name;
+use crate::mail::registry::{
+    ActorAddressInventoryError, AddressResolutionError, ResolvedAddress, address::AddressIndex,
+};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::SeizeHandle;
 
@@ -99,6 +103,7 @@ pub enum MailboxEntry {
 
 pub struct Registry {
     inner: RwLock<Inner>,
+    addresses: Result<AddressIndex, ActorAddressInventoryError>,
     /// Issue iamacoffeepot/aether#742: notification hook fired after
     /// every successful mailbox registration. The chassis (or any
     /// hub-aware boot path) installs a closure that pushes the full
@@ -168,7 +173,11 @@ struct Inner {
 impl Registry {
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: RwLock::new(Inner::default()), on_mailbox_change: RwLock::new(None) }
+        Self {
+            inner: RwLock::new(Inner::default()),
+            addresses: AddressIndex::from_inventory(),
+            on_mailbox_change: RwLock::new(None),
+        }
     }
 
     /// Issue iamacoffeepot/aether#742: install the post-registration
@@ -457,15 +466,39 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
+        match self.resolve_address(name) {
+            Ok(resolved) => Some(resolved.mailbox_id),
+            Err(error @ (AddressResolutionError::PathTooDeep { .. } | AddressResolutionError::PathTooLong { .. })) => {
+                tracing::warn!(name, ?error, "scope path over cap; resolution miss");
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Resolve a canonical or ADR-0166 abbreviated actor address to one
+    /// live mailbox. Canonical inputs preserve the existing
+    /// validate/fold/exact-name lookup. An abbreviated input expands
+    /// through the generated root/child inventory before that canonical
+    /// lookup, so aliases are never hashed, stored, or reverse-reported.
+    pub fn resolve_address(&self, address: &str) -> Result<ResolvedAddress, AddressResolutionError> {
+        let canonical_path = match address.split_once("://") {
+            None => address.to_owned(),
+            Some((root, relative)) => self.addresses.as_ref().map_err(Clone::clone)?.expand(root, relative)?,
+        };
+        let mailbox_id = self
+            .lookup_canonical(&canonical_path)?
+            .ok_or_else(|| AddressResolutionError::NoLiveMailbox { canonical_path: canonical_path.clone() })?;
+        Ok(ResolvedAddress { mailbox_id, canonical_path })
+    }
+
+    fn lookup_canonical(&self, name: &str) -> Result<Option<MailboxId>, ScopePathError> {
         // ADR-0098 wire boundary: `name` is user-controlled (the MCP
         // `recipient_name` surface resolves here), so cap its scope depth
         // / byte size before it folds to a registry key. An over-cap name
         // is a resolution miss, not a key-space bloat.
         let segments: Vec<&str> = name.split('/').collect();
-        if let Err(err) = validate_scope_path(&segments) {
-            tracing::warn!(name, ?err, "scope path over cap; resolution miss");
-            return None;
-        }
+        validate_scope_path(&segments)?;
         // ADR-0099 §4: resolve a written name by the parse → fold (the
         // inverse of the `/`-render), not `hash(name)` — a hosted /
         // nested actor's id is the lineage fold, so the whole-string hash
@@ -475,10 +508,10 @@ impl Registry {
         // the runtime-name resolution path itself — the registry is the one owner of the parse → fold
         let id = mailbox_id_from_path(name);
         let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
-        match inner.mailboxes.get(&id) {
+        Ok(match inner.mailboxes.get(&id) {
             Some(slot) if slot.name == name && !matches!(slot.entry, MailboxEntry::Dropped) => Some(id),
             _ => None,
-        }
+        })
     }
 
     /// Fetch the entry for a mailbox id. Returns an owned clone so the
