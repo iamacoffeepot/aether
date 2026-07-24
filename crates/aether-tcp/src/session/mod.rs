@@ -28,7 +28,10 @@
 // Handler-signature kinds need to be importable at file root for
 // the `#[actor]`-emitted `HandlesKind` markers against the identity
 // (always-on, outside the `feature = "runtime"` gate).
-use super::kinds::{SessionClose, SessionDataReady, SessionWrite};
+use super::{
+    TcpCapability, TcpListenerActor,
+    kinds::{SessionClose, SessionDataReady, SessionWrite},
+};
 
 /// `aether.tcp.session` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the
@@ -38,7 +41,7 @@ use super::kinds::{SessionClose, SessionDataReady, SessionWrite};
 /// `TcpStream` write half + the read thread) lives behind the one
 /// `feature = "runtime"` gate, so a transport-only build never names
 /// `TcpSessionState` nor pulls `aether_substrate` through this actor.
-#[actor(instanced)]
+#[actor(instanced, child_of(TcpCapability), child_of(TcpListenerActor))]
 pub struct TcpSessionActor;
 
 // The `#[actor]` attribute path stays always-on (the macro divides what it

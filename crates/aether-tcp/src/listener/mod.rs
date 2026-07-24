@@ -15,7 +15,10 @@
 // Handler-signature kinds must be importable at file root because
 // `#[actor]` emits `impl HandlesKind<K> for X {}` markers against the
 // identity (always-on, outside the `feature = "runtime"` gate).
-use super::kinds::{Close, ConnectionReady};
+use super::{
+    TcpCapability,
+    kinds::{Close, ConnectionReady},
+};
 
 /// `aether.tcp.listener` **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the
@@ -25,7 +28,7 @@ use super::kinds::{Close, ConnectionReady};
 /// `std::net::TcpListener`'s accept thread + the connection channel) lives
 /// behind the one `feature = "runtime"` gate, so a transport-only build never
 /// names `TcpListenerState` nor pulls `aether_substrate` through this actor.
-#[actor(instanced)]
+#[actor(instanced, child_of(TcpCapability))]
 pub struct TcpListenerActor;
 
 // The `#[actor]` attribute path stays always-on (the macro divides what it

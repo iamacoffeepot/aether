@@ -23,7 +23,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{ActorId, Kind, MailboxId, RequestId, Source, Tag, fold_lineage, with_tag};
+use aether_data::{Kind, MailboxId, RequestId, Source};
 
 use crate::model::{Addressable, ChildOf, HandlesKind, Instanced};
 use crate::wasm::bridge::mail;
@@ -116,12 +116,11 @@ impl<'a, R> WasmActorMailbox<'a, R> {
         WasmActorMailboxWithContext { mailbox: *self, context }
     }
 
-    /// Rewrap a precomputed `mailbox` id as a typed peer handle that
-    /// inherits this handle's ctx binding (`sender` + inline registry), so
-    /// the rewrapped handle's sends stamp the same origin and route the
-    /// same way. The by-id counterpart of [`Self::resolve_peer_scoped`], for
-    /// a cap that folds a child / session id itself rather than resolving by
-    /// name.
+    /// Rewrap this physical `mailbox` id as another recipient type while
+    /// inheriting this handle's ctx binding (`sender` + inline registry), so
+    /// the rewrapped handle's sends stamp the same origin and route the same
+    /// way. Use this after a typed [`Self::resolve`] chain when the physical
+    /// actor hosts a different logical recipient interface.
     #[must_use]
     pub fn at<Peer>(&self, mailbox: u64) -> WasmActorMailbox<'a, Peer> {
         WasmActorMailbox::__new(mailbox, self.sender, self.inline)
@@ -140,22 +139,6 @@ impl<'a, R> WasmActorMailbox<'a, R> {
         Child: ChildOf<R> + Instanced,
     {
         self.at(Child::resolve(self.mailbox_id().0, name).0)
-    }
-
-    /// Resolve a child mailbox of *this* actor, where the child is the
-    /// instanced node `scope:segment` (ADR-0099 §3 — `scope` is the
-    /// child's `NAMESPACE`, `segment` its `:` discriminator). The child's
-    /// id folds that node's `ActorId` onto this actor's lineage carry,
-    /// so a cap that owns a scoped-child facade — the component host
-    /// reaching a loaded component, a socket listener reaching a session
-    /// — composes the registered fold id without allocating a name.
-    ///
-    /// `self.mailbox` is the parent carry: exact for a root-pinned cap
-    /// (depth-1, carry == id), which is every cap that hosts children.
-    #[must_use]
-    pub fn resolve_peer_scoped<Peer: Addressable>(&self, scope: &str, segment: &str) -> WasmActorMailbox<'a, Peer> {
-        let node = ActorId::instanced(scope, segment);
-        WasmActorMailbox::__new(with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)), self.sender, self.inline)
     }
 }
 

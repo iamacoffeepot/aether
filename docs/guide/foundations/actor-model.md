@@ -191,6 +191,44 @@ has singleton versus instanced cardinality. The actor's own
 native inventory and wasm manifest records derive names and type tags from the
 actor types rather than copying string literals.
 
+TCP uses multiple parent permissions because accepted and outbound sessions
+have different real lineages:
+
+```rust
+#[actor(singleton, root)]
+pub struct TcpCapability;
+
+#[actor(instanced, child_of(TcpCapability))]
+pub struct TcpListenerActor;
+
+#[actor(
+    instanced,
+    child_of(TcpCapability),
+    child_of(TcpListenerActor),
+)]
+pub struct TcpSessionActor;
+```
+
+The mailbox chain selects which permitted lineage is meant. An accepted
+session resolves through its named listener, while an outbound session resolves
+directly beneath the capability:
+
+```rust
+let accepted_session = tcp
+    .resolve::<TcpListenerActor>("game")
+    .resolve::<TcpSessionActor>("shared");
+let outbound_session = tcp.resolve::<TcpSessionActor>("shared");
+
+assert_ne!(
+    accepted_session.mailbox_id(),
+    outbound_session.mailbox_id(),
+);
+```
+
+`ChildOf` therefore does not choose one global parent for an actor type. Each
+typed `resolve` step checks one declared direct edge, and the mailbox carried
+from the previous step supplies the canonical lineage and identity fold.
+
 ## Reply classes
 
 A handler declares how it answers through its class marker
