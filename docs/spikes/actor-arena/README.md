@@ -76,12 +76,15 @@ sequential access and one update per activation, then compares:
 - a direct arena page walk with one lock/run token for the contiguous live
   run.
 
-The fixture uses 65,536 same-kind, 64-byte “bullet” states and five million
-updates. Mailbox hashing is intentionally absent from this workload: it asks
-what a scene system can gain once it already has the namespace/kind cohort and
-wants to advance every bullet. Namespace-local bitmap shards allow the fixture
-to exceed one 4,096-slot two-level root without adding an arena id to the actor
-coordinate.
+The fixture uses 65,536 same-kind, 64-byte bullet states and five million
+updates. Each update advances three position words by three velocity words,
+decrements lifetime, and folds in a frame stamp. It intentionally excludes
+collision broadphase and rendering, so it remains a ceiling for lightweight
+projectiles rather than a complete game-frame claim. Mailbox hashing is absent:
+the workload asks what a scene system can gain once it already has the
+namespace/kind cohort and wants to advance every bullet. Namespace-local bitmap
+shards allow the fixture to exceed one 4,096-slot two-level root without adding
+an arena id to the actor coordinate.
 
 ## Allocator mechanism
 

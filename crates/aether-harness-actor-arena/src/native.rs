@@ -470,9 +470,22 @@ impl StateArena {
 }
 
 fn apply_activation(state: &mut [u64], config: &TrialConfig, activation: usize) {
+    if config.workload == Workload::SceneSweep {
+        apply_bullet_update(state, mail_value(config.seed, activation, 0));
+        return;
+    }
+
     for mail in 0..mails_in_activation(config, activation) {
         apply_mail(state, mail_value(config.seed, activation, mail));
     }
+}
+
+fn apply_bullet_update(state: &mut [u64], frame_stamp: u64) {
+    state[0] = state[0].wrapping_add(state[3]);
+    state[1] = state[1].wrapping_add(state[4]);
+    state[2] = state[2].wrapping_add(state[5]);
+    state[6] = state[6].saturating_sub(1);
+    state[7] ^= frame_stamp;
 }
 
 fn apply_mail(state: &mut [u64], value: u64) {
