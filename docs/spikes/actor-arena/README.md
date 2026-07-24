@@ -158,6 +158,8 @@ misses.
 ```text
 cargo build --release -p aether-harness-actor-arena --bins
 
+scripts/actor-arena-measure.sh /tmp/actor-arena-results
+
 target/release/aether-actor-arena-compare \
   --base boxed-current \
   --candidate arena-state \
