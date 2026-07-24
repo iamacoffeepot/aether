@@ -21,7 +21,7 @@
 //!
 //! The cap follows the ADR-0122 identity/runtime split (the `aether.fs`
 //! worked example, #2318): the addressing identity is the ZST
-//! [`ComponentHostCapability`] — the `#[actor(singleton)]` markers
+//! [`ComponentHostCapability`] — the `#[actor(singleton, root)]` markers
 //! (`Addressable`, the per-handler `HandlesKind`, the name inventory) ride it
 //! always-on, so a transport-only build addresses the cap without naming the
 //! substrate-typed state. The state-bearing runtime
@@ -91,7 +91,7 @@ use aether_actor::actor;
 /// and the egress handles) lives behind the one `feature = "runtime"` gate, so
 /// a transport-only build never names the state nor pulls `aether_substrate` /
 /// `wasmtime` through this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct ComponentHostCapability;
 
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
@@ -109,44 +109,40 @@ mod tests {
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use aether_actor::wasm::inline::Registry;
-    use aether_actor::{Addressable, WasmActorMailbox};
-    use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
+    use aether_actor::{Addressable, Embedded, WasmActorMailbox};
+    use aether_data::mailbox_id_from_name;
 
-    use super::{ComponentHostCapability, ComponentHostWasmExt};
+    use super::{ComponentHostCapability, ComponentHostWasmExt, resolve_embedded};
     use crate::trampoline::WasmTrampoline;
 
+    struct Guest;
+
+    impl Addressable for Guest {
+        const NAMESPACE: &'static str = "aether.kit.camera";
+        type Resolver = Embedded;
+    }
+
     /// A loaded component's id is the ADR-0099 §3 lineage fold over
-    /// `[aether.component, aether.embedded:<name>]`. `loaded`
-    /// composes exactly that — folding the trampoline node's `ActorId`
-    /// onto the component host's carry — so it agrees with the id the
-    /// spawn machinery registers it under. It must **not** resolve the
-    /// bare load-name (`ctx.actor::<R>()` hashing the bare `NAMESPACE`),
-    /// nor the pre-0099 flat `trampoline:<name>` hash — both reach a
-    /// mailbox nothing is registered under (the #1364 footgun). This pins
-    /// the one canonical path for a loaded component.
+    /// `[aether.component, aether.embedded:<name>]`. The loaded facade first
+    /// traverses the declared host-to-trampoline edge, then exposes that same
+    /// mailbox under the guest recipient type. Direct typed resolution and
+    /// `resolve_embedded` must agree with it.
     #[test]
     fn loaded_composes_the_canonical_trampoline_address() {
-        // `R` is arbitrary here — the resolved id depends only on the
-        // host carry + the trampoline node name. The ctx binding (sender +
-        // inline registry) is irrelevant to id resolution, so a throwaway
-        // registry and a zero sender suffice (issue 1987).
+        // The ctx binding (sender + inline registry) is irrelevant to id
+        // resolution, so a throwaway registry and a zero sender suffice
+        // (issue 1987).
         let registry = Registry::new();
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,
             &registry,
         );
-        let camera = host.loaded::<ComponentHostCapability>("aether.kit.camera");
+        let name = Guest::NAMESPACE;
+        let camera = host.loaded::<Guest>(name);
+        let trampoline = host.resolve::<WasmTrampoline>(name);
 
-        // The component host is root-pinned (depth-1), so its carry is
-        // its own id; fold the trampoline node onto it.
-        let host_carry = mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0;
-        let node = ActorId::instanced(WasmTrampoline::NAMESPACE, "aether.kit.camera");
-        let canonical = MailboxId(with_tag(Tag::Mailbox, fold_lineage(host_carry, node)));
-        assert_eq!(camera.mailbox_id(), canonical);
-
-        // Not the pre-0099 flat name-hash, and not the bare load-name.
-        assert_ne!(camera.mailbox_id(), mailbox_id_from_name(&format!("{}:camera", WasmTrampoline::NAMESPACE)),);
-        assert_ne!(camera.mailbox_id(), mailbox_id_from_name("camera"));
+        assert_eq!(camera.mailbox_id(), trampoline.mailbox_id());
+        assert_eq!(camera.mailbox_id(), resolve_embedded(name));
     }
 }

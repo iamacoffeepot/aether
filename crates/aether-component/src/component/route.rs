@@ -17,11 +17,8 @@ use crate::trampoline::WasmTrampoline;
 /// cap's FFI mailbox, mirroring `aether_fs::FsMailboxExt`'s
 /// cap-owned facade pattern (issue 580).
 ///
-/// `.loaded::<R>(name)` resolves a typed peer handle. The trampoline
-/// prefix lives in exactly one place in the workspace —
-/// [`WasmTrampoline::NAMESPACE`] (issue 654) — and this method reads
-/// from it, so a future rename of the convention touches one constant
-/// and propagates everywhere.
+/// `.loaded::<R>(name)` traverses the declared host-to-trampoline edge, then
+/// exposes that same physical mailbox under the guest recipient type.
 ///
 /// `R: Addressable` is the peer's actor type, supplied by the caller (same
 /// as today's `WasmCtx::resolve_actor` surface). Type-checks at the
@@ -29,16 +26,16 @@ use crate::trampoline::WasmTrampoline;
 /// `R: HandlesKind<K>`.
 pub trait ComponentHostWasmExt {
     /// Resolve a typed peer-component mailbox for the loaded component
-    /// named `name`. The full mailbox address is
-    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`. The resolved
-    /// handle inherits this handle's ctx binding (`sender` + inline
-    /// registry), so its sends stamp the same origin (issue 1987).
+    /// named `name`. The resolved handle inherits this handle's ctx binding
+    /// (`sender` + inline registry), so its sends stamp the same origin
+    /// (issue 1987).
     fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 }
 
 impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
     fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
+        let trampoline = self.resolve::<WasmTrampoline>(name);
+        trampoline.at(trampoline.mailbox_id().0)
     }
 }
 
@@ -51,15 +48,15 @@ impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait ComponentHostNativeExt {
     /// Resolve a typed peer-component mailbox for the loaded component
-    /// named `name`. The full mailbox address is
-    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`.
+    /// named `name`.
     fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
     fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.resolve_peer_scoped::<R>(WasmTrampoline::NAMESPACE, name)
+        let trampoline = self.resolve::<WasmTrampoline>(name);
+        trampoline.at(trampoline.mailbox_id().0)
     }
 }
 

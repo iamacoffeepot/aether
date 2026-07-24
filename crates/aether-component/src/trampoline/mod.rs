@@ -71,6 +71,8 @@ use aether_kinds::{DropComponent, ReplaceComponent};
 #[cfg(not(target_family = "wasm"))]
 use aether_kinds::{DropResult, ReplaceResult};
 
+use crate::component::ComponentHostCapability;
+
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
 // (imports, `WasmTrampolineState`, `WasmTrampolineConfig`, the replace /
 // sibling-spawn helpers) — lives in the `runtime` directory, gated once here.
@@ -93,5 +95,5 @@ pub use runtime::WasmTrampolineConfig;
 /// nor pulls `aether_substrate` through this cap. External consumers address
 /// this name — `spawn_child::<WasmTrampoline>`, `resolve_actor::<WasmTrampoline>`,
 /// `WasmTrampoline::NAMESPACE`.
-#[actor(instanced)]
+#[actor(instanced, child_of(ComponentHostCapability))]
 pub struct WasmTrampoline;

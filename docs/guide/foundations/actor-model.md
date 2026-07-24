@@ -316,7 +316,12 @@ typed methods on the mailbox handle that stand in for raw kind sends.
 loaded-component lookup just mentioned (from `ComponentHostWasmExt` in a
 component, `ComponentHostNativeExt` in a capability). Each helper is available
 on both the component and the capability handle, so the same call reads the
-same whichever host you write from.
+same whichever host you write from. Underneath, it first follows the declared
+typed child edge with
+`ctx.actor::<ComponentHostCapability>().resolve::<WasmTrampoline>("camera")`.
+The helper then intentionally retypes that trampoline mailbox as `Camera`:
+the trampoline and its loaded guest share one physical mailbox, while the
+guest type supplies the compile-time mail-handling surface.
 
 ## One or many: cardinality
 
