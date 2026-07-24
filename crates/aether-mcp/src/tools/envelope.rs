@@ -1,12 +1,10 @@
 use super::{
-    EngineId, Kind, MailEnvelope, MailboxAddress, MailboxId, ScopePathError, mailbox_id_from_path, validate_scope_path,
+    EngineId, Kind, MailEnvelope, MailboxAddress, MailboxId, ScopePathError, mailbox_id_from_name, validate_scope_path,
 };
 
 /// ADR-0098/0099 input hygiene: reject a `recipient_name` whose
-/// `/`-rendered scope path exceeds the depth or byte caps before it
-/// folds to a `MailboxId`. The MCP `send_mail` surface is the wire
-/// boundary for user-controlled names, so the aggregate-key guard lands
-/// here; [`mailbox_id_from_path`] stays infallible for static callers.
+/// `/`-rendered scope path exceeds the depth or byte caps before it reaches
+/// the selected engine's registry.
 pub(super) fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<()> {
     let segments: Vec<&str> = recipient_name.split('/').collect();
     validate_scope_path(&segments).map_err(|e| match e {
@@ -19,21 +17,13 @@ pub(super) fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<(
     })
 }
 
-/// Resolve an operator-supplied recipient name into its wire mailbox id — the
-/// runtime-name forwarding path the MCP front owns: names arrive as strings on
-/// the tool call (`recipient_name`, a lineage address, a component path), so
-/// there is no typed actor to resolve through. The one sanctioned
-/// `mailbox_id_from_path` call site in this crate; every tool funnels here.
-#[allow(clippy::disallowed_methods)] // the runtime-name wire-forwarding escape hatch — the tool surface receives names as strings
-pub(super) fn recipient_mailbox(name: &str) -> MailboxId {
-    mailbox_id_from_path(name)
-}
-
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
-/// (`engine = None`) carrying a typed kind.
+/// (`engine = None`) carrying a typed kind. Callers pass only trusted
+/// actor-owned singleton capability constants, never operator input.
 pub(super) fn local_envelope<K: Kind>(mailbox: &str, kind: &K) -> MailEnvelope {
     MailEnvelope {
-        to: MailboxAddress::local(recipient_mailbox(mailbox)),
+        #[allow(clippy::disallowed_methods)] // trusted actor-owned singleton capability constant
+        to: MailboxAddress::local(mailbox_id_from_name(mailbox)),
         from: None,
         kind: K::ID,
         correlation_id: None,
@@ -43,9 +33,12 @@ pub(super) fn local_envelope<K: Kind>(mailbox: &str, kind: &K) -> MailEnvelope {
 
 /// Build a `MailEnvelope` addressed at a mailbox on a specific
 /// substrate (`engine = Some`) carrying a typed kind — the hub routes
-/// it through to that engine's proxy.
+/// it through to that engine's proxy. Callers pass only trusted actor-owned
+/// singleton capability constants; operator addresses use
+/// [`engine_envelope_by_id`] after engine resolution.
 pub(super) fn engine_envelope<K: Kind>(engine: EngineId, mailbox: &str, kind: &K) -> MailEnvelope {
-    engine_envelope_by_id(engine, recipient_mailbox(mailbox), kind)
+    #[allow(clippy::disallowed_methods)] // trusted actor-owned singleton capability constant
+    engine_envelope_by_id(engine, mailbox_id_from_name(mailbox), kind)
 }
 
 /// Like [`engine_envelope`] but addresses the recipient by

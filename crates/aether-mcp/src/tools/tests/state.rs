@@ -171,43 +171,46 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
     let decoded_schema: SchemaType = wire::from_bytes(&entry.schema_wire).expect("schema_wire decodes");
     assert!(matches!(decoded_schema, SchemaType::String), "the registered schema round-trips through the wire");
 
-    // Now drive the harness's encode path directly. Seed the
-    // per-engine cache the way a real refresh would (engine id is
-    // synthetic; the cache is engine-keyed so any uuid suffices
-    // for this assertion), then verify `build_mail_envelope`
-    // encodes a `MailSpec` against the component kind without
-    // ever consulting `descriptors::all()`. This is the surface
-    // the production `send_mail` reaches for after a
-    // `load_component` populates the cache via the same wire
-    // path the assertion above exercised.
+    // Now drive the schema encode path directly. Direct-mail preparation also
+    // performs engine-owned recipient resolution, which is covered below by
+    // the routed resolver double.
     let engine = EngineId(Uuid::from_u128(0x1232_dead_beef));
-    // Seed the per-engine cache the way `refresh_engine_kinds` would
-    // on a hit — the cache merge helper is the single writer.
     mcp.merge_into_engine_cache(engine, vec![component_kind.clone()]);
-    let envelope = mcp
-        .build_mail_envelope(MailSpec {
-            engine_id: engine.0.to_string(),
-            mail: EngineMailSpec {
-                recipient_name: "aether.embedded:test".to_owned(),
-                kind_name: component_kind.name.clone(),
-                params: Some(serde_json::Value::String("hello".to_owned())),
-            },
-        })
+    let (_descriptor, payload) = mcp
+        .resolve_and_encode(engine, &component_kind.name, serde_json::Value::String("hello".to_owned()))
         .await
-        .expect("build_mail_envelope encodes the component-defined kind");
-    // The schema-encoded payload for a `SchemaType::String` is the
-    // wire-codec string shape; decoding back via the same schema
-    // must yield the original JSON value.
-    let decoded = aether_codec::decode_schema(&envelope.payload, &component_kind.schema)
+        .expect("component-defined kind encodes from the live cache");
+    let decoded = aether_codec::decode_schema(&payload, &component_kind.schema)
         .expect("payload decodes against the cached schema");
     assert_eq!(
         decoded,
         serde_json::Value::String("hello".to_owned()),
         "the encoded payload round-trips through aether_codec against the live schema",
     );
-    assert_eq!(
-        envelope.kind,
-        KindId(kind_id_from_parts(&component_kind.name, &component_kind.schema)),
-        "envelope kind id matches the live KindId of the component-defined kind",
-    );
+}
+
+#[tokio::test]
+async fn engine_address_resolver_returns_the_engine_mailbox_without_local_folding() {
+    let supplied = "aether.test://short";
+    let canonical = "aether.test/aether.test.child:short";
+    let engine_answer = MailboxId(0xABCD_EF01_2345_6789);
+    #[allow(clippy::disallowed_methods)]
+    let locally_folded = mailbox_id_from_path(supplied);
+    assert_ne!(engine_answer, locally_folded, "test answer must expose accidental client-side folding");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine_answer, canonical, Arc::clone(&calls));
+    let mcp = connect_mcp(port);
+    let engine = EngineId(Uuid::from_u128(0x4057));
+
+    let resolved =
+        mcp.resolve_engine_address(engine, supplied).await.expect("routed engine resolves abbreviated address");
+    assert_eq!(resolved, (engine_answer, canonical.to_owned()));
+
+    let calls = calls.lock().expect("address-route calls mutex is never poisoned");
+    assert_eq!(calls.len(), 1, "textual address performs exactly one uncached resolver RPC");
+    assert_eq!(calls[0].kind, ResolveAddress::ID);
+    let request = ResolveAddress::decode_from_bytes(&calls[0].payload).expect("resolver request decodes");
+    drop(calls);
+    assert_eq!(request.address, supplied);
 }

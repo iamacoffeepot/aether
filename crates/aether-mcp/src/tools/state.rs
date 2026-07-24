@@ -1,13 +1,14 @@
 use super::bytes::resolve_bytes_params;
 use super::components::{ResolvedComponent, StagedBootManifest};
+use super::ids::parse_mailbox_id;
 use super::ids::{mail_node_to_json, node_reversible_ids};
 use super::{
     AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, EngineId, EngineMailSpec, EngineNames,
     FLEET_CAP, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
-    MailNodeWire, MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
-    ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors,
-    engine_envelope, frame_size_aware_error, internal_msg, local_envelope, max_frame_size, recipient_mailbox,
-    reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
+    MailNodeWire, MailSpec, MailboxAddress, MailboxId, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
+    ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType, Uuid,
+    component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
+    max_frame_size, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
     validate_recipient_scope, wire,
 };
 use aether_data::canonical::kind_id_from_parts;
@@ -17,6 +18,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 
+pub(super) struct PreparedDirectMail {
+    pub(super) envelope: MailEnvelope,
+    pub(super) engine: EngineId,
+    pub(super) resolved_mailbox_id: MailboxId,
+    pub(super) canonical_recipient: String,
+    pub(super) kind_name: String,
+}
+
+pub(super) struct DeliveredDirectMail {
+    pub(super) events: Vec<MailEnvelope>,
+    pub(super) timed_out: bool,
+    pub(super) engine: EngineId,
+    pub(super) resolved_mailbox_id: MailboxId,
+    pub(super) kind_name: String,
+}
+
 impl Mcp {
     /// Build one `MailSpec` into an `engine = Some` envelope and route
     /// it through the hub, awaiting the substrate's terminal settle and
@@ -24,17 +41,54 @@ impl Mcp {
     /// collected reply envelopes plus a `timed_out` flag — the await is
     /// bounded by [`AWAIT_TIMEOUT_DEFAULT_MS`] so a cap that never
     /// replies returns at the cap rather than hanging.
-    pub(super) async fn deliver_one(&self, spec: MailSpec) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
-        let envelope = self.build_mail_envelope(spec).await?;
+    pub(super) async fn deliver_one(&self, spec: MailSpec) -> anyhow::Result<DeliveredDirectMail> {
+        let prepared = self.prepare_direct_mail(spec).await?;
         let timeout = Duration::from_millis(u64::from(AWAIT_TIMEOUT_DEFAULT_MS));
-        self.session.call_collecting(envelope, timeout).await
+        let (events, timed_out) = self.session.call_collecting(prepared.envelope, timeout).await.map_err(|error| {
+            anyhow::anyhow!("delivering mail to canonical recipient `{}`: {error}", prepared.canonical_recipient)
+        })?;
+        Ok(DeliveredDirectMail {
+            events,
+            timed_out,
+            engine: prepared.engine,
+            resolved_mailbox_id: prepared.resolved_mailbox_id,
+            kind_name: prepared.kind_name,
+        })
     }
 
     /// [`Self::deliver_one`]'s fire-and-forget twin: build the envelope
     /// and write the `Call` without awaiting any reply (issue 1242).
     pub(super) async fn deliver_one_fire(&self, spec: MailSpec) -> anyhow::Result<()> {
-        let envelope = self.build_mail_envelope(spec).await?;
-        self.session.fire(envelope).await
+        let prepared = self.prepare_direct_mail(spec).await?;
+        self.session.fire(prepared.envelope).await.map_err(|error| {
+            anyhow::anyhow!("firing mail to canonical recipient `{}`: {error}", prepared.canonical_recipient)
+        })
+    }
+
+    /// Resolve one operator-supplied address in the selected engine. Tagged
+    /// mailbox ids are already canonical wire identity and remain direct;
+    /// every textual address makes one uncached inventory RPC so ADR-0166
+    /// expansion and liveness are owned by the engine registry.
+    pub(super) async fn resolve_engine_address(
+        &self,
+        engine: EngineId,
+        address: &str,
+    ) -> anyhow::Result<(MailboxId, String)> {
+        if address.starts_with("mbx-") {
+            let mailbox_id = parse_mailbox_id(address).map_err(|error| anyhow::anyhow!("{}", error.message))?;
+            return Ok((mailbox_id, address.to_owned()));
+        }
+
+        validate_recipient_scope(address)?;
+        let reply = self
+            .session
+            .call_one(engine_envelope(engine, INVENTORY_CAP, &ResolveAddress { address: address.to_owned() }))
+            .await?;
+        match ResolveAddressResult::decode_from_bytes(&reply.payload) {
+            Some(ResolveAddressResult::Ok { mailbox_id, canonical_path }) => Ok((mailbox_id, canonical_path)),
+            Some(ResolveAddressResult::Err { error }) => Err(anyhow::anyhow!("{error}")),
+            None => Err(anyhow::anyhow!("undecodable ResolveAddressResult")),
+        }
     }
 
     /// Resolve a component registry selector hub-local to its wasm bytes +
@@ -214,32 +268,26 @@ impl Mcp {
     /// miss *or* a field-mismatch encode failure (a kind widened in place,
     /// ADR-0091 §3) triggers one `aether.inventory.kinds` refresh-and-retry
     /// before the error surfaces.
-    pub(super) async fn build_mail_envelope(&self, spec: MailSpec) -> anyhow::Result<MailEnvelope> {
-        // ADR-0098/0099 wire boundary: `recipient_name` is user-controlled
-        // and folds to a registry key, so cap its scope depth / byte size
-        // before it reaches `mailbox_id_from_path` (the fold itself stays
-        // infallible for static callers). A breach fails this mail item.
-        validate_recipient_scope(&spec.mail.recipient_name)?;
+    pub(super) async fn prepare_direct_mail(&self, spec: MailSpec) -> anyhow::Result<PreparedDirectMail> {
         let engine = EngineId(
             Uuid::parse_str(&spec.engine_id).map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
         );
+        let (resolved_mailbox_id, canonical_recipient) =
+            self.resolve_engine_address(engine, &spec.mail.recipient_name).await?;
         let params = spec.mail.params.unwrap_or(serde_json::Value::Null);
         let (desc, payload) = self.resolve_and_encode(engine, &spec.mail.kind_name, params).await?;
-        Ok(MailEnvelope {
-            to: MailboxAddress {
-                engine: Some(engine),
-                // ADR-0099 §4: resolve the recipient by the parse → fold,
-                // so a `/`-rendered hosted / nested actor name
-                // (`aether.component/aether.component/aether.embedded:aether.camera`)
-                // reaches its lineage-folded id. A root-cap name is a
-                // single segment and folds to the same id `hash(name)`
-                // gives.
-                mailbox: recipient_mailbox(&spec.mail.recipient_name),
+        Ok(PreparedDirectMail {
+            envelope: MailEnvelope {
+                to: MailboxAddress { engine: Some(engine), mailbox: resolved_mailbox_id },
+                from: None,
+                kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
+                correlation_id: None,
+                payload,
             },
-            from: None,
-            kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
-            correlation_id: None,
-            payload,
+            engine,
+            resolved_mailbox_id,
+            canonical_recipient,
+            kind_name: spec.mail.kind_name,
         })
     }
 
@@ -275,7 +323,7 @@ impl Mcp {
     /// Resolve `params` against the engine's live schema for `kind_name`
     /// and schema-encode them, refreshing the per-engine kind cache once
     /// on a staleness signal (ADR-0091 §3). The single shared encode path
-    /// behind `send_mail` ([`Self::build_mail_envelope`]) and every
+    /// behind `send_mail` ([`Self::prepare_direct_mail`]) and every
     /// engine-fixed bundle surface ([`Self::encode_mail_bundle`]).
     ///
     /// Two staleness triggers refresh the cache from

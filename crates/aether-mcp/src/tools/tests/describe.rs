@@ -3,6 +3,8 @@ use super::super::bytes::response_inline_max_bytes;
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use aether_kinds::{DescribeComponent, DescribeComponentResult};
+use std::collections::VecDeque;
 use std::fs;
 
 /// `describe_kinds` with no `engine_id` and an empty hub returns the
@@ -394,39 +396,54 @@ async fn describe_component_reads_the_cache() {
         .expect("full describe keeps multi-line docs");
     let caps_full: serde_json::Value = serde_json::from_str(&hit_full).expect("json");
     assert_eq!(caps_full["handlers"][0]["doc"], multi_doc, "full=true keeps the wire doc string: {hit_full}");
+}
 
-    // Name-addressed describe resolves the lineage name to the SAME
-    // cache key the substrate registers under (`mailbox_id_from_path`,
-    // the fold `registry.lookup` uses), so a cache seeded under that key
-    // is found by name without a `mbx-` id. This is the MCP half of the
-    // boot-manifest path; the live substrate forward-on-miss is covered
-    // end-to-end by FleetHarness (it needs a real loaded component).
-    let lineage = "aether.component/aether.embedded:fake_component";
-    let by_name_key = mailbox_id_from_path(lineage);
-    let named_caps = ComponentCapabilities {
-        handlers: vec![HandlerCapability {
-            id: KindId(0x33),
-            name: "test.by_name".to_owned(),
-            doc: None,
-            reply: aether_data::ReplyContract::None,
+#[tokio::test]
+async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplied_alias() {
+    let supplied = "aether.component://camera";
+    let canonical = "aether.component/aether.embedded:camera";
+    let engine_answer = MailboxId(0x4057_0000_0000_0100);
+    let engine = EngineId(Uuid::from_u128(0x4057));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::from([TerrainRouteReply {
+        events: vec![TerrainReplyEvent {
+            kind: DescribeComponentResult::ID,
+            payload: DescribeComponentResult::Ok {
+                capabilities: ComponentCapabilities {
+                    handlers: vec![HandlerCapability {
+                        id: KindId(0x33),
+                        name: "test.by_name".to_owned(),
+                        doc: None,
+                        reply: aether_data::ReplyContract::None,
+                    }],
+                    ..ComponentCapabilities::default()
+                },
+            }
+            .encode_into_bytes(),
         }],
-        ..ComponentCapabilities::default()
-    };
-    mcp.components
-        .lock()
-        .expect("test setup: component cache mutex is never poisoned")
-        .insert((engine, by_name_key), named_caps);
-    let by_name = mcp
+        settle: true,
+    }])));
+    let (_chassis, port) = boot_hub_with_address_route_replies(engine_answer, canonical, Arc::clone(&calls), replies);
+    let mcp = connect_mcp(port);
+
+    let output = mcp
         .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: engine_id.to_owned(),
-            component: lineage.to_owned(),
+            engine_id: engine.0.to_string(),
+            component: supplied.to_owned(),
             full: false,
         }))
         .await
-        .expect("name-addressed describe resolves to the cached caps");
-    let by_name_json: serde_json::Value = serde_json::from_str(&by_name).expect("json");
-    assert_eq!(
-        by_name_json["handlers"][0]["name"], "test.by_name",
-        "a lineage name resolves to the substrate-consistent cache key: {by_name}"
+        .expect("name-addressed describe resolves and forwards");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+    assert_eq!(output["handlers"][0]["name"], "test.by_name");
+    assert!(
+        mcp.components.lock().expect("component cache mutex is never poisoned").contains_key(&(engine, engine_answer)),
+        "capabilities cache uses the engine-returned id"
     );
+    let calls = calls.lock().expect("address-route calls mutex is never poisoned");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].kind, ResolveAddress::ID);
+    let describe = DescribeComponent::decode_from_bytes(&calls[1].payload).expect("describe request decodes");
+    drop(calls);
+    assert_eq!(describe.name, supplied, "component host receives the original operator spelling");
 }

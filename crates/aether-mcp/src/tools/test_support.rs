@@ -63,6 +63,98 @@ pub(super) struct RouteInventorySink {
     mailer: Arc<Mailer>,
 }
 
+#[derive(Clone)]
+pub(super) struct AddressRouteLoopbackParams {
+    pub(super) mailbox_id: MailboxId,
+    pub(super) canonical_path: String,
+    pub(super) calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    pub(super) replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+}
+
+/// Routed-engine double for address-boundary tests. It returns a caller-chosen
+/// mailbox id that is deliberately unrelated to the supplied path, making any
+/// accidental local fold visible in the forwarded application envelope.
+pub(super) struct AddressRouteSink {
+    mailbox_id: MailboxId,
+    canonical_path: String,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    mailer: Arc<Mailer>,
+}
+
+#[actor(singleton)]
+impl NativeActor for AddressRouteSink {
+    type Config = ();
+    type Params = AddressRouteLoopbackParams;
+    const NAMESPACE: &'static str = "aether.fleet";
+
+    fn init((): (), params: AddressRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self {
+            mailbox_id: params.mailbox_id,
+            canonical_path: params.canonical_path,
+            calls: params.calls,
+            replies: params.replies,
+            mailer: ctx.mailer(),
+        })
+    }
+
+    #[handler::single]
+    #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
+    fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
+        use aether_substrate::mail::{Mail, Source, SourceAddr};
+
+        self.calls.lock().expect("address-route calls mutex is never poisoned").push(mail.clone());
+        let SourceAddr::Component(target) = ctx.reply_target().addr else {
+            return;
+        };
+        let correlation = ctx.reply_target().correlation_id;
+        if mail.kind == ResolveAddress::ID {
+            self.mailer.push(
+                Mail::new(
+                    target,
+                    ResolveAddressResult::ID,
+                    ResolveAddressResult::Ok {
+                        mailbox_id: self.mailbox_id,
+                        canonical_path: self.canonical_path.clone(),
+                    }
+                    .encode_into_bytes(),
+                    1,
+                )
+                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+            );
+        } else {
+            let reply = self.replies.lock().expect("address-route replies mutex is never poisoned").pop_front();
+            let Some(reply) = reply else {
+                self.mailer.push(
+                    Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
+                        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+                );
+                return;
+            };
+            for event in reply.events {
+                self.mailer.push(
+                    Mail::new(target, event.kind, event.payload, 1)
+                        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+                );
+            }
+            if reply.settle {
+                self.mailer.push(
+                    Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
+                        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+                );
+            }
+            if !reply.settle {
+                return;
+            }
+            return;
+        }
+        self.mailer.push(
+            Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+        );
+    }
+}
+
 /// One dynamically-typed reply event emitted by [`TerrainRouteSink`].
 #[derive(Clone)]
 pub(super) struct TerrainReplyEvent {
@@ -111,8 +203,20 @@ impl NativeActor for TerrainRouteSink {
     fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
         use aether_substrate::mail::{Mail, Source, SourceAddr};
 
-        self.calls.lock().expect("terrain calls mutex is never poisoned").push(mail.clone());
-        let reply = if mail.kind == ListKinds::ID {
+        let reply = if mail.kind == ResolveAddress::ID {
+            let request = ResolveAddress::decode_from_bytes(&mail.payload).expect("test resolver request decodes");
+            #[allow(clippy::disallowed_methods)]
+            // test double mirrors the engine answer expected by legacy terrain assertions
+            let mailbox_id = mailbox_id_from_path(&request.address);
+            TerrainRouteReply {
+                events: vec![TerrainReplyEvent {
+                    kind: ResolveAddressResult::ID,
+                    payload: ResolveAddressResult::Ok { mailbox_id, canonical_path: request.address }
+                        .encode_into_bytes(),
+                }],
+                settle: true,
+            }
+        } else if mail.kind == ListKinds::ID {
             TerrainRouteReply {
                 events: vec![TerrainReplyEvent {
                     kind: ListKindsResult::ID,
@@ -127,6 +231,9 @@ impl NativeActor for TerrainRouteSink {
                 .pop_front()
                 .unwrap_or(TerrainRouteReply { events: Vec::new(), settle: true })
         };
+        if mail.kind != ResolveAddress::ID {
+            self.calls.lock().expect("terrain calls mutex is never poisoned").push(mail);
+        }
         let SourceAddr::Component(target) = ctx.reply_target().addr else {
             return;
         };
@@ -341,6 +448,52 @@ pub(super) fn boot_hub_with_route_loopback(
         )
         .build_passive()
         .expect("hub caps boot");
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
+    (chassis, port)
+}
+
+pub(super) fn boot_hub_with_address_route_loopback(
+    mailbox_id: MailboxId,
+    canonical_path: &str,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+) -> (PassiveChassis<TestChassis>, u16) {
+    boot_hub_with_address_route_replies(mailbox_id, canonical_path, calls, Arc::new(Mutex::new(VecDeque::new())))
+}
+
+pub(super) fn boot_hub_with_address_route_replies(
+    mailbox_id: MailboxId,
+    canonical_path: &str,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+) -> (PassiveChassis<TestChassis>, u16) {
+    let registry = Arc::new(Registry::new());
+    for descriptor in descriptors::all() {
+        let _ = registry.register_kind_with_descriptor(descriptor);
+    }
+    let (outbound, _rx) = HubOutbound::attached_loopback();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<AddressRouteSink>(AddressRouteLoopbackParams {
+            mailbox_id,
+            canonical_path: canonical_path.to_owned(),
+            calls,
+            replies,
+        })
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+                #[allow(clippy::disallowed_methods)] // test hub routes engine calls to its trusted singleton sink
+                route_target: Some(mailbox_id_from_name("aether.fleet")),
+            },
+            RpcServerConfig { port: Some(0) },
+        )
+        .build_passive()
+        .expect("address route loopback caps boot");
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     (chassis, port)
 }

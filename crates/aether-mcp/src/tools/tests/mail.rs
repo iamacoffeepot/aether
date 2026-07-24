@@ -1,7 +1,11 @@
+use super::super::mail::settle_mail_item;
 #[allow(clippy::wildcard_imports)]
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use std::collections::VecDeque;
+use tokio::task::yield_now;
+use tokio::time::timeout;
 
 /// `send_mail` is a best-effort batch: a bad `kind_name` and a bad
 /// `engine_id` fail locally in `deliver_one`, while a well-formed
@@ -75,15 +79,12 @@ async fn send_mail_traced_bad_spec_is_tool_error() {
     assert!(result.is_err(), "an unknown kind in the batch should be a tool error");
 }
 
-/// Issue 1242: `fire_and_forget: true` is non-blocking — a
-/// well-formed item is dispatched without awaiting any reply, so the
-/// call returns `status: "dispatched"` with empty `replies` well
-/// under the await timeout, even against an unknown engine (the
-/// server's eventual error `ReplyEnd` is dropped as an unrouted
-/// frame, never awaited). Contrast `delivered`, which blocks on
-/// settlement.
+/// Fire-and-forget does not skip the engine-owned recipient resolution added
+/// by issue 4057. An unknown engine therefore fails during preparation instead
+/// of reporting `dispatched`; only the application mail's settlement is
+/// omitted.
 #[tokio::test]
-async fn send_mail_fire_and_forget_is_non_blocking() {
+async fn send_mail_fire_and_forget_rejects_unknown_engine_during_resolution() {
     use std::time::Instant;
 
     let (_chassis, port) = boot_hub();
@@ -92,10 +93,8 @@ async fn send_mail_fire_and_forget_is_non_blocking() {
     let out = mcp
         .send_mail(Parameters(SendMailArgs {
             mails: vec![MailSpec {
-                // A well-formed item to an engine the hub doesn't
-                // supervise: the dispatch chain never settles with a
-                // reply, so a blocking call would wait — fire-and-
-                // forget returns at once.
+                // Recipient resolution is routed first and reports that this
+                // engine is not supervised before the application mail fires.
                 engine_id: "00000000-0000-0000-0000-000000000099".to_owned(),
                 mail: EngineMailSpec {
                     recipient_name: "aether.fs".to_owned(),
@@ -111,9 +110,168 @@ async fn send_mail_fire_and_forget_is_non_blocking() {
     assert!(started.elapsed() < Duration::from_secs(5), "fire-and-forget must not block on settlement");
     let statuses: Vec<MailStatus> = serde_json::from_str(&out).expect("status array");
     assert_eq!(statuses.len(), 1);
-    assert_eq!(statuses[0].status, "dispatched", "fire-and-forget reports dispatched, not delivered");
+    assert!(
+        statuses[0].status.starts_with("error: "),
+        "fire-and-forget may await engine resolution and therefore rejects an unknown engine"
+    );
     assert!(statuses[0].replies.is_empty(), "fire-and-forget carries no replies");
     assert!(!statuses[0].timed_out, "dispatch is not a timeout");
+}
+
+#[tokio::test]
+async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution() {
+    let supplied = "aether.test://camera";
+    let canonical = "aether.test/aether.test.child:camera";
+    let engine_answer = MailboxId(0x4057_0000_0000_0001);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine_answer, canonical, Arc::clone(&calls));
+    let mcp = connect_mcp(port);
+    let engine = EngineId(Uuid::from_u128(0x4057));
+
+    let prepared = mcp
+        .prepare_direct_mail(MailSpec {
+            engine_id: engine.0.to_string(),
+            mail: EngineMailSpec {
+                recipient_name: supplied.to_owned(),
+                kind_name: "aether.fs.list".to_owned(),
+                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+            },
+        })
+        .await
+        .expect("direct mail prepares through the engine resolver");
+    assert_eq!(prepared.envelope.to.mailbox, engine_answer);
+    assert_eq!(prepared.resolved_mailbox_id, engine_answer);
+    assert_eq!(prepared.canonical_recipient, canonical);
+    assert_eq!(calls.lock().expect("address-route calls mutex is never poisoned").len(), 1);
+
+    calls.lock().expect("address-route calls mutex is never poisoned").clear();
+    let bundle = mcp
+        .encode_mail_bundle(
+            engine,
+            &[EngineMailSpec {
+                recipient_name: supplied.to_owned(),
+                kind_name: "aether.fs.list".to_owned(),
+                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+            }],
+        )
+        .await
+        .expect("NamedMail bundle encodes without recipient pre-resolution");
+    assert_eq!(bundle[0].recipient_name, supplied);
+    assert!(
+        calls.lock().expect("address-route calls mutex is never poisoned").is_empty(),
+        "NamedMail remains engine-atomic and never calls the pre-resolver"
+    );
+}
+
+#[tokio::test]
+async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved_mailbox() {
+    let supplied = "aether.test://declared-reply";
+    let canonical = "aether.test/aether.test.child:declared-reply";
+    let engine_answer = MailboxId(0x4057_0000_0000_0003);
+    #[allow(clippy::disallowed_methods)]
+    let locally_folded = mailbox_id_from_path(supplied);
+    assert_ne!(engine_answer, locally_folded, "test answer must expose accidental client-side folding");
+
+    let reply_descriptor =
+        KindDescriptor { name: "aether.test.component.reply".to_owned(), schema: SchemaType::String };
+    let reply_kind_id = KindId(kind_id_from_parts(&reply_descriptor.name, &reply_descriptor.schema));
+    let reply_params = serde_json::json!("decoded through engine-resolved handler contract");
+    let replies = Arc::new(Mutex::new(VecDeque::from([TerrainRouteReply {
+        events: vec![TerrainReplyEvent {
+            kind: reply_kind_id,
+            payload: aether_codec::encode_schema(&reply_params, &reply_descriptor.schema)
+                .expect("component reply schema encodes"),
+        }],
+        settle: true,
+    }])));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_replies(engine_answer, canonical, Arc::clone(&calls), replies);
+    let mcp = connect_mcp(port);
+    let engine = EngineId(Uuid::from_u128(0x4057));
+    mcp.prefill_engine(engine);
+    mcp.merge_into_engine_cache(engine, vec![reply_descriptor.clone()]);
+    let request_descriptor = mcp.cache_lookup(engine, "aether.fs.list").expect("static request descriptor is cached");
+    let request_kind_id = KindId(kind_id_from_parts(&request_descriptor.name, &request_descriptor.schema));
+    mcp.components.lock().expect("component cache mutex is never poisoned").insert(
+        (engine, engine_answer),
+        ComponentCapabilities {
+            handlers: vec![HandlerCapability {
+                id: request_kind_id,
+                name: "aether.fs.list".to_owned(),
+                doc: None,
+                reply: aether_data::ReplyContract::One(reply_kind_id),
+            }],
+            ..ComponentCapabilities::default()
+        },
+    );
+    assert!(
+        !mcp.components
+            .lock()
+            .expect("component cache mutex is never poisoned")
+            .contains_key(&(engine, locally_folded)),
+        "only the engine-returned mailbox id owns the handler contract"
+    );
+
+    let status = settle_mail_item(
+        &mcp,
+        0,
+        MailSpec {
+            engine_id: engine.0.to_string(),
+            mail: EngineMailSpec {
+                recipient_name: supplied.to_owned(),
+                kind_name: "aether.fs.list".to_owned(),
+                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+            },
+        },
+        ReplyProjection::All,
+    )
+    .await;
+
+    assert_eq!(status.status, "delivered");
+    assert_eq!(status.replies.len(), 1);
+    assert_eq!(status.replies[0].kind_name.as_deref(), Some(reply_descriptor.name.as_str()));
+    assert_eq!(status.replies[0].params.as_ref(), Some(&reply_params));
+    assert!(status.replies[0].payload_bytes.is_none(), "declared component reply decoded without base64 fallback");
+    let calls = calls.lock().expect("address-route calls mutex is never poisoned");
+    assert_eq!(calls.len(), 2, "one resolver RPC precedes one ordinary application delivery");
+    assert_eq!(calls[0].kind, ResolveAddress::ID);
+    assert_eq!(calls[1].mailbox, engine_answer, "ordinary send routes to the engine-returned mailbox id");
+    drop(calls);
+}
+
+#[tokio::test]
+async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
+    let engine_answer = MailboxId(0x4057_0000_0000_0002);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine_answer, "aether.fs", Arc::clone(&calls));
+    let mcp = connect_mcp(port);
+    let engine = EngineId(Uuid::from_u128(0x4057));
+
+    mcp.deliver_one_fire(MailSpec {
+        engine_id: engine.0.to_string(),
+        mail: EngineMailSpec {
+            recipient_name: "aether.fs".to_owned(),
+            kind_name: "aether.fs.list".to_owned(),
+            params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+        },
+    })
+    .await
+    .expect("resolver settles before the application mail is fired");
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if calls.lock().expect("address-route calls mutex is never poisoned").len() >= 2 {
+                break;
+            }
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("fired application envelope reaches route sink");
+    let calls = calls.lock().expect("address-route calls mutex is never poisoned");
+    assert_eq!(calls[0].kind, ResolveAddress::ID);
+    assert_eq!(calls[1].mailbox, engine_answer);
+    drop(calls);
 }
 
 fn traced_response_node() -> MailNodeJson {

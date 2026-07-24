@@ -89,6 +89,8 @@ A per-engine MCP call crosses two distinct translations:
 
 ```text
 tool JSON
+  → textual recipient resolution through selected engine inventory
+  → engine returns live mailbox id + canonical path
   → schema-aware encode in aether-mcp
   → WireFrame / MailEnvelope over hub RPC
   → proxy selects engine
@@ -100,7 +102,10 @@ tool JSON
 
 Failures at these layers look different. A schema error happens before mail is
 sent. An unknown engine fails at the fleet boundary. An unknown recipient fails
-inside the selected engine. A handler error or non-settling descendant happens
+inside the selected engine during address resolution. Canonical lineage and
+ADR-0166 abbreviated spellings share that engine-owned seam; the MCP
+coordinator keeps no alias table and never hashes operator paths. A handler
+error or non-settling descendant happens
 after dispatch. Start diagnosis at the earliest layer supported by evidence;
 the [recovery runbook](../operating/recovery.md) is organized that way.
 

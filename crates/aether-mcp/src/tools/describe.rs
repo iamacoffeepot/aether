@@ -10,7 +10,7 @@ use crate::args::{
     NativeCapHandlers, NativeHandlerJson, TransformListing,
 };
 
-use super::envelope::{engine_envelope, local_envelope, recipient_mailbox};
+use super::envelope::{engine_envelope, local_envelope};
 use super::ids::{parse_engine_id, parse_mailbox_id, static_kind_name};
 use super::render::{internal, internal_msg, json, project_capabilities, render_shape};
 use super::{COMPONENT_CAP, FLEET_CAP, INVENTORY_CAP, Mcp};
@@ -107,15 +107,16 @@ pub(super) fn describe_transforms() -> Result<String, McpError> {
 
 pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
-    // Resolve the input to a cache key (and, when it is a lineage name,
-    // the forwardable name). A `mbx-` id parses directly; anything else
-    // is a lineage name folded the same way send_mail resolves a
-    // recipient and the substrate's `registry.lookup` resolves it
-    // (`mailbox_id_from_path`), so the cache key agrees across all three.
+    // A tagged id remains a local cache-only fast path. Every textual
+    // address is resolved by the selected engine, which returns both the
+    // real mailbox id used as the cache key and its canonical path. The
+    // component host still receives the operator's original spelling so its
+    // own engine-atomic name handling remains the forwarding contract.
     let (mailbox_id, forward_name) = if args.component.starts_with("mbx-") {
         (parse_mailbox_id(&args.component)?, None)
     } else {
-        (recipient_mailbox(&args.component), Some(args.component.clone()))
+        let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.component).await.map_err(internal)?;
+        (mailbox_id, Some(args.component.clone()))
     };
 
     // Cache fast-path: populated by load_component / replace_component or

@@ -5,7 +5,7 @@
 //! The `aether.inventory` mailbox serves the per-build reverse-lookup
 //! inventory over mail so an out-of-process observer (the MCP harness)
 //! reads the running substrate's *own* state instead of a drift-prone
-//! compiled-in copy. Four request kinds:
+//! compiled-in copy. Five request kinds:
 //!
 //! - [`Manifest`] → the compile-time manifest: every declared
 //!   `NameEntry` + every instanced-family `TemplateEntry`. Templates keep
@@ -14,6 +14,8 @@
 //!   hash → name map (ADR-0088 §6).
 //! - [`Resolve`] → per-id `Option<String>`, for ids the client can't
 //!   compute from the manifest alone (ADR-0088 §5).
+//! - [`ResolveAddress`] → the live mailbox id and canonical path for a
+//!   canonical or ADR-0166 abbreviated actor address.
 //! - [`ListKinds`] → the engine's live kind vocabulary (ADR-0091).
 //! - [`ListHandlers`] → the native handler manifest (ADR-0109 §5).
 //!
@@ -139,6 +141,28 @@ pub struct ResolvedName {
 #[kind(name = "aether.inventory.resolve_result")]
 pub struct ResolveResult {
     pub resolved: Vec<ResolvedName>,
+}
+
+/// `aether.inventory.resolve_address` — resolve one canonical or ADR-0166
+/// abbreviated actor address inside the selected engine. The engine registry
+/// owns abbreviation expansion, canonical validation, liveness, and the final
+/// mailbox id; external clients must not fold the supplied string themselves.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.inventory.resolve_address")]
+pub struct ResolveAddress {
+    pub address: String,
+}
+
+/// Reply to [`ResolveAddress`]. The success arm carries both the live mailbox
+/// id and its canonical path so a caller can route by id while displaying and
+/// caching capabilities under the registry's real identity. The failure arm
+/// intentionally carries only the registry's human-readable diagnostic rather
+/// than duplicating the substrate's internal address-resolution error enum.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.inventory.resolve_address_result")]
+pub enum ResolveAddressResult {
+    Ok { mailbox_id: aether_data::MailboxId, canonical_path: String },
+    Err { error: String },
 }
 
 /// `aether.inventory.kinds` — request the running substrate's

@@ -105,7 +105,12 @@ not for hub artifact-store or MCP-local queries.
 **Sending mail.** `send_mail` is the workhorse. You give it a batch of items, each
 `{engine_id, recipient_name, kind_name, params}` — the **mailbox** to deliver to,
 the **kind** to deliver, and the structured params, which the tool schema-encodes to
-wire bytes against that kind's descriptor. By default each item *blocks* until its
+wire bytes against that kind's descriptor. A textual `recipient_name` may be a
+canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
+abbreviation (`aether.component://camera`). The selected engine resolves either
+spelling to the same live mailbox id and canonical path before dispatch;
+aether-mcp does not hash operator strings or keep an alias cache. A tagged
+`mbx-…` remains direct on tools that accept it. By default each item *blocks* until its
 chain settles. The batch-level `replies` projection defaults to `terminal`: it
 keeps the last arrival-ordered reply plus any reply recognized as an error from
 its decoded `Err` shape or exact kind-name error suffix. Use `none` to suppress
@@ -158,6 +163,11 @@ including domain rejections such as `StagedProposalLimitReached`. Task tools
 render mark ids as `{value}` records; generic `send_mail` continues to expose
 the live codec's newtype shape.
 
+Terrain mailbox arguments use the same direct-mail resolver as `send_mail`.
+Canonical loaded lineages and unambiguous ADR-0166 abbreviations therefore
+route identically, with liveness checked by the selected engine before the
+task request is sent.
+
 **Introspection.** `describe_kinds` is how you learn what to put in `params`. The
 default call returns a compact `[{name, shape}]` listing of every kind — a one-line
 field rendering per kind, small enough to read in one shot. Start with
@@ -168,7 +178,8 @@ need their nested `SchemaType`. `names` cannot combine with `families` or
 `prefix`, and a bare unfiltered `full: true` call is refused so schema output
 stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
-the component's loaded lineage name. `load_component` returns that
+the component's loaded lineage name or an unambiguous ADR-0166 abbreviation.
+`load_component` returns the canonical
 `aether.component/aether.embedded:NAME` address. For a boot load, retain the
 configured name from the component spec or derive the expected lineage from
 that spec; `spawn_substrate` itself returns only engine information. Registry
@@ -222,8 +233,9 @@ dispatched atomically around the readback — `mails` before (the state that sho
 appear) and `after_mails` after (cleanup). How that frame is produced — world-space
 geometry, the camera matrix, the depth convention — is covered in
 [Rendering & camera](systems/rendering.md).
-`actor_logs` pulls recent entries from one actor's per-actor log ring by mailbox
-name; pass `contains` to filter message bodies by a case-sensitive substring
+`actor_logs` and `actor_cost` resolve textual actor addresses inside the
+selected engine before querying its returned mailbox id. `actor_logs` pulls
+recent entries from that actor's per-actor log ring; pass `contains` to filter message bodies by a case-sensitive substring
 substrate-side, before entries cross the wire. Thread the reply's `next_since`
 back as `since` to page forward without re-reading. Only in-actor `tracing::*` events reach a ring — see
 [Logging](systems/logging.md) for the in-actor versus stderr boundary.
@@ -244,6 +256,10 @@ one handler.
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as
   `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
   See [The type system](foundations/type-system.md).
+- **The engine resolves textual actor addresses.** Canonical paths and
+  `root.namespace://relative` abbreviations are checked against the selected
+  engine's declared topology and live registry. Do not derive a mailbox id
+  from the spelling.
 - **`send_mail` blocks and projects replies by default.** It waits for settlement
   and returns the terminal reply plus recognized errors. Request `replies: "all"`
   when every event matters or `"none"` when only failures matter. A no-reply
@@ -255,14 +271,13 @@ one handler.
   desktop chassis; the headless chassis replies with an error rather than hanging.
   To read back a backgrounded or minimized window, mail `aether.window.focus`
   first to foreground it — see [Window](systems/window.md).
-- **`describe_component` is cache-first, with a live name fallback.** Address it
-  by the lineage returned by `load_component` or retained from a boot spec. A
-  cache hit returns immediately; only a name-addressed cache miss asks the
-  substrate. That fallback makes boot-manifest loads discoverable after an
-  aether-mcp restart, while successful loads and replacements refresh the
-  cache. Generic component-drop mail does not invalidate it, so a cached
-  description is not proof of current liveness; pair it with `drop_result` or a
-  safe live probe when that distinction matters. Registry `list_components`
+- **`describe_component` resolves names before consulting its cache.** Address
+  it by the lineage returned by `load_component`, an unambiguous abbreviation,
+  or a retained boot-spec lineage. The selected engine first returns the live
+  mailbox id and canonical path; aether-mcp then checks capabilities cached
+  under that real id and asks the component host only on a cache miss. A tagged
+  `mbx-` id remains cache-only, so that form alone does not prove liveness.
+  Registry `list_components`
   rows are stored artifacts, not lineage names. A `mbx-` id is only a local
   cache fast-path and needs a prior `load_component` / `replace_component`.
 
