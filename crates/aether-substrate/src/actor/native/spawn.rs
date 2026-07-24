@@ -779,6 +779,9 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
         let params = params.expect("SpawnBuilder::finish consumed exactly once");
+        if let Subname::Named(subname) = subname {
+            validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)?;
+        }
         if let (Some(parent), Some(declared_namespace)) = (&parent, declared_parent_namespace)
             && parent.logical() != ActorId::singleton(declared_namespace)
         {

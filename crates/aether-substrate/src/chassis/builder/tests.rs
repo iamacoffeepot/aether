@@ -966,6 +966,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     struct ActualParent {
         init_count: Arc<AtomicU32>,
         mismatch_observed: Arc<AtomicBool>,
+        invalid_subname_observed: Arc<AtomicBool>,
     }
     impl Addressable for ActualParent {
         const NAMESPACE: &'static str = "test.checked_spawn.actual";
@@ -974,17 +975,17 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     impl HandlesKind<Hatch> for ActualParent {}
     impl aether_actor::Lifecycle<Self> for ActualParent {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
+        type Params = (Arc<AtomicU32>, Arc<AtomicBool>, Arc<AtomicBool>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
 
         fn init(
             (): (),
-            (init_count, mismatch_observed): Self::Params,
+            (init_count, mismatch_observed, invalid_subname_observed): Self::Params,
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
-            Ok(Self { init_count, mismatch_observed })
+            Ok(Self { init_count, mismatch_observed, invalid_subname_observed })
         }
     }
     impl NativeActor for ActualParent {
@@ -1000,7 +1001,21 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
             if kind.0 != Hatch::ID.0 {
                 return None;
             }
-            let _ = Hatch::decode_from_bytes(payload)?;
+            let mail = Hatch::decode_from_bytes(payload)?;
+            if mail.tag == 2 {
+                let error = ctx
+                    .spawn_child::<DeclaredParent, Child>(
+                        Subname::Named("invalid:name"),
+                        (),
+                        Arc::clone(&state.init_count),
+                    )
+                    .finish()
+                    .expect_err("the invalid subname must be rejected");
+                if matches!(error, SpawnError::SubnameInvalid(_)) {
+                    state.invalid_subname_observed.store(true, AtomicOrdering::SeqCst);
+                }
+                return Some(());
+            }
             let error = ctx
                 .spawn_child::<DeclaredParent, Child>(Subname::Named("never-built"), (), Arc::clone(&state.init_count))
                 .finish()
@@ -1019,8 +1034,13 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     let (registry, mailer) = bare_substrate();
     let init_count = Arc::new(AtomicU32::new(0));
     let mismatch_observed = Arc::new(AtomicBool::new(false));
+    let invalid_subname_observed = Arc::new(AtomicBool::new(false));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ActualParent>((Arc::clone(&init_count), Arc::clone(&mismatch_observed)))
+        .with_actor::<ActualParent>((
+            Arc::clone(&init_count),
+            Arc::clone(&mismatch_observed),
+            Arc::clone(&invalid_subname_observed),
+        ))
         .build_passive()
         .expect("ActualParent boots");
 
@@ -1041,6 +1061,18 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
         registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:never-built").is_none(),
         "a false parent must not mutate the mailbox registry",
     );
+
+    let bytes = (Hatch { tag: 2 }).encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !invalid_subname_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        invalid_subname_observed.load(AtomicOrdering::SeqCst),
+        "named subname validation must precede runtime parent comparison",
+    );
+    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "invalid subname and false parent must not init the child");
 
     drop(chassis);
 }

@@ -123,6 +123,37 @@ impl OutboundBuffer {
     }
 }
 
+/// Exactly one identity source for a native binding. Production construction
+/// is typed; test-only construction retains only the concrete routing facts
+/// needed by existing mailbox helpers and cannot spawn.
+enum BindingIdentity {
+    Typed(ActorRuntimeIdentity),
+    Untyped { mailbox: MailboxId, carry: u64 },
+}
+
+impl BindingIdentity {
+    fn mailbox(&self) -> MailboxId {
+        match self {
+            Self::Typed(identity) => identity.mailbox(),
+            Self::Untyped { mailbox, .. } => *mailbox,
+        }
+    }
+
+    fn carry(&self) -> u64 {
+        match self {
+            Self::Typed(identity) => identity.carry(),
+            Self::Untyped { carry, .. } => *carry,
+        }
+    }
+
+    fn runtime_identity(&self) -> Option<&ActorRuntimeIdentity> {
+        match self {
+            Self::Typed(identity) => Some(identity),
+            Self::Untyped { .. } => None,
+        }
+    }
+}
+
 /// Per-actor binding state every native capability owns. Each
 /// capability constructs one at boot via [`NativeBinding::new`] and
 /// holds it for the lifetime of its dispatcher thread; SDK helpers
@@ -144,12 +175,9 @@ impl OutboundBuffer {
 /// here.
 pub struct NativeBinding {
     mailer: Arc<Mailer>,
-    /// ADR-0165: typed production bindings carry the actor's logical type
-    /// identity together with its concrete lineage facts. Test-only bindings
-    /// deliberately retain only a mailbox and cannot spawn.
-    identity: Option<ActorRuntimeIdentity>,
-    untyped_mailbox: MailboxId,
-    untyped_carry: u64,
+    /// ADR-0165: exactly one typed production identity or one explicitly
+    /// untyped test identity.
+    identity: BindingIdentity,
     /// The actor's inbox, drained by the dispatcher via
     /// [`Self::recv_blocking`] / [`Self::try_recv`]. [`SettlingInbox`]'s
     /// drop settles any residue queued at teardown, closing the #1716
@@ -254,9 +282,7 @@ impl NativeBinding {
     ) -> Self {
         Self {
             mailer,
-            identity: Some(ActorRuntimeIdentity::new::<A>(self_mailbox, carry, canonical_name)),
-            untyped_mailbox: self_mailbox,
-            untyped_carry: carry,
+            identity: BindingIdentity::Typed(ActorRuntimeIdentity::new::<A>(self_mailbox, carry, canonical_name)),
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
@@ -300,11 +326,9 @@ impl NativeBinding {
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
         Self {
             mailer,
-            identity: None,
-            untyped_mailbox: self_mailbox,
             // Untyped tests still use relative actor resolution. Preserve the
             // historical depth-1 carry without inventing a logical identity.
-            untyped_carry: self_mailbox.0,
+            identity: BindingIdentity::Untyped { mailbox: self_mailbox, carry: self_mailbox.0 },
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
@@ -364,7 +388,7 @@ impl NativeBinding {
     /// publish their address to peers without going through the
     /// transport's send path.
     pub fn self_mailbox(&self) -> MailboxId {
-        self.identity.as_ref().map_or(self.untyped_mailbox, ActorRuntimeIdentity::mailbox)
+        self.identity.mailbox()
     }
 
     /// This actor's lineage carry (ADR-0099 §3) — the rolling fold
@@ -372,11 +396,11 @@ impl NativeBinding {
     /// [`super::ctx::NativeCtx::spawn_child`] can pass it as the parent
     /// carry the spawn machinery folds the new node's `ActorId` onto.
     pub fn carry(&self) -> u64 {
-        self.identity.as_ref().map_or(self.untyped_carry, ActorRuntimeIdentity::carry)
+        self.identity.carry()
     }
 
     pub(super) fn runtime_identity(&self) -> Option<&ActorRuntimeIdentity> {
-        self.identity.as_ref()
+        self.identity.runtime_identity()
     }
 
     /// Borrow the wired `Mailer`. Surfaced so cross-file producer
@@ -1007,6 +1031,10 @@ mod tests {
         let recipient = registry.lookup("test.sink").unwrap();
 
         let transport = NativeBinding::new_for_test(mailer, MailboxId(99));
+        assert!(
+            matches!(&transport.identity, BindingIdentity::Untyped { mailbox: MailboxId(99), carry: 99 }),
+            "test bindings must have one untyped identity source",
+        );
         assert!(transport.runtime_identity().is_none(), "test bindings must remain logically untyped");
         assert!(transport.spawner().is_none(), "untyped test bindings must not be able to spawn");
         assert_eq!(transport.carry(), 99, "untyped relative resolution keeps the depth-1 carry");
