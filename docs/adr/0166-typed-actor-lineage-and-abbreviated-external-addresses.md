@@ -1,7 +1,8 @@
 # ADR-0166: Typed actor lineage and abbreviated external addresses
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-24
+- **Accepted:** 2026-07-24
 
 ## Context
 
