@@ -2,6 +2,7 @@
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use std::collections::VecDeque;
 
 /// `parse_level` round-trips every documented spelling and rejects
 /// unknown strings — case-insensitive (`"INFO"` and `"info"` both
@@ -95,4 +96,61 @@ async fn actor_logs_bad_level_is_tool_error() {
         }))
         .await;
     assert!(result.is_err(), "an unknown level should be a tool error");
+}
+
+#[tokio::test]
+async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
+    let engine_answer = MailboxId(0x4057_0000_0000_0200);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::from([
+        TerrainRouteReply {
+            events: vec![TerrainReplyEvent {
+                kind: aether_kinds::LogTailResult::ID,
+                payload: aether_kinds::LogTailResult::Ok { entries: Vec::new(), next_since: 0, truncated_before: None }
+                    .encode_into_bytes(),
+            }],
+            settle: true,
+        },
+        TerrainRouteReply {
+            events: vec![TerrainReplyEvent {
+                kind: aether_kinds::CostTailResult::ID,
+                payload: aether_kinds::CostTailResult::Ok { rows: Vec::new() }.encode_into_bytes(),
+            }],
+            settle: true,
+        },
+    ])));
+    let (_chassis, port) = boot_hub_with_address_route_replies(
+        engine_answer,
+        "aether.test/aether.test.child:probe",
+        Arc::clone(&calls),
+        replies,
+    );
+    let mcp = connect_mcp(port);
+    let engine_id = Uuid::from_u128(0x4057).to_string();
+
+    mcp.actor_logs(Parameters(ActorLogsArgs {
+        engine_id: engine_id.clone(),
+        mailbox_name: "aether.test://probe".to_owned(),
+        max: None,
+        level: None,
+        since: None,
+        contains: None,
+    }))
+    .await
+    .expect("actor logs resolves and returns");
+    mcp.actor_cost(Parameters(ActorCostArgs {
+        engine_id,
+        mailbox_name: "aether.test://probe".to_owned(),
+        kind_id: None,
+    }))
+    .await
+    .expect("actor cost resolves and returns");
+
+    let calls = calls.lock().expect("address-route calls mutex is never poisoned");
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0].kind, ResolveAddress::ID);
+    assert_eq!(calls[1].mailbox, engine_answer);
+    assert_eq!(calls[2].kind, ResolveAddress::ID);
+    assert_eq!(calls[3].mailbox, engine_answer);
+    drop(calls);
 }

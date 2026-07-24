@@ -4,7 +4,7 @@
 //! (the MCP harness) reads the running substrate's **own, per-build**
 //! state instead of a drift-prone compiled-in copy.
 //!
-//! Four request kinds, each replying synchronously (ADR-0112 `-> R`):
+//! Five request kinds, each replying synchronously (ADR-0112 `-> R`):
 //!
 //! - [`Manifest`] → [`ManifestResult`]: the compile-time manifest —
 //!   every link-time [`NameEntry`](aether_data::name_inventory::NameEntry)
@@ -20,6 +20,9 @@
 //!   manifest alone (the runtime-registry arm of the ADR-0088 §2 chain,
 //!   `thread_name::resolve_runtime`). `None` on a miss so the client
 //!   falls back to rendering the ADR-0064 tagged-id string itself.
+//! - [`ResolveAddress`] → [`ResolveAddressResult`]: engine-owned
+//!   canonical/ADR-0166 abbreviated address resolution to one live mailbox id
+//!   and canonical path.
 //! - [`ListKinds`] → [`ListKindsResult`] (ADR-0091): every
 //!   [`KindId`](aether_data::KindId) currently registered in the
 //!   substrate's `Registry`, with its full
@@ -39,7 +42,8 @@
 //!   `aether.render`, …) surfaces its `In -> Out` the way
 //!   `describe_component` surfaces a wasm component's.
 //!
-//! The `Manifest` / `Resolve` / `ListKinds` / `ListHandlers` family is
+//! The `Manifest` / `Resolve` / `ResolveAddress` / `ListKinds` /
+//! `ListHandlers` family is
 //! owned here in [`kinds`], per the `capability-anatomy.md` rule. Its one
 //! upstream consumer, `aether-mcp`, takes this crate identity-only
 //! (`default-features = false`) exactly as it takes `aether-fs` — the
@@ -49,7 +53,7 @@
 //! holdout in `aether-kinds`: `aether-fleet` uses it for component config
 //! descriptors, so it is shared vocabulary rather than cap-owned.
 //!
-//! The cap is stateless. `ListKinds` reads the engine's `Registry`
+//! The cap is stateless. `ResolveAddress` and `ListKinds` read the engine's `Registry`
 //! through the handler ctx (`NativeCtx::mailer().registry()`) — the same
 //! one the component-host cap registers into for `register_or_match_all`,
 //! so a `load_component`'s registrations are visible the moment they
@@ -65,7 +69,7 @@
 // markers always-on, outside the `feature = "runtime"` gate. The reply
 // kinds are named only by the gated handler bodies, so they ride the
 // runtime gate below.
-use kinds::{ListHandlers, ListKinds, Manifest, Resolve};
+use kinds::{ListHandlers, ListKinds, Manifest, Resolve, ResolveAddress};
 
 use aether_actor::actor;
 
@@ -83,11 +87,11 @@ pub mod kinds;
 /// `type State = Self` (that spelling selects the un-split shape). The
 /// `Manifest`, `Resolve`, and `ListHandlers` arms read process-global
 /// tables — the link-time inventories and the runtime name registry —
-/// directly. The `ListKinds` arm reads the engine's `Registry` off the
-/// handler ctx, so the reply reflects whatever vocabulary the substrate
-/// currently holds (including anything `ComponentHostCapability`
-/// registered at load time) without a cross-cap event channel and
-/// without pinning one registry instance at `init`.
+/// directly. The `ResolveAddress` and `ListKinds` arms read the engine's
+/// `Registry` off the handler ctx, so their replies reflect its live address
+/// and vocabulary state (including anything `ComponentHostCapability`
+/// registered at load time) without a cross-cap event channel or pinning one
+/// registry instance at `init`.
 #[actor(singleton)]
 pub struct InventoryCapability;
 
@@ -98,7 +102,7 @@ pub struct InventoryCapability;
 // helpers, the `aether_substrate`-typed imports, and the state struct
 // sit behind the one `feature = "runtime"` gate.
 #[cfg(not(target_family = "wasm"))]
-use kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
+use kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveAddressResult, ResolveResult};
 
 // The runtime half — the wire-projection helpers (nested as
 // `runtime/manifest.rs` / `runtime/resolve.rs`), the

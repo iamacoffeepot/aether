@@ -27,11 +27,11 @@ use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::wire;
 use aether_data::{
-    EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid, mailbox_id_from_path, tagged_id,
+    EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid, mailbox_id_from_name, tagged_id,
     validate_scope_path,
 };
 use aether_data::{EnumVariant, Primitive, SchemaType};
-use aether_inventory::kinds::{ListKinds, ListKindsResult};
+use aether_inventory::kinds::{ListKinds, ListKindsResult, ResolveAddress, ResolveAddressResult};
 #[cfg(test)]
 use aether_kinds::KindDescriptorWire;
 use aether_kinds::{
@@ -94,7 +94,7 @@ use self::components::{MAX_REPLICAS, components_all_loaded, reject_replicas_out_
 use self::components::{
     component_config_bytes, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export,
 };
-use self::envelope::{engine_envelope, local_envelope, recipient_mailbox, validate_recipient_scope};
+use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
 #[cfg(test)]
 use self::ids::{parse_kind_id, render_compact_tree, static_kind_name};
 #[cfg(test)]
@@ -271,7 +271,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles (status 'delivered'). The batch-level `replies` projection defaults to `terminal`, which returns the last arrival-ordered correlated reply plus every recognized error; `none` suppresses non-errors, and `all` restores the complete decoded stream. Recognition is exact for decoded `Err` variants and final kind-name error segments/suffixes. Each retained reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is fixed at 300s per item; on timeout the item reports status 'timeout' with timed_out:true and the projected replies collected so far. Set fire_and_forget:true for non-blocking dispatch (status 'dispatched', empty replies regardless of projection). For `Bytes`-typed request fields, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file`, `$base64`, or `$text`. Decoded reply `Bytes` leaves over 16 KiB spill to a host file; a still-oversized complete result then passes through the generic 32 KiB whole-response guard, so explicit `all` never truncates."
+        description = "Send one or more mail items to substrate mailboxes. `recipient_name` accepts a canonical lineage, an unambiguous ADR-0166 `root.namespace://relative` abbreviation, or a tagged mbx- id; textual addresses are resolved for liveness by the selected engine and are never hashed or alias-cached by aether-mcp. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles (status 'delivered'). The batch-level `replies` projection defaults to `terminal`, which returns the last arrival-ordered correlated reply plus every recognized error; `none` suppresses non-errors, and `all` restores the complete decoded stream. Recognition is exact for decoded `Err` variants and final kind-name error segments/suffixes. Each retained reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is fixed at 300s per item; on timeout the item reports status 'timeout' with timed_out:true and the projected replies collected so far. Set fire_and_forget:true to await recipient resolution, then fire the application mail without awaiting its settlement (status 'dispatched', empty replies regardless of projection). For `Bytes`-typed request fields, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file`, `$base64`, or `$text`. Decoded reply `Bytes` leaves over 16 KiB spill to a host file; a still-oversized complete result then passes through the generic 32 KiB whole-response guard, so explicit `all` never truncates."
     )]
     pub async fn send_mail(&self, Parameters(args): Parameters<SendMailArgs>) -> Result<String, McpError> {
         guard_response_size("send_mail", mail::send_mail(self, args).await)
@@ -400,7 +400,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, its top-level doc, and (ADR-0090) its boot-config kind id+name when it declared a typed Config. Per-handler and component docs default to the first rustdoc line; pass full: true for the complete rustdoc strings (issue 3006). Address the component by its full lineage name. load_component returns that name; spawn_substrate returns engine information only, so callers booting components should give each an explicit name or derive and retain its lineage from the boot spec and stored manifest. list_components reports stored artifacts, never live lineages. On a component-cache miss, a lineage name is resolved live against the substrate, which makes boot-loaded components discoverable after an aether-mcp restart. A cache hit is returned without a liveness query, so a successful description alone does not prove the component is still loaded. A tagged mbx- id is accepted only as a local cache fast-path."
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, its top-level doc, and (ADR-0090) its boot-config kind id+name when it declared a typed Config. Per-handler and component docs default to the first rustdoc line; pass full: true for the complete rustdoc strings (issue 3006). Address the component by its full lineage name or an unambiguous ADR-0166 abbreviation; the selected engine resolves textual addresses to its live mailbox id and canonical path before the cache lookup. load_component returns the canonical name. spawn_substrate returns engine information only, so callers booting components should give each an explicit name or derive and retain its lineage from the boot spec and stored manifest. list_components reports stored artifacts, never live lineages. A tagged mbx- id is accepted only as a local cache fast-path."
     )]
     pub async fn describe_component(
         &self,

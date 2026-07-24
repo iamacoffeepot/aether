@@ -31,7 +31,7 @@ pub(super) async fn call_terrain_kind(
     expected_reply_kind: &str,
 ) -> Result<serde_json::Value, McpError> {
     let engine = parse_engine_id(engine_id)?;
-    let (events, timed_out) = mcp
+    let delivered = mcp
         .deliver_one(MailSpec {
             engine_id: engine_id.to_owned(),
             mail: EngineMailSpec { recipient_name: mailbox.to_owned(), kind_name: request_kind.to_owned(), params },
@@ -40,7 +40,7 @@ pub(super) async fn call_terrain_kind(
         .map_err(internal)?;
     let expected = mcp.lookup_descriptor(engine, expected_reply_kind).await.map_err(internal)?;
     let engine_kinds = mcp.snapshot_engine_kinds(engine);
-    decode_terrain_reply(&events, timed_out, &expected, &engine_kinds)
+    decode_terrain_reply(&delivered.events, delivered.timed_out, &expected, &engine_kinds)
 }
 
 pub(super) fn decode_terrain_reply(

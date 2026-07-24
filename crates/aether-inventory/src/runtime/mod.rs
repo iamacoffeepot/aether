@@ -12,10 +12,10 @@
 // beside the body.
 use aether_actor::runtime;
 
-use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve};
+use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve, ResolveAddress};
 
 #[cfg(not(target_family = "wasm"))]
-use super::{HandlersResult, ListKindsResult, ManifestResult, ResolveResult};
+use super::{HandlersResult, ListKindsResult, ManifestResult, ResolveAddressResult, ResolveResult};
 
 // The reverse-lookup helper, nested under this `runtime` directory so the
 // one `mod runtime;` gate in the parent covers it (no per-sibling `#[cfg]`).
@@ -162,6 +162,26 @@ impl NativeActor for InventoryCapability {
         ResolveResult { resolved: resolve_ids(ctx.mailer().registry(), mail.ids) }
     }
 
+    /// Resolve one external actor address through the selected engine's
+    /// registry. ADR-0166 abbreviation expansion, canonical validation, and
+    /// liveness all remain engine-owned; the wire deliberately projects
+    /// failures as diagnostic text instead of exposing the substrate error
+    /// enum.
+    #[handler::single]
+    #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
+    fn on_resolve_address(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: ResolveAddress,
+    ) -> ResolveAddressResult {
+        match ctx.mailer().registry().resolve_address(&mail.address) {
+            Ok(resolved) => {
+                ResolveAddressResult::Ok { mailbox_id: resolved.mailbox_id, canonical_path: resolved.canonical_path }
+            }
+            Err(error) => ResolveAddressResult::Err { error: error.to_string() },
+        }
+    }
+
     /// Reply with the native handler manifest (ADR-0109 §5): every
     /// `#[handler]` across every native actor linked into the
     /// substrate, each carrying its owning `namespace`, input kind
@@ -210,9 +230,13 @@ mod tests {
     use super::*;
     use crate::kinds::ParamKindWire;
     use aether_actor::actor;
-    use aether_data::name_inventory::HandlerEntry;
+    use aether_data::name_inventory::{
+        ChildEntry, HandlerEntry, NameEntry, ParamKind as InventoryParamKind, RootEntry, TemplateEntry,
+    };
     use aether_data::tagged_id;
-    use aether_data::{MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name};
+    use aether_data::{
+        ActorId, MAILBOX_DOMAIN, MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
+    };
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -220,6 +244,38 @@ mod tests {
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
     use std::sync::Arc;
+
+    const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
+    const ADDRESS_TEST_CHILD: &str = "aether.test.inventory_address_child";
+
+    inventory::submit! {
+        NameEntry {
+            domain: MAILBOX_DOMAIN,
+            name: ADDRESS_TEST_ROOT,
+        }
+    }
+    inventory::submit! {
+        TemplateEntry {
+            domain: MAILBOX_DOMAIN,
+            prefix: ADDRESS_TEST_CHILD,
+            template: ":{subname}",
+            param: InventoryParamKind::Dynamic,
+        }
+    }
+    inventory::submit! {
+        RootEntry {
+            actor: ActorId::singleton(ADDRESS_TEST_ROOT),
+            namespace: ADDRESS_TEST_ROOT,
+        }
+    }
+    inventory::submit! {
+        ChildEntry {
+            parent: ActorId::singleton(ADDRESS_TEST_ROOT),
+            child: ActorId::singleton(ADDRESS_TEST_CHILD),
+            parent_namespace: ADDRESS_TEST_ROOT,
+            child_namespace: ADDRESS_TEST_CHILD,
+        }
+    }
 
     /// The stateless cap + a fully-wired test mailer + `NativeBinding`
     /// transport. Handlers are called directly and return their
@@ -362,6 +418,44 @@ mod tests {
 
         assert_eq!(result.resolved[4].id, "not-a-tagged-id");
         assert_eq!(result.resolved[4].name, None, "a malformed id reports None without aborting the batch");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // boundary-real fixture registers the canonical lineage-fold id
+    fn resolve_address_serves_canonical_short_explicit_and_engine_errors() {
+        let name = "camera";
+        let canonical = format!("{ADDRESS_TEST_ROOT}/{ADDRESS_TEST_CHILD}:{name}");
+        let mailbox_id = aether_data::mailbox_id_from_path(&canonical);
+        let mut fix = fixture();
+        fix.registry
+            .try_register_inbox_with_id(mailbox_id, canonical.clone(), noop_handler())
+            .expect("register canonical child mailbox");
+        let mut ctx = session_ctx(&fix.transport);
+
+        for address in [
+            canonical.clone(),
+            format!("{ADDRESS_TEST_ROOT}://{name}"),
+            format!("{ADDRESS_TEST_ROOT}://{ADDRESS_TEST_CHILD}:{name}"),
+        ] {
+            assert_eq!(
+                InventoryCapability::on_resolve_address(&mut fix.state, &mut ctx, ResolveAddress { address },),
+                ResolveAddressResult::Ok { mailbox_id, canonical_path: canonical.clone() },
+            );
+        }
+        let missing = InventoryCapability::on_resolve_address(
+            &mut fix.state,
+            &mut ctx,
+            ResolveAddress { address: format!("{ADDRESS_TEST_ROOT}://missing") },
+        );
+        match missing {
+            ResolveAddressResult::Err { error } => {
+                assert!(error.contains("has no live mailbox"), "engine diagnostic is preserved: {error}");
+                assert!(error.contains("missing"), "engine diagnostic names the missing address: {error}");
+            }
+            other @ ResolveAddressResult::Ok { .. } => {
+                panic!("missing address should return an engine diagnostic, got {other:?}")
+            }
+        }
     }
 
     /// A native test cap with a synchronous `-> R` handler — the

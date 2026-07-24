@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use aether_data::{EngineId, Kind, MailId, Uuid};
+use aether_data::{EngineId, Kind, MailId};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
@@ -9,7 +9,7 @@ use crate::args::{
     MailSpec, MailStatus, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
 };
 
-use super::envelope::{engine_envelope, engine_envelope_by_id, recipient_mailbox};
+use super::envelope::{engine_envelope, engine_envelope_by_id};
 use super::ids::{mail_id_to_json, parse_engine_id, render_compact_tree};
 use super::render::{internal, internal_msg, json};
 use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
@@ -45,38 +45,31 @@ pub(super) async fn settle_mail_item(
     spec: MailSpec,
     reply_projection: ReplyProjection,
 ) -> MailStatus {
-    // Capture the engine id and the handler's declared reply kind
-    // (ADR-0109 / issue 1803) before `deliver_one` consumes the
-    // spec, so `decode_reply_events` can search the per-engine kind
-    // cache for component-defined reply kinds (issue 1804).
-    let engine = Uuid::parse_str(&spec.engine_id).ok().map(EngineId);
-    let declared_reply = engine.and_then(|e| {
-        let mbx = recipient_mailbox(&spec.mail.recipient_name);
-        let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
-        cache.get(&(e, mbx)).and_then(|caps| {
-            caps.handlers
-                .iter()
-                .find(|h| h.name == spec.mail.kind_name)
-                // ADR-0112 / ADR-0134: a single-class handler names
-                // one static reply kind and a multi-class handler
-                // names its element kind — both are what a driver
-                // decodes, so search the cache for either. A manual
-                // / silent handler yields no declared kind.
-                .and_then(|h| match h.reply {
-                    aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
-                    _ => None,
-                })
-        })
-    });
-
     let mut replies = Vec::new();
     let mut timed_out = false;
     let status = match mcp.deliver_one(spec).await {
-        Ok((events, hit_timeout)) => {
-            let engine_kinds = engine.map(|e| mcp.snapshot_engine_kinds(e)).unwrap_or_default();
-            replies = project_replies(decode_reply_events(&events, &engine_kinds, declared_reply), reply_projection);
-            timed_out = hit_timeout;
-            if hit_timeout {
+        Ok(delivered) => {
+            // The prepared direct path carries the engine's resolved mailbox
+            // id forward, so an abbreviated spelling consults the same
+            // component-capability cache entry as its canonical spelling.
+            let declared_reply = {
+                let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
+                cache.get(&(delivered.engine, delivered.resolved_mailbox_id)).and_then(|caps| {
+                    caps.handlers.iter().find(|handler| handler.name == delivered.kind_name).and_then(|handler| {
+                        match handler.reply {
+                            aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
+                            _ => None,
+                        }
+                    })
+                })
+            };
+            let engine_kinds = mcp.snapshot_engine_kinds(delivered.engine);
+            replies = project_replies(
+                decode_reply_events(&delivered.events, &engine_kinds, declared_reply),
+                reply_projection,
+            );
+            timed_out = delivered.timed_out;
+            if delivered.timed_out {
                 "timeout"
             } else {
                 "delivered"
