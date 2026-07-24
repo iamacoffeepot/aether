@@ -21,6 +21,7 @@ use aether_substrate::mail::helpers::register_or_match_all;
 
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
+use crate::component::ComponentHostCapability;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 
 /// sha256 hex over `wasm` — the ADR-0147 module-boot dedup key. A small local
@@ -249,7 +250,9 @@ impl ComponentHostCapabilityState {
             // `wire`) and later sibling spawns index their own.
             wasm_bytes: Arc::clone(&wasm_bytes),
         };
-        let mailbox_id = match ctx.spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config, ()).finish()
+        let mailbox_id = match ctx
+            .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&name), trampoline_config, ())
+            .finish()
         {
             Ok(id) => id,
             Err(e) => {
@@ -381,7 +384,7 @@ impl ComponentHostCapabilityState {
             wasm_bytes,
         };
         let boot_mailbox = ctx
-            .spawn_child::<WasmTrampoline>(Subname::Named(boot_namespace), boot_config, ())
+            .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(boot_namespace), boot_config, ())
             .finish()
             .map_err(|e| format!("boot trampoline spawn failed: {e:?}"))?;
         self.mailer.capability_registry().register(boot_mailbox, &boot_caps);

@@ -419,8 +419,13 @@ connection with `ctx.spawn_child`
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
 
-`ctx.spawn_child` works on both hosts. A native capability spawns any `Instanced`
-native actor; a wasm component spawns its own **sibling** types — `Instanced` actors
+`ctx.spawn_child` works on both hosts. A native capability names its executing
+parent and child types, and can spawn an `Instanced` native actor only when the
+child declares `ChildOf<Parent>`:
+`ctx.spawn_child::<TcpListenerActor, TcpSessionActor>(subname, config, params)`.
+The runtime also verifies that the binding executing the handler has the
+declared parent's logical namespace before constructing the child. A wasm
+component preserves the one-type form and spawns its own **sibling** types — `Instanced` actors
 its module also exports ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)). One wasm crate can export several
 actor types (`export!(RootManager, Panel, …)`), and a running instance stands up a
 sibling just as the listener stands up a session:

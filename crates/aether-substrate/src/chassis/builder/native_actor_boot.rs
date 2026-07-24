@@ -148,7 +148,7 @@ where
 
         // Per-cap transport. `NativeBinding::from_ctx` pulls the
         // chassis's aborter + spawner.
-        let transport = Arc::new(NativeBinding::from_ctx(ctx, mailbox_id));
+        let transport = Arc::new(NativeBinding::from_ctx::<A>(ctx, mailbox_id));
         transport.install_inbox(receiver);
 
         // Per-actor scratch storage (issue 582 / ADR-0074). Stamped

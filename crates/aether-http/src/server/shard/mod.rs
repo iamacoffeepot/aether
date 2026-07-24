@@ -17,6 +17,7 @@
 // Handler-signature kinds resolve at file root through these imports —
 // `#[actor]` emits the `HandlesKind<K>` markers always-on against the
 // identity, and the handler bodies in `runtime` name these kinds.
+use super::HttpServerCapability;
 use crate::kinds::{
     HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose, WebSocketMessage,
 };
@@ -28,7 +29,7 @@ use aether_kinds::trace::Settled;
 /// marker, and the instanced name-inventory entry, all emitted always-on by
 /// `#[actor]`. The state-bearing runtime (`HttpShardState`, the
 /// per-connection machine) lives behind the one `feature = "runtime"` gate.
-#[actor(instanced)]
+#[actor(instanced, child_of(HttpServerCapability))]
 pub struct HttpDispatchShard;
 
 use aether_actor::actor;

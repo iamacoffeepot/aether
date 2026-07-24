@@ -46,6 +46,7 @@ use aether_kinds::TerminateEngine;
 // `RpcInboundReady` is owned by the RPC server cap (ADR-0121); the proxy
 // shares the wake-mail kind. Imported at file root for the always-on
 // `HandlesKind<RpcInboundReady>` marker.
+use crate::server::FleetServer;
 use aether_rpc::RpcInboundReady;
 
 // The proxy's implementation, split along its seams (ADR-0121):
@@ -90,7 +91,7 @@ pub use connect::is_reforkable_spawn_failure;
 /// holds the `aether_substrate`-typed RPC connection + the forked child +
 /// heartbeat handle) lives in `runtime.rs`, so the identity file never names
 /// `FleetProxyState`.
-#[actor(instanced)]
+#[actor(instanced, child_of(FleetServer))]
 pub struct FleetProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro

@@ -22,13 +22,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
+use aether_actor::{Addressable, HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
@@ -62,10 +63,13 @@ use std::time::Duration;
 pub use aether_actor::Subname;
 
 /// Failure modes for the [`SpawnBuilder::finish`] spawn pipeline.
-/// Returned in the order the lifecycle checks them: validate → owner
-/// check → tombstone check → name uniqueness → init.
+/// Returned in the order the lifecycle checks them: parent identity →
+/// validate → owner check → tombstone check → name uniqueness → init.
 #[derive(Debug)]
 pub enum SpawnError {
+    /// The handler named a declared parent type whose logical namespace does
+    /// not match the actor actually executing the handler.
+    ParentTypeMismatch { declared_namespace: &'static str, actual_logical: ActorId, actual_canonical_name: Arc<str> },
     /// Subname is empty, contains `:`, has control / whitespace
     /// chars, or exceeds the byte cap. See
     /// [`NamespaceError`].
@@ -340,7 +344,7 @@ impl Spawner {
         params: A::Params,
         after_init_mail: Vec<Envelope>,
         sender_for_init: Source,
-        parent: Option<(u64, MailboxId)>,
+        parent: Option<&ActorRuntimeIdentity>,
     ) -> Result<MailboxId, SpawnError>
     where
         A: Instanced + NativeActor,
@@ -367,24 +371,17 @@ impl Spawner {
         //    depth-1 fixed point: the node is the root of its own
         //    lineage, so it keeps the flat `{NAMESPACE}:{subname}` id.
         let child_actor = ActorId::instanced(A::NAMESPACE, &subname_str);
-        let (carry, full_name) = match parent {
-            Some((parent_carry, parent_id)) => {
-                let carry = fold_lineage(parent_carry, child_actor);
-                // A spawning actor is always registered, so the `None`
-                // fallback is unreachable in practice; the folded id still
-                // routes, so degrade the *display* name to the flat form
-                // rather than fail the spawn.
-                let name = self.registry.mailbox_name(parent_id).map_or_else(
-                    || format!("{}:{}", A::NAMESPACE, subname_str),
-                    |parent_name| format!("{parent_name}/{}:{}", A::NAMESPACE, subname_str),
-                );
+        let (carry, full_name) = parent.map_or_else(
+            || (child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname_str))),
+            |parent| {
+                let carry = fold_lineage(parent.carry(), child_actor);
+                let name: Arc<str> = Arc::from(format!("{}/{}:{}", parent.canonical_name(), A::NAMESPACE, subname_str));
                 (carry, name)
-            }
-            None => (child_actor.0, format!("{}:{}", A::NAMESPACE, subname_str)),
-        };
+            },
+        );
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
         if self.actor_registry.is_tombstoned(id) {
-            return Err(SpawnError::SubnameRetired { full_name });
+            return Err(SpawnError::SubnameRetired { full_name: full_name.to_string() });
         }
 
         // 4. Construct + init on caller's thread. Build the inbox pair
@@ -393,11 +390,12 @@ impl Spawner {
         // the spawn thread doesn't exist yet.
         let (tx, rx) = mpsc::channel::<Envelope>();
 
-        let transport = Arc::new(NativeBinding::new(
+        let transport = Arc::new(NativeBinding::new::<A>(
             Arc::clone(&self.mailer),
             id,
             // The child's lineage carry — its descendants fold onto it.
             carry,
+            Arc::clone(&full_name),
             Arc::clone(&self.aborter),
             // Pass the chassis's `Spawner` through so the spawned
             // actor can in turn `ctx.spawn_child` from its own
@@ -469,7 +467,7 @@ impl Spawner {
         // only and no longer derives the id.
         let registered = self.registry.try_register_inbox_with_id(
             id,
-            full_name.clone(),
+            full_name.to_string(),
             Arc::new(move |dispatch: OwnedDispatch| {
                 match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler) {
                     RelayOutcome::Delivered => {}
@@ -521,7 +519,7 @@ impl Spawner {
             // (init succeeded) drops naturally as `actor` falls out
             // of scope.
             self.registry.remove_closure(id);
-            return Err(SpawnError::SubnameInUse { full_name });
+            return Err(SpawnError::SubnameInUse { full_name: full_name.to_string() });
         }
 
         // iamacoffeepot/aether#3051: seed every declared handler into
@@ -644,13 +642,16 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     /// `config`. Taken with `config` when `finish` runs.
     params: Option<A::Params>,
     sender: Source,
-    /// ADR-0099 §3: the spawning actor's lineage `(carry, id)`, or
+    /// ADR-0165: the spawning actor's typed runtime identity, or
     /// `None` for a top-level chassis-level spawn. `Some` nests the
     /// child — its id folds the new node's `ActorId` onto the parent
     /// carry, and its registered name renders under the parent's. `None`
     /// is the depth-1 case: the child is the root of its own lineage and
     /// keeps the flat `{NAMESPACE}:{subname}` id it has today.
-    parent: Option<(u64, MailboxId)>,
+    parent: Option<ActorRuntimeIdentity>,
+    /// The parent namespace named by the native handler call. `None` for a
+    /// top-level chassis spawn.
+    declared_parent_namespace: Option<&'static str>,
     after_init: Vec<Envelope>,
     _marker: PhantomData<fn() -> A>,
     /// Carries the `'ctx` lifetime even though `spawner` is `Arc`
@@ -672,13 +673,37 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         sender: Source,
         parent: Option<(u64, MailboxId)>,
     ) -> Self {
+        debug_assert!(parent.is_none(), "SpawnBuilder::new is reserved for top-level chassis spawns");
         Self {
             spawner,
             subname,
             config: Some(config),
             params: Some(params),
             sender,
-            parent,
+            parent: None,
+            declared_parent_namespace: None,
+            after_init: Vec::new(),
+            _marker: PhantomData,
+            _ctx: PhantomData,
+        }
+    }
+
+    pub(super) fn new_child<P: Addressable>(
+        spawner: Arc<Spawner>,
+        subname: Subname<'ctx>,
+        config: A::Config,
+        params: A::Params,
+        sender: Source,
+        parent: ActorRuntimeIdentity,
+    ) -> Self {
+        Self {
+            spawner,
+            subname,
+            config: Some(config),
+            params: Some(params),
+            sender,
+            parent: Some(parent),
+            declared_parent_namespace: Some(P::NAMESPACE),
             after_init: Vec::new(),
             _marker: PhantomData,
             _ctx: PhantomData,
@@ -741,10 +766,29 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// enforced by the move into `finish`, and a double-finish would
     /// require an unsafe API misuse.
     pub fn finish(self) -> Result<MailboxId, SpawnError> {
-        let SpawnBuilder { spawner, subname, config, params, sender, parent, after_init, .. } = self;
+        let SpawnBuilder {
+            spawner,
+            subname,
+            config,
+            params,
+            sender,
+            parent,
+            declared_parent_namespace,
+            after_init,
+            ..
+        } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
         let params = params.expect("SpawnBuilder::finish consumed exactly once");
-        Spawner::spawn_actor::<A>(spawner, subname, config, params, after_init, sender, parent)
+        if let (Some(parent), Some(declared_namespace)) = (&parent, declared_parent_namespace)
+            && parent.logical() != ActorId::singleton(declared_namespace)
+        {
+            return Err(SpawnError::ParentTypeMismatch {
+                declared_namespace,
+                actual_logical: parent.logical(),
+                actual_canonical_name: Arc::clone(parent.canonical_name()),
+            });
+        }
+        Spawner::spawn_actor::<A>(spawner, subname, config, params, after_init, sender, parent.as_ref())
     }
 }
 

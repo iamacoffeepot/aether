@@ -696,8 +696,11 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         }
     }
 
-    /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a
-    /// child of the calling actor. The new actor's [`Source`]
+    /// Spawn an instanced `A` as a child of declared parent `P`. The
+    /// `A: ChildOf<P>` bound enforces the ADR-0166 permission, and
+    /// [`SpawnBuilder::finish`](crate::SpawnBuilder::finish) verifies that
+    /// `P` matches the executing binding's logical identity before entering
+    /// the spawn pipeline. The new actor's [`Source`]
     /// stamps the calling actor's mailbox so any reply addressed to
     /// `SourceAddr::Component` routes back here.
     ///
@@ -711,14 +714,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// [`NativeBinding::new_for_test`] (which doesn't wire a
     /// spawner) — fail-fast per ADR-0063: production transports always
     /// carry one, so handler code never reaches the panic.
-    pub fn spawn_child<'b, A>(
+    pub fn spawn_child<'b, P, A>(
         &'b self,
         subname: super::spawn::Subname<'b>,
         config: A::Config,
         params: A::Params,
     ) -> super::spawn::SpawnBuilder<'b, A>
     where
-        A: aether_actor::Instanced + NativeActor,
+        P: Addressable,
+        A: aether_actor::ChildOf<P> + aether_actor::Instanced + NativeActor,
     {
         let spawner = self
             .binding
@@ -726,17 +730,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
             .expect("NativeCtx::spawn_child requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
         let sender =
             Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
-        // ADR-0099 §3: the child nests under this actor — its id folds
-        // the new node's `ActorId` onto this actor's lineage carry, and
-        // it registers under this actor's rendered name.
-        super::spawn::SpawnBuilder::new(
-            Arc::clone(spawner),
-            subname,
-            config,
-            params,
-            sender,
-            Some((self.binding.carry(), self.binding.self_mailbox())),
-        )
+        // ADR-0165: the child builder captures the complete typed parent
+        // identity so it can validate the declared parent and derive both
+        // lineage and canonical name without a registry lookup.
+        let parent = self
+            .binding
+            .runtime_identity()
+            .expect("NativeCtx::spawn_child requires a typed production binding")
+            .clone();
+        super::spawn::SpawnBuilder::new_child::<P>(Arc::clone(spawner), subname, config, params, sender, parent)
     }
 }
 

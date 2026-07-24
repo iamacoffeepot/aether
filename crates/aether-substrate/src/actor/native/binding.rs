@@ -40,6 +40,7 @@ use std::sync::{Arc, OnceLock};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
@@ -143,15 +144,12 @@ impl OutboundBuffer {
 /// here.
 pub struct NativeBinding {
     mailer: Arc<Mailer>,
-    self_mailbox: MailboxId,
-    /// ADR-0099 §3: this actor's rolling lineage carry — the running
-    /// FNV-1a fold state over its lineage of `ActorId`s, root to leaf.
-    /// `with_tag(Mailbox, carry) == self_mailbox`. `spawn_child` folds a
-    /// child's `ActorId` onto this carry to derive the child's id, so an
-    /// actor passes its whole lineage forward as one `u64`. A root cap
-    /// is the depth-1 fixed point: its carry is its own `ActorId.0`
-    /// (== `self_mailbox.0`), so it keeps the exact id it has today.
-    carry: u64,
+    /// ADR-0165: typed production bindings carry the actor's logical type
+    /// identity together with its concrete lineage facts. Test-only bindings
+    /// deliberately retain only a mailbox and cannot spawn.
+    identity: Option<ActorRuntimeIdentity>,
+    untyped_mailbox: MailboxId,
+    untyped_carry: u64,
     /// The actor's inbox, drained by the dispatcher via
     /// [`Self::recv_blocking`] / [`Self::try_recv`]. [`SettlingInbox`]'s
     /// drop settles any residue queued at teardown, closing the #1716
@@ -246,17 +244,19 @@ impl NativeBinding {
     /// for harnesses that don't go through a chassis (`SubstrateHarness`
     /// internals) or for tests that want to substitute a custom
     /// aborter.
-    pub fn new(
+    pub fn new<A: super::NativeActor>(
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
         carry: u64,
+        canonical_name: Arc<str>,
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
         Self {
             mailer,
-            self_mailbox,
-            carry,
+            identity: Some(ActorRuntimeIdentity::new::<A>(self_mailbox, carry, canonical_name)),
+            untyped_mailbox: self_mailbox,
+            untyped_carry: carry,
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
@@ -276,17 +276,18 @@ impl NativeBinding {
     ///
     /// ```ignore
     /// let claim = ctx.claim_mailbox_drop_on_shutdown(NAME)?;
-    /// let transport = NativeBinding::from_ctx(ctx, claim.id);
+    /// let transport = NativeBinding::from_ctx::<MyActor>(ctx, claim.id);
     /// ```
     #[must_use]
-    pub fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId) -> Self {
-        Self::new(
+    pub fn from_ctx<A: super::NativeActor>(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId) -> Self {
+        Self::new::<A>(
             ctx.mail_send_handle(),
             self_mailbox,
             // A cap built under a `ChassisCtx` is a root-pinned chassis
             // capability (depth-1), so its lineage carry is its own
             // `ActorId.0` == `self_mailbox.0` — it keeps today's id.
             self_mailbox.0,
+            Arc::from(A::NAMESPACE),
             ctx.fatal_aborter(),
             Some(Arc::clone(ctx.spawner_arc())),
         )
@@ -297,9 +298,24 @@ impl NativeBinding {
     /// appropriate for production capabilities, which should go
     /// through [`Self::from_ctx`].
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
-        // Test bindings never spawn children; seed the carry at the
-        // depth-1 fixed point so `self_mailbox` and the carry agree.
-        Self::new(mailer, self_mailbox, self_mailbox.0, Arc::new(PanicAborter), None)
+        Self {
+            mailer,
+            identity: None,
+            untyped_mailbox: self_mailbox,
+            // Untyped tests still use relative actor resolution. Preserve the
+            // historical depth-1 carry without inventing a logical identity.
+            untyped_carry: self_mailbox.0,
+            inbox: OnceLock::new(),
+            correlation: AtomicU64::new(0),
+            reply_lineage: ReplyLineage::new(),
+            aborter: Arc::new(PanicAborter),
+            spawner: None,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            outbound: Mutex::new(OutboundBuffer::new()),
+            blob_producer: Mutex::new(None),
+            inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
+            request_contexts: Mutex::new(RequestContextTable::new()),
+        }
     }
 
     /// Install the receiver half of the actor's inbox so the
@@ -314,7 +330,7 @@ impl NativeBinding {
     /// chassis-wiring bug.
     pub fn install_inbox(&self, inbox: Receiver<Envelope>) {
         let settling = SettlingInbox::new_with_lineage(
-            self.self_mailbox,
+            self.self_mailbox(),
             inbox,
             Arc::clone(&self.mailer),
             self.reply_lineage.clone(),
@@ -348,7 +364,7 @@ impl NativeBinding {
     /// publish their address to peers without going through the
     /// transport's send path.
     pub fn self_mailbox(&self) -> MailboxId {
-        self.self_mailbox
+        self.identity.as_ref().map_or(self.untyped_mailbox, ActorRuntimeIdentity::mailbox)
     }
 
     /// This actor's lineage carry (ADR-0099 §3) — the rolling fold
@@ -356,7 +372,11 @@ impl NativeBinding {
     /// [`super::ctx::NativeCtx::spawn_child`] can pass it as the parent
     /// carry the spawn machinery folds the new node's `ActorId` onto.
     pub fn carry(&self) -> u64 {
-        self.carry
+        self.identity.as_ref().map_or(self.untyped_carry, ActorRuntimeIdentity::carry)
+    }
+
+    pub(super) fn runtime_identity(&self) -> Option<&ActorRuntimeIdentity> {
+        self.identity.as_ref()
     }
 
     /// Borrow the wired `Mailer`. Surfaced so cross-file producer
@@ -483,7 +503,7 @@ impl NativeBinding {
         K: Kind,
     {
         let correlation = self.reply_lineage.mint();
-        let reply_id = MailId::new(self.self_mailbox, correlation);
+        let reply_id = MailId::new(self.self_mailbox(), correlation);
         self.mailer.send_reply(sender, payload, reply_id, root, parent);
     }
 
@@ -582,14 +602,14 @@ impl NativeBinding {
     ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
-        let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation);
-        let mail_id = MailId::new(self.self_mailbox, correlation);
+        let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation);
+        let mail_id = MailId::new(self.self_mailbox(), correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // ADR-0080 §2 producer hook: emit `Sent` before pushing the
         // mail. Every `Mailer` carries a trace handle by default
         // (per-chassis post iamacoffeepot/aether#953), so producer
         // calls are unconditional; the drainer is the optional piece.
-        self.mailer.record_sent(mail_id, root, parent_mail, self.self_mailbox, recipient_id, KindId(kind));
+        self.mailer.record_sent(mail_id, root, parent_mail, self.self_mailbox(), recipient_id, KindId(kind));
         let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to).with_lineage(
             mail_id,
             root,
@@ -672,8 +692,8 @@ impl NativeBinding {
     ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let reply_to = reply_to_override
-            .unwrap_or_else(|| Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation));
-        let mail_id = MailId::new(self.self_mailbox, correlation);
+            .unwrap_or_else(|| Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation));
+        let mail_id = MailId::new(self.self_mailbox(), correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // iamacoffeepot/aether#1150: only the settlement increment is
         // eager here; the `Sent` trace event emits at flush against the
@@ -815,7 +835,7 @@ impl NativeBinding {
                 mail.mail_id,
                 mail.root,
                 mail.parent_mail,
-                self.self_mailbox,
+                self.self_mailbox(),
                 mail.recipient,
                 mail.kind,
                 construct_start,
@@ -987,6 +1007,9 @@ mod tests {
         let recipient = registry.lookup("test.sink").unwrap();
 
         let transport = NativeBinding::new_for_test(mailer, MailboxId(99));
+        assert!(transport.runtime_identity().is_none(), "test bindings must remain logically untyped");
+        assert!(transport.spawner().is_none(), "untyped test bindings must not be able to spawn");
+        assert_eq!(transport.carry(), 99, "untyped relative resolution keeps the depth-1 carry");
 
         assert_eq!(transport.prev_correlation(), 0);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);

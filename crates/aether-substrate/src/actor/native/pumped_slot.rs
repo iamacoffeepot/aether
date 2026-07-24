@@ -392,10 +392,11 @@ mod tests {
             .try_register_inbox_with_id(self_id, "test.pumped.probe", handler)
             .expect("register the pumped mailbox");
 
-        let binding = Arc::new(NativeBinding::new(
+        let binding = Arc::new(NativeBinding::new::<PumpProbe>(
             Arc::clone(&fx.mailer),
             self_id,
             self_id.0,
+            Arc::from(PumpProbe::NAMESPACE),
             Arc::clone(&fx.aborter),
             Some(Arc::clone(&fx.spawner)),
         ));

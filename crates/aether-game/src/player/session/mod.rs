@@ -1,6 +1,6 @@
 //! Per-connection player-session identity.
 
-use crate::{PollResult, TickBundle};
+use crate::{GameGatewayCapability, PollResult, TickBundle};
 use aether_tcp::{SessionClosed, SessionData};
 #[cfg(feature = "runtime")]
 use alloc::string::String;
@@ -16,7 +16,7 @@ pub struct PlayerSessionConfig {
 }
 
 /// `aether.game.player.session` actor, one trusted boundary per TCP connection.
-#[actor(instanced)]
+#[actor(instanced, child_of(GameGatewayCapability))]
 pub struct PlayerSessionActor;
 
 use aether_actor::actor;
