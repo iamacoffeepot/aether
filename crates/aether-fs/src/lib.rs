@@ -181,7 +181,7 @@ impl<T: FsRequestForwarder> FsMailboxExt for T {}
 /// transform registry) lives behind the one `feature = "runtime"` gate, so
 /// a transport-only build never names `FsCapabilityState` nor pulls
 /// `aether_substrate` through this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct FsCapability;
 
 // The `#[actor]` attribute path stays always-on (the macro divides what it

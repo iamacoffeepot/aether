@@ -25,7 +25,7 @@ pub use config::{ArtifactsConfig, ArtifactsOverlay};
 use aether_actor::actor;
 
 /// Addressing identity for the `aether.artifacts` capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct ArtifactsCapability;
 
 #[cfg(feature = "runtime")]

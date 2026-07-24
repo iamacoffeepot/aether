@@ -16,7 +16,7 @@ use aether_bloomery::Topic;
 pub use runtime::{IntegrateReactorState, IntegrateTick};
 
 /// Addressing identity for the integrate reactor capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct IntegrateReactorCapability;
 
 impl IntegrateReactorCapability {

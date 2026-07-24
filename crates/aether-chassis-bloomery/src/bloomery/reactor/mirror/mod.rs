@@ -17,7 +17,7 @@ use crate::store::{AckOutboxResult, DrainOutboxResult};
 pub use runtime::{DrainTick, MirrorReactorState};
 
 /// Addressing identity for the outbox reactor capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct MirrorReactorCapability;
 
 impl MirrorReactorCapability {

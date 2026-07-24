@@ -151,7 +151,7 @@ impl HttpMailboxExt for NativeActorMailbox<'_, HttpCapability> {
 /// plus the `ureq` adapter stack live behind the one `feature = "runtime"`
 /// gate, so a transport-only build never names `HttpCapabilityState` nor
 /// pulls `aether_substrate` through this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct HttpCapability;
 
 // The struct-hosted `#[actor(singleton)]` reads the sibling `runtime` module

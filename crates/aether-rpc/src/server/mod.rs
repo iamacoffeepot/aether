@@ -66,7 +66,7 @@ pub mod test_echo;
 /// (`RpcServerState`, which owns the TCP listener bookkeeping and
 /// per-connection state) plus the handler bodies live in `runtime.rs`, so the
 /// identity file never names `RpcServerState`.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct RpcServerCapability;
 
 // The struct-hosted `#[actor(singleton)]` reads the sibling `runtime` module

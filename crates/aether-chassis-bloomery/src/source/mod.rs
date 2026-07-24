@@ -25,7 +25,7 @@ pub use config::{SourceConfig, SourceOverlay};
 use aether_actor::actor;
 
 /// Addressing identity for the `aether.source` capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct SourceCapability;
 
 #[cfg(feature = "runtime")]

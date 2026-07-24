@@ -97,7 +97,7 @@ pub use runtime::{LifecycleConfig, LifecycleConfigLayer, LifecycleOverlay, Lifec
 /// `mod runtime`, which owns the data graph, subscriber table, fan-out,
 /// and settlement gating) lives behind the one `feature = "runtime"`
 /// gate; the chassis only feeds the cap [`LifecycleAdvance`] cadence.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct LifecycleCapability;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,

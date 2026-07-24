@@ -120,7 +120,7 @@ pub struct HttpServerHandle {
 /// accept thread + shared route table + shard sinks, ADR-0135) lives behind
 /// the one `feature = "runtime"` gate, so a transport-only build never names
 /// the state type nor pulls `aether_substrate` through this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct HttpServerCapability;
 
 // The struct-hosted `#[actor(singleton)]` reads the sibling `runtime` module

@@ -82,7 +82,7 @@ pub use config::{FleetConfig, FleetConfigLayer, FleetOverlay};
 /// supervised-fleet table + the `aether_substrate`-typed mailer + the
 /// artifact store) lives in `runtime.rs`, so the identity file never names
 /// `FleetServerState`.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct FleetServer;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro

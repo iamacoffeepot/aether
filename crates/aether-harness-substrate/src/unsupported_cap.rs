@@ -42,7 +42,7 @@ use aether_actor::actor;
 #[allow(clippy::wildcard_imports)]
 use runtime::*;
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for UnsupportedSubstrateHarnessCapability {
     type State = UnsupportedSubstrateHarnessCapabilityState;
 

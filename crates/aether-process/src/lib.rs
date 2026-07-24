@@ -61,7 +61,7 @@ pub const DEFAULT_TIMEOUT_MILLIS: u32 = 30_000;
 /// allowlist + the `aether_substrate`-typed task queue) lives behind the
 /// one `feature = "runtime"` gate, so a transport-only build never names
 /// it nor pulls `aether_substrate` through this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct ProcessCapability;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro

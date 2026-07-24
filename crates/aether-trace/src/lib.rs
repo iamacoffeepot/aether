@@ -42,7 +42,7 @@ use aether_actor::actor;
 ///
 /// Services [`DispatchTraced`] only; the trace fold + `Settled` emission
 /// it used to host retired with the central queue (see module doc).
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct TraceDispatchCapability;
 
 // The reply kind rides the native gate (not `runtime`): the `#[actor]`

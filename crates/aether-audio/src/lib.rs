@@ -87,7 +87,7 @@ pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
 /// owns the cpal worker thread + the deferred-load bookkeeping) lives behind
 /// the one `feature = "runtime"` gate, so a marker-only build never names
 /// `AudioCapabilityState` nor pulls the native audio stack through this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct AudioCapability;
 
 // The `#[actor]` attribute path stays always-on (the macro divides what it
