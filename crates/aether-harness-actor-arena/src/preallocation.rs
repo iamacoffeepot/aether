@@ -62,6 +62,7 @@ pub struct PreallocationConfig {
     pub live_percent: u8,
     pub hole_pattern: HolePattern,
     pub sweep_mode: SweepMode,
+    pub warmup_sweeps: usize,
     pub sweeps: usize,
     pub burst_actors: usize,
     pub seed: u64,
@@ -216,6 +217,9 @@ fn run_native(config: PreallocationConfig) -> PreallocationReport {
     let retirement_nanos = elapsed_nanos(started.elapsed());
     let live_arena_pages = arena.live_page_count();
 
+    arena.sweep(config.warmup_sweeps, config.sweep_mode, config.seed ^ 0x082e_fa98_ec4e_6c89);
+    arena.reset(&coordinates, config.seed);
+
     let started = Instant::now();
     let (completed_updates, visited_arena_pages) =
         arena.sweep(config.sweeps, config.sweep_mode, config.seed ^ 0xa409_3822_299f_31d0);
@@ -288,21 +292,11 @@ fn run_wasm(config: PreallocationConfig) -> Result<PreallocationReport> {
     let cold_allocations = allocation_guard.map(AllocationGuard::finish);
     let cold_peak_rss_bytes = peak_rss_bytes();
 
+    arena.sweep_frames(config.actors, config.warmup_sweeps, config.seed ^ 0x082e_fa98_ec4e_6c89)?;
+    arena.reset(&config);
+
     let started = Instant::now();
-    for frame in 0..config.sweeps {
-        black_box(
-            arena
-                .sweep
-                .call(
-                    &mut arena.store,
-                    (
-                        i32::try_from(config.actors).expect("validated actor count fits Wasm32"),
-                        mail_value(config.seed ^ 0xa409_3822_299f_31d0, frame, 0).cast_signed(),
-                    ),
-                )
-                .map_err(|error| anyhow::anyhow!("execute Wasm bullet sweep: {error}"))?,
-        );
-    }
+    arena.sweep_frames(config.actors, config.sweeps, config.seed ^ 0xa409_3822_299f_31d0)?;
     let hot_nanos = elapsed_nanos(started.elapsed());
     let completed_updates =
         u64::try_from(config.actors.checked_mul(config.sweeps).context("completed update count overflow")?)
@@ -560,6 +554,14 @@ impl GrowingNativeArena {
         }))
     }
 
+    fn reset(&mut self, coordinates: &[Option<ActorCoordinate>], seed: u64) {
+        for (actor, coordinate) in coordinates.iter().copied().enumerate() {
+            if let Some(coordinate) = coordinate {
+                self.initialize(coordinate, seed, actor);
+            }
+        }
+    }
+
     fn state(&self, coordinate: ActorCoordinate) -> &[u64] {
         let (chunk_index, local) = self.local_coordinate(coordinate);
         let start = (local.page as usize * self.page_slots + local.slot as usize) * self.words_per_state;
@@ -720,6 +722,34 @@ impl GrowingWasmArena {
         let memory = self.memory.data_mut(&mut self.store);
         for byte in (start..end).step_by(4_096) {
             memory[byte] = memory[byte].wrapping_add(1);
+        }
+    }
+
+    fn sweep_frames(&mut self, actors: usize, sweeps: usize, seed: u64) -> Result<()> {
+        for frame in 0..sweeps {
+            black_box(
+                self.sweep
+                    .call(
+                        &mut self.store,
+                        (
+                            i32::try_from(actors).expect("validated actor count fits Wasm32"),
+                            mail_value(seed, frame, 0).cast_signed(),
+                        ),
+                    )
+                    .map_err(|error| anyhow::anyhow!("execute Wasm bullet sweep: {error}"))?,
+            );
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self, config: &PreallocationConfig) {
+        for actor in 0..config.actors {
+            let start = WASM_STATE_BASE + actor * self.state_bytes;
+            initialize_bytes(
+                &mut self.memory.data_mut(&mut self.store)[start..start + self.state_bytes],
+                config.seed,
+                actor,
+            );
         }
     }
 
@@ -923,6 +953,7 @@ mod tests {
             live_percent: 100,
             hole_pattern: HolePattern::Packed,
             sweep_mode: SweepMode::LiveBitmap,
+            warmup_sweeps: 2,
             sweeps: 3,
             burst_actors: 65,
             seed: 42,
@@ -978,6 +1009,17 @@ mod tests {
         assert_eq!(underestimated.completed_updates, exact.completed_updates);
         assert_eq!(underestimated.checksum, exact.checksum);
         assert!(underestimated.incremental_chunks > 0);
+    }
+
+    #[test]
+    fn warmup_is_restored_before_measured_work() {
+        let warmed = run_preallocation_trial(config()).expect("warmed trial");
+        let mut cold = config();
+        cold.warmup_sweeps = 0;
+        let cold = run_preallocation_trial(cold).expect("unwarmed trial");
+
+        assert_eq!(warmed.completed_updates, cold.completed_updates);
+        assert_eq!(warmed.checksum, cold.checksum);
     }
 
     #[test]

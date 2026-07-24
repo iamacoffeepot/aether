@@ -133,7 +133,10 @@ logical reserved/live/unused bytes, Wasm pages and growth calls, RSS,
 live/visited arena pages, hot nanoseconds per update, exact completion, and a
 full-state checksum. Allocation counters and forced physical page touching are
 separate three-sample diagnostic campaigns because each perturbs the primary
-cold result.
+cold result. Before the hot timer, each cell performs eight complete sweeps and
+restores every live actor to its deterministic initial state. Cell order moves
+by an evenly distributed stride and reverses on alternating rounds so
+equivalent cells do not repeatedly occupy the same thermal position.
 
 ## Allocator mechanism
 
@@ -238,6 +241,7 @@ target/release/aether-actor-arena-preallocation-trial \
   --live-percent 75 \
   --hole-pattern random \
   --sweep-mode live-bitmap \
+  --warmup-sweeps 8 \
   --sweeps 80 \
   --burst-actors 4096
 ```

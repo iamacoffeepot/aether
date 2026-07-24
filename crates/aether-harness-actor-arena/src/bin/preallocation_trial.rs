@@ -37,6 +37,9 @@ struct Args {
     #[arg(long, value_enum, default_value = "live-bitmap")]
     sweep_mode: SweepMode,
 
+    #[arg(long, default_value_t = 8)]
+    warmup_sweeps: usize,
+
     #[arg(long, default_value_t = 80)]
     sweeps: usize,
 
@@ -67,6 +70,7 @@ fn main() -> Result<()> {
         live_percent: args.live_percent,
         hole_pattern: args.hole_pattern,
         sweep_mode: args.sweep_mode,
+        warmup_sweeps: args.warmup_sweeps,
         sweeps: args.sweeps,
         burst_actors: args.burst_actors,
         seed: args.seed,

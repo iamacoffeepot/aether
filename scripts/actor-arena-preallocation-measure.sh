@@ -16,6 +16,7 @@ common=(
     --actors 65536
     --page-slots 64
     --state-bytes 64
+    --warmup-sweeps 8
     --burst-actors 4096
     --seed 6840227784451616781
 )

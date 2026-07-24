@@ -35,6 +35,9 @@ struct Args {
     #[arg(long, default_value_t = 80)]
     sweeps: usize,
 
+    #[arg(long, default_value_t = 8)]
+    warmup_sweeps: usize,
+
     #[arg(long, default_value_t = 64)]
     page_slots: usize,
 
@@ -157,7 +160,7 @@ fn main() -> Result<()> {
 
     for round in 0..args.samples {
         let mut order: Vec<_> = (0..cells.len()).collect();
-        let rotation = (round / 2) % cells.len();
+        let rotation = round * cells.len().div_ceil(args.samples) % cells.len();
         order.rotate_left(rotation);
         if !round.is_multiple_of(2) {
             order.reverse();
@@ -182,7 +185,8 @@ fn main() -> Result<()> {
     let report = MatrixReport {
         schema: 1,
         rounds: args.samples,
-        order: "rotating forward/reverse cell order; one fresh process per cell and round".to_owned(),
+        order: "evenly distributed rotating forward/reverse cell order; one fresh process per cell and round"
+            .to_owned(),
         cells: cell_reports,
         environment,
     };
@@ -362,6 +366,7 @@ fn base_config(
         live_percent: 100,
         hole_pattern: HolePattern::Packed,
         sweep_mode: SweepMode::LiveBitmap,
+        warmup_sweeps: args.warmup_sweeps,
         sweeps: args.sweeps,
         burst_actors: args.burst_actors.min(args.actors).max(1),
         seed: args.seed,
@@ -395,6 +400,8 @@ fn run_trial_process(executable: &Path, config: &PreallocationConfig) -> Result<
         .arg(hole_name(config.hole_pattern))
         .arg("--sweep-mode")
         .arg(sweep_name(config.sweep_mode))
+        .arg("--warmup-sweeps")
+        .arg(config.warmup_sweeps.to_string())
         .arg("--sweeps")
         .arg(config.sweeps.to_string())
         .arg("--burst-actors")
@@ -550,9 +557,9 @@ fn iqr(values: &[f64]) -> f64 {
 fn markdown_report(report: &MatrixReport) -> String {
     let mut markdown = format!(
         "# Actor arena preallocation matrix\n\n\
-         Each cell has {} fresh-process samples. Cell order rotates and alternates forward/reverse between rounds. \
-         Cold rates include capacity reservation plus actor state initialization. Hot rates contain bullet updates \
-         only.\n\n",
+         Each cell has {} fresh-process samples. Cell order rotates by an evenly distributed stride and alternates \
+         forward/reverse between rounds. Cold rates include capacity reservation plus actor state initialization. \
+         Hot rates follow a warm/reset phase and contain bullet updates only.\n\n",
         report.rounds
     );
     let mut campaign = "";
@@ -565,7 +572,7 @@ fn markdown_report(report: &MatrixReport) -> String {
                 "## {campaign}\n\n\
                  | # | Cell | Target | Hint | Growth pages | Live | Sweep | Cold ns/actor | Spawn ns/actor | \
                  Growth p99 µs | Max growth µs | Hot ns/update | Hot IQR | Capacity | Unused MiB | Peak RSS MiB |\n\
-                 |---:|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+                 |---:|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
             );
         }
         let hint_percent = cell.config.capacity_hint as f64 / cell.config.actors as f64 * 100.0;
@@ -701,13 +708,14 @@ fn metric_svg(report: &MatrixReport, title: &str, get: impl Fn(&CellReport) -> f
 
 fn reproduction_command(args: &Args) -> String {
     format!(
-        "{} --artifact-dir <output> --campaign {} --samples {} --actors {} --sweeps {} --page-slots {} \
-         --state-bytes {} --burst-actors {} --seed {}{}{}\n",
+        "{} --artifact-dir <output> --campaign {} --samples {} --actors {} --warmup-sweeps {} --sweeps {} \
+         --page-slots {} --state-bytes {} --burst-actors {} --seed {}{}{}\n",
         env::current_exe()
             .map_or_else(|_| "aether-actor-arena-preallocation-matrix".into(), |path| path.display().to_string()),
         campaign_name(args.campaign),
         args.samples,
         args.actors,
+        args.warmup_sweeps,
         args.sweeps,
         args.page_slots,
         args.state_bytes,
