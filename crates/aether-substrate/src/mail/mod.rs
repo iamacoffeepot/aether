@@ -21,7 +21,10 @@ pub use cost::{CostCell, CostCells, CostTable};
 pub use mail_ref::MailRef;
 pub use mailer::Mailer;
 pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
-pub use registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Registry};
+pub use registry::{
+    ActorAddressInventoryError, AddressResolutionError, InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch,
+    Registry, ResolvedAddress,
+};
 
 /// Addressing token for any mailbox — component or substrate-owned sink.
 /// ADR-0065 hoisted the canonical home into `aether_data` (per ADR-0069);

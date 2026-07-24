@@ -108,9 +108,10 @@ mod tests {
     // trampoline-address fold against the flat name hash — the primitive is
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
-    use aether_actor::wasm::inline::Registry;
+    use aether_actor::wasm::inline::Registry as InlineRegistry;
     use aether_actor::{Addressable, Embedded, WasmActorMailbox};
     use aether_data::mailbox_id_from_name;
+    use aether_substrate::mail::registry::{Registry, noop_handler};
 
     use super::{ComponentHostCapability, ComponentHostWasmExt, resolve_embedded};
     use crate::trampoline::WasmTrampoline;
@@ -132,7 +133,7 @@ mod tests {
         // The ctx binding (sender + inline registry) is irrelevant to id
         // resolution, so a throwaway registry and a zero sender suffice
         // (issue 1987).
-        let registry = Registry::new();
+        let registry = InlineRegistry::new();
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,
@@ -144,5 +145,38 @@ mod tests {
 
         assert_eq!(camera.mailbox_id(), trampoline.mailbox_id());
         assert_eq!(camera.mailbox_id(), resolve_embedded(name));
+    }
+
+    /// The external registry boundary expands abbreviated component
+    /// addresses before its canonical live lookup. Typed resolution,
+    /// the full canonical path, the short discriminator, and the
+    /// explicit child segment therefore identify one mailbox, while
+    /// reverse lookup retains only the canonical spelling.
+    #[test]
+    fn registry_resolves_typed_canonical_and_abbreviated_component_addresses_equally() {
+        let inline_registry = InlineRegistry::new();
+        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
+            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
+            0,
+            &inline_registry,
+        );
+        let name = "camera";
+        let typed = host.resolve::<WasmTrampoline>(name).mailbox_id();
+        let canonical = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
+        let registry = Registry::new();
+        registry
+            .try_register_inbox_with_id(typed, canonical.clone(), noop_handler())
+            .expect("register canonical trampoline mailbox");
+
+        for address in [canonical.as_str(), "aether.component://camera", "aether.component://aether.embedded:camera"] {
+            let resolved = registry.resolve_address(address).expect("address resolves to the live trampoline");
+            assert_eq!(resolved.mailbox_id, typed);
+            assert_eq!(resolved.canonical_path, canonical);
+        }
+        assert_eq!(registry.mailbox_name(typed).as_deref(), Some(canonical.as_str()));
+        assert!(
+            registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("://")),
+            "alias spellings never enter registry inventory"
+        );
     }
 }

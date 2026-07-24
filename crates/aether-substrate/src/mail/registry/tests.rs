@@ -6,8 +6,8 @@ use aether_data::{KindDescriptor, MailboxCategory, SchemaType};
 use aether_kinds::trace::Nanos;
 
 use crate::mail::registry::{
-    DropError, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, noop_handler,
-    test_dispatch, test_owned_dispatch,
+    AddressResolutionError, DropError, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch,
+    Registry, noop_handler, test_dispatch, test_owned_dispatch,
 };
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::SeizeHandle;
@@ -388,6 +388,33 @@ fn lookup_over_bytes_scope_path_is_resolution_miss() {
     // Single segment longer than the byte cap (depth stays 1).
     let name = "a".repeat(aether_data::MAX_SCOPE_PATH_BYTES + 1);
     assert!(r.lookup(&name).is_none());
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the registry canonical-name test must construct the exact lineage-fold id that lookup derives"
+)]
+fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
+    let r = Registry::new();
+    let canonical = "root/worker:camera";
+    let id = aether_data::mailbox_id_from_path(canonical);
+    r.try_register_inbox_with_id(id, canonical, noop_handler()).unwrap();
+
+    let resolved = r.resolve_address(canonical).expect("canonical mailbox is live");
+    assert_eq!(resolved.mailbox_id, id);
+    assert_eq!(resolved.canonical_path, canonical);
+    assert_eq!(
+        r.resolve_address("root/worker:missing"),
+        Err(AddressResolutionError::NoLiveMailbox { canonical_path: "root/worker:missing".to_owned() })
+    );
+
+    let too_deep =
+        (0..=aether_data::MAX_SCOPE_PATH_DEPTH).map(|index| format!("seg{index}")).collect::<Vec<_>>().join("/");
+    assert_eq!(
+        r.resolve_address(&too_deep),
+        Err(AddressResolutionError::PathTooDeep { limit: aether_data::MAX_SCOPE_PATH_DEPTH })
+    );
 }
 
 #[test]
