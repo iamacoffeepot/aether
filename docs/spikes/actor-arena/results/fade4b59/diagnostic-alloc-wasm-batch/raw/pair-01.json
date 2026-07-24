@@ -1,0 +1,80 @@
+{
+  "index": 1,
+  "order": "candidate-base",
+  "base": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-arena",
+      "workload": "dispatch",
+      "actors": 1024,
+      "mails": 250000,
+      "mails_per_activation": 16,
+      "page_slots": 64,
+      "state_bytes": 256,
+      "pattern": "random",
+      "seed": 6840227784451616781,
+      "warmup_mails": 25000,
+      "instrument_allocations": true
+    },
+    "elapsed_nanos": 4362875,
+    "completed_mails": 250000,
+    "nanos_per_mail": 17.4515,
+    "mails_per_second": 57301664.61335702,
+    "checksum": "fe584d5f5db3fb7e",
+    "peak_rss_bytes": 10698752,
+    "allocations": {
+      "allocation_calls": 0,
+      "allocated_bytes": 0,
+      "deallocation_calls": 0,
+      "deallocated_bytes": 0
+    },
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 15625,
+      "host_entries": 250000,
+      "host_to_guest_bytes": 2000000,
+      "guest_linear_memory_bytes": 327680,
+      "allocator_cas_retries": 0
+    }
+  },
+  "candidate": {
+    "schema": 1,
+    "config": {
+      "backend": "wasm-batch",
+      "workload": "dispatch",
+      "actors": 1024,
+      "mails": 250000,
+      "mails_per_activation": 16,
+      "page_slots": 64,
+      "state_bytes": 256,
+      "pattern": "random",
+      "seed": 6840227784451616781,
+      "warmup_mails": 25000,
+      "instrument_allocations": true
+    },
+    "elapsed_nanos": 966667,
+    "completed_mails": 250000,
+    "nanos_per_mail": 3.866668,
+    "mails_per_second": 258620600.475655,
+    "checksum": "fe584d5f5db3fb7e",
+    "peak_rss_bytes": 10928128,
+    "allocations": {
+      "allocation_calls": 0,
+      "allocated_bytes": 0,
+      "deallocation_calls": 0,
+      "deallocated_bytes": 0
+    },
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 245,
+      "host_entries": 245,
+      "host_to_guest_bytes": 4000000,
+      "guest_linear_memory_bytes": 327680,
+      "allocator_cas_retries": 0
+    }
+  },
+  "paired_delta_nanos_per_mail": -13.584831999999999,
+  "speedup": 4.5133174092008925
+}

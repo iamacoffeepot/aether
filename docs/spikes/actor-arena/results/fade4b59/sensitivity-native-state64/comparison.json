@@ -1,0 +1,659 @@
+{
+  "schema": 1,
+  "workload": "dispatch",
+  "base": "boxed-current",
+  "candidate": "arena-state",
+  "pairs": [
+    {
+      "index": 0,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12395166,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4790332,
+        "mails_per_second": 403383060.78353447,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6356992,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13750000,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.75,
+        "mails_per_second": 363636363.6363636,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6193152,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.27096680000000006,
+      "speedup": 0.9014666181818182
+    },
+    {
+      "index": 1,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12462209,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4924418,
+        "mails_per_second": 401212979.17568225,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6406144,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13767042,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7534084,
+        "mails_per_second": 363186224.0269188,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6176768,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.26096660000000016,
+      "speedup": 0.9052205259488566
+    },
+    {
+      "index": 2,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12342458,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4684916,
+        "mails_per_second": 405105692.8854852,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6356992,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13776375,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.755275,
+        "mails_per_second": 362940178.3850977,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6193152,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.2867834,
+      "speedup": 0.8959147816461152
+    },
+    {
+      "index": 3,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12268458,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4536916,
+        "mails_per_second": 407549180.18222016,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6373376,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13789833,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7579666,
+        "mails_per_second": 362585971.8533212,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6176768,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.3042750000000001,
+      "speedup": 0.8896741534143306
+    },
+    {
+      "index": 4,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12304834,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4609668,
+        "mails_per_second": 406344368.40025634,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6356992,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13730041,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7460082,
+        "mails_per_second": 364164972.2677449,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6176768,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.2850413999999999,
+      "speedup": 0.8961979064738409
+    },
+    {
+      "index": 5,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12439667,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4879334,
+        "mails_per_second": 401940019.7770567,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6373376,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13821084,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7642168,
+        "mails_per_second": 361766124.8567768,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6193152,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.2762833999999996,
+      "speedup": 0.9000500250197453
+    },
+    {
+      "index": 6,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12350791,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4701582,
+        "mails_per_second": 404832370.6554503,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6373376,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13881916,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7763832,
+        "mails_per_second": 360180828.064368,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6176768,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.30622499999999997,
+      "speedup": 0.889703625925989
+    },
+    {
+      "index": 7,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12398708,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4797416,
+        "mails_per_second": 403267824.357183,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6373376,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13710042,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7420084,
+        "mails_per_second": 364696184.00877255,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6193152,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.2622667999999999,
+      "speedup": 0.9043522988478081
+    },
+    {
+      "index": 8,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "boxed-current",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 12313333,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.4626666,
+        "mails_per_second": 406063898.37747425,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6356992,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "arena-state",
+          "workload": "dispatch",
+          "actors": 4096,
+          "mails": 5000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 64,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 250000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 13698791,
+        "completed_mails": 5000000,
+        "nanos_per_mail": 2.7397582,
+        "mails_per_second": 364995713.8553322,
+        "checksum": "2d91d8b85e31b60a",
+        "peak_rss_bytes": 6176768,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 312500,
+          "state_lock_acquisitions": 312500,
+          "scheduled_items": 312500,
+          "host_entries": 0,
+          "host_to_guest_bytes": 0,
+          "guest_linear_memory_bytes": 0,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.2770915999999999,
+      "speedup": 0.8988627536546838
+    }
+  ],
+  "statistics": {
+    "base_median_nanos_per_mail": 2.4701582,
+    "candidate_median_nanos_per_mail": 2.7534084,
+    "median_paired_delta_nanos_per_mail": 0.2770915999999999,
+    "paired_delta_iqr_nanos_per_mail": 0.01581659999999996,
+    "relative_change_percent": 11.466884995463044,
+    "median_speedup": 0.8988627536546838,
+    "directional_consistency": 1.0,
+    "noise_floor_nanos_per_mail": 0.3,
+    "classification": "inconclusive"
+  },
+  "environment": {
+    "generated_unix_seconds": 1784852965,
+    "git_commit": "fade4b593993644b87694c332dedb7d8047cf749",
+    "git_branch": "spike/actor-arena-measurement",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2",
+    "operating_system": "Darwin andromeda.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:41:15 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6041 arm64",
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 12,
+    "trial_executable": "/Users/hadynfitzgerald/workspace/aether/.agents/worktrees/codex-019f90fe-cd9a-7510-a5c9-5938f9b00bca/target/release/aether-actor-arena-trial"
+  }
+}

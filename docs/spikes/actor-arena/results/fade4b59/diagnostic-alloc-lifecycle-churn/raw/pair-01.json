@@ -1,0 +1,80 @@
+{
+  "index": 1,
+  "order": "candidate-base",
+  "base": {
+    "schema": 1,
+    "config": {
+      "backend": "boxed-current",
+      "workload": "lifecycle-churn",
+      "actors": 4096,
+      "mails": 250000,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 256,
+      "pattern": "random",
+      "seed": 6840227784451616781,
+      "warmup_mails": 25000,
+      "instrument_allocations": true
+    },
+    "elapsed_nanos": 9764500,
+    "completed_mails": 250000,
+    "nanos_per_mail": 39.058,
+    "mails_per_second": 25602949.459777765,
+    "checksum": "63ac58a54fc45890",
+    "peak_rss_bytes": 6668288,
+    "allocations": {
+      "allocation_calls": 250000,
+      "allocated_bytes": 64000000,
+      "deallocation_calls": 250000,
+      "deallocated_bytes": 64000000
+    },
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 250000,
+      "host_entries": 0,
+      "host_to_guest_bytes": 0,
+      "guest_linear_memory_bytes": 0,
+      "allocator_cas_retries": 0
+    }
+  },
+  "candidate": {
+    "schema": 1,
+    "config": {
+      "backend": "arena-state",
+      "workload": "lifecycle-churn",
+      "actors": 4096,
+      "mails": 250000,
+      "mails_per_activation": 1,
+      "page_slots": 64,
+      "state_bytes": 256,
+      "pattern": "random",
+      "seed": 6840227784451616781,
+      "warmup_mails": 25000,
+      "instrument_allocations": true
+    },
+    "elapsed_nanos": 5206167,
+    "completed_mails": 250000,
+    "nanos_per_mail": 20.824668,
+    "mails_per_second": 48019973.23558771,
+    "checksum": "63ac58a54fc45890",
+    "peak_rss_bytes": 5636096,
+    "allocations": {
+      "allocation_calls": 0,
+      "allocated_bytes": 0,
+      "deallocation_calls": 0,
+      "deallocated_bytes": 0
+    },
+    "counters": {
+      "route_lookups": 0,
+      "state_lock_acquisitions": 0,
+      "scheduled_items": 250000,
+      "host_entries": 0,
+      "host_to_guest_bytes": 0,
+      "guest_linear_memory_bytes": 0,
+      "allocator_cas_retries": 0
+    }
+  },
+  "paired_delta_nanos_per_mail": -18.233332,
+  "speedup": 1.875564114635585
+}

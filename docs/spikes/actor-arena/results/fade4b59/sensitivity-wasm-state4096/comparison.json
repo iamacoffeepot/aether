@@ -1,0 +1,659 @@
+{
+  "schema": 1,
+  "workload": "dispatch",
+  "base": "wasm-inline",
+  "candidate": "wasm-arena",
+  "pairs": [
+    {
+      "index": 0,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17678292,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.678292,
+        "mails_per_second": 56566550.65998457,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15237120,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 18471667,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 18.471667,
+        "mails_per_second": 54136965.548372,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15286272,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.793375000000001,
+      "speedup": 0.9570490849580603
+    },
+    {
+      "index": 1,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 18020167,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 18.020167,
+        "mails_per_second": 55493381.38764197,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15384576,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17825000,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.825,
+        "mails_per_second": 56100981.76718093,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15220736,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": -0.19516700000000142,
+      "speedup": 1.0109490603085556
+    },
+    {
+      "index": 2,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17774041,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.774041,
+        "mails_per_second": 56261825.88416444,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15089664,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17731459,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.731459,
+        "mails_per_second": 56396938.34556987,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15319040,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": -0.042581999999999454,
+      "speedup": 1.002401494428631
+    },
+    {
+      "index": 3,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17819292,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.819292,
+        "mails_per_second": 56118952.42527032,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15400960,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17618667,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.618667,
+        "mails_per_second": 56757982.88258698,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15269888,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": -0.20062500000000227,
+      "speedup": 1.0113870703158192
+    },
+    {
+      "index": 4,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17630875,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.630875,
+        "mails_per_second": 56718682.42500727,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15745024,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 18103000,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 18.103,
+        "mails_per_second": 55239463.07241893,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15286272,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.4721250000000019,
+      "speedup": 0.9739200684969341
+    },
+    {
+      "index": 5,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17561166,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.561166,
+        "mails_per_second": 56943827.078452535,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15237120,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 18263375,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 18.263375,
+        "mails_per_second": 54754392.328909636,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15286272,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 0.7022089999999999,
+      "speedup": 0.9615509729171087
+    },
+    {
+      "index": 6,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17741917,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.741917,
+        "mails_per_second": 56363695.08435869,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15368192,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 18831375,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 18.831375,
+        "mails_per_second": 53102866.89102627,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15286272,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": 1.0894580000000005,
+      "speedup": 0.9421466568426363
+    },
+    {
+      "index": 7,
+      "order": "candidate-base",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17690542,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.690542,
+        "mails_per_second": 56527380.56301497,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15368192,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17645834,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.645834,
+        "mails_per_second": 56670599.98410956,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15253504,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": -0.04470799999999997,
+      "speedup": 1.0025336291840896
+    },
+    {
+      "index": 8,
+      "order": "base-candidate",
+      "base": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-inline",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17825709,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.825709,
+        "mails_per_second": 56098750.405944586,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15368192,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4325376,
+          "allocator_cas_retries": 0
+        }
+      },
+      "candidate": {
+        "schema": 1,
+        "config": {
+          "backend": "wasm-arena",
+          "workload": "dispatch",
+          "actors": 1024,
+          "mails": 1000000,
+          "mails_per_activation": 16,
+          "page_slots": 64,
+          "state_bytes": 4096,
+          "pattern": "random",
+          "seed": 6840227784451616781,
+          "warmup_mails": 100000,
+          "instrument_allocations": false
+        },
+        "elapsed_nanos": 17696875,
+        "completed_mails": 1000000,
+        "nanos_per_mail": 17.696875,
+        "mails_per_second": 56507151.68638531,
+        "checksum": "22a5ab19b492fbf3",
+        "peak_rss_bytes": 15302656,
+        "allocations": null,
+        "counters": {
+          "route_lookups": 0,
+          "state_lock_acquisitions": 0,
+          "scheduled_items": 62500,
+          "host_entries": 1000000,
+          "host_to_guest_bytes": 8000000,
+          "guest_linear_memory_bytes": 4259840,
+          "allocator_cas_retries": 0
+        }
+      },
+      "paired_delta_nanos_per_mail": -0.12883400000000123,
+      "speedup": 1.0072800423803638
+    }
+  ],
+  "statistics": {
+    "base_median_nanos_per_mail": 17.741917,
+    "candidate_median_nanos_per_mail": 17.825,
+    "median_paired_delta_nanos_per_mail": -0.042581999999999454,
+    "paired_delta_iqr_nanos_per_mail": 0.8310430000000011,
+    "relative_change_percent": 0.46828648786936267,
+    "median_speedup": 1.002401494428631,
+    "directional_consistency": 0.5555555555555556,
+    "noise_floor_nanos_per_mail": 1.7741917000000003,
+    "classification": "inconclusive"
+  },
+  "environment": {
+    "generated_unix_seconds": 1784852967,
+    "git_commit": "fade4b593993644b87694c332dedb7d8047cf749",
+    "git_branch": "spike/actor-arena-measurement",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2",
+    "operating_system": "Darwin andromeda.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:41:15 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6041 arm64",
+    "cpu": "Apple M4 Pro",
+    "logical_cpus": 12,
+    "trial_executable": "/Users/hadynfitzgerald/workspace/aether/.agents/worktrees/codex-019f90fe-cd9a-7510-a5c9-5938f9b00bca/target/release/aether-actor-arena-trial"
+  }
+}

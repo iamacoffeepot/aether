@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360">
+<rect width="100%" height="100%" fill="white"/>
+<line x1="55" y1="180" x2="845" y2="180" stroke="#555" stroke-width="1"/>
+<line x1="55" y1="234.0279860533555" x2="845" y2="234.0279860533555" stroke="#2b6" stroke-dasharray="5 5"/>
+<line x1="55" y1="125.9720139466445" x2="845" y2="125.9720139466445" stroke="#c44" stroke-dasharray="5 5"/>
+<polyline points="55.0,58.2 153.8,55.0 252.5,60.2 351.2,74.7 450.0,82.5 548.8,247.1 647.5,59.8 746.2,71.5 845.0,74.1 " fill="none" stroke="#2468a2" stroke-width="2"/>
+<g fill="#2468a2"><circle cx="55.0" cy="58.2" r="4"/><circle cx="153.8" cy="55.0" r="4"/><circle cx="252.5" cy="60.2" r="4"/><circle cx="351.2" cy="74.7" r="4"/><circle cx="450.0" cy="82.5" r="4"/><circle cx="548.8" cy="247.1" r="4"/><circle cx="647.5" cy="59.8" r="4"/><circle cx="746.2" cy="71.5" r="4"/><circle cx="845.0" cy="74.1" r="4"/></g>
+<text x="55" y="24" font-family="sans-serif" font-size="16">candidate − base paired delta (ns/mail)</text>
+<text x="8" y="184" font-family="sans-serif" font-size="12">0</text>
+<text x="8" y="348" font-family="sans-serif" font-size="12">faster</text>
+<text x="8" y="18" font-family="sans-serif" font-size="12">slower</text>
+</svg>
