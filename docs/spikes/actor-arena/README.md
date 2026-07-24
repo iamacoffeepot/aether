@@ -2,8 +2,10 @@
 
 Status: disposable measurement spike; not a runtime design decision.
 
-[Measured results and recommendation](RESULTS.md) are recorded from revision
-`fade4b593993644b87694c332dedb7d8047cf749`.
+[Core measured results and recommendation](RESULTS.md) are recorded from
+revision `fade4b593993644b87694c332dedb7d8047cf749`. The
+[preallocation follow-up](PREALLOCATION_RESULTS.md) is recorded from revision
+`a907975fce9d19f2ce957b13abf4b646c86b6f4a`.
 
 This spike asks whether namespace-owned actor arenas are valuable enough to
 justify a production vertical slice. It deliberately leaves the substrate

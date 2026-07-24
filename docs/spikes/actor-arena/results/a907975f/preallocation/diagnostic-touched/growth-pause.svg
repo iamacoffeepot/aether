@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+<rect width="100%" height="100%" fill="white"/>
+<line x1="60" y1="360" x2="1140" y2="360" stroke="#555" stroke-width="1"/>
+<rect x="60.00" y="189.28" width="119.00" height="170.72" fill="#2468a2"><title>0: diagnostic-native-hint-050 = 8.583</title></rect><rect x="180.00" y="360.00" width="119.00" height="0.00" fill="#2468a2"><title>1: diagnostic-native-hint-100 = 0.000</title></rect><rect x="300.00" y="360.00" width="119.00" height="0.00" fill="#2468a2"><title>2: diagnostic-native-hint-200 = 0.000</title></rect><rect x="420.00" y="308.62" width="119.00" height="51.38" fill="#2468a2"><title>3: diagnostic-native-pages-01 = 2.583</title></rect><rect x="540.00" y="252.26" width="119.00" height="107.74" fill="#2468a2"><title>4: diagnostic-native-pages-16 = 5.417</title></rect><rect x="660.00" y="60.00" width="119.00" height="300.00" fill="#2468a2"><title>5: diagnostic-native-pages-64 = 15.083</title></rect><rect x="780.00" y="271.33" width="119.00" height="88.67" fill="#8b5a2b"><title>6: diagnostic-wasm-hint-050 = 4.458</title></rect><rect x="900.00" y="360.00" width="119.00" height="0.00" fill="#8b5a2b"><title>7: diagnostic-wasm-hint-100 = 0.000</title></rect><rect x="1020.00" y="360.00" width="119.00" height="0.00" fill="#8b5a2b"><title>8: diagnostic-wasm-hint-200 = 0.000</title></rect>
+<text x="60" y="28" font-family="sans-serif" font-size="16">Maximum incremental chunk-growth pause by cell (microseconds)</text>
+<text x="8" y="64" font-family="sans-serif" font-size="12">15.083</text>
+<text x="8" y="364" font-family="sans-serif" font-size="12">0</text>
+</svg>

@@ -1,8 +1,13 @@
 # Actor arena spike results
 
-Measured revision: `fade4b593993644b87694c332dedb7d8047cf749`  
-Machine: Apple M4 Pro, 12 logical CPUs, aarch64 macOS 26 / Darwin 25.5  
-Toolchain: rustc 1.96.0, Wasmtime 44  
+Core measured revision: `fade4b593993644b87694c332dedb7d8047cf749`
+
+Preallocation measured revision: `a907975fce9d19f2ce957b13abf4b646c86b6f4a`
+
+Machine: Apple M4 Pro, 12 logical CPUs, aarch64 macOS 26 / Darwin 25.5
+
+Toolchain: rustc 1.96.0, Wasmtime 44
+
 Primary protocol: nine alternating fresh-process AB/BA pairs
 
 ## Outcome
@@ -20,6 +25,12 @@ actor loop → arena page loop was 2.18× faster.
 That full-scene gain was stable from 4,096 through 65,536 bullets. This supports
 a production-shaped vertical slice for namespace/kind cohort iteration. It
 does not support an arena migration that only replaces `Box<A::State>`.
+
+The preallocation follow-up shows that the slice does not require an exact
+population forecast. Approximate hints can reserve stable chunks and grow
+transparently without changing hot throughput, provided cohort iteration walks
+live pages rather than reserved capacity. The consequential variable is active
+page density, not estimate precision.
 
 ## Primary results
 
@@ -40,6 +51,36 @@ does not support an arena migration that only replaces `Box<A::State>`.
 Adjacent rows are independent paired comparisons, so their base medians need
 not be identical. Classification uses the predeclared ADR-0085-style noise
 floor and 75% direction requirement.
+
+## Preallocation follow-up
+
+The follow-up tested 50% through 400% population hints, 1–64 pages per growth
+chunk, exact chunk boundaries, 25%–100% occupancy, packed versus random holes,
+and real Wasmtime pre-growth.
+
+The useful findings are:
+
+- hot native updates remained 1.116–1.158 ns/update across every capacity hint
+  when a hierarchical live-page bitmap excluded spare pages;
+- a 75% native hint with 16-page/1,024-actor chunks incurred sixteen
+  incremental growths with a 5.67 µs p99 pause;
+- one actor beyond an exact 65,536 hint allocated one 64-KiB state chunk in
+  5.21 µs;
+- at 25% packed occupancy, scanning the 2× reserved capacity was 49% slower
+  than walking live pages;
+- at the same occupancy, random holes kept four times as many pages active and
+  made the live-page sweep 74% slower than packed state;
+- exact Wasm pre-growth used one `memory.grow`; 50% and 75% hints used 33 and
+  17 calls, respectively, without changing hot throughput; and
+- a 2× untouched Wasm reserve left RSS flat, while forcing the spare 4 MiB
+  resident raised RSS by approximately 4 MiB.
+
+Chunk size is therefore a frequency-versus-pause choice, and should be
+byte-bounded per actor kind. Exact population prediction is not a prerequisite.
+Page density and live-page traversal are.
+
+See the [complete preallocation result](PREALLOCATION_RESULTS.md) and
+[machine-readable primary matrix](results/a907975f/preallocation/primary/matrix.json).
 
 ## Bullet scene
 
@@ -144,6 +185,9 @@ Evidence:
 - The bullet cell is single-threaded. It establishes per-core page-iteration
   throughput; it does not prove worker scaling, fairness, or an acceptable
   page-shard size.
+- The preallocation follow-up uses 64-byte state and heap-backed native chunks.
+  Larger actor states, native virtual-memory reservation, and multiworker
+  growth remain production-slice measurements.
 - The scene baseline already has the namespace cohort and therefore omits
   mailbox routing. That is intentional: it isolates dynamic per-actor update
   from ECS-like cohort iteration.
@@ -164,16 +208,21 @@ Build one production-shaped bullet namespace behind an experimental feature,
 not a broad actor migration:
 
 1. namespace owns typed, stable `ActorArena<A::State>` pages;
-2. mailbox routes resolve to `{page, slot, generation}`;
-3. per-actor mail remains valid for ordinary work;
-4. an explicit same-kind cohort update can acquire one page run token and call
+2. an advisory per-kind count reserves byte-bounded chunks but never becomes a
+   hard actor limit;
+3. mailbox routes resolve to `{page, slot, generation}`;
+4. availability and live-page/live-slot bitmap hierarchies remain distinct;
+5. per-actor mail remains valid for ordinary work;
+6. an explicit same-kind cohort update can acquire one page run token and call
    a monomorphized handler across its live slots;
-5. ready/live bitmaps let pages be split across workers rather than
+7. ready/live bitmaps let pages be split across workers rather than
    serializing the namespace;
-6. Wasm uses persistent cells/shards and a packed delivery ABI as a separate
-   mechanism; and
-7. the real-runtime comparison repeats this scene, random mail, churn, and
-   worker-scaling matrix before an ADR commits the architecture.
+8. allocation reuses holes, reclaims empty chunks, and reports actors/page so
+   random retirement cannot silently destroy density;
+9. Wasm pre-grows persistent cells/shards lazily and uses a packed delivery ABI
+   as a separate mechanism; and
+10. the real-runtime comparison repeats this scene, random mail, churn,
+    density, and worker-scaling matrix before an ADR commits the architecture.
 
 The key decision is therefore: pursue arenas together with typed cohort/page
 execution. Do not pursue “arena allocation” as an isolated box replacement.

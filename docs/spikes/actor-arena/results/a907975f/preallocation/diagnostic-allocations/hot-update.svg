@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+<rect width="100%" height="100%" fill="white"/>
+<line x1="60" y1="360" x2="1140" y2="360" stroke="#555" stroke-width="1"/>
+<rect x="60.00" y="100.24" width="119.00" height="259.76" fill="#2468a2"><title>0: diagnostic-native-hint-050 = 1.114</title></rect><rect x="180.00" y="93.46" width="119.00" height="266.54" fill="#2468a2"><title>1: diagnostic-native-hint-100 = 1.143</title></rect><rect x="300.00" y="87.59" width="119.00" height="272.41" fill="#2468a2"><title>2: diagnostic-native-hint-200 = 1.169</title></rect><rect x="420.00" y="87.09" width="119.00" height="272.91" fill="#2468a2"><title>3: diagnostic-native-pages-01 = 1.171</title></rect><rect x="540.00" y="99.04" width="119.00" height="260.96" fill="#2468a2"><title>4: diagnostic-native-pages-16 = 1.119</title></rect><rect x="660.00" y="95.78" width="119.00" height="264.22" fill="#2468a2"><title>5: diagnostic-native-pages-64 = 1.133</title></rect><rect x="780.00" y="67.74" width="119.00" height="292.26" fill="#8b5a2b"><title>6: diagnostic-wasm-hint-050 = 1.254</title></rect><rect x="900.00" y="67.84" width="119.00" height="292.16" fill="#8b5a2b"><title>7: diagnostic-wasm-hint-100 = 1.253</title></rect><rect x="1020.00" y="60.00" width="119.00" height="300.00" fill="#8b5a2b"><title>8: diagnostic-wasm-hint-200 = 1.287</title></rect>
+<text x="60" y="28" font-family="sans-serif" font-size="16">Hot bullet update by capacity-study cell (ns/update)</text>
+<text x="8" y="64" font-family="sans-serif" font-size="12">1.287</text>
+<text x="8" y="364" font-family="sans-serif" font-size="12">0</text>
+</svg>
