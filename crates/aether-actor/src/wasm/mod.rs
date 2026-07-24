@@ -17,8 +17,9 @@
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::model::ctx`].
 //!   - [`WasmActorMailbox<R>`] — actor-typed sender returned by
-//!     `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`. Lifetime-
-//!     free — the bridge free functions cover dispatch.
+//!     `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`, plus
+//!     [`WasmActorMailboxWithContext`] for a typed request context bound to
+//!     subsequent sends.
 //!   - [`WasmActor`] trait — entry point with the `init` constructor and
 //!     the `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` lifecycle
 //!     hooks (ADR-0101). `init` returns `Result<Self, ActorInitError>` so a
@@ -60,7 +61,7 @@ pub use ctx::{
     ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 #[allow(clippy::module_name_repetitions)]
-pub use mailbox::WasmActorMailbox;
+pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};
 
 // Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
 // `resolve_mailbox` shim. The transport-free [`crate::mail::mailbox::Mailbox<K>`]

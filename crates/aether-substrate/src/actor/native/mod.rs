@@ -81,7 +81,7 @@ pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
 pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
 pub use envelope::Envelope;
-pub use mailbox::NativeActorMailbox;
+pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
 pub use pumped_slot::PumpedSlot;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};

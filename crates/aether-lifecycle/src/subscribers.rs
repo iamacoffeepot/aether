@@ -4,7 +4,7 @@
 //! the native [`broadcast_to_subscribers`] fan-out the receive side calls
 //! once per advance.
 
-use aether_actor::WasmActorMailbox;
+use aether_actor::{HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeSelf};
 
@@ -15,7 +15,7 @@ use aether_actor::ReplyMode;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_data::KindId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
+use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext, NativeCtx};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::mail::MailboxId as SubstrateMailboxId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
@@ -46,61 +46,90 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The generic escape hatch is unaffected: `mailbox.send(&LifecycleSubscribe { .. })`
 /// still works, since `send` is an inherent method on the underlying
 /// mailbox type.
-pub trait LifecycleMailboxExt {
+trait LifecycleMailboxForward {
+    fn forward<K>(&self, payload: &K)
+    where
+        LifecycleCapability: HandlesKind<K>,
+        K: Kind;
+}
+
+#[allow(private_bounds)]
+pub trait LifecycleMailboxExt: LifecycleMailboxForward {
     /// Mail `aether.lifecycle.subscribe_self { stage }` to the cap —
     /// subscribe the *calling* actor to the lifecycle stage `K` (a
     /// stage kind, e.g. `Tick` / `Render`). The cap resolves the
     /// subscriber from the inbound's host-stamped `Source` (ADR-0083),
     /// so the call site spells out neither the stage id nor its own
     /// mailbox. This is the common form. Idempotent.
-    fn subscribe<K: Kind>(&self);
+    fn subscribe<K: Kind>(&self) {
+        self.forward(&LifecycleSubscribeSelf { stage: K::ID.0 });
+    }
 
     /// Mail `aether.lifecycle.subscribe { stage, mailbox }` to the cap.
     /// Add an *explicit* `mailbox` to the subscriber set for stage `K`.
     /// The rare cross-mailbox form; [`subscribe`](Self::subscribe)
     /// covers the self case. Idempotent.
-    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId);
+    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+        self.forward(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
+    }
 
     /// Mail `aether.lifecycle.unsubscribe_self { stage }` to the cap —
     /// unsubscribe the *calling* actor from stage `K`. Reflexive twin
     /// of [`subscribe`](Self::subscribe). Idempotent on "not currently
     /// subscribed."
-    fn unsubscribe<K: Kind>(&self);
+    fn unsubscribe<K: Kind>(&self) {
+        self.forward(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
+    }
 
     /// Mail `aether.lifecycle.unsubscribe { stage, mailbox }` to the
     /// cap. Remove an *explicit* `mailbox` from the subscriber set for
     /// stage `K`. Idempotent on "not currently subscribed."
-    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId);
+    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
+        self.forward(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
+    }
 }
 
-impl LifecycleMailboxExt for WasmActorMailbox<'_, LifecycleCapability> {
-    fn subscribe<K: Kind>(&self) {
-        self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
+impl<T: LifecycleMailboxForward> LifecycleMailboxExt for T {}
+
+impl LifecycleMailboxForward for WasmActorMailbox<'_, LifecycleCapability> {
+    fn forward<K>(&self, payload: &K)
+    where
+        LifecycleCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
     }
-    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
-    }
-    fn unsubscribe<K: Kind>(&self) {
-        self.send(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
-    }
-    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
+}
+
+impl<C: Kind> LifecycleMailboxForward for WasmActorMailboxWithContext<'_, '_, LifecycleCapability, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        LifecycleCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
     }
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-impl LifecycleMailboxExt for NativeActorMailbox<'_, LifecycleCapability> {
-    fn subscribe<K: Kind>(&self) {
-        self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
+impl LifecycleMailboxForward for NativeActorMailbox<'_, LifecycleCapability> {
+    fn forward<K>(&self, payload: &K)
+    where
+        LifecycleCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
     }
-    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
-    }
-    fn unsubscribe<K: Kind>(&self) {
-        self.send(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
-    }
-    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
+}
+
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+impl<C: Kind> LifecycleMailboxForward for NativeActorMailboxWithContext<'_, '_, LifecycleCapability, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        LifecycleCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
     }
 }
 
@@ -121,5 +150,29 @@ pub fn broadcast_to_subscribers<M: ReplyMode>(
     };
     for mailbox in set {
         let _ = ctx.send_envelope_tracked(SubstrateMailboxId(mailbox.0), stage, &[]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LifecycleCapability, LifecycleMailboxExt, LifecycleSubscribeSelf, WasmActorMailbox, WasmActorMailboxWithContext,
+    };
+
+    fn assert_facade<T: LifecycleMailboxExt>() {}
+
+    #[test]
+    fn facade_is_available_to_wasm_senders() {
+        assert_facade::<WasmActorMailbox<'static, LifecycleCapability>>();
+        assert_facade::<WasmActorMailboxWithContext<'static, 'static, LifecycleCapability, LifecycleSubscribeSelf>>();
+    }
+
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    #[test]
+    fn facade_is_available_to_native_senders() {
+        assert_facade::<super::NativeActorMailbox<'static, LifecycleCapability>>();
+        assert_facade::<
+            super::NativeActorMailboxWithContext<'static, 'static, LifecycleCapability, LifecycleSubscribeSelf>,
+        >();
     }
 }

@@ -83,8 +83,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox, WasmCtx,
-    WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorInitError, ActorTypeTag, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox,
+    WasmActorMailboxWithContext, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
