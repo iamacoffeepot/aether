@@ -109,14 +109,14 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
     let engine = parse_engine_id(&args.engine_id)?;
     // A tagged id remains a local cache-only fast path. Every textual
     // address is resolved by the selected engine, which returns both the
-    // real mailbox id used as the cache key and the canonical path forwarded
-    // to the component host.
+    // real mailbox id used as the cache key and its canonical path. The
+    // component host still receives the operator's original spelling so its
+    // own engine-atomic name handling remains the forwarding contract.
     let (mailbox_id, forward_name) = if args.component.starts_with("mbx-") {
         (parse_mailbox_id(&args.component)?, None)
     } else {
-        let (mailbox_id, canonical_path) =
-            mcp.resolve_engine_address(engine, &args.component).await.map_err(internal)?;
-        (mailbox_id, Some(canonical_path))
+        let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.component).await.map_err(internal)?;
+        (mailbox_id, Some(args.component.clone()))
     };
 
     // Cache fast-path: populated by load_component / replace_component or

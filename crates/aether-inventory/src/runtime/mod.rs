@@ -247,6 +247,9 @@ mod tests {
 
     const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
     const ADDRESS_TEST_CHILD: &str = "aether.test.inventory_address_child";
+    const AMBIGUOUS_ADDRESS_TEST_ROOT: &str = "aether.test.inventory_ambiguous_root";
+    const AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD: &str = "aether.test.inventory_ambiguous_first";
+    const AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD: &str = "aether.test.inventory_ambiguous_second";
 
     inventory::submit! {
         NameEntry {
@@ -274,6 +277,50 @@ mod tests {
             child: ActorId::singleton(ADDRESS_TEST_CHILD),
             parent_namespace: ADDRESS_TEST_ROOT,
             child_namespace: ADDRESS_TEST_CHILD,
+        }
+    }
+    inventory::submit! {
+        NameEntry {
+            domain: MAILBOX_DOMAIN,
+            name: AMBIGUOUS_ADDRESS_TEST_ROOT,
+        }
+    }
+    inventory::submit! {
+        TemplateEntry {
+            domain: MAILBOX_DOMAIN,
+            prefix: AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD,
+            template: ":{subname}",
+            param: InventoryParamKind::Dynamic,
+        }
+    }
+    inventory::submit! {
+        TemplateEntry {
+            domain: MAILBOX_DOMAIN,
+            prefix: AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD,
+            template: ":{subname}",
+            param: InventoryParamKind::Dynamic,
+        }
+    }
+    inventory::submit! {
+        RootEntry {
+            actor: ActorId::singleton(AMBIGUOUS_ADDRESS_TEST_ROOT),
+            namespace: AMBIGUOUS_ADDRESS_TEST_ROOT,
+        }
+    }
+    inventory::submit! {
+        ChildEntry {
+            parent: ActorId::singleton(AMBIGUOUS_ADDRESS_TEST_ROOT),
+            child: ActorId::singleton(AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD),
+            parent_namespace: AMBIGUOUS_ADDRESS_TEST_ROOT,
+            child_namespace: AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD,
+        }
+    }
+    inventory::submit! {
+        ChildEntry {
+            parent: ActorId::singleton(AMBIGUOUS_ADDRESS_TEST_ROOT),
+            child: ActorId::singleton(AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD),
+            parent_namespace: AMBIGUOUS_ADDRESS_TEST_ROOT,
+            child_namespace: AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD,
         }
     }
 
@@ -454,6 +501,33 @@ mod tests {
             }
             other @ ResolveAddressResult::Ok { .. } => {
                 panic!("missing address should return an engine diagnostic, got {other:?}")
+            }
+        }
+
+        let ambiguous = InventoryCapability::on_resolve_address(
+            &mut fix.state,
+            &mut ctx,
+            ResolveAddress { address: format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}://camera") },
+        );
+        match ambiguous {
+            ResolveAddressResult::Err { error } => {
+                assert!(error.contains("camera"), "ambiguity diagnostic names the supplied segment: {error}");
+                assert!(error.contains("ambiguous"), "engine ambiguity diagnostic is preserved: {error}");
+                assert!(
+                    error.contains(AMBIGUOUS_ADDRESS_TEST_ROOT),
+                    "ambiguity diagnostic names the parent root: {error}"
+                );
+                assert!(
+                    error.contains(AMBIGUOUS_ADDRESS_TEST_FIRST_CHILD),
+                    "ambiguity diagnostic carries the first explicit candidate: {error}"
+                );
+                assert!(
+                    error.contains(AMBIGUOUS_ADDRESS_TEST_SECOND_CHILD),
+                    "ambiguity diagnostic carries the second explicit candidate: {error}"
+                );
+            }
+            other @ ResolveAddressResult::Ok { .. } => {
+                panic!("ambiguous short address should return an engine diagnostic, got {other:?}")
             }
         }
     }

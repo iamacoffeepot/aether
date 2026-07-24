@@ -399,7 +399,7 @@ async fn describe_component_reads_the_cache() {
 }
 
 #[tokio::test]
-async fn describe_component_uses_the_engine_resolved_id_and_canonical_path() {
+async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplied_alias() {
     let supplied = "aether.component://camera";
     let canonical = "aether.component/aether.embedded:camera";
     let engine_answer = MailboxId(0x4057_0000_0000_0100);
@@ -445,5 +445,5 @@ async fn describe_component_uses_the_engine_resolved_id_and_canonical_path() {
     assert_eq!(calls[0].kind, ResolveAddress::ID);
     let describe = DescribeComponent::decode_from_bytes(&calls[1].payload).expect("describe request decodes");
     drop(calls);
-    assert_eq!(describe.name, canonical, "component host receives the canonical engine path");
+    assert_eq!(describe.name, supplied, "component host receives the original operator spelling");
 }
