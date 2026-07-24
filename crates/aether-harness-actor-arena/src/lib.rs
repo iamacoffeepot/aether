@@ -6,6 +6,7 @@
 //! migration commits to them.
 
 mod allocator;
+mod churn;
 mod metrics;
 mod native;
 mod trace;
@@ -63,10 +64,21 @@ pub enum AccessPattern {
     HotCold,
 }
 
+/// Timed mechanism. Dispatch models mail delivery; lifecycle churn models
+/// reserve, state initialization, and retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Workload {
+    Dispatch,
+    LifecycleChurn,
+    SceneSweep,
+}
+
 /// One fresh-process trial configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrialConfig {
     pub backend: Backend,
+    pub workload: Workload,
     pub actors: usize,
     pub mails: u64,
     pub mails_per_activation: usize,
@@ -98,11 +110,27 @@ impl TrialConfig {
         if self.backend == Backend::WasmDetached && self.actors > 4_096 {
             bail!("wasm-detached is capped at 4096 instances to bound setup memory");
         }
+        if self.workload == Workload::LifecycleChurn
+            && !matches!(self.backend, Backend::BoxedCurrent | Backend::ArenaState)
+        {
+            bail!("lifecycle-churn supports boxed-current and arena-state");
+        }
+        if self.workload == Workload::SceneSweep {
+            if self.backend.is_wasm() {
+                bail!("scene-sweep currently measures the native actor arms");
+            }
+            if self.pattern != AccessPattern::Sequential || self.mails_per_activation != 1 {
+                bail!("scene-sweep requires sequential access and one mail per activation");
+            }
+        }
 
         Ok(())
     }
 
     fn activations(&self) -> usize {
+        if self.workload == Workload::LifecycleChurn {
+            return usize::try_from(self.mails).expect("lifecycle operation count fits in usize");
+        }
         usize::try_from(
             self.mails.div_ceil(u64::try_from(self.mails_per_activation).expect("activation batch fits in u64")),
         )
@@ -110,6 +138,9 @@ impl TrialConfig {
     }
 
     fn warmup_activations(&self) -> usize {
+        if self.workload == Workload::LifecycleChurn {
+            return usize::try_from(self.warmup_mails).expect("warmup lifecycle operation count fits in usize");
+        }
         usize::try_from(
             self.warmup_mails.div_ceil(u64::try_from(self.mails_per_activation).expect("activation batch fits in u64")),
         )
@@ -159,10 +190,12 @@ pub fn run_trial(config: TrialConfig) -> Result<TrialReport> {
         config.pattern,
         config.seed,
     );
-    let mut experiment: Experiment = if config.backend.is_wasm() {
+    let mut experiment: Experiment = if config.workload == Workload::LifecycleChurn {
+        churn::ChurnExperiment::new(&config)?.into()
+    } else if config.backend.is_wasm() {
         wasm::WasmExperiment::new(&config)?.into()
     } else {
-        native::NativeExperiment::new(&config)?.into()
+        native::NativeExperiment::new(&config).into()
     };
 
     experiment.deliver(&config, trace.prefix(config.warmup_activations()))?;
@@ -200,6 +233,7 @@ struct DeliveryOutcome {
 }
 
 enum Experiment {
+    Churn(churn::ChurnExperiment),
     Native(native::NativeExperiment),
     Wasm(wasm::WasmExperiment),
 }
@@ -207,6 +241,12 @@ enum Experiment {
 impl From<native::NativeExperiment> for Experiment {
     fn from(value: native::NativeExperiment) -> Self {
         Self::Native(value)
+    }
+}
+
+impl From<churn::ChurnExperiment> for Experiment {
+    fn from(value: churn::ChurnExperiment) -> Self {
+        Self::Churn(value)
     }
 }
 
@@ -219,6 +259,7 @@ impl From<wasm::WasmExperiment> for Experiment {
 impl Experiment {
     fn deliver(&mut self, config: &TrialConfig, trace: &[usize]) -> Result<DeliveryOutcome> {
         match self {
+            Self::Churn(experiment) => Ok(experiment.deliver(config, trace)),
             Self::Native(experiment) => Ok(experiment.deliver(config, trace)),
             Self::Wasm(experiment) => experiment.deliver(config, trace),
         }
@@ -226,6 +267,10 @@ impl Experiment {
 
     fn reset(&mut self, config: &TrialConfig) -> Result<()> {
         match self {
+            Self::Churn(experiment) => {
+                experiment.reset(config);
+                Ok(())
+            }
             Self::Native(experiment) => {
                 experiment.reset(config);
                 Ok(())
@@ -236,6 +281,7 @@ impl Experiment {
 
     fn checksum(&mut self) -> u64 {
         match self {
+            Self::Churn(experiment) => experiment.checksum(),
             Self::Native(experiment) => experiment.checksum(),
             Self::Wasm(experiment) => experiment.checksum(),
         }

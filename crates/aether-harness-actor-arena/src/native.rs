@@ -5,7 +5,8 @@ use std::{
 };
 
 use crate::{
-    ActorCoordinate, Backend, DeliveryOutcome, HierarchicalBitmap, MechanismCounters, TrialConfig, trace::mail_value,
+    ActorCoordinate, Backend, DeliveryOutcome, HierarchicalBitmap, MechanismCounters, TrialConfig, Workload,
+    trace::mail_value,
 };
 
 type RouteMap<T> = HashMap<u64, T, BuildHasherDefault<IdentityHasher>>;
@@ -39,16 +40,14 @@ pub enum NativeExperiment {
 }
 
 impl NativeExperiment {
-    pub fn new(config: &TrialConfig) -> anyhow::Result<Self> {
-        let experiment = match config.backend {
+    pub fn new(config: &TrialConfig) -> Self {
+        match config.backend {
             Backend::BoxedCurrent => Self::Boxed(CurrentRoutes::boxed(config)),
-            Backend::ArenaState => Self::ArenaState(CurrentRoutes::arena(config)?),
-            Backend::ArenaEndpoint => Self::ArenaEndpoint(EndpointRoutes::new(config)?),
-            Backend::ArenaPage => Self::ArenaPage(PageRoutes::new(config)?),
+            Backend::ArenaState => Self::ArenaState(CurrentRoutes::arena(config)),
+            Backend::ArenaEndpoint => Self::ArenaEndpoint(EndpointRoutes::new(config)),
+            Backend::ArenaPage => Self::ArenaPage(PageRoutes::new(config)),
             _ => unreachable!("native experiment constructed for Wasm backend"),
-        };
-
-        Ok(experiment)
+        }
     }
 
     pub fn deliver(&mut self, config: &TrialConfig, trace: &[usize]) -> DeliveryOutcome {
@@ -142,8 +141,8 @@ impl CurrentRoutes {
         Self { routes, ordered, arena: None }
     }
 
-    fn arena(config: &TrialConfig) -> anyhow::Result<Self> {
-        let (arena, coordinates) = StateArena::populated(config)?;
+    fn arena(config: &TrialConfig) -> Self {
+        let (arena, coordinates) = StateArena::populated(config);
         let arena = Arc::new(arena);
         let mut routes = RouteMap::default();
         let mut ordered = Vec::with_capacity(config.actors);
@@ -154,21 +153,30 @@ impl CurrentRoutes {
             ordered.push(handler);
         }
 
-        Ok(Self { routes, ordered, arena: Some(arena) })
+        Self { routes, ordered, arena: Some(arena) }
     }
 
     fn deliver(&self, config: &TrialConfig, trace: &[usize]) -> DeliveryOutcome {
         for (activation, actor) in trace.iter().copied().enumerate() {
-            self.routes[&mailbox(actor)].dispatch(config, activation);
+            if config.workload == Workload::SceneSweep {
+                self.ordered[actor].dispatch(config, activation);
+            } else {
+                self.routes[&mailbox(actor)].dispatch(config, activation);
+            }
         }
+        let route_lookups = if config.workload == Workload::SceneSweep {
+            0
+        } else {
+            trace.len() as u64
+        };
 
         DeliveryOutcome {
             completed_mails: completed_mails(config, trace.len()),
             counters: MechanismCounters {
-                route_lookups: trace.len() as u64,
+                route_lookups,
                 state_lock_acquisitions: trace.len() as u64,
                 scheduled_items: trace.len() as u64,
-                allocator_cas_retries: self.arena.as_ref().map_or(0, |arena| arena.bitmap.cas_retries()),
+                allocator_cas_retries: self.arena.as_ref().map_or(0, |arena| arena.cas_retries()),
                 ..MechanismCounters::default()
             },
         }
@@ -197,8 +205,8 @@ pub struct EndpointRoutes {
 }
 
 impl EndpointRoutes {
-    fn new(config: &TrialConfig) -> anyhow::Result<Self> {
-        let (arena, coordinates) = StateArena::populated(config)?;
+    fn new(config: &TrialConfig) -> Self {
+        let (arena, coordinates) = StateArena::populated(config);
         let routes = coordinates
             .iter()
             .copied()
@@ -206,25 +214,39 @@ impl EndpointRoutes {
             .map(|(actor, coordinate)| (mailbox(actor), Endpoint { coordinate }))
             .collect();
 
-        Ok(Self { routes, coordinates, arena: Arc::new(arena) })
+        Self { routes, coordinates, arena: Arc::new(arena) }
     }
 
     fn deliver(&self, config: &TrialConfig, trace: &[usize]) -> DeliveryOutcome {
         for (activation, actor) in trace.iter().copied().enumerate() {
-            self.arena.dispatch(self.routes[&mailbox(actor)].coordinate, config, activation);
+            let coordinate = if config.workload == Workload::SceneSweep {
+                self.coordinates[actor]
+            } else {
+                self.routes[&mailbox(actor)].coordinate
+            };
+            self.arena.dispatch(coordinate, config, activation);
         }
 
-        self.outcome(config, trace.len(), trace.len() as u64)
+        self.outcome(
+            config,
+            trace.len(),
+            trace.len() as u64,
+            if config.workload == Workload::SceneSweep {
+                0
+            } else {
+                trace.len() as u64
+            },
+        )
     }
 
-    fn outcome(&self, config: &TrialConfig, activations: usize, locks: u64) -> DeliveryOutcome {
+    fn outcome(&self, config: &TrialConfig, activations: usize, locks: u64, route_lookups: u64) -> DeliveryOutcome {
         DeliveryOutcome {
             completed_mails: completed_mails(config, activations),
             counters: MechanismCounters {
-                route_lookups: activations as u64,
+                route_lookups,
                 state_lock_acquisitions: locks,
                 scheduled_items: activations as u64,
-                allocator_cas_retries: self.arena.bitmap.cas_retries(),
+                allocator_cas_retries: self.arena.cas_retries(),
                 ..MechanismCounters::default()
             },
         }
@@ -261,15 +283,19 @@ pub struct PageRoutes {
 }
 
 impl PageRoutes {
-    fn new(config: &TrialConfig) -> anyhow::Result<Self> {
-        let endpoints = EndpointRoutes::new(config)?;
+    fn new(config: &TrialConfig) -> Self {
+        let endpoints = EndpointRoutes::new(config);
         let page_count = config.actors.div_ceil(config.page_slots);
         let batches = (0..page_count).map(|_| Vec::with_capacity(config.page_slots)).collect();
 
-        Ok(Self { endpoints, batches, touched: Vec::with_capacity(page_count), marked: vec![false; page_count] })
+        Self { endpoints, batches, touched: Vec::with_capacity(page_count), marked: vec![false; page_count] }
     }
 
     fn deliver(&mut self, config: &TrialConfig, trace: &[usize]) -> DeliveryOutcome {
+        if config.workload == Workload::SceneSweep {
+            return self.deliver_scene_sweep(config, trace);
+        }
+
         let mut locks = 0_u64;
         let scheduling_window = config.page_slots;
 
@@ -295,7 +321,33 @@ impl PageRoutes {
             }
         }
 
-        let mut outcome = self.endpoints.outcome(config, trace.len(), locks);
+        let mut outcome = self.endpoints.outcome(config, trace.len(), locks, trace.len() as u64);
+        outcome.counters.scheduled_items = locks;
+        outcome
+    }
+
+    fn deliver_scene_sweep(&self, config: &TrialConfig, trace: &[usize]) -> DeliveryOutcome {
+        let mut start = 0;
+        let mut locks = 0_u64;
+
+        while start < trace.len() {
+            let page = self.endpoints.coordinates[trace[start]].page;
+            let mut end = start + 1;
+            while end < trace.len() && self.endpoints.coordinates[trace[end]].page == page {
+                end += 1;
+            }
+            self.endpoints.arena.dispatch_scene_page(
+                page as usize,
+                config,
+                start,
+                &trace[start..end],
+                &self.endpoints.coordinates,
+            );
+            locks += 1;
+            start = end;
+        }
+
+        let mut outcome = self.endpoints.outcome(config, trace.len(), locks, 0);
         outcome.counters.scheduled_items = locks;
         outcome
     }
@@ -314,22 +366,26 @@ struct ArenaPage {
 }
 
 struct StateArena {
-    bitmap: HierarchicalBitmap,
+    bitmaps: Vec<HierarchicalBitmap>,
     pages: Vec<ArenaPage>,
     words_per_state: usize,
 }
 
 impl StateArena {
-    fn populated(config: &TrialConfig) -> anyhow::Result<(Self, Vec<ActorCoordinate>)> {
-        anyhow::ensure!(
-            config.actors <= config.page_slots * 64,
-            "the spike bitmap supports at most 64 pages ({} actors for this page size)",
-            config.page_slots * 64
-        );
+    fn populated(config: &TrialConfig) -> (Self, Vec<ActorCoordinate>) {
         let page_count = config.actors.div_ceil(config.page_slots);
         let words_per_state = words_per_state(config);
+        let shard_capacity = config.page_slots * 64;
+        let bitmaps = (0..config.actors.div_ceil(shard_capacity))
+            .map(|shard| {
+                HierarchicalBitmap::new(
+                    config.actors.saturating_sub(shard * shard_capacity).min(shard_capacity),
+                    config.page_slots,
+                )
+            })
+            .collect();
         let arena = Self {
-            bitmap: HierarchicalBitmap::new(config.actors, config.page_slots),
+            bitmaps,
             pages: (0..page_count)
                 .map(|_| ArenaPage {
                     states: Mutex::new(vec![0; config.page_slots * words_per_state].into_boxed_slice()),
@@ -339,17 +395,19 @@ impl StateArena {
         };
         let coordinates: Vec<_> = (0..config.actors)
             .map(|actor| {
-                let coordinate = arena.bitmap.reserve().expect("arena sized for actor population");
+                let shard = actor / shard_capacity;
+                let mut coordinate = arena.bitmaps[shard].reserve().expect("arena shard sized for actor population");
+                coordinate.page += u32::try_from(shard * 64).expect("global page fits in coordinate");
                 arena.reset_slot(coordinate, config.seed, actor);
                 coordinate
             })
             .collect();
 
-        Ok((arena, coordinates))
+        (arena, coordinates)
     }
 
     fn dispatch(&self, coordinate: ActorCoordinate, config: &TrialConfig, activation: usize) {
-        assert!(self.bitmap.is_live(coordinate), "stale arena endpoint");
+        assert!(self.is_live(coordinate), "stale arena endpoint");
         let mut page = self.pages[coordinate.page as usize].states.lock().expect("arena page state");
         let state = self.state_mut(&mut page, coordinate.slot);
         apply_activation(state, config, activation);
@@ -361,6 +419,23 @@ impl StateArena {
         for item in batch {
             let state = self.state_mut(&mut page, item.slot);
             apply_activation(state, config, item.activation);
+        }
+        drop(page);
+    }
+
+    fn dispatch_scene_page(
+        &self,
+        page_index: usize,
+        config: &TrialConfig,
+        first_activation: usize,
+        actors: &[usize],
+        coordinates: &[ActorCoordinate],
+    ) {
+        let mut page = self.pages[page_index].states.lock().expect("arena page state");
+        for (offset, actor) in actors.iter().copied().enumerate() {
+            let coordinate = coordinates[actor];
+            debug_assert_eq!(coordinate.page as usize, page_index);
+            apply_activation(self.state_mut(&mut page, coordinate.slot), config, first_activation + offset);
         }
         drop(page);
     }
@@ -379,6 +454,18 @@ impl StateArena {
     fn state_mut<'a>(&self, page: &'a mut [u64], slot: u8) -> &'a mut [u64] {
         let start = slot as usize * self.words_per_state;
         &mut page[start..start + self.words_per_state]
+    }
+
+    fn is_live(&self, coordinate: ActorCoordinate) -> bool {
+        let page = coordinate.page as usize;
+        let shard = page / 64;
+        let mut local = coordinate;
+        local.page = u32::try_from(page % 64).expect("local page is bounded to 64");
+        self.bitmaps.get(shard).is_some_and(|bitmap| bitmap.is_live(local))
+    }
+
+    fn cas_retries(&self) -> u64 {
+        self.bitmaps.iter().map(HierarchicalBitmap::cas_retries).sum()
     }
 }
 
@@ -436,11 +523,12 @@ fn completed_mails(config: &TrialConfig, activations: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AccessPattern, Backend, TrialConfig, run_trial};
+    use crate::{AccessPattern, Backend, TrialConfig, Workload, run_trial};
 
     fn config(backend: Backend) -> TrialConfig {
         TrialConfig {
             backend,
+            workload: Workload::Dispatch,
             actors: 130,
             mails: 10_003,
             mails_per_activation: 17,
@@ -462,6 +550,32 @@ mod tests {
             assert_eq!(report.completed_mails, 10_003);
             assert_eq!(report.checksum, reports[0].checksum);
         }
+        assert!(reports[3].counters.state_lock_acquisitions < reports[2].counters.state_lock_acquisitions);
+    }
+
+    #[test]
+    fn large_scene_sweep_crosses_bitmap_shards_without_changing_work() {
+        let scene = |backend| TrialConfig {
+            backend,
+            workload: Workload::SceneSweep,
+            actors: 5_000,
+            mails: 10_007,
+            mails_per_activation: 1,
+            page_slots: 64,
+            state_bytes: 64,
+            pattern: AccessPattern::Sequential,
+            seed: 77,
+            warmup_mails: 503,
+            instrument_allocations: false,
+        };
+        let reports = [Backend::BoxedCurrent, Backend::ArenaState, Backend::ArenaEndpoint, Backend::ArenaPage]
+            .map(|backend| run_trial(scene(backend)).expect("scene sweep"));
+
+        for report in &reports {
+            assert_eq!(report.completed_mails, 10_007);
+            assert_eq!(report.checksum, reports[0].checksum);
+        }
+        assert_eq!(reports[3].counters.route_lookups, 0);
         assert!(reports[3].counters.state_lock_acquisitions < reports[2].counters.state_lock_acquisitions);
     }
 }

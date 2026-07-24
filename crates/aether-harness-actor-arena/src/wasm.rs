@@ -483,11 +483,12 @@ fn wasm_pages(bytes: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AccessPattern, Backend, TrialConfig, run_trial};
+    use crate::{AccessPattern, Backend, TrialConfig, Workload, run_trial};
 
     fn config(backend: Backend) -> TrialConfig {
         TrialConfig {
             backend,
+            workload: Workload::Dispatch,
             actors: 12,
             mails: 2_003,
             mails_per_activation: 7,

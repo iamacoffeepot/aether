@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use aether_harness_actor_arena::{AccessPattern, Backend, TrialReport};
+use aether_harness_actor_arena::{AccessPattern, Backend, TrialReport, Workload};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,9 @@ struct Args {
 
     #[arg(long, value_enum)]
     candidate: Backend,
+
+    #[arg(long, value_enum, default_value = "dispatch")]
+    workload: Workload,
 
     #[arg(long, default_value_t = 9)]
     pairs: usize,
@@ -103,6 +106,7 @@ struct Environment {
 #[derive(Debug, Serialize, Deserialize)]
 struct ComparisonReport {
     schema: u32,
+    workload: Workload,
     base: Backend,
     candidate: Backend,
     pairs: Vec<PairReport>,
@@ -146,8 +150,15 @@ fn main() -> Result<()> {
 
     let statistics = statistics(&pairs);
     let environment = environment(&trial_executable);
-    let report =
-        ComparisonReport { schema: 1, base: args.base, candidate: args.candidate, pairs, statistics, environment };
+    let report = ComparisonReport {
+        schema: 1,
+        workload: args.workload,
+        base: args.base,
+        candidate: args.candidate,
+        pairs,
+        statistics,
+        environment,
+    };
 
     write_json(&args.artifact_dir.join("comparison.json"), &report)?;
     write_json(&args.artifact_dir.join("environment.json"), &report.environment)?;
@@ -187,6 +198,8 @@ fn run_trial_process(executable: &Path, args: &Args, backend: Backend) -> Result
     command
         .arg("--backend")
         .arg(backend_name(backend))
+        .arg("--workload")
+        .arg(workload_name(args.workload))
         .arg("--actors")
         .arg(args.actors.to_string())
         .arg("--mails")
@@ -279,6 +292,11 @@ fn percentile(values: &[f64], quantile: f64) -> f64 {
 fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
     let stats = &report.statistics;
     let first = &report.pairs[0];
+    let unit = match args.workload {
+        Workload::Dispatch => "mail",
+        Workload::LifecycleChurn => "lifecycle op",
+        Workload::SceneSweep => "entity update",
+    };
     let mut markdown = format!(
         "# Actor arena paired comparison\n\n\
          Base: `{}`  \n\
@@ -286,15 +304,15 @@ fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
          Classification: **{}**\n\n\
          | Metric | Result |\n\
          |---|---:|\n\
-         | Base median | {:.3} ns/mail |\n\
-         | Candidate median | {:.3} ns/mail |\n\
-         | Median paired delta | {:+.3} ns/mail |\n\
-         | Paired delta IQR | {:.3} ns/mail |\n\
+         | Base median | {:.3} ns/{} |\n\
+         | Candidate median | {:.3} ns/{} |\n\
+         | Median paired delta | {:+.3} ns/{} |\n\
+         | Paired delta IQR | {:.3} ns/{} |\n\
          | Relative median change | {:+.2}% |\n\
          | Median speedup | {:.3}× |\n\
          | Directional consistency | {:.1}% |\n\
          | ADR-0085 noise floor | {:.3} ns/mail |\n\n\
-         Configuration: {} actors, {} mails, {} bytes/state, {} mails/activation, \
+         Configuration: `{}` workload, {} actors, {} work units, {} bytes/state, {} mails/activation, \
          {} slots/page, `{}` access, seed `{}`.\n\n\
          ## Pairs\n\n\
          | Pair | Order | Base ns/mail | Candidate ns/mail | Delta | Speedup |\n\
@@ -303,13 +321,18 @@ fn markdown_report(report: &ComparisonReport, args: &Args) -> String {
         backend_name(report.candidate),
         stats.classification,
         stats.base_median_nanos_per_mail,
+        unit,
         stats.candidate_median_nanos_per_mail,
+        unit,
         stats.median_paired_delta_nanos_per_mail,
+        unit,
         stats.paired_delta_iqr_nanos_per_mail,
+        unit,
         stats.relative_change_percent,
         stats.median_speedup,
         stats.directional_consistency * 100.0,
         stats.noise_floor_nanos_per_mail,
+        workload_name(args.workload),
         args.actors,
         args.mails,
         args.state_bytes,
@@ -425,12 +448,13 @@ fn delta_svg(report: &ComparisonReport) -> String {
 
 fn reproduction_command(args: &Args, executable: &Path) -> String {
     format!(
-        "{} --base {} --candidate {} --pairs {} --artifact-dir <output> --actors {} --mails {} \
+        "{} --base {} --candidate {} --workload {} --pairs {} --artifact-dir <output> --actors {} --mails {} \
          --mails-per-activation {} --page-slots {} --state-bytes {} --pattern {} --seed {} \
          --warmup-mails {}{}\n\nTrial executable used: {}\n",
         env::current_exe().map_or_else(|_| "aether-actor-arena-compare".into(), |path| path.display().to_string()),
         backend_name(args.base),
         backend_name(args.candidate),
+        workload_name(args.workload),
         args.pairs,
         args.actors,
         args.mails,
@@ -511,5 +535,13 @@ const fn pattern_name(pattern: AccessPattern) -> &'static str {
         AccessPattern::Random => "random",
         AccessPattern::Clustered => "clustered",
         AccessPattern::HotCold => "hot-cold",
+    }
+}
+
+const fn workload_name(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Dispatch => "dispatch",
+        Workload::LifecycleChurn => "lifecycle-churn",
+        Workload::SceneSweep => "scene-sweep",
     }
 }

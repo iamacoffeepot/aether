@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use aether_harness_actor_arena::{AccessPattern, Backend, TrialConfig, run_trial};
+use aether_harness_actor_arena::{AccessPattern, Backend, TrialConfig, Workload, run_trial};
 use anyhow::Result;
 use clap::Parser;
 
@@ -10,6 +10,9 @@ use clap::Parser;
 struct Args {
     #[arg(long, value_enum)]
     backend: Backend,
+
+    #[arg(long, value_enum, default_value = "dispatch")]
+    workload: Workload,
 
     #[arg(long, default_value_t = 1_024)]
     actors: usize,
@@ -44,6 +47,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let report = run_trial(TrialConfig {
         backend: args.backend,
+        workload: args.workload,
         actors: args.actors,
         mails: args.mails,
         mails_per_activation: args.mails_per_activation,

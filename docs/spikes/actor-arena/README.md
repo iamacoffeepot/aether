@@ -11,7 +11,8 @@ discussion:
 2. route endpoint simplification;
 3. page-granularity scheduling;
 4. persistent Wasm linear-memory state; and
-5. packed host-to-guest delivery.
+5. packed host-to-guest delivery; and
+6. reserve–initialize–retire lifecycle churn.
 
 The result can establish a performance ceiling or reject an idea. It cannot,
 by itself, prove the end-to-end runtime gain.
@@ -58,6 +59,30 @@ by a state reset. The timed interval contains delivery only; setup, compilation,
 allocation, reset, checksum, and serialization are excluded. Every trial
 reports the exact completed mail count and a full-state checksum.
 
+`--workload lifecycle-churn` changes the work unit from mail delivery to one
+retire/replacement cycle. `boxed-current` drops and reallocates a boxed state;
+`arena-state` releases a generation-stamped coordinate, reserves a replacement,
+and initializes the in-page state without allocating. This is a single-thread
+heap-versus-bitmap mechanism ceiling. The concurrency test establishes bitmap
+correctness, but a production vertical slice must still measure contended
+allocation across real namespace shards.
+
+`--workload scene-sweep` is the high-population ECS-shaped cell. It requires
+sequential access and one update per activation, then compares:
+
+- a direct list of `Arc<dyn handler>` actors, with one actor mutex per update;
+- the same dynamic call shape pointing into arena state;
+- concrete generation-stamped coordinates with one page lock per entity; and
+- a direct arena page walk with one lock/run token for the contiguous live
+  run.
+
+The fixture uses 65,536 same-kind, 64-byte “bullet” states and five million
+updates. Mailbox hashing is intentionally absent from this workload: it asks
+what a scene system can gain once it already has the namespace/kind cohort and
+wants to advance every bullet. Namespace-local bitmap shards allow the fixture
+to exceed one 4,096-slot two-level root without adding an arena id to the actor
+coordinate.
+
 ## Allocator mechanism
 
 `HierarchicalBitmap` is the proposed small-form allocator:
@@ -88,6 +113,13 @@ at results:
    indexed linear-memory state.
 6. `wasm-arena` → `wasm-batch`: host-boundary batching independently of state
    placement.
+7. `boxed-current` → `arena-state` under `lifecycle-churn`: heap
+   drop/allocation versus bitmap release/reserve, with identical state
+   initialization.
+8. Three `scene-sweep` cuts at 65,536 bullets:
+   `boxed-current` → `arena-state` → `arena-endpoint` → `arena-page`.
+   These isolate state placement, dynamic dispatch, and tight page iteration
+   for the high-entity-count case.
 
 Native primary cell: 4,096 actors, 256 bytes/state, random activations,
 16 mails/activation, 64 slots/page.
@@ -129,6 +161,7 @@ cargo build --release -p aether-harness-actor-arena --bins
 target/release/aether-actor-arena-compare \
   --base boxed-current \
   --candidate arena-state \
+  --workload dispatch \
   --pairs 9 \
   --artifact-dir /tmp/actor-arena/native-storage \
   --actors 4096 \
