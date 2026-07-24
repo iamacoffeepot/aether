@@ -6,14 +6,13 @@ use std::sync::Arc;
 use aether_actor::runtime;
 use aether_kinds::MonitorNotice;
 
-use crate::subscribers::WindowSubscribers;
-use crate::synthetic::{InjectWindowEvent, SyntheticWindowCapability};
+use super::subscribers::WindowSubscribers;
 use crate::{
-    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
-    ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowClosed, WindowId, WindowInfo, WindowMode,
-    WindowOpened,
+    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult,
+    InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
+    SubscribeWindowSelf, SyntheticWindowCapability, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
+    WindowClosed, WindowId, WindowInfo, WindowMode, WindowOpened,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};

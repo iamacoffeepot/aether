@@ -204,6 +204,19 @@ pub struct UnsubscribeAllWindows {
     pub mailbox: MailboxId,
 }
 
+/// Raw, already-encoded window event injected through the synthetic runtime.
+///
+/// The runtime deliberately has one handler for this envelope rather than a
+/// handler or cached id for every public window event kind.
+#[cfg(feature = "synthetic")]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.inject_event")]
+pub struct InjectWindowEvent {
+    pub window: WindowId,
+    pub kind: KindId,
+    pub payload: Vec<u8>,
+}
+
 /// Published after a newly created window is fully attached.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.opened")]

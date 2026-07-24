@@ -13,7 +13,7 @@ mod input;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{Manual, actor};
+use aether_actor::{Manual, runtime};
 use aether_data::Kind;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
@@ -29,14 +29,14 @@ use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
 use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
-use super::{
-    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
-    ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowClosed, WindowId, WindowInfo, WindowOpened,
-    WindowSpec,
+use super::subscribers::WindowSubscribers;
+use crate::{
+    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, DesktopWindowCapability, FocusWindow,
+    FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
+    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowClosed, WindowId,
+    WindowInfo, WindowOpened, WindowSpec,
 };
-use crate::subscribers::WindowSubscribers;
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
 
@@ -490,10 +490,7 @@ impl DesktopWindowCapabilityState {
     }
 }
 
-/// Desktop implementation identity for the neutral `aether.window` mailbox.
-pub struct DesktopWindowCapability;
-
-#[actor(singleton)]
+#[runtime]
 impl NativeActor for DesktopWindowCapability {
     type State = DesktopWindowCapabilityState;
 
@@ -917,7 +914,7 @@ mod tests {
         let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
         state
             .subscribers
-            .subscribe(&mut ctx, super::super::WindowSelector::All, Key::ID, subscriber)
+            .subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber)
             .expect("registered subscriber is valid");
 
         state.publish(&mut ctx, WindowId(5), &Key { window: WindowId(5), code: 41 });

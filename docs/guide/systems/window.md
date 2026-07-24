@@ -8,8 +8,8 @@
 `aether-window` is the bespoke home of window behavior. One application-scoped
 actor owns every live window, translates native window events, routes the
 resulting Aether kinds, and exposes window lifecycle and control over mail.
-Callers use the platform-neutral `WindowCapability` identity and explicit
-`WindowId` values; they never hold a native window handle or address a
+Callers use the platform-neutral `WindowCapability` alias of the concrete
+headless identity and explicit `WindowId` values; they never hold a native window handle or address a
 desktop-, headless-, or test-specific implementation.
 
 The desktop chassis still owns the application thread and the call to winit's
@@ -163,17 +163,20 @@ All variants claim the one shared window namespace:
 
 - `DesktopWindowCapability` is pumped by `DesktopWindowApplication` and owns
   real winit state.
-- `WindowCapability`'s production headless runtime fails every request
-  immediately because there is no window peripheral.
+- `HeadlessWindowCapability` is the production headless runtime and fails
+  every request immediately because there is no window peripheral;
+  `WindowCapability` remains its neutral compatibility alias.
 - `SyntheticWindowCapability`, declared with
   `#[actor(singleton, runtime::synthetic)]`, is test-only. It keeps a
   deterministic in-memory window map and the same selector-aware routing
   behavior.
 - The hub installs no window actor.
 
-The neutral `WindowCapability` is the only identity consumer code should name.
-The runtime identities share one namespace constant inside `aether-window`;
-variants do not repeat a namespace literal.
+The neutral `WindowCapability` alias is the only identity consumer code should
+name. The concrete runtime identities share one namespace constant inside
+`aether-window`; variants do not repeat a namespace literal. The default
+headless implementation is `runtime/mod.rs`, while the desktop and synthetic
+implementations are keyed at `runtime/desktop/` and `runtime/synthetic.rs`.
 
 The initial desktop window still reads `AETHER_WINDOW_MODE` and
 `AETHER_WINDOW_TITLE`. `AETHER_WINDOW_MODE` accepts `windowed`,
