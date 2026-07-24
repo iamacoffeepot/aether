@@ -223,6 +223,14 @@ Actor birth is divided into work that can be completed immediately and work requ
 
 Everything that can be done safely at the caller’s current execution home is done immediately.
 
+All post-seal births use the same storage-neutral lifecycle:
+
+```text
+construct and init -> publish Starting -> wire at the execution home -> publish Live
+```
+
+For a handler-spawned detached sibling or companion, the caller-local reservation records uniqueness and completion but does not create a parent-drop cascade; ADR-0097’s independent-lifetime rule remains unchanged. A logical child additionally retains its declared parent relationship and relative-addressing metadata. A post-seal root or other external actor has no parent-local reservation or parent task ledger: it uses the same owner and activation protocol with an external control completion. Pre-seal boot actors remain under the private boot authority described below.
+
 For a handler-spawned child, the builder:
 
 1. validates the subname and local configuration;
@@ -248,9 +256,11 @@ Because the table belongs to one parent binding, the key does not repeat the par
 
 A synchronous validation, construction, or `init` failure releases the reservation and returns directly. The deferred completion is armed only after locally fallible preparation has succeeded.
 
+`ParentReservation` is a move-only weak capability into the spawning binding’s child-key table. It does not keep the binding alive and does not itself imply lifecycle ownership. On authoritative rejection, it releases the staged key after rollback and before completing `SpawnError`. On successful Live publication, it promotes the staged key to the binding’s live-child set before completing `SpawnApplied`; ordinary live teardown later releases that live key. If the binding has disappeared, finalization is a no-op and the independently live actor retains its accepted lifetime policy. No path may finalize the reservation twice.
+
 Arbitrary application effects explicitly permitted from `init` remain application behavior. The runtime guarantee is narrower: handler-time spawn preparation performs no direct write to the routing registry, global namespace table, actor-liveness registry, or global cost index.
 
-The permanent effect vocabulary is equivalent to:
+For handler-spawned birth, the permanent effect vocabulary is equivalent to:
 
 ```rust
 struct PreparedSpawnCommit {
@@ -333,6 +343,12 @@ registry owner
     publish every Starting route accepted from the batch
     schedule activation jobs only after that publication
 
+registry owner, on authoritative rejection before wire
+    roll back token-owned storage and cost rows
+    drop initialized state exactly once without unwire
+    release the staged parent-local reservation
+    complete SpawnError into the parent ledger
+
 actor execution home
     run wire without draining the actor inbox
     flush wire-time mail and effects into the parked tail
@@ -347,6 +363,7 @@ registry owner
     publish the live keyed and enumeration views
     emit the inventory change
     issue one catch-up wake
+    promote the parent-local reservation to the live-child set
     complete SpawnApplied into the parent ledger
 
 parent actor’s later turn
@@ -457,7 +474,7 @@ The in-flight table becomes fill-once:
 - a duplicate or stale completion cannot overwrite an output;
 - a duplicate or stale completion cannot send a second wake.
 
-A settlement hold is acquired when the staged operation is armed. It remains held through owner apply, activation, and the parent’s completion handler. The parent releases it only after its business continuation and reply are resolved, or explicitly through the no-reply path.
+An ADR-0080 settlement hold is acquired when the staged operation is armed. It remains held through owner apply, activation, and the parent’s completion handler. The parent releases it only after its business continuation and reply are resolved, or explicitly through the no-reply path.
 
 If the parent binding disappears:
 
@@ -736,6 +753,8 @@ Supporting work retains its existing purpose:
 
 #4036 may close after #4070 proves handler authority is staged. #4035 closes only after its owner foundation, inventory publication, and final-seal child are complete.
 
+`ActorRegistry` monitor/liveness teardown and `CostTable` teardown are separate lifecycle working sets. Their remaining direct mutations must be assigned explicitly when teardown migrates; neither is permission to retain a post-seal routing writer.
+
 The final-seal issue must classify every production routing mutation as exactly one of:
 
 - private pre-seal boot authority;
@@ -781,12 +800,15 @@ Implementation of this ADR must prove:
 - every recoverable apply failure happens before `wire`;
 - installing a valid activation token is recoverably infallible;
 - initialized-but-unwired rollback drops exactly once and does not call `unwire`;
+- authoritative apply rejection releases the staged parent-local reservation before completing failure;
 - post-wire cancellation calls `unwire` exactly once at the same execution home;
 - owner-channel closure after `wire` causes local same-home cleanup;
 - a stale token cannot install state or complete a parent twice;
 - duplicate deferred completion cannot overwrite output or emit a second wake;
 - parent binding loss releases its ledger and settlement hold without a spurious wake;
 - parent binding loss does not accidentally cancel an independently live child;
+- Live promotion converts the staged parent-local reservation before completing success, and live teardown releases the resulting live-child key;
+- root, detached companion or sibling, and logical-child births share the init/Starting/wire/Live protocol without changing their accepted relationship or cascade semantics;
 - explicit `after_init` mail remains the bootstrap prefix;
 - same-flush, cross-flush, and wire-time mail remain FIFO behind that prefix;
 - newly dispatched Live mail cannot overtake the parked tail;
