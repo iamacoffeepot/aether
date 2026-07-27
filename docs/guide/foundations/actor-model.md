@@ -184,6 +184,15 @@ parent. Each `child_of(Parent)` implements `ChildOf<Parent>` and records one
 permitted direct parent edge. The argument may be repeated for distinct parent
 types, and an actor may be both a root and a permitted child.
 
+Parentless native entry points consume that permission as a compile-time bound.
+Chassis composition (`Builder::with_actor` and `with_actor_configured`),
+chassis-level instanced spawn, pumped-actor boot, and the matching test and
+harness adapters all require `Root` beside their existing native actor bounds.
+A child-only actor therefore cannot cross one of those root placement surfaces,
+but remains valid through typed child placement such as
+`NativeCtx::spawn_child`, where its declared `ChildOf<Parent>` edge is checked
+instead. No runtime metadata lookup is involved in either check.
+
 These are placement permissions, not runtime facts. They do not say that an
 instance is live, that a parent owns or supervises a child, or that the actor
 has singleton versus instanced cardinality. The actor's own

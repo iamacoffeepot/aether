@@ -42,7 +42,7 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use crate::settlement_config::SettlementConfig;
-use aether_actor::Addressable;
+use aether_actor::{Addressable, Root};
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::ConfigMember;
 use aether_substrate::{
@@ -371,10 +371,58 @@ impl SubstrateHarnessBuilder {
     /// ADR-0156 §5: mirrors `Builder::with_actor` — it carries only `params`
     /// (the composer-supplied construction input). To also supply a cap's
     /// operator-resolvable `Config`, use the paired [`Self::with_actor_configured`].
+    ///
+    /// Parentless composition rejects a child-only actor at compile time:
+    ///
+    /// ```compile_fail
+    /// use aether_actor::{Addressable, ChildOf, Lifecycle, Many, One};
+    /// use aether_data::KindId;
+    /// use aether_harness_substrate::SubstrateHarnessBuilder;
+    /// use aether_substrate::{BootError, Dispatch, Manual, NativeActor, NativeCtx, NativeInitCtx};
+    ///
+    /// struct Parent;
+    /// impl Addressable for Parent {
+    ///     const NAMESPACE: &'static str = "example.parent";
+    ///     type Resolver = One;
+    /// }
+    ///
+    /// struct ChildOnly;
+    /// impl Addressable for ChildOnly {
+    ///     const NAMESPACE: &'static str = "example.child_only";
+    ///     type Resolver = Many;
+    /// }
+    /// impl ChildOf<Parent> for ChildOnly {}
+    /// impl Lifecycle<Self> for ChildOnly {
+    ///     type Config = ();
+    ///     type Params = ();
+    ///     type InitError = BootError;
+    ///     type InitCtx<'a> = NativeInitCtx<'a>;
+    ///     type Ctx<'a> = NativeCtx<'a>;
+    ///
+    ///     fn init(_: (), _: (), _: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    ///         Ok(Self)
+    ///     }
+    /// }
+    /// impl Dispatch<Self> for ChildOnly {
+    ///     fn dispatch(
+    ///         _: &mut Self,
+    ///         _: &mut NativeCtx<'_, Manual>,
+    ///         _: KindId,
+    ///         _: &[u8],
+    ///     ) -> Option<()> {
+    ///         None
+    ///     }
+    /// }
+    /// impl NativeActor for ChildOnly {
+    ///     type State = Self;
+    /// }
+    ///
+    /// let _ = SubstrateHarnessBuilder::default().with_actor::<ChildOnly>(());
+    /// ```
     #[must_use]
     pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
-        A: NativeActor,
+        A: Root + NativeActor,
         A::Config: Send + 'static + ConfigMember,
         A::Params: Send + 'static,
     {
@@ -391,7 +439,7 @@ impl SubstrateHarnessBuilder {
     #[must_use]
     pub fn with_actor_configured<A>(mut self, params: A::Params, config: A::Config) -> Self
     where
-        A: NativeActor,
+        A: Root + NativeActor,
         A::Config: Send + 'static + ConfigMember,
         A::Params: Send + 'static,
     {
@@ -808,7 +856,7 @@ impl SubstrateHarness {
         params: A::Params,
     ) -> aether_substrate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor,
+        A: Root + aether_actor::Instanced + NativeActor,
     {
         self.passive.spawn_actor::<A>(subname, config, params)
     }
@@ -1680,7 +1728,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.spawn.child";
             type Resolver = aether_actor::Many;
         }
-        impl aether_actor::Root for Child {}
+        impl Root for Child {}
         impl HandlesKind<Bump> for Child {}
         impl aether_actor::Lifecycle<Self> for Child {
             type Config = Arc<AtomicU32>;

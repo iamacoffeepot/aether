@@ -928,7 +928,7 @@ fn config_for(max_request_bytes: usize) -> HttpServerConfig {
 /// call sites.
 fn boot_chassis<H>(config: HttpServerConfig) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = (), Params = ()>,
+    H: aether_actor::Root + NativeActor<Config = (), Params = ()>,
 {
     let (registry, mailer) = fresh_substrate();
     Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -952,7 +952,7 @@ fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
 /// buffered [`config_for`] config (`max_request_bytes`).
 fn boot_buffered<H>(max_request_bytes: usize) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = (), Params = ()>,
+    H: aether_actor::Root + NativeActor<Config = (), Params = ()>,
 {
     boot_chassis::<H>(config_for(max_request_bytes))
 }
@@ -961,7 +961,7 @@ where
 /// config (credit `window`).
 fn boot_response_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = (), Params = ()>,
+    H: aether_actor::Root + NativeActor<Config = (), Params = ()>,
 {
     boot_chassis::<H>(stream_config_for(window))
 }
@@ -970,7 +970,7 @@ where
 /// [`request_stream_config_for`] config (credit `window`).
 fn boot_request_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
-    H: NativeActor<Config = (), Params = ()>,
+    H: aether_actor::Root + NativeActor<Config = (), Params = ()>,
 {
     boot_chassis::<H>(request_stream_config_for(window))
 }

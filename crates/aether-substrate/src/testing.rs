@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aether_actor::Root;
 use aether_data::{Kind, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
@@ -109,7 +110,7 @@ pub fn boot_test_chassis_with<A>(
     params: A::Params,
 ) -> PassiveChassis<TestChassis>
 where
-    A: NativeActor,
+    A: Root + NativeActor,
     A::Config: ConfigMember + 'static,
 {
     // ADR-0156 §5: compose the cap and stage its explicit `config` in one
