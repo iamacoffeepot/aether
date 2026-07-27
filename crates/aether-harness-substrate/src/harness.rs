@@ -1680,6 +1680,7 @@ mod tests {
             const NAMESPACE: &'static str = "test.spawn.child";
             type Resolver = aether_actor::Many;
         }
+        impl aether_actor::Root for Child {}
         impl HandlesKind<Bump> for Child {}
         impl aether_actor::Lifecycle<Self> for Child {
             type Config = Arc<AtomicU32>;

@@ -60,7 +60,7 @@ pub struct ReplySink {
 use aether_actor::actor;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for ReplySink {
     // ADR-0156 §3: the shared capture cells are construction wiring, not
     // operator config, so they ride the `Params` channel; `Config` is `()`.

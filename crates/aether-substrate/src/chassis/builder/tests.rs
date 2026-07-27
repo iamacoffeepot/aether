@@ -114,6 +114,8 @@ macro_rules! close_observed_state {
             type Resolver = aether_actor::Many;
         }
 
+        impl aether_actor::Root for $type {}
+
         impl aether_actor::Lifecycle<Self> for $type {
             type Config = ();
             type Params = Arc<AtomicU32>;
@@ -192,6 +194,8 @@ macro_rules! unit_shutdown_actor {
             type Resolver = aether_actor::Many;
         }
 
+        impl aether_actor::Root for $type {}
+
         impl HandlesKind<$kind> for $type {}
 
         impl aether_actor::Lifecycle<Self> for $type {
@@ -223,6 +227,7 @@ impl Addressable for StubLog {
     const NAMESPACE: &'static str = "test.chassis_builder.stub_log";
     type Resolver = aether_actor::One;
 }
+impl aether_actor::Root for StubLog {}
 
 impl aether_actor::Lifecycle<Self> for StubLog {
     type Config = ();
@@ -356,6 +361,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
         const NAMESPACE: &'static str = "test.claim_only.init_tripwire";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for InitTripwireCap {}
     impl aether_actor::Lifecycle<Self> for InitTripwireCap {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -511,6 +517,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
         const NAMESPACE: &'static str = "test.phase7.failing_cap";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for FailingCap {}
 
     impl aether_actor::Lifecycle<Self> for FailingCap {
         type Config = ();
@@ -619,6 +626,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
         const NAMESPACE: &'static str = "test.with_actor.probe";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for ProbeCap {}
     impl HandlesKind<Ping> for ProbeCap {}
 
     impl aether_actor::Lifecycle<Self> for ProbeCap {
@@ -719,6 +727,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
         const NAMESPACE: &'static str = "test.local.probe";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for LocalProbe {}
     impl HandlesKind<Tick> for LocalProbe {}
 
     // Newtype-per-slot is the Local convention: each
@@ -830,6 +839,7 @@ fn ctx_spawn_child_routes_through_handler() {
         const NAMESPACE: &'static str = "test.spawn_child.parent";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for ParentCap {}
     impl HandlesKind<Hatch> for ParentCap {}
     impl aether_actor::Lifecycle<Self> for ParentCap {
         type Config = ();
@@ -972,6 +982,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
         const NAMESPACE: &'static str = "test.checked_spawn.actual";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for ActualParent {}
     impl HandlesKind<Hatch> for ActualParent {}
     impl aether_actor::Lifecycle<Self> for ActualParent {
         type Config = ();
@@ -1138,6 +1149,7 @@ fn ctx_spawn_child_accepts_a_distinct_parent_type_with_the_same_logical_namespac
         const NAMESPACE: &'static str = DeclaredParent::NAMESPACE;
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for RuntimeParent {}
     impl HandlesKind<Hatch> for RuntimeParent {}
     impl aether_actor::Lifecycle<Self> for RuntimeParent {
         type Config = ();
@@ -1296,6 +1308,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         const NAMESPACE: &'static str = "test.spawn_cost.probe";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for SpawnCostProbe {}
 
     impl HandlesKind<CostPing> for SpawnCostProbe {}
     impl HandlesKind<CostQuit> for SpawnCostProbe {}
@@ -1526,6 +1539,7 @@ fn resolve_actor_returns_none_on_type_mismatch() {
         const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for Foo {}
     impl aether_actor::Lifecycle<Self> for Foo {
         type Config = ();
         type Params = ();
@@ -1639,6 +1653,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
         const NAMESPACE: &'static str = "test.monitor.watcher";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for Watcher {}
     impl HandlesKind<WatchOrder> for Watcher {}
     impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
@@ -1788,6 +1803,7 @@ fn watcher_close_prunes_targets_forward_index() {
         const NAMESPACE: &'static str = "test.monitor.target2";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for Target {}
     impl aether_actor::Lifecycle<Self> for Target {
         type Config = ();
         type Params = ();
@@ -1820,6 +1836,7 @@ fn watcher_close_prunes_targets_forward_index() {
         const NAMESPACE: &'static str = "test.monitor.watcher2";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for Watcher {}
     impl HandlesKind<WatchOrder> for Watcher {}
     impl HandlesKind<Quit> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
@@ -1957,6 +1974,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
         const NAMESPACE: &'static str = "test.resolve.member";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for Member {}
     impl HandlesKind<Quit> for Member {}
     impl aether_actor::Lifecycle<Self> for Member {
         type Config = ();
@@ -2127,6 +2145,7 @@ fn instanced_can_spawn_grandchild() {
         const NAMESPACE: &'static str = "test.recursive.parent";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for Parent {}
     impl HandlesKind<Hatch> for Parent {}
     impl HandlesKind<Quit> for Parent {}
     impl aether_actor::Lifecycle<Self> for Parent {
@@ -2305,6 +2324,7 @@ fn spawn_actor_runs_wire_once_after_init() {
         const NAMESPACE: &'static str = "test.spawn_wire.probe";
         type Resolver = aether_actor::Many;
     }
+    impl aether_actor::Root for WireSpawnProbe {}
     impl aether_actor::Lifecycle<Self> for WireSpawnProbe {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -2363,6 +2383,7 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
         const NAMESPACE: &'static str = "test.wire.singleton";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for WireProbe {}
     impl aether_actor::Lifecycle<Self> for WireProbe {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -2420,6 +2441,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         const NAMESPACE: &'static str = "test.barrier.pinger";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for Pinger {}
     impl aether_actor::Lifecycle<Self> for Pinger {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -2455,6 +2477,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         const NAMESPACE: &'static str = "test.barrier.ponger";
         type Resolver = aether_actor::One;
     }
+    impl aether_actor::Root for Ponger {}
     impl HandlesKind<WireBarrierPing> for Ponger {}
     impl aether_actor::Lifecycle<Self> for Ponger {
         type Config = ();
