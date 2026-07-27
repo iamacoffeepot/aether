@@ -1,0 +1,11 @@
+error: `composable` requires explicit instanced Wasm cardinality; use `#[actor(instanced, composable)]`
+ --> tests/ui/rejects_actor_composable_cardinality.rs:6:34
+  |
+6 | impl aether_actor::WasmActor for DefaultComposable {}
+  |                                  ^^^^^^^^^^^^^^^^^
+
+error: `composable` requires explicit instanced Wasm cardinality; use `#[actor(instanced, composable)]`
+  --> tests/ui/rejects_actor_composable_cardinality.rs:11:34
+   |
+11 | impl aether_actor::WasmActor for SingletonComposable {}
+   |                                  ^^^^^^^^^^^^^^^^^^^

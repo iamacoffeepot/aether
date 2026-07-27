@@ -1,4 +1,4 @@
-error: unrecognised #[actor] argument; expected `singleton`, `instanced`, `root`, `child_of(TypePath)`, `runtime_feature = "name"`, or a bare runtime module path
+error: unrecognised #[actor] argument; expected `singleton`, `instanced`, `root`, `child_of(TypePath)`, `composable`, `runtime_feature = "name"`, or a bare runtime module path
  --> tests/ui/rejects_actor_unknown_arg.rs:8:9
   |
 8 | #[actor(bogus = 1)]

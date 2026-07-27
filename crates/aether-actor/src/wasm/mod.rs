@@ -228,6 +228,39 @@ pub trait WasmActor:
     }
 }
 
+/// Placement permission for a reusable instanced Wasm actor that may appear
+/// beneath any [`WasmActor`] parent exported from the same resident module
+/// (ADR-0166).
+///
+/// This is a logical module-local composition permission. It does not permit
+/// native placement or cross-module loading, and it carries no ownership,
+/// supervision, liveness, or isolation semantics.
+pub trait ModuleChild: WasmActor + crate::Instanced {}
+
+impl<P, C> crate::ChildOf<P> for C
+where
+    P: WasmActor,
+    C: ModuleChild,
+{
+}
+
+/// Macro-generated placement facts for one exported Wasm actor.
+///
+/// This descriptor is an immutable companion to the actor-lineage custom
+/// section. Later module-local spawn validation can consult it directly
+/// without reflecting over marker traits or decoding custom-section bytes.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::module_name_repetitions)]
+pub struct WasmPlacementFacts {
+    /// Whether the generated resolver gives the actor instanced cardinality.
+    pub is_instanced: bool,
+    /// Whether the actor carries the module-local [`ModuleChild`] permission.
+    pub module_child: bool,
+    /// Exact declared parent actor tags from `child_of(...)`.
+    pub exact_parent_tags: &'static [ActorTypeTag],
+}
+
 /// Object-safe erasure over a guest [`WasmActor`]'s post-construction
 /// surface (ADR-0096). A multi-actor module — `export!(A, B, …)` —
 /// holds whichever exported type a given instance became in one

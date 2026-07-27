@@ -23,6 +23,13 @@ use crate::opts::{ActorCardinality, ActorOpts};
 #[allow(clippy::too_many_lines)] // emits the full wasm-actor surface in one go
 pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
+    if opts.composable && !matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "`composable` requires explicit instanced Wasm cardinality; use `#[actor(instanced, composable)]`",
+        ));
+    }
+
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
     let trait_path = item.trait_.as_ref().map(|(_, p, _)| p).expect("trait_ checked above");
@@ -358,6 +365,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
         }
     });
+    let module_child_impl = opts.composable.then(|| {
+        quote! {
+            impl #impl_generics ::aether_actor::ModuleChild for #self_ty #where_clause {}
+        }
+    });
     let child_impls = opts.child_of.iter().map(|parent| {
         quote! {
             impl #impl_generics ::aether_actor::ChildOf<#parent>
@@ -500,6 +512,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     Ok(quote! {
         #actor_impl
         #root_impl
+        #module_child_impl
         #(#child_impls)*
 
         #(#handles_kind_impls)*

@@ -1,0 +1,11 @@
+error: `composable` and `child_of(...)` are mutually exclusive (ADR-0166)
+ --> tests/ui/rejects_actor_composable_child_of.rs:5:32
+  |
+5 | #[actor(instanced, composable, child_of(FirstParent))]
+  |                                ^^^^^^^^^^^^^^^^^^^^^
+
+error: `composable` and `child_of(...)` are mutually exclusive (ADR-0166)
+  --> tests/ui/rejects_actor_composable_child_of.rs:10:44
+   |
+10 | #[actor(instanced, child_of(SecondParent), composable)]
+   |                                            ^^^^^^^^^^

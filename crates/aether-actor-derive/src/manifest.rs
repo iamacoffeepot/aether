@@ -3,7 +3,7 @@ use quote::quote;
 use syn::Type;
 
 use crate::handler_parse::{FallbackFn, HandlerClass, HandlerFn};
-use crate::opts::ActorOpts;
+use crate::opts::{ActorCardinality, ActorOpts};
 
 //noinspection DuplicatedCode -- proc-macro crates intentionally do not depend on one another for this leaf helper.
 fn to_screaming_snake_case(s: &str) -> String {
@@ -198,6 +198,7 @@ pub fn build_inputs_manifest_consts(
 /// inputs manifest, `#[actor]` owns only const data; `export!` is the sole
 /// custom-section retention point so metadata from transitive wasm rlibs
 /// cannot stack in the final module.
+#[allow(clippy::too_many_lines)] // one walk keeps wire records and runtime placement facts on the same option source
 pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> TokenStream2 {
     let actor_namespace = quote! { <#self_ty as ::aether_actor::Addressable>::NAMESPACE };
     let actor_tag = quote! {
@@ -267,13 +268,52 @@ pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> 
         ));
     }
 
+    if opts.composable {
+        len_terms.push(quote! {
+            1 + ::aether_actor::__macro_internals::actor_lineage_module_child_len(
+                #actor_tag,
+                #actor_namespace,
+            )
+        });
+        copy_blocks.push(emit_record_copy_block(
+            &section_version,
+            &quote! {
+                ::aether_actor::__macro_internals::actor_lineage_module_child_len(
+                    #actor_tag,
+                    #actor_namespace,
+                )
+            },
+            &quote! {
+                ::aether_actor::__macro_internals::write_actor_lineage_module_child::<RECORD_LEN>(
+                    #actor_tag,
+                    #actor_namespace,
+                )
+            },
+        ));
+    }
+
     let len_expr = if len_terms.is_empty() {
         quote! { 0usize }
     } else {
         quote! { #(#len_terms)+* }
     };
+    let is_instanced = matches!(opts.cardinality, Some(ActorCardinality::Instanced));
+    let module_child = opts.composable;
+    let exact_parent_tags = opts.child_of.iter().map(|parent| {
+        quote! {
+            ::aether_actor::__macro_internals::ActorTypeTag::of::<#parent>()
+        }
+    });
 
     quote! {
+        #[doc(hidden)]
+        pub const __AETHER_PLACEMENT: ::aether_actor::__macro_internals::WasmPlacementFacts =
+            ::aether_actor::__macro_internals::WasmPlacementFacts {
+                is_instanced: #is_instanced,
+                module_child: #module_child,
+                exact_parent_tags: &[#(#exact_parent_tags),*],
+            };
+
         #[doc(hidden)]
         pub const __AETHER_LINEAGE_MANIFEST_LEN: usize = #len_expr;
 

@@ -1,0 +1,17 @@
+error: `composable` takes no arguments; use `#[actor(instanced, composable)]`
+ --> tests/ui/rejects_malformed_actor_composable.rs:3:20
+  |
+3 | #[actor(instanced, composable(argument))]
+  |                    ^^^^^^^^^^
+
+error: `composable` takes no arguments; use `#[actor(instanced, composable)]`
+ --> tests/ui/rejects_malformed_actor_composable.rs:6:20
+  |
+6 | #[actor(instanced, composable = true)]
+  |                    ^^^^^^^^^^
+
+error: duplicate `composable` declaration in #[actor]
+ --> tests/ui/rejects_malformed_actor_composable.rs:9:32
+  |
+9 | #[actor(instanced, composable, composable)]
+  |                                ^^^^^^^^^^

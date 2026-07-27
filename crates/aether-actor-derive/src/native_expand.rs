@@ -48,6 +48,12 @@ fn reject_generic_native_lineage(generics: &syn::Generics, opts: &ActorOpts) -> 
 #[allow(clippy::too_many_lines)]
 pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeEmit) -> syn::Result<TokenStream2> {
     if emit == NativeEmit::Full {
+        if opts.composable {
+            return Err(syn::Error::new_spanned(
+                &item.self_ty,
+                "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
+            ));
+        }
         reject_generic_native_lineage(&item.generics, opts)?;
     }
 
@@ -947,6 +953,12 @@ fn emit_native_identity_markers(
 /// `aether_substrate`, so the identity survives a `--no-default-features` build
 /// where `mod runtime` is `#[cfg]`-stripped.
 pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Result<TokenStream2> {
+    if opts.composable {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
+        ));
+    }
     reject_generic_native_lineage(&item.generics, opts)?;
 
     let ident = &item.ident;
