@@ -4,6 +4,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_actor::Root;
+
 use super::boot_passives::boot_passives;
 use super::built::{BuiltChassis, PassiveChassis};
 use super::claim::claim_only;
@@ -274,7 +276,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     #[must_use]
     pub fn with_actor<A>(mut self, params: A::Params) -> Self
     where
-        A: NativeActor,
+        A: Root + NativeActor,
         A::Config: ConfigMember,
     {
         self.config_members.extend(<A::Config as ConfigMember>::members());
@@ -303,7 +305,7 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     #[must_use]
     pub fn with_actor_configured<A>(mut self, params: A::Params, config: A::Config) -> Self
     where
-        A: NativeActor,
+        A: Root + NativeActor,
         A::Config: ConfigMember + 'static,
     {
         self.config_sources.set_override::<A::Config>(config);

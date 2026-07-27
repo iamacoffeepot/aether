@@ -4,6 +4,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
+use aether_actor::Root;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
@@ -234,7 +235,7 @@ impl<'a> DriverCtx<'a> {
         params: A::Params,
     ) -> Result<(PumpedSlot<A>, Arc<MailboxWakeSlot>), BootError>
     where
-        A: NativeActor,
+        A: Root + NativeActor,
     {
         // Claim namespace ownership for this actor's `NAMESPACE` (mirrors
         // `NativeActorBoot::claim`), so a later collision surfaces loud.
@@ -303,7 +304,7 @@ pub(crate) fn assemble_pumped_slot<A>(
     params: A::Params,
 ) -> Result<PumpedSlot<A>, BootError>
 where
-    A: NativeActor,
+    A: Root + NativeActor,
 {
     let mailer = spawner.mailer();
     let ring_capacities = spawner.ring_capacities();

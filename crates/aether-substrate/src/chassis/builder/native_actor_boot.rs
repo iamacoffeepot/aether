@@ -3,6 +3,7 @@ use std::io;
 use std::mem;
 use std::sync::{Arc, Weak};
 
+use aether_actor::Root;
 use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
@@ -40,7 +41,7 @@ struct ClaimResources {
 /// the phase state is what lets the claim-only `--describe` path (which
 /// never resolves a config value) run the Claim pass on this boot
 /// unchanged: `claim` touches neither.
-enum BootState<A: NativeActor> {
+enum BootState<A: Root + NativeActor> {
     /// Pre-claim.
     Pending,
     /// Post-claim, pre-init — mailbox + transport + slots claimed.
@@ -71,7 +72,7 @@ enum BootState<A: NativeActor> {
 /// drop-on-shutdown claim, and settlement gating on the
 /// `LifecycleAdvance` chain root (not a per-mailbox pending counter) is
 /// the frame-integration gate now.
-pub(super) struct NativeActorBoot<A: NativeActor> {
+pub(super) struct NativeActorBoot<A: Root + NativeActor> {
     /// The resolved cap config, filled by the ADR-0156 §5 `resolve` pass off
     /// the builder's source stack and consumed by `init`. `None` until
     /// `resolve` runs — the claim-only `--describe` path never resolves it, so
@@ -83,13 +84,13 @@ pub(super) struct NativeActorBoot<A: NativeActor> {
     state: BootState<A>,
 }
 
-impl<A: NativeActor> NativeActorBoot<A> {
+impl<A: Root + NativeActor> NativeActorBoot<A> {
     pub(super) fn new(params: A::Params) -> Self {
         Self { config: None, params: Some(params), state: BootState::Pending }
     }
 }
 
-impl<A: NativeActor> PassiveBoot for NativeActorBoot<A>
+impl<A: Root + NativeActor> PassiveBoot for NativeActorBoot<A>
 where
     A::Config: ConfigMember,
 {

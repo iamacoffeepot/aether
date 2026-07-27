@@ -4,6 +4,8 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use aether_actor::Root;
+
 use super::boot_passives::BootedPassives;
 use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
 use crate::actor::native::NativeActor;
@@ -34,7 +36,7 @@ macro_rules! chassis_accessors {
             params: A::Params,
         ) -> crate::SpawnBuilder<'a, A>
         where
-            A: aether_actor::Instanced + NativeActor,
+            A: Root + aether_actor::Instanced + NativeActor,
         {
             spawn_actor(&self.booted, subname, config, params)
         }
@@ -152,7 +154,7 @@ impl<C: Chassis> PassiveChassis<C> {
         params: A::Params,
     ) -> Result<(PumpedSlot<A>, Arc<MailboxWakeSlot>), BootError>
     where
-        A: NativeActor,
+        A: Root + NativeActor,
     {
         let spawner = &self.booted.spawner;
         let actor_registry = spawner.actor_registry();
@@ -204,7 +206,7 @@ fn spawn_actor<'a, A>(
     params: A::Params,
 ) -> crate::SpawnBuilder<'a, A>
 where
-    A: aether_actor::Instanced + NativeActor,
+    A: Root + aether_actor::Instanced + NativeActor,
 {
     crate::SpawnBuilder::new(
         Arc::clone(&booted.spawner),
