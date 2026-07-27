@@ -64,7 +64,7 @@ mod test_handlers {
     pub struct ApiRouteHandlerState;
 
     #[http::router]
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for ApiRouteHandler {
         type State = ApiRouteHandlerState;
         type Config = ();
@@ -109,7 +109,7 @@ mod test_handlers {
     pub struct ExtractRouteHandlerState;
 
     #[http::router]
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for ExtractRouteHandler {
         type State = ExtractRouteHandlerState;
         type Config = ();
@@ -141,7 +141,7 @@ mod test_handlers {
     pub struct TmpRouteHandlerState;
 
     #[http::router]
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for TmpRouteHandler {
         type State = TmpRouteHandlerState;
         type Config = ();
@@ -168,7 +168,7 @@ mod test_handlers {
     pub struct WiredRouteHandlerState;
 
     #[http::router]
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for WiredRouteHandler {
         type State = WiredRouteHandlerState;
         type Config = ();
@@ -216,7 +216,7 @@ mod test_handlers {
     pub struct BookRouteHandlerState;
 
     #[http::router]
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for BookRouteHandler {
         type State = BookRouteHandlerState;
         type Config = ();
@@ -278,7 +278,7 @@ mod test_handlers {
     pub struct EchoPeer;
     pub struct EchoPeerState;
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for EchoPeer {
         type State = EchoPeerState;
         type Config = ();
@@ -299,7 +299,7 @@ mod test_handlers {
     pub struct SilentPeer;
     pub struct SilentPeerState;
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for SilentPeer {
         type State = SilentPeerState;
         type Config = ();
@@ -323,7 +323,7 @@ mod test_handlers {
     pub struct DeferRouteHandlerState;
 
     #[http::router]
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for DeferRouteHandler {
         type State = DeferRouteHandlerState;
         type Config = ();
@@ -370,7 +370,7 @@ mod test_handlers {
             pub struct $state;
 
             #[http::router]
-            #[actor(singleton)]
+            #[actor(singleton, root)]
             impl NativeActor for $ty {
                 type State = $state;
                 type Config = ();
@@ -402,7 +402,7 @@ mod test_handlers {
             pub struct $ty;
             pub struct $state;
 
-            #[actor(singleton)]
+            #[actor(singleton, root)]
             impl NativeActor for $ty {
                 type State = $state;
                 type Config = ();
@@ -478,7 +478,7 @@ mod test_handlers {
     }
 
     #[http::router(shared)]
-    #[actor(instanced)]
+    #[actor(instanced, root)]
     impl NativeActor for SharedMacroPoolHandler {
         type State = SharedMacroPoolHandlerState;
         type Config = &'static [u8];
@@ -522,7 +522,7 @@ mod test_handlers {
     }
 
     #[http::router]
-    #[actor(instanced)]
+    #[actor(instanced, root)]
     impl NativeActor for ExclusiveMacroPoolHandler {
         type State = ExclusiveMacroPoolHandlerState;
         type Config = &'static [u8];
@@ -567,7 +567,7 @@ mod test_handlers {
     /// stateless cap still names a state type rather than `()` / `Self`).
     pub struct EchoHttpHandlerState;
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for EchoHttpHandler {
         type State = EchoHttpHandlerState;
         type Config = ();
@@ -607,7 +607,7 @@ mod test_handlers {
     /// Empty runtime state for the stateless fixed-body handler (ADR-0122).
     pub struct FixedBodyHttpHandlerState;
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for FixedBodyHttpHandler {
         type State = FixedBodyHttpHandlerState;
         type Config = ();
@@ -642,7 +642,7 @@ mod test_handlers {
     /// Empty runtime state for the stateless silent handler (ADR-0122).
     pub struct SilentHttpHandlerState;
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for SilentHttpHandler {
         type State = SilentHttpHandlerState;
         type Config = ();
@@ -686,7 +686,7 @@ mod test_handlers {
         ended: bool,
     }
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for StreamHttpHandler {
         type State = StreamHttpHandlerState;
         type Config = ();
@@ -751,7 +751,7 @@ mod test_handlers {
         emitted: bool,
     }
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for StreamIdEchoHandler {
         type State = StreamIdEchoHandlerState;
         type Config = ();
@@ -808,7 +808,7 @@ mod test_handlers {
         flooded: bool,
     }
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for FloodHttpHandler {
         type State = FloodHttpHandlerState;
         type Config = ();
@@ -865,7 +865,7 @@ mod test_handlers {
         stream: Option<RequestStream>,
     }
 
-    #[actor(singleton)]
+    #[actor(singleton, root)]
     impl NativeActor for StreamingUploadHandler {
         type State = StreamingUploadHandlerState;
         type Config = ();

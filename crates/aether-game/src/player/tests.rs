@@ -78,7 +78,7 @@ struct PublishBundle {
     bundle: TickBundle,
 }
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for TestTurnSim {
     type State = TestTurnSimState;
     // ADR-0156 §3: the retained-bundle vec + observation channel are

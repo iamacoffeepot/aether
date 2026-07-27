@@ -57,7 +57,7 @@ pub struct TestEchoReply {
 /// coupling a test to a production cap's semantics. Holds nothing.
 pub struct TestEchoActor;
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for TestEchoActor {
     type Config = ();
     const NAMESPACE: &'static str = "aether.rpc.test.echo";
@@ -113,7 +113,7 @@ pub struct DeferredEchoActor {
     tasks: TaskQueue,
 }
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for DeferredEchoActor {
     type Config = ();
     const NAMESPACE: &'static str = "aether.rpc.test.deferred_echo";

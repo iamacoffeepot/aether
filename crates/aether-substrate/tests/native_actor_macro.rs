@@ -73,7 +73,7 @@ struct ProbeParams {
     ping_total: Arc<AtomicU32>,
 }
 
-#[aether_actor::actor]
+#[aether_actor::actor(root)]
 impl NativeActor for MacroProbeCap {
     // ADR-0156 §3: the shared probe counters are construction wiring, not
     // operator config, so they ride the `Params` channel; `Config` is `()`.
@@ -488,7 +488,7 @@ struct TaskRouteCap {
     obs: TaskObservations,
 }
 
-#[aether_actor::actor]
+#[aether_actor::actor(root)]
 impl NativeActor for TaskRouteCap {
     // ADR-0156 §3: the shared observation counters are construction wiring, not
     // operator config, so they ride the `Params` channel; `Config` is `()`.
@@ -757,7 +757,7 @@ struct DeferredReplyCap {
     obs: DeferredObs,
 }
 
-#[aether_actor::actor]
+#[aether_actor::actor(root)]
 impl NativeActor for DeferredReplyCap {
     // ADR-0156 §3: the shared deferred-reply counters are construction wiring,
     // not operator config, so they ride the `Params` channel; `Config` is `()`.

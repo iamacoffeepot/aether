@@ -82,7 +82,7 @@ pub(super) struct AddressRouteSink {
     mailer: Arc<Mailer>,
 }
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for AddressRouteSink {
     type Config = ();
     type Params = AddressRouteLoopbackParams;
@@ -186,7 +186,7 @@ pub(super) struct TerrainRouteSink {
     mailer: Arc<Mailer>,
 }
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for TerrainRouteSink {
     // ADR-0156 §3: the canned replies + shared capture cells are construction
     // wiring, not operator config, so they ride the `Params` channel.
@@ -253,7 +253,7 @@ impl NativeActor for TerrainRouteSink {
     }
 }
 
-#[actor(singleton)]
+#[actor(singleton, root)]
 impl NativeActor for RouteInventorySink {
     // ADR-0156 §3: the canned reply + shared call counter are construction
     // wiring, not operator config, so they ride the `Params` channel.

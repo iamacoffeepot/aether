@@ -163,6 +163,7 @@ impl aether_actor::Addressable for Relay {
     const NAMESPACE: &'static str = "mlat.relay";
     type Resolver = aether_actor::Many;
 }
+impl aether_actor::Root for Relay {}
 impl aether_actor::HandlesKind<Ping> for Relay {}
 impl aether_actor::Lifecycle<Self> for Relay {
     type Config = RelayConfig;
@@ -251,6 +252,7 @@ impl aether_actor::Addressable for TickSource {
     const NAMESPACE: &'static str = "mlat.ticksrc";
     type Resolver = aether_actor::Many;
 }
+impl aether_actor::Root for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
 impl aether_actor::Lifecycle<Self> for TickSource {
     /// `(entry, burst)`: the relay-0 mailbox and the number of `Ping`s to
