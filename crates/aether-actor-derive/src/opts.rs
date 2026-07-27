@@ -32,6 +32,9 @@ pub struct ActorOpts {
     /// is intentional so one child identity can be permitted beneath several
     /// logical parents.
     pub child_of: Vec<syn::TypePath>,
+    /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
+    /// parent exported from the same resident module.
+    pub composable: bool,
 }
 
 pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -68,6 +71,18 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             }
             opts.root = true;
             Ok(())
+        } else if meta.path.is_ident("composable") {
+            if meta.input.peek(Paren) || meta.input.peek(syn::Token![=]) {
+                return Err(meta.error("`composable` takes no arguments; use `#[actor(instanced, composable)]`"));
+            }
+            if opts.composable {
+                return Err(meta.error("duplicate `composable` declaration in #[actor]"));
+            }
+            if !opts.child_of.is_empty() {
+                return Err(meta.error("`composable` and `child_of(...)` are mutually exclusive (ADR-0166)"));
+            }
+            opts.composable = true;
+            Ok(())
         } else if meta.path.is_ident("child_of") {
             let content;
             syn::parenthesized!(content in meta.input);
@@ -82,6 +97,9 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             let parent_tokens = parent.to_token_stream().to_string();
             if opts.child_of.iter().any(|existing| existing.to_token_stream().to_string() == parent_tokens) {
                 return Err(meta.error("duplicate identical `child_of` declaration in #[actor]"));
+            }
+            if opts.composable {
+                return Err(meta.error("`composable` and `child_of(...)` are mutually exclusive (ADR-0166)"));
             }
             opts.child_of.push(parent);
             Ok(())
@@ -103,7 +121,7 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `root`, `child_of(TypePath)`, `runtime_feature = \"name\"`, \
+                 `root`, `child_of(TypePath)`, `composable`, `runtime_feature = \"name\"`, \
                  or a bare runtime module path",
             ))
         }

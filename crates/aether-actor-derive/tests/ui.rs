@@ -20,8 +20,13 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/accepts_minimal_actor.rs");
     t.pass("tests/ui/accepts_actor_lineage_wasm.rs");
+    t.pass("tests/ui/accepts_actor_composable_wasm.rs");
     t.compile_fail("tests/ui/rejects_duplicate_actor_lineage.rs");
     t.compile_fail("tests/ui/rejects_malformed_actor_lineage.rs");
+    t.compile_fail("tests/ui/rejects_actor_composable_cardinality.rs");
+    t.compile_fail("tests/ui/rejects_actor_composable_child_of.rs");
+    t.compile_fail("tests/ui/rejects_actor_composable_native.rs");
+    t.compile_fail("tests/ui/rejects_malformed_actor_composable.rs");
     t.compile_fail("tests/ui/rejects_generic_native_lineage_impl.rs");
     t.compile_fail("tests/ui/rejects_generic_native_lineage_struct.rs");
     // ADR-0112: the manual reply class compiles. The native manual-class

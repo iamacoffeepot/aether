@@ -21,11 +21,13 @@
 // `&mut self` to match the dispatch ABI but don't read state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, Addressable, Manual, One, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::__macro_internals::WasmPlacementFacts;
+use aether_actor::{ActorInitError, ActorTypeTag, Addressable, Manual, One, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_data::{
     ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, INPUTS_SECTION_VERSION, InputsRecord, ReplyContract,
-    wire,
+    actor_lineage_child_len, actor_lineage_module_child_len, actor_lineage_root_len, wire, write_actor_lineage_child,
+    write_actor_lineage_module_child, write_actor_lineage_root,
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -113,20 +115,39 @@ impl WasmActor for ManifestProbe {
     fn unwire(&mut self, _ctx: &mut WasmCtx<'_>) {}
 }
 
-fn parse_lineage_section(bytes: &[u8]) -> Vec<ActorLineageRecord> {
+struct ComposableProbe;
+
+#[actor(instanced, composable)]
+impl WasmActor for ComposableProbe {
+    const NAMESPACE: &'static str = "manifest.composable";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LineageSectionError {
+    UnsupportedVersion(u8),
+    MalformedRecord,
+}
+
+fn parse_lineage_section(bytes: &[u8]) -> Result<Vec<ActorLineageRecord>, LineageSectionError> {
     let mut out = Vec::new();
     let mut cursor = bytes;
     while !cursor.is_empty() {
-        assert_eq!(
-            cursor[0], ACTOR_LINEAGE_SECTION_VERSION,
-            "every lineage record must start with the section version byte"
-        );
-        let (record, rest) =
-            wire::take_from_bytes::<ActorLineageRecord>(&cursor[1..]).expect("wire decode of lineage record failed");
+        if cursor[0] != ACTOR_LINEAGE_SECTION_VERSION {
+            return Err(LineageSectionError::UnsupportedVersion(cursor[0]));
+        }
+        let (record, rest) = wire::take_from_bytes::<ActorLineageRecord>(&cursor[1..])
+            .map_err(|_| LineageSectionError::MalformedRecord)?;
         out.push(record);
         cursor = rest;
     }
-    out
+    Ok(out)
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
@@ -212,7 +233,10 @@ fn manifest_const_round_trips_to_expected_records() {
 
 #[test]
 fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
-    let records = parse_lineage_section(&ManifestProbe::__AETHER_LINEAGE_MANIFEST);
+    const EXACT_PARENT_TAGS: &[ActorTypeTag] = &[ActorTypeTag::of::<FirstParent>(), ActorTypeTag::of::<SecondParent>()];
+
+    let records = parse_lineage_section(&ManifestProbe::__AETHER_LINEAGE_MANIFEST)
+        .expect("generated exact lineage manifest must decode");
     let actor = ActorId::singleton(ManifestProbe::NAMESPACE).0;
     let first = ActorId::singleton(FirstParent::NAMESPACE).0;
     let second = ActorId::singleton(SecondParent::NAMESPACE).0;
@@ -236,6 +260,12 @@ fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
         ]
     );
 
+    assert_eq!(
+        ManifestProbe::__AETHER_PLACEMENT,
+        WasmPlacementFacts { is_instanced: false, module_child: false, exact_parent_tags: EXACT_PARENT_TAGS },
+        "runtime placement facts must derive from the same exact parents as the wire records"
+    );
+
     let expected_root = ActorLineageRecord::Root { actor, namespace: ManifestProbe::NAMESPACE.into() };
     let runtime = wire::to_vec(&expected_root).expect("runtime lineage encoding");
     assert_eq!(
@@ -243,4 +273,77 @@ fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
         runtime,
         "const encoder must match the runtime aether-wire vocabulary"
     );
+}
+
+#[test]
+fn composable_lineage_manifest_records_module_child_and_placement_facts() {
+    assert_eq!(ACTOR_LINEAGE_SECTION_VERSION, 0x02, "module-child metadata requires v0x02 framing");
+
+    let bytes = &ComposableProbe::__AETHER_LINEAGE_MANIFEST;
+    assert_eq!(&bytes[1..5], &2u32.to_le_bytes(), "ModuleChild must retain wire selector 2");
+
+    let child = ActorId::singleton(ComposableProbe::NAMESPACE).0;
+    assert_eq!(
+        parse_lineage_section(bytes).expect("generated module-child lineage manifest must decode"),
+        vec![ActorLineageRecord::ModuleChild { child, child_namespace: ComposableProbe::NAMESPACE.into() }]
+    );
+    assert_eq!(
+        ComposableProbe::__AETHER_PLACEMENT,
+        WasmPlacementFacts { is_instanced: true, module_child: true, exact_parent_tags: &[] },
+        "the hidden runtime facts and module-child record must derive from one actor declaration"
+    );
+
+    let runtime =
+        wire::to_vec(&ActorLineageRecord::ModuleChild { child, child_namespace: ComposableProbe::NAMESPACE.into() })
+            .expect("runtime module-child encoding");
+    assert_eq!(&bytes[1..], runtime, "generated module-child bytes must match runtime aether-wire encoding");
+}
+
+#[test]
+fn lineage_const_encoders_match_runtime_wire_for_every_selector() {
+    const ACTOR: u64 = ActorId::singleton(ManifestProbe::NAMESPACE).0;
+    const FIRST: u64 = ActorId::singleton(FirstParent::NAMESPACE).0;
+    const ROOT_LEN: usize = actor_lineage_root_len(ACTOR, ManifestProbe::NAMESPACE);
+    const ROOT_BYTES: [u8; ROOT_LEN] = write_actor_lineage_root(ACTOR, ManifestProbe::NAMESPACE);
+    const CHILD_LEN: usize = actor_lineage_child_len(FIRST, ACTOR, FirstParent::NAMESPACE, ManifestProbe::NAMESPACE);
+    const CHILD_BYTES: [u8; CHILD_LEN] =
+        write_actor_lineage_child(FIRST, ACTOR, FirstParent::NAMESPACE, ManifestProbe::NAMESPACE);
+    const MODULE_CHILD_LEN: usize = actor_lineage_module_child_len(ACTOR, ManifestProbe::NAMESPACE);
+    const MODULE_CHILD_BYTES: [u8; MODULE_CHILD_LEN] =
+        write_actor_lineage_module_child(ACTOR, ManifestProbe::NAMESPACE);
+
+    let records = [
+        (ROOT_BYTES.as_slice(), ActorLineageRecord::Root { actor: ACTOR, namespace: ManifestProbe::NAMESPACE.into() }),
+        (
+            CHILD_BYTES.as_slice(),
+            ActorLineageRecord::Child {
+                parent: FIRST,
+                child: ACTOR,
+                parent_namespace: FirstParent::NAMESPACE.into(),
+                child_namespace: ManifestProbe::NAMESPACE.into(),
+            },
+        ),
+        (
+            MODULE_CHILD_BYTES.as_slice(),
+            ActorLineageRecord::ModuleChild { child: ACTOR, child_namespace: ManifestProbe::NAMESPACE.into() },
+        ),
+    ];
+
+    for (const_bytes, record) in records {
+        assert_eq!(
+            const_bytes,
+            wire::to_vec(&record).expect("runtime actor-lineage encoding"),
+            "const and runtime actor-lineage encoders must agree for {record:?}"
+        );
+    }
+}
+
+#[test]
+fn lineage_reader_rejects_stale_and_malformed_records() {
+    let mut stale = ComposableProbe::__AETHER_LINEAGE_MANIFEST;
+    stale[0] = 0x01;
+    assert_eq!(parse_lineage_section(&stale), Err(LineageSectionError::UnsupportedVersion(0x01)));
+
+    let malformed = &ComposableProbe::__AETHER_LINEAGE_MANIFEST[..ComposableProbe::__AETHER_LINEAGE_MANIFEST_LEN - 1];
+    assert_eq!(parse_lineage_section(malformed), Err(LineageSectionError::MalformedRecord));
 }

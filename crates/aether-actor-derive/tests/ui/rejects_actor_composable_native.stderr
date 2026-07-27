@@ -1,0 +1,11 @@
+error: `composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions
+ --> tests/ui/rejects_actor_composable_native.rs:6:22
+  |
+6 | impl NativeActor for ImplNative {}
+  |                      ^^^^^^^^^^
+
+error: `composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions
+ --> tests/ui/rejects_actor_composable_native.rs:9:8
+  |
+9 | struct StructNative;
+  |        ^^^^^^^^^^^^
