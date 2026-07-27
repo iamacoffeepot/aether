@@ -12,5 +12,5 @@ use aether_actor::actor;
 use crate::kinds::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
 
 /// Fail-fast `aether.clipboard` companion for chassis without a clipboard.
-#[actor(singleton, runtime::headless)]
+#[actor(singleton, root, runtime::headless)]
 pub struct HeadlessClipboardCapability;

@@ -28,7 +28,7 @@ pub use config::{StoreConfig, StoreOverlay};
 use aether_actor::actor;
 
 /// Addressing identity for the `aether.store` capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct StoreCapability;
 
 #[cfg(feature = "runtime")]

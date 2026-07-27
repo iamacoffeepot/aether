@@ -32,5 +32,5 @@ use crate::kinds::{
 ///
 /// Headless chassis composes one of [`Self`] / [`crate::RenderCapability`],
 /// never both — the chassis builder rejects double-claiming a mailbox.
-#[actor(singleton, runtime::headless)]
+#[actor(singleton, root, runtime::headless)]
 pub struct HeadlessRenderCapability;

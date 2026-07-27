@@ -22,7 +22,7 @@ use aether_bloomery::Topic;
 pub use runtime::{DispatchTick, ExecutorReactorState};
 
 /// Addressing identity for the executor dispatch reactor capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct ExecutorReactorCapability;
 
 impl ExecutorReactorCapability {

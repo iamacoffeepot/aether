@@ -27,7 +27,7 @@ const WINDOW_NAMESPACE: &str = "aether.window";
 /// Fail-fast headless identity for the `aether.window` actor.
 ///
 /// This default runtime replies that no window peripheral is available.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct HeadlessWindowCapability;
 
 /// Platform-neutral compatibility alias for the headless window identity.
@@ -38,13 +38,13 @@ pub use HeadlessWindowCapability as WindowCapability;
 
 /// Desktop implementation identity for the `aether.window` mailbox.
 #[cfg(feature = "desktop")]
-#[actor(singleton, runtime::desktop)]
+#[actor(singleton, root, runtime::desktop)]
 pub struct DesktopWindowCapability;
 
 /// Deterministic in-memory implementation identity for the `aether.window`
 /// mailbox.
 #[cfg(feature = "synthetic")]
-#[actor(singleton, runtime::synthetic)]
+#[actor(singleton, root, runtime::synthetic)]
 pub struct SyntheticWindowCapability;
 
 trait WindowMailboxForward {

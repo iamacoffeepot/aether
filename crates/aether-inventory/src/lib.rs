@@ -92,7 +92,7 @@ pub mod kinds;
 /// and vocabulary state (including anything `ComponentHostCapability`
 /// registered at load time) without a cross-cap event channel or pinning one
 /// registry instance at `init`.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct InventoryCapability;
 
 // The reply kinds ride the native gate (not `runtime`): the `#[actor]`

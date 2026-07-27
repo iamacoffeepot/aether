@@ -113,5 +113,5 @@ pub use headless::HeadlessRenderCapability;
 /// the `render-runtime` gate in the `runtime` module, so a transport- or
 /// marker-only build never names it nor pulls `aether_substrate`/wgpu through
 /// this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct RenderCapability;

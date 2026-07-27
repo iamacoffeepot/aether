@@ -28,7 +28,7 @@ pub use config::{SigningConfig, SigningOverlay};
 use aether_actor::actor;
 
 /// Addressing identity for the `aether.signing` capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct SigningCapability;
 
 #[cfg(feature = "runtime")]

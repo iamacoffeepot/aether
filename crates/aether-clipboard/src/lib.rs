@@ -19,7 +19,7 @@ use aether_actor::{WasmActorMailbox, actor};
 use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Addressing identity for the system or in-memory `aether.clipboard` actor.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct ClipboardCapability;
 
 /// Sender-side convenience methods for the text clipboard requests.

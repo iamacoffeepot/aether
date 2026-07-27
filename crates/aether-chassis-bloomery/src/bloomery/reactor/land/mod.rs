@@ -12,7 +12,7 @@ use aether_bloomery::Topic;
 pub use runtime::{LandReactorState, LandTick};
 
 /// Addressing identity for the land reactor capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct LandReactorCapability;
 
 impl LandReactorCapability {

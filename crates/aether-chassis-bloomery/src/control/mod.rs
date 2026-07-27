@@ -34,7 +34,7 @@ use aether_actor::actor;
 use aether_bloomery::control::{Admit, ClaimResult, CommitResult, EnumerateClaimsResult, Query, ReplayJournalResult};
 
 /// Addressing identity for the `aether.bloomery.control` capability (ADR-0122).
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct ControlCore;
 
 #[cfg(feature = "runtime")]

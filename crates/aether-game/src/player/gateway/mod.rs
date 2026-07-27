@@ -5,7 +5,7 @@ use aether_kinds::MonitorNotice;
 use aether_tcp::{BindListenerResult, SessionClosed, SessionData};
 
 /// `aether.game.gateway` singleton gateway.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct GameGatewayCapability;
 
 use aether_actor::actor;

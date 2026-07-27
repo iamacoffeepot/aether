@@ -31,7 +31,7 @@ use crate::signing::VerifyResult;
 use crate::store::RecordDispatchDescriptionResult;
 
 /// Addressing identity for the `aether.bloomery.api` capability (ADR-0122).
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct BloomeryApiCapability;
 
 pub use dto::{MemberProjection, SealRequest};

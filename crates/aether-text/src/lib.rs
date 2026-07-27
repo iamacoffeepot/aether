@@ -60,7 +60,7 @@ pub use kinds::*;
 /// `feature = "runtime"` gate, so a transport-only build never names
 /// `TextCapabilityState` nor pulls `fontdue` / `aether_substrate` through
 /// this cap.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct TextCapability;
 
 // The struct-hosted `#[actor(singleton)]` above lifts this cap's identity

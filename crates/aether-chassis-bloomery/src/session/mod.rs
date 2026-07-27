@@ -40,7 +40,7 @@ pub use config::{SessionConfig, SessionOverlay};
 use aether_actor::actor;
 
 /// Addressing identity for the `aether.session` capability.
-#[actor(singleton)]
+#[actor(singleton, root)]
 pub struct SessionPoolCapability;
 
 #[cfg(feature = "runtime")]
