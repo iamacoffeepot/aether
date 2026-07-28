@@ -13,10 +13,12 @@
 pub mod kinds;
 
 pub use aether_kinds::{WindowId, WindowMode};
+#[cfg(feature = "runtime")]
+pub(crate) use kinds::WindowCommand;
 pub use kinds::*;
 pub(crate) use kinds::{ApplyWindowCommand, ApplyWindowCommandResult};
-#[cfg(feature = "runtime")]
-pub(crate) use kinds::{RetireWindow, WindowCommand, WindowForwardContext};
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_actor::validate_namespace_segment;
