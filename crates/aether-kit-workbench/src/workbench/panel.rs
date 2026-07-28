@@ -33,8 +33,8 @@ use aether_kit_widget::{
 };
 
 use super::{
-    WorkbenchControl, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchMarkMode, WorkbenchOperator,
-    WorkbenchPanelSettings, WorkbenchProposalState,
+    TerrainWorkbench, WorkbenchControl, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchMarkMode,
+    WorkbenchOperator, WorkbenchPanelSettings, WorkbenchProposalState,
 };
 
 const MARK_MODE_SUBNAME: &str = "mark_mode";
@@ -455,7 +455,7 @@ impl TerrainToolPanel {
     }
 }
 
-#[actor(instanced)]
+#[actor(instanced, child_of(TerrainWorkbench))]
 impl WasmActor for TerrainToolPanel {
     type Config = TerrainToolPanelConfig;
     const NAMESPACE: &'static str = "aether.kit.workbench.panel";

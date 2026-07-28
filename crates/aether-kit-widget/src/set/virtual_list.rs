@@ -196,7 +196,7 @@ impl VirtualListWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `VirtualListConfig` again to replace the item vector or viewport.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.virtual_list";

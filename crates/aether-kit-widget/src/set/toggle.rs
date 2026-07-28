@@ -84,7 +84,7 @@ impl ToggleWidget {
 
 /// A toggle widget. Spawned inline by a panel root with a [`ToggleConfig`];
 /// reports [`ToggleChanged`] after each completed activation.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for ToggleWidget {
     type Config = ToggleConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.toggle";
