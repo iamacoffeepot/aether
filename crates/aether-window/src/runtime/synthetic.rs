@@ -1,12 +1,11 @@
 //! Deterministic in-memory `aether.window` runtime for substrate harnesses.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use aether_actor::runtime;
 use aether_kinds::MonitorNotice;
 
-use super::subscribers::WindowSubscribers;
+use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult,
     InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode,
@@ -53,11 +52,11 @@ impl NativeActor for SyntheticWindowCapability {
 
     const NAMESPACE: &'static str = crate::WINDOW_NAMESPACE;
 
-    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<SyntheticWindowCapabilityState, BootError> {
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<SyntheticWindowCapabilityState, BootError> {
         Ok(SyntheticWindowCapabilityState {
             next_window_id: 1,
             windows: BTreeMap::new(),
-            subscribers: WindowSubscribers::new(Arc::clone(ctx.mailer().registry())),
+            subscribers: WindowSubscribers::new(),
         })
     }
 
@@ -151,10 +150,11 @@ impl NativeActor for SyntheticWindowCapability {
 
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        match state.subscribers.subscribe(ctx, mail.selector, mail.kind, mail.mailbox) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
+        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
+            return SubscribeWindowResult::Err { error };
         }
+        state.subscribers.subscribe(ctx, mail.selector, mail.kind, mail.mailbox);
+        SubscribeWindowResult::Ok
     }
 
     #[handler::single]
@@ -172,13 +172,14 @@ impl NativeActor for SyntheticWindowCapability {
     #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         mail: UnsubscribeWindow,
     ) -> SubscribeWindowResult {
-        match state.subscribers.unsubscribe(mail.selector, mail.kind, mail.mailbox) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
+        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
+            return SubscribeWindowResult::Err { error };
         }
+        state.subscribers.unsubscribe(mail.selector, mail.kind, mail.mailbox);
+        SubscribeWindowResult::Ok
     }
 
     #[handler::single]
@@ -208,5 +209,59 @@ impl NativeActor for SyntheticWindowCapability {
     #[handler::single]
     fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
         state.subscribers.purge_departed(notice.target);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use aether_data::Kind;
+    use aether_kinds::Key;
+    use aether_substrate::Registry;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::registry::MailDispatch;
+    use aether_substrate::mail::{MailId, Source};
+
+    use super::*;
+
+    #[test]
+    fn explicit_subscriptions_validate_before_mutating_routes() {
+        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), aether_data::MailboxId(1)));
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut state = SyntheticWindowCapabilityState {
+            next_window_id: 1,
+            windows: BTreeMap::new(),
+            subscribers: WindowSubscribers::new(),
+        };
+        let unknown = aether_data::MailboxId(0xBAD);
+
+        assert!(matches!(
+            SyntheticWindowCapability::on_subscribe(
+                &mut state,
+                &mut ctx,
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: unknown },
+            ),
+            SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
+        ));
+        assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
+
+        let dropped =
+            mailer.registry().register_inline("test.synthetic.dropped", Arc::new(|_dispatch: MailDispatch<'_>| {}));
+        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, dropped);
+        mailer.registry().drop_mailbox(dropped).expect("drop subscriber mailbox");
+
+        assert!(matches!(
+            SyntheticWindowCapability::on_unsubscribe(
+                &mut state,
+                &mut ctx,
+                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+            ),
+            SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
+        ));
+        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([dropped]));
     }
 }

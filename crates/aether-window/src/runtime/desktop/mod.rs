@@ -29,7 +29,7 @@ use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
 use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
-use super::subscribers::WindowSubscribers;
+use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, DesktopWindowCapability, FocusWindow,
     FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode,
@@ -502,14 +502,14 @@ impl NativeActor for DesktopWindowCapability {
     fn init(
         (): (),
         _params: DesktopWindowParams,
-        ctx: &mut NativeInitCtx<'_>,
+        _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<DesktopWindowCapabilityState, BootError> {
         Ok(DesktopWindowCapabilityState {
             next_window_id: 1,
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
-            subscribers: WindowSubscribers::new(Arc::clone(ctx.mailer().registry())),
+            subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
             pending_host_effects: Vec::new(),
@@ -630,10 +630,11 @@ impl NativeActor for DesktopWindowCapability {
 
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        match state.subscribers.subscribe(ctx, mail.selector, mail.kind, mail.mailbox) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
+        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
+            return SubscribeWindowResult::Err { error };
         }
+        state.subscribers.subscribe(ctx, mail.selector, mail.kind, mail.mailbox);
+        SubscribeWindowResult::Ok
     }
 
     #[handler::single]
@@ -651,13 +652,14 @@ impl NativeActor for DesktopWindowCapability {
     #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         mail: UnsubscribeWindow,
     ) -> SubscribeWindowResult {
-        match state.subscribers.unsubscribe(mail.selector, mail.kind, mail.mailbox) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
+        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
+            return SubscribeWindowResult::Err { error };
         }
+        state.subscribers.unsubscribe(mail.selector, mail.kind, mail.mailbox);
+        SubscribeWindowResult::Ok
     }
 
     #[handler::single]
@@ -710,24 +712,24 @@ pub fn resolve_fullscreen(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::mpsc;
 
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
+    use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch};
     use aether_substrate::mail::{MailId, Source, SourceAddr};
 
     use super::*;
 
     fn test_state() -> DesktopWindowCapabilityState {
-        let registry = Arc::new(Registry::new());
         DesktopWindowCapabilityState {
             next_window_id: 1,
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
-            subscribers: WindowSubscribers::new(registry),
+            subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
             pending_host_effects: Vec::new(),
@@ -767,6 +769,39 @@ mod tests {
                 close_reply: None,
             },
         );
+    }
+
+    #[test]
+    fn explicit_subscriptions_validate_before_mutating_routes() {
+        let mut state = test_state();
+        let (binding, mailer) = test_ctx();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let unknown = aether_data::MailboxId(0xBAD);
+
+        assert!(matches!(
+            DesktopWindowCapability::on_subscribe(
+                &mut state,
+                &mut ctx,
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: unknown },
+            ),
+            SubscribeWindowResult::Err { error } if error == "unknown mailbox id 0x0000000000000bad"
+        ));
+        assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
+
+        let dropped =
+            mailer.registry().register_inline("test.window.dropped", Arc::new(|_dispatch: MailDispatch<'_>| {}));
+        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, dropped);
+        mailer.registry().drop_mailbox(dropped).expect("drop subscriber mailbox");
+
+        assert!(matches!(
+            DesktopWindowCapability::on_unsubscribe(
+                &mut state,
+                &mut ctx,
+                UnsubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+            ),
+            SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
+        ));
+        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([dropped]));
     }
 
     #[test]
@@ -908,14 +943,10 @@ mod tests {
         let manager = aether_data::MailboxId(0xA37E);
         let binding = Arc::new(NativeBinding::new_for_test(mailer, manager));
         let mut state = test_state();
-        state.subscribers = WindowSubscribers::new(registry);
         let root = MailId::new(aether_data::MailboxId(0x100), 7);
         let parent = MailId::new(aether_data::MailboxId(0x200), 9);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
-        state
-            .subscribers
-            .subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber)
-            .expect("registered subscriber is valid");
+        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 
         state.publish(&mut ctx, WindowId(5), &Key { window: WindowId(5), code: 41 });
         drop(ctx);
