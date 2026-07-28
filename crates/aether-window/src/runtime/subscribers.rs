@@ -1,11 +1,10 @@
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 
 use aether_actor::ReplyMode;
 use aether_data::{KindId, MailboxId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
-use aether_substrate::mail::registry::{MailboxEntry, Registry};
+use aether_substrate::mail::MailboxEntry;
 
 use crate::{WindowId, WindowSelector};
 
@@ -16,15 +15,14 @@ use crate::{WindowId, WindowSelector};
 /// unions into a `BTreeSet`, which makes a mailbox subscribed through both
 /// selectors receive one copy.
 pub struct WindowSubscribers {
-    registry: Arc<Registry>,
     all: HashMap<KindId, BTreeSet<MailboxId>>,
     specific: HashMap<(WindowId, KindId), BTreeSet<MailboxId>>,
     monitors: HashMap<MailboxId, MonitorHandle>,
 }
 
 impl WindowSubscribers {
-    pub fn new(registry: Arc<Registry>) -> Self {
-        Self { registry, all: HashMap::new(), specific: HashMap::new(), monitors: HashMap::new() }
+    pub fn new() -> Self {
+        Self { all: HashMap::new(), specific: HashMap::new(), monitors: HashMap::new() }
     }
 
     pub fn subscribe<M: ReplyMode>(
@@ -33,11 +31,9 @@ impl WindowSubscribers {
         selector: WindowSelector,
         kind: KindId,
         mailbox: MailboxId,
-    ) -> Result<(), String> {
-        validate_subscriber_mailbox(&self.registry, mailbox)?;
+    ) {
         self.insert(selector, kind, mailbox);
         self.watch(ctx, mailbox);
-        Ok(())
     }
 
     pub fn subscribe_self<M: ReplyMode>(
@@ -56,10 +52,8 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    pub fn unsubscribe(&mut self, selector: WindowSelector, kind: KindId, mailbox: MailboxId) -> Result<(), String> {
-        validate_subscriber_mailbox(&self.registry, mailbox)?;
+    pub fn unsubscribe(&mut self, selector: WindowSelector, kind: KindId, mailbox: MailboxId) {
         self.remove(selector, kind, mailbox);
-        Ok(())
     }
 
     pub fn unsubscribe_self<M: ReplyMode>(
@@ -144,8 +138,8 @@ impl WindowSubscribers {
     }
 }
 
-fn validate_subscriber_mailbox(registry: &Registry, mailbox: MailboxId) -> Result<(), String> {
-    match registry.entry(mailbox) {
+pub fn validate_subscriber_mailbox(ctx: &NativeCtx<'_>, mailbox: MailboxId) -> Result<(), String> {
+    match ctx.mailer().registry().entry(mailbox) {
         Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
         Some(MailboxEntry::Dropped) => Err(format!("mailbox {mailbox:?} already dropped")),
         None => Err(format!("unknown mailbox id {mailbox:?}")),
@@ -156,21 +150,16 @@ fn validate_subscriber_mailbox(registry: &Registry, mailbox: MailboxId) -> Resul
 mod tests {
     use aether_data::Kind;
     use aether_kinds::{Key, MouseMove};
-    use aether_substrate::mail::registry::MailDispatch;
 
     use super::*;
 
-    fn fixture() -> (Arc<Registry>, WindowSubscribers, MailboxId, MailboxId) {
-        let registry = Arc::new(Registry::new());
-        let first = registry.register_inline("test.window.first", Arc::new(|_dispatch: MailDispatch<'_>| {}));
-        let second = registry.register_inline("test.window.second", Arc::new(|_dispatch: MailDispatch<'_>| {}));
-        let subscribers = WindowSubscribers::new(Arc::clone(&registry));
-        (registry, subscribers, first, second)
+    fn fixture() -> (WindowSubscribers, MailboxId, MailboxId) {
+        (WindowSubscribers::new(), MailboxId(1), MailboxId(2))
     }
 
     #[test]
     fn one_selector_routes_only_the_selected_window() {
-        let (_, mut subscribers, mailbox, _) = fixture();
+        let (mut subscribers, mailbox, _) = fixture();
         subscribers.insert(WindowSelector::One(WindowId(1)), Key::ID, mailbox);
 
         assert_eq!(subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([mailbox]));
@@ -179,7 +168,7 @@ mod tests {
 
     #[test]
     fn all_selector_is_prospective() {
-        let (_, mut subscribers, mailbox, _) = fixture();
+        let (mut subscribers, mailbox, _) = fixture();
         subscribers.insert(WindowSelector::All, MouseMove::ID, mailbox);
 
         assert_eq!(subscribers.recipients(WindowId(1), MouseMove::ID), BTreeSet::from([mailbox]));
@@ -188,7 +177,7 @@ mod tests {
 
     #[test]
     fn all_and_one_union_deduplicates_the_same_mailbox() {
-        let (_, mut subscribers, mailbox, other) = fixture();
+        let (mut subscribers, mailbox, other) = fixture();
         subscribers.insert(WindowSelector::All, Key::ID, mailbox);
         subscribers.insert(WindowSelector::One(WindowId(7)), Key::ID, mailbox);
         subscribers.insert(WindowSelector::One(WindowId(7)), Key::ID, other);
@@ -197,23 +186,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_validation_rejects_unknown_and_dropped_mailboxes() {
-        let (registry, _, mailbox, _) = fixture();
-        assert_eq!(
-            validate_subscriber_mailbox(&registry, MailboxId(0xBAD)),
-            Err("unknown mailbox id 0x0000000000000bad".to_owned()),
-        );
-
-        registry.drop_mailbox(mailbox).expect("drop test mailbox");
-        assert_eq!(
-            validate_subscriber_mailbox(&registry, mailbox),
-            Err(format!("mailbox {mailbox:?} already dropped")),
-        );
-    }
-
-    #[test]
     fn unsubscribe_and_bulk_cleanup_preserve_other_routes() {
-        let (_, mut subscribers, mailbox, other) = fixture();
+        let (mut subscribers, mailbox, other) = fixture();
         subscribers.insert(WindowSelector::All, Key::ID, mailbox);
         subscribers.insert(WindowSelector::One(WindowId(3)), Key::ID, mailbox);
         subscribers.insert(WindowSelector::One(WindowId(3)), Key::ID, other);
@@ -227,7 +201,7 @@ mod tests {
 
     #[test]
     fn monitor_cleanup_purges_only_the_departed_mailbox_from_every_route() {
-        let (_, mut subscribers, departed, survivor) = fixture();
+        let (mut subscribers, departed, survivor) = fixture();
         subscribers.insert(WindowSelector::All, Key::ID, departed);
         subscribers.insert(WindowSelector::All, Key::ID, survivor);
         subscribers.insert(WindowSelector::One(WindowId(3)), MouseMove::ID, departed);
