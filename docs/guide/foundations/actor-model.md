@@ -395,7 +395,7 @@ though its implementation type is `TerraEditor`, not
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
 `ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)` is one
-(from `WindowMailboxExt`), and
+(from `WindowManagerMailboxExt`), and
 `ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")` is the
 loaded-component lookup just mentioned (from `ComponentHostWasmExt` in a
 component, `ComponentHostNativeExt` in a capability). Each helper is available

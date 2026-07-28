@@ -70,7 +70,7 @@ use aether_test_fixtures_kinds::{
     AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig,
     SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender, TextInputObserved, TickObserved,
 };
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 pub struct Probe {
     tick_count: u64,

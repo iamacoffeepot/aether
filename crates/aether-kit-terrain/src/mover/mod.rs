@@ -60,7 +60,7 @@ use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 use crate::OCTIMETERS_PER_TILE;
 use crate::world::CellPos;

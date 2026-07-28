@@ -22,7 +22,7 @@ use aether_text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
     MEMORY_FONT_NAMESPACE, TextCapability,
 };
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 
 use self::markdown::{MarkdownLine, MarkdownTone};

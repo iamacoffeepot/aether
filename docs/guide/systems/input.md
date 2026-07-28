@@ -61,7 +61,7 @@ identity:
 
 ```rust
 use aether_kinds::{Key, MouseMove, WindowSize};
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let windows = ctx.actor::<WindowCapability>();

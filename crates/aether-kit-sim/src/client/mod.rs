@@ -27,7 +27,7 @@ use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 use aether_kit_terrain::OCTIMETERS_PER_TILE;
 use aether_kit_terrain::world::WorldPoint;

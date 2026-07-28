@@ -56,7 +56,7 @@ use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 use aether_render::{RenderCapability, ViewProjection};
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;

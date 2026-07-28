@@ -54,7 +54,7 @@ use aether_component::component::ComponentHostWasmExt;
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{TAU, Vec2, Vec3};
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
 

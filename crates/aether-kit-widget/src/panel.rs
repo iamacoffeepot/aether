@@ -53,7 +53,7 @@ use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
-use aether_window::{WindowCapability, WindowMailboxExt, WindowSelector};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
 use crate::composite::Composite;
 use crate::focus::{
