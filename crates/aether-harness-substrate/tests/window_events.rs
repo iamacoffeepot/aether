@@ -14,7 +14,12 @@ fn window_mailbox() -> &'static str {
 }
 
 fn spec(title: &str, width: u32, height: u32) -> WindowSpec {
-    WindowSpec { title: title.to_owned(), mode: WindowMode::Windowed, size: Some(WindowSizeRequest { width, height }) }
+    WindowSpec {
+        name: title.to_owned(),
+        title: title.to_owned(),
+        mode: WindowMode::Windowed,
+        size: Some(WindowSizeRequest { width, height }),
+    }
 }
 
 #[test]
@@ -68,6 +73,7 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
         panic!("first create succeeds");
     };
     assert_eq!(first.id, WindowId(1));
+    assert_eq!(first.name, "first");
     assert_eq!((first.width, first.height), (320, 200));
     assert_eq!(
         result.reply::<SetWindowTitleResult>("title-first").expect("title reply"),
@@ -91,6 +97,7 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
         panic!("second create succeeds");
     };
     assert_eq!(second.id, WindowId(2));
+    assert_eq!(second.name, "second");
 
     let ListWindowsResult::Ok { windows } = result.reply::<ListWindowsResult>("listed").expect("populated list reply")
     else {
@@ -98,6 +105,7 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
     };
     assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [WindowId(1), WindowId(2)]);
     assert_eq!(windows[0].title, "renamed");
+    assert_eq!(windows[0].name, "first");
     assert_eq!((windows[0].width, windows[0].height), (640, 360));
     assert!(windows[0].focused);
     assert_eq!(

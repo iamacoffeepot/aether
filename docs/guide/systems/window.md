@@ -3,14 +3,16 @@
 > **Governing ADRs:** [ADR-0035](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0035-substrate-chassis-split.md)
 > (the substrate/chassis split) and
 > [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
-> (the application-scoped multi-window manager).
+> (the application-scoped multi-window manager), and
+> [ADR-0167](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0167-window-manager-supervises-addressable-window-actors.md)
+> (named child identities; Proposed and landing incrementally).
 
 `aether-window` is the bespoke home of window behavior. One application-scoped
 actor owns every live window, translates native window events, routes the
 resulting Aether kinds, and exposes window lifecycle and control over mail.
-Callers use the platform-neutral `WindowCapability` alias of the concrete
-headless identity and explicit `WindowId` values; they never hold a native window handle or address a
-desktop-, headless-, or test-specific implementation.
+Callers use the platform-neutral `WindowCapability` manager identity, stable
+window names, and explicit `WindowId` values; they never hold a native window
+handle or address a desktop-, headless-, or test-specific implementation.
 
 The desktop chassis still owns the application thread and the call to winit's
 event loop. That is thread ownership, not window-domain ownership:
@@ -45,12 +47,13 @@ and shutdown; it does not interpret raw winit events.
 
 ## The public surface
 
-Consumers address the neutral identity and use `WindowMailboxExt`:
+Consumers address the neutral manager identity and use
+`WindowManagerMailboxExt` for list, create, and subscription operations:
 
 ```rust
 use aether_kinds::{Key, WindowMode};
 use aether_window::{
-    WindowCapability, WindowMailboxExt, WindowSelector, WindowSizeRequest,
+    WindowCapability, WindowManagerMailboxExt, WindowSelector, WindowSizeRequest,
     WindowSpec,
 };
 
@@ -59,6 +62,7 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 
     windows.list();
     windows.create(WindowSpec {
+        name: "inspector".to_owned(),
         title: "Inspector".to_owned(),
         mode: WindowMode::Windowed,
         size: Some(WindowSizeRequest { width: 960, height: 540 }),
@@ -66,6 +70,10 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     windows.subscribe::<Key>(WindowSelector::All);
 }
 ```
+
+The compatibility `WindowMailboxExt` facade continues to expose the existing
+id-bearing control methods while named desktop and synthetic child runtimes
+are introduced in later increments.
 
 The request/reply families are:
 
@@ -79,17 +87,21 @@ The request/reply families are:
 | `focus` | `WindowId` | acknowledgement |
 | `request_redraw` | `WindowId` | acknowledgement |
 
-Every targeted operation rejects an unknown or already-closing id. Window
-requests are advisory: an OS may clamp a size or decline to focus exactly as
-asked, so callers should treat the reply's applied state as authoritative.
-There is no implicit primary, focused, or current target. The boot window is
-simply the first `WindowSpec` realized after winit resumes.
+`WindowSpec::name` is an immutable actor instance segment: it cannot be empty,
+contain whitespace or `:`, or duplicate a pending or live window name. The
+mutable title remains independent of that stable name. Every targeted
+operation rejects an unknown or already-closing id. Window requests are
+advisory: an OS may clamp a size or decline to focus exactly as asked, so
+callers should treat the reply's applied state as authoritative.
+There is no implicit focused or current target. The boot window is named
+`main` and is simply the first `WindowSpec` realized after winit resumes.
 
 `WindowInfo` reports:
 
 ```rust
 pub struct WindowInfo {
     pub id: WindowId,
+    pub name: String,
     pub title: String,
     pub mode: WindowMode,
     pub width: u32,
@@ -159,7 +171,7 @@ state and never becomes a wire payload.
 
 ## Runtime variants
 
-All variants claim the one shared window namespace:
+All manager variants claim the one shared window namespace:
 
 - `DesktopWindowCapability` is pumped by `DesktopWindowApplication` and owns
   real winit state.
@@ -170,13 +182,18 @@ All variants claim the one shared window namespace:
   `#[actor(singleton, runtime::synthetic)]`, is test-only. It keeps a
   deterministic in-memory window map and the same selector-aware routing
   behavior.
+- `WindowInstance` is the neutral named child identity. Its headless runtime
+  has only the five typed control handlers and fails them immediately; desktop
+  and synthetic managers do not spawn child actors in this increment.
 - The hub installs no window actor.
 
-The neutral `WindowCapability` alias is the only identity consumer code should
-name. The concrete runtime identities share one namespace constant inside
-`aether-window`; variants do not repeat a namespace literal. The default
-headless implementation is `runtime/mod.rs`, while the desktop and synthetic
-implementations are keyed at `runtime/desktop/` and `runtime/synthetic.rs`.
+The neutral `WindowCapability` and `WindowInstance` aliases are the identities
+consumer code should name. Concrete manager runtime identities share one
+namespace constant inside `aether-window`; variants do not repeat a namespace
+literal. The default headless manager implementation is `runtime/mod.rs`, the
+headless named endpoint is `runtime/instance.rs`, and the desktop and synthetic
+manager implementations are keyed at `runtime/desktop/` and
+`runtime/synthetic.rs`.
 
 The initial desktop window still reads `AETHER_WINDOW_MODE` and
 `AETHER_WINDOW_TITLE`. `AETHER_WINDOW_MODE` accepts `windowed`,

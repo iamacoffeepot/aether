@@ -24,6 +24,7 @@ pub struct WindowSizeRequest {
 /// Creation specification for one window.
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WindowSpec {
+    pub name: String,
     pub title: String,
     pub mode: WindowMode,
     pub size: Option<WindowSizeRequest>,
@@ -33,6 +34,7 @@ pub struct WindowSpec {
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WindowInfo {
     pub id: WindowId,
+    pub name: String,
     pub title: String,
     pub mode: WindowMode,
     pub width: u32,
@@ -249,6 +251,7 @@ mod tests {
 
     fn spec() -> WindowSpec {
         WindowSpec {
+            name: "tools".to_owned(),
             title: "tools".to_owned(),
             mode: WindowMode::Windowed,
             size: Some(WindowSizeRequest { width: 1280, height: 720 }),
@@ -258,6 +261,7 @@ mod tests {
     fn info() -> WindowInfo {
         WindowInfo {
             id: WindowId(7),
+            name: "tools".to_owned(),
             title: "tools".to_owned(),
             mode: WindowMode::Windowed,
             width: 1280,
