@@ -241,18 +241,17 @@ fn call_echo_round_trip_event_then_end() {
 /// a capability that replies via `HubOutbound::send_reply` (which
 /// only routes `Session` / `EngineMailbox`) drops the reply silently —
 /// the same drop #1316/#1319 fixed for the desktop driver. The
-/// `HeadlessWindowCapability` `Err`-replies on `set_window_mode`; with
+/// `HeadlessWindowCapability` `Err`-replies on `list`; with
 /// the bug present this `Call` would yield a bare `ReplyEnd` and zero
 /// `ReplyEvent`s. Routing through the `Mailer` (the complete router)
 /// pushes the reply back locally to the server's `on_any`, so the
 /// `Err` rides home as a `ReplyEvent` before the `ReplyEnd`.
 #[test]
-fn call_headless_window_set_mode_err_reaches_component_reply() {
+fn call_headless_window_list_err_reaches_component_reply() {
     use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
-    use aether_kinds::{WindowId, WindowMode};
-    use aether_window::{HeadlessWindowCapability, SetWindowMode, SetWindowModeResult};
+    use aether_window::{HeadlessWindowCapability, ListWindows, ListWindowsResult};
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -268,8 +267,7 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
     let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
     complete_handshake(&mut stream);
 
-    let payload = SetWindowMode { window: WindowId(1), mode: WindowMode::Windowed, width: None, height: None }
-        .encode_into_bytes();
+    let payload = ListWindows.encode_into_bytes();
     let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
@@ -278,7 +276,7 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
             envelope: MailEnvelope {
                 to: MailboxAddress::local(window_mailbox),
                 from: None,
-                kind: <SetWindowMode as Kind>::ID,
+                kind: <ListWindows as Kind>::ID,
                 correlation_id: None,
                 payload,
             },
@@ -296,11 +294,11 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
         }
         other => panic!("expected ReplyEvent, got {other:?}"),
     };
-    assert_eq!(envelope.kind, <SetWindowModeResult as Kind>::ID);
-    let decoded = SetWindowModeResult::decode_from_bytes(&envelope.payload).expect("decode SetWindowModeResult");
+    assert_eq!(envelope.kind, <ListWindowsResult as Kind>::ID);
+    let decoded = ListWindowsResult::decode_from_bytes(&envelope.payload).expect("decode ListWindowsResult");
     assert!(
-        matches!(decoded, SetWindowModeResult::Err { window: WindowId(1), .. }),
-        "headless window cap preserves the addressed id in its Err reply, got {decoded:?}",
+        matches!(decoded, ListWindowsResult::Err { .. }),
+        "headless window manager returns its root-owned list error, got {decoded:?}",
     );
 
     let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");

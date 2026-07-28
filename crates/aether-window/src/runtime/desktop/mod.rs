@@ -9,33 +9,34 @@
 
 mod application;
 mod input;
+mod instance;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{Manual, runtime};
-use aether_data::Kind;
+use aether_actor::{Addressable, Manual, runtime};
+use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
 };
-use aether_substrate::InboundMail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::{InboundMail, MonitorHandle as ActorMonitorHandle, Subname};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::keyboard::PhysicalKey;
-use winit::monitor::{MonitorHandle, VideoModeHandle};
+use winit::monitor::{MonitorHandle as WinitMonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
 use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
 use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
-    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, DesktopWindowCapability, FocusWindow,
-    FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
-    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowClosed, WindowId,
-    WindowInfo, WindowOpened, WindowSpec,
+    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
+    DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
+    RequestWindowRedrawResult, RetireWindow, SetWindowModeResult, SetWindowTitleResult, SubscribeWindow,
+    SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
+    WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance, WindowOpened, WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
@@ -111,14 +112,14 @@ impl DesktopWindowState {
 
 /// Application-scoped `aether.window` state.
 ///
-/// Engine identities are monotonic and never reused. The `BTreeMap` makes
-/// `ListWindows` naturally ordered; the two hash maps provide constant-time
-/// native lookup without exposing winit identities on the wire.
+/// Engine identities are the mailbox ids of supervised named children. The
+/// `BTreeMap` makes `ListWindows` naturally ordered; the hash maps provide
+/// constant-time native lookup without exposing winit identities on the wire.
 pub struct DesktopWindowCapabilityState {
-    next_window_id: u64,
     windows: BTreeMap<WindowId, DesktopWindowState>,
     native_windows: HashMap<WindowId, Arc<Window>>,
     winit_windows: HashMap<WinitWindowId, WindowId>,
+    child_monitors: HashMap<WindowId, ActorMonitorHandle>,
     subscribers: WindowSubscribers,
     pending_creates: HashMap<WindowId, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,
@@ -192,14 +193,45 @@ impl DesktopWindowCapabilityState {
         };
         match attachment {
             Ok(()) => {
+                let predicted = MailboxId(id.0);
+                let spawned = match ctx
+                    .spawn_child::<WindowCapability, DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
+                    .finish()
+                {
+                    Ok(spawned) => spawned,
+                    Err(error) => {
+                        return self.rollback_attached_create(
+                            id,
+                            &mut pending,
+                            format!("failed to spawn window child: {error:?}"),
+                        );
+                    }
+                };
+                if spawned != predicted {
+                    ctx.actor_at::<DesktopWindowInstance>(spawned).send(&RetireWindow);
+                    return self.rollback_attached_create(
+                        id,
+                        &mut pending,
+                        format!("spawned window child {spawned:?} did not match predicted mailbox {predicted:?}"),
+                    );
+                }
+                let monitor = match ctx.monitor(spawned) {
+                    Ok(monitor) => monitor,
+                    Err(error) => {
+                        ctx.actor_at::<DesktopWindowInstance>(spawned).send(&RetireWindow);
+                        return self.rollback_attached_create(
+                            id,
+                            &mut pending,
+                            format!("failed to monitor window child: {error:?}"),
+                        );
+                    }
+                };
                 let Some(state) = self.windows.get_mut(&id) else {
                     let error = format!("window {id:?} disappeared during attachment");
-                    self.remove_window(id);
-                    if let Some(reply) = pending.reply.take() {
-                        reply.reply(&CreateWindowResult::Err { error });
-                    }
-                    return self.failed_create_effects(pending.shutdown_on_failure);
+                    ctx.actor_at::<DesktopWindowInstance>(spawned).send(&RetireWindow);
+                    return self.rollback_attached_create(id, &mut pending, error);
                 };
+                self.child_monitors.insert(id, monitor);
                 state.lifecycle = DesktopWindowLifecycle::Live;
                 self.shutdown_when_idle = false;
                 let info = state.info(id);
@@ -222,6 +254,21 @@ impl DesktopWindowCapabilityState {
         }
     }
 
+    fn rollback_attached_create(
+        &mut self,
+        id: WindowId,
+        pending: &mut PendingCreate,
+        error: String,
+    ) -> Vec<WindowHostEffect> {
+        self.remove_window(id);
+        if let Some(reply) = pending.reply.take() {
+            reply.reply(&CreateWindowResult::Err { error });
+        }
+        let mut effects = vec![WindowHostEffect::Closing { id }];
+        effects.extend(self.failed_create_effects(pending.shutdown_on_failure));
+        effects
+    }
+
     /// Fail a queued create before a native window could be staged.
     pub fn fail_window_creation(&mut self, id: WindowId, error: String) -> Vec<WindowHostEffect> {
         let Some(mut pending) = self.pending_creates.remove(&id) else {
@@ -239,12 +286,16 @@ impl DesktopWindowCapabilityState {
         let existed = self.remove_window(id);
         if !existed {
             if let Some(reply) = close_reply {
-                reply.reply(&CloseWindowResult::Err { window: id, error: format!("unknown window {id:?}") });
+                reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err {
+                    error: format!("unknown window {id:?}"),
+                }));
             }
             return Vec::new();
         }
         if let Some(reply) = close_reply {
-            reply.reply(&CloseWindowResult::Ok { window: id });
+            reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Ok));
+        } else {
+            ctx.actor_at::<DesktopWindowInstance>(MailboxId(id.0)).send(&RetireWindow);
         }
         self.publish(ctx, id, &WindowClosed { window: id });
         if self.windows.values().any(|window| window.lifecycle != DesktopWindowLifecycle::Attaching) {
@@ -413,15 +464,6 @@ impl DesktopWindowCapabilityState {
         }
     }
 
-    fn allocate_window_id(&mut self) -> Result<WindowId, String> {
-        let id = self.next_window_id;
-        if id == 0 {
-            return Err("window identity space exhausted".to_owned());
-        }
-        self.next_window_id = self.next_window_id.wrapping_add(1);
-        Ok(WindowId(id))
-    }
-
     fn failed_create_effects(&mut self, shutdown_on_failure: bool) -> Vec<WindowHostEffect> {
         if self.windows.values().any(|window| window.lifecycle != DesktopWindowLifecycle::Attaching) {
             self.shutdown_when_idle = false;
@@ -450,10 +492,7 @@ impl DesktopWindowCapabilityState {
         {
             return Err((format!("window name `{}` is already in use", spec.name), reply));
         }
-        let id = match self.allocate_window_id() {
-            Ok(id) => id,
-            Err(error) => return Err((error, reply)),
-        };
+        let id = predicted_window_id(&spec.name);
         self.pending_host_actions.push_back(WindowHostAction::Create { id, spec: spec.clone() });
         self.pending_creates.insert(id, PendingCreate { spec, reply, shutdown_on_failure });
         Ok(id)
@@ -502,6 +541,10 @@ impl DesktopWindowCapabilityState {
     }
 }
 
+fn predicted_window_id(name: &str) -> WindowId {
+    WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
+}
+
 #[runtime]
 impl NativeActor for DesktopWindowCapability {
     type State = DesktopWindowCapabilityState;
@@ -517,10 +560,10 @@ impl NativeActor for DesktopWindowCapability {
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<DesktopWindowCapabilityState, BootError> {
         Ok(DesktopWindowCapabilityState {
-            next_window_id: 1,
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
+            child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
@@ -538,7 +581,9 @@ impl NativeActor for DesktopWindowCapability {
         }
         for (id, window) in &mut state.windows {
             if let Some(reply) = window.close_reply.take() {
-                reply.reply(&CloseWindowResult::Err { window: *id, error: "window manager shutting down".to_owned() });
+                reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err {
+                    error: format!("window manager shutting down before closing {id:?}"),
+                }));
             }
         }
     }
@@ -566,78 +611,91 @@ impl NativeActor for DesktopWindowCapability {
     }
 
     #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CloseWindow) {
+    fn on_apply_command(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ApplyWindowCommand) {
         let reply = ctx.take_inbound();
-        if let Err((error, reply)) = state.queue_close(mail.window, Some(Box::new(reply)))
-            && let Some(reply) = reply
-        {
-            reply.reply(&CloseWindowResult::Err { window: mail.window, error });
-        }
-    }
-
-    #[handler::single]
-    fn on_set_mode(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowMode) -> SetWindowModeResult {
-        let window = match state.live_window(mail.window) {
-            Ok(window) => window,
-            Err(error) => return SetWindowModeResult::Err { window: mail.window, error },
+        let result = match mail.command {
+            WindowCommand::Close => {
+                if let Err((error, reply)) = state.queue_close(mail.window, Some(Box::new(reply)))
+                    && let Some(reply) = reply
+                {
+                    reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
+                }
+                return;
+            }
+            WindowCommand::SetMode { mode, width, height } => {
+                let window = match state.live_window(mail.window) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        reply.reply(&ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }));
+                        return;
+                    }
+                };
+                let fullscreen = match resolve_fullscreen(&mode, window.current_monitor().as_ref()) {
+                    Ok(fullscreen) => fullscreen,
+                    Err(error) => {
+                        reply.reply(&ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }));
+                        return;
+                    }
+                };
+                window.set_fullscreen(fullscreen);
+                if matches!(mode, WindowMode::Windowed)
+                    && let (Some(width), Some(height)) = (width, height)
+                {
+                    let _ = window.request_inner_size(PhysicalSize::new(width, height));
+                }
+                window.request_redraw();
+                let size = window.inner_size();
+                if let Some(state) = state.windows.get_mut(&mail.window) {
+                    state.mode = mode.clone();
+                    state.width = size.width;
+                    state.height = size.height;
+                }
+                ApplyWindowCommandResult::SetMode(SetWindowModeResult::Ok {
+                    mode,
+                    width: size.width,
+                    height: size.height,
+                })
+            }
+            WindowCommand::SetTitle { title } => {
+                let window = match state.live_window(mail.window) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        reply.reply(&ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error }));
+                        return;
+                    }
+                };
+                window.set_title(&title);
+                if let Some(state) = state.windows.get_mut(&mail.window) {
+                    state.title.clone_from(&title);
+                }
+                ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
+            }
+            WindowCommand::Focus => {
+                let window = match state.live_window(mail.window) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        reply.reply(&ApplyWindowCommandResult::Focus(FocusWindowResult::Err { error }));
+                        return;
+                    }
+                };
+                window.set_minimized(false);
+                window.set_visible(true);
+                window.focus_window();
+                ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
+            }
+            WindowCommand::RequestRedraw => {
+                let window = match state.live_window(mail.window) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        reply.reply(&ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err { error }));
+                        return;
+                    }
+                };
+                window.request_redraw();
+                ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Ok)
+            }
         };
-        let fullscreen = match resolve_fullscreen(&mail.mode, window.current_monitor().as_ref()) {
-            Ok(fullscreen) => fullscreen,
-            Err(error) => return SetWindowModeResult::Err { window: mail.window, error },
-        };
-        window.set_fullscreen(fullscreen);
-        if matches!(mail.mode, WindowMode::Windowed)
-            && let (Some(width), Some(height)) = (mail.width, mail.height)
-        {
-            let _ = window.request_inner_size(PhysicalSize::new(width, height));
-        }
-        window.request_redraw();
-        let size = window.inner_size();
-        if let Some(state) = state.windows.get_mut(&mail.window) {
-            state.mode = mail.mode.clone();
-            state.width = size.width;
-            state.height = size.height;
-        }
-        SetWindowModeResult::Ok { window: mail.window, mode: mail.mode, width: size.width, height: size.height }
-    }
-
-    #[handler::single]
-    fn on_set_title(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowTitle) -> SetWindowTitleResult {
-        let window = match state.live_window(mail.window) {
-            Ok(window) => window,
-            Err(error) => return SetWindowTitleResult::Err { window: mail.window, error },
-        };
-        window.set_title(&mail.title);
-        if let Some(state) = state.windows.get_mut(&mail.window) {
-            state.title.clone_from(&mail.title);
-        }
-        SetWindowTitleResult::Ok { window: mail.window, title: mail.title }
-    }
-
-    #[handler::single]
-    fn on_focus(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FocusWindow) -> FocusWindowResult {
-        let window = match state.live_window(mail.window) {
-            Ok(window) => window,
-            Err(error) => return FocusWindowResult::Err { window: mail.window, error },
-        };
-        window.set_minimized(false);
-        window.set_visible(true);
-        window.focus_window();
-        FocusWindowResult::Ok { window: mail.window }
-    }
-
-    #[handler::single]
-    fn on_request_redraw(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: RequestWindowRedraw,
-    ) -> RequestWindowRedrawResult {
-        let window = match state.live_window(mail.window) {
-            Ok(window) => window,
-            Err(error) => return RequestWindowRedrawResult::Err { window: mail.window, error },
-        };
-        window.request_redraw();
-        RequestWindowRedrawResult::Ok { window: mail.window }
+        reply.reply(&result);
     }
 
     #[handler::single]
@@ -693,11 +751,20 @@ impl NativeActor for DesktopWindowCapability {
 
     #[handler::single]
     fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+        let id = WindowId(notice.target.0);
+        if state.child_monitors.remove(&id).is_some() {
+            let _ = state.queue_close(id, None);
+        }
         state.subscribers.purge_departed(notice.target);
     }
 }
 
-fn find_exclusive_mode(monitor: &MonitorHandle, width: u32, height: u32, refresh_mhz: u32) -> Option<VideoModeHandle> {
+fn find_exclusive_mode(
+    monitor: &WinitMonitorHandle,
+    width: u32,
+    height: u32,
+    refresh_mhz: u32,
+) -> Option<VideoModeHandle> {
     monitor.video_modes().find(|mode| {
         mode.size().width == width && mode.size().height == height && mode.refresh_rate_millihertz() == refresh_mhz
     })
@@ -706,7 +773,7 @@ fn find_exclusive_mode(monitor: &MonitorHandle, width: u32, height: u32, refresh
 /// Resolve a public window mode to winit's native fullscreen representation.
 pub fn resolve_fullscreen(
     mode: &WindowMode,
-    monitor_for_exclusive: Option<&MonitorHandle>,
+    monitor_for_exclusive: Option<&WinitMonitorHandle>,
 ) -> Result<Option<Fullscreen>, String> {
     match mode {
         WindowMode::Windowed => Ok(None),
@@ -737,10 +804,10 @@ mod tests {
 
     fn test_state() -> DesktopWindowCapabilityState {
         DesktopWindowCapabilityState {
-            next_window_id: 1,
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
+            child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
@@ -752,7 +819,7 @@ mod tests {
 
     fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), aether_data::MailboxId(1)));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(1)));
         (binding, mailer)
     }
 
@@ -789,7 +856,7 @@ mod tests {
         let mut state = test_state();
         let (binding, mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let unknown = aether_data::MailboxId(0xBAD);
+        let unknown = MailboxId(0xBAD);
 
         assert!(matches!(
             DesktopWindowCapability::on_subscribe(
@@ -818,24 +885,23 @@ mod tests {
     }
 
     #[test]
-    fn window_ids_are_monotonic_and_actions_remain_ordered() {
+    fn window_ids_derive_from_named_child_mailboxes_and_actions_remain_ordered() {
         let mut state = test_state();
         assert!(state.queue_create(spec("first", "First"), None, false).is_ok());
         assert!(state.queue_create(spec("second", "Second"), None, false).is_ok());
 
         let (actions, _) = state.take_host_work();
-        assert!(matches!(actions[0], WindowHostAction::Create { id: WindowId(1), .. }));
-        assert!(matches!(actions[1], WindowHostAction::Create { id: WindowId(2), .. }));
-        assert_eq!(state.next_window_id, 3);
+        assert!(matches!(actions[0], WindowHostAction::Create { id, .. } if id == predicted_window_id("first")));
+        assert!(matches!(actions[1], WindowHostAction::Create { id, .. } if id == predicted_window_id("second")));
+        assert_ne!(predicted_window_id("first"), predicted_window_id("second"));
     }
 
     #[test]
-    fn invalid_names_are_rejected_before_initial_reservation_or_id_allocation() {
+    fn invalid_names_are_rejected_before_initial_reservation() {
         for name in ["", "two words", "bad:name"] {
             let mut state = test_state();
 
             assert!(state.queue_initial_window(spec(name, "Invalid")).is_err());
-            assert_eq!(state.next_window_id, 1);
             assert!(!state.initial_window_reserved);
             assert!(state.pending_creates.is_empty());
             assert!(state.pending_host_actions.is_empty());
@@ -843,16 +909,14 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_pending_and_live_names_are_rejected_without_allocating_ids() {
+    fn duplicate_pending_and_live_names_are_rejected() {
         let mut pending = test_state();
         assert!(pending.queue_create(spec("tools", "Tools"), None, false).is_ok());
         assert!(pending.queue_create(spec("tools", "Other title"), None, false).is_err());
-        assert_eq!(pending.next_window_id, 2);
 
         let mut live = test_state();
         insert_window(&mut live, WindowId(7), "tools", false);
         assert!(live.queue_create(spec("tools", "Other title"), None, false).is_err());
-        assert_eq!(live.next_window_id, 1);
         assert!(live.pending_host_actions.is_empty());
     }
 
@@ -938,14 +1002,14 @@ mod tests {
     fn pending_replacement_defers_last_window_shutdown_until_create_resolves() {
         let mut state = test_state();
         insert_window(&mut state, WindowId(1), "first", true);
-        state.next_window_id = 2;
         assert!(state.queue_create(spec("replacement", "Replacement"), None, false).is_ok());
+        let replacement = predicted_window_id("replacement");
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         assert!(state.finish_window_close(WindowId(1), &mut ctx).is_empty());
         assert!(state.shutdown_when_idle);
-        let effects = state.fail_window_creation(WindowId(2), "native create failed".to_owned());
+        let effects = state.fail_window_creation(replacement, "native create failed".to_owned());
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
     }
@@ -954,25 +1018,9 @@ mod tests {
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
         let mut state = test_state();
         state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-        let effects = state.fail_window_creation(WindowId(1), "native create failed".to_owned());
+        let effects = state.fail_window_creation(predicted_window_id("main"), "native create failed".to_owned());
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-        assert!(state.pending_creates.is_empty());
-    }
-
-    #[test]
-    fn successful_attachment_makes_the_staged_window_live() {
-        let mut state = test_state();
-        assert!(state.queue_create(spec("tools", "Tools"), None, false).is_ok());
-        insert_window(&mut state, WindowId(1), "tools", false);
-        state.windows.get_mut(&WindowId(1)).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-
-        let effects = state.finish_window_attachment(WindowId(1), Ok(()), &mut ctx);
-
-        assert!(effects.is_empty());
-        assert_eq!(state.windows[&WindowId(1)].lifecycle, DesktopWindowLifecycle::Live);
         assert!(state.pending_creates.is_empty());
     }
 
@@ -980,15 +1028,16 @@ mod tests {
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
         let mut state = test_state();
         state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
-        insert_window(&mut state, WindowId(1), "main", false);
-        state.windows.get_mut(&WindowId(1)).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
+        let id = predicted_window_id("main");
+        insert_window(&mut state, id, "main", false);
+        state.windows.get_mut(&id).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
-        let effects = state.finish_window_attachment(WindowId(1), Err("render attach failed".to_owned()), &mut ctx);
+        let effects = state.finish_window_attachment(id, Err("render attach failed".to_owned()), &mut ctx);
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
-        assert!(!state.windows.contains_key(&WindowId(1)));
+        assert!(!state.windows.contains_key(&id));
         assert!(state.pending_creates.is_empty());
     }
 
@@ -1004,11 +1053,11 @@ mod tests {
             }) as Arc<dyn InboxHandler>,
         );
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let manager = aether_data::MailboxId(0xA37E);
+        let manager = MailboxId(0xA37E);
         let binding = Arc::new(NativeBinding::new_for_test(mailer, manager));
         let mut state = test_state();
-        let root = MailId::new(aether_data::MailboxId(0x100), 7);
-        let parent = MailId::new(aether_data::MailboxId(0x200), 9);
+        let root = MailId::new(MailboxId(0x100), 7);
+        let parent = MailId::new(MailboxId(0x200), 9);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 

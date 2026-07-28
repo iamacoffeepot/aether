@@ -3,10 +3,10 @@
 use aether_actor::runtime;
 
 use super::{
-    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult,
-    HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
-    SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
+    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
+    FocusWindowResult, HeadlessWindowCapability, ListWindows, ListWindowsResult, RequestWindowRedrawResult,
+    SetWindowModeResult, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
+    UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf, WindowCommand,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -43,32 +43,21 @@ impl NativeActor for HeadlessWindowCapability {
     }
 
     #[handler::single]
-    fn on_close(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CloseWindow) -> CloseWindowResult {
-        CloseWindowResult::Err { window: mail.window, error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowMode) -> SetWindowModeResult {
-        SetWindowModeResult::Err { window: mail.window, error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowTitle) -> SetWindowTitleResult {
-        SetWindowTitleResult::Err { window: mail.window, error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FocusWindow) -> FocusWindowResult {
-        FocusWindowResult::Err { window: mail.window, error: unsupported() }
-    }
-
-    #[handler::single]
-    fn on_request_redraw(
+    fn on_apply_command(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        mail: RequestWindowRedraw,
-    ) -> RequestWindowRedrawResult {
-        RequestWindowRedrawResult::Err { window: mail.window, error: unsupported() }
+        mail: ApplyWindowCommand,
+    ) -> ApplyWindowCommandResult {
+        let error = unsupported();
+        match mail.command {
+            WindowCommand::Close => ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }),
+            WindowCommand::SetMode { .. } => ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }),
+            WindowCommand::SetTitle { .. } => ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error }),
+            WindowCommand::Focus => ApplyWindowCommandResult::Focus(FocusWindowResult::Err { error }),
+            WindowCommand::RequestRedraw => {
+                ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err { error })
+            }
+        }
     }
 
     #[handler::single]

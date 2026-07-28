@@ -13,9 +13,16 @@
 pub mod kinds;
 
 pub use aether_kinds::{WindowId, WindowMode};
+#[cfg(feature = "runtime")]
+pub(crate) use kinds::WindowCommand;
 pub use kinds::*;
+pub(crate) use kinds::{ApplyWindowCommand, ApplyWindowCommandResult};
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
-use aether_actor::{HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext, actor, validate_namespace_segment};
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
+use aether_actor::validate_namespace_segment;
+use aether_actor::{HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext, actor};
 use aether_data::{Kind, MailboxId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_kinds::MonitorNotice;
@@ -54,11 +61,21 @@ pub use HeadlessWindowInstance as WindowInstance;
 #[actor(singleton, root, runtime::desktop)]
 pub struct DesktopWindowCapability;
 
+/// Desktop runtime identity for one named window endpoint.
+#[cfg(feature = "desktop")]
+#[actor(instanced, child_of(WindowCapability), runtime::desktop::instance)]
+pub struct DesktopWindowInstance;
+
 /// Deterministic in-memory implementation identity for the `aether.window`
 /// mailbox.
 #[cfg(feature = "synthetic")]
 #[actor(singleton, root, runtime::synthetic)]
 pub struct SyntheticWindowCapability;
+
+/// Deterministic in-memory runtime identity for one named window endpoint.
+#[cfg(feature = "synthetic")]
+#[actor(instanced, child_of(WindowCapability), runtime::synthetic::instance)]
+pub struct SyntheticWindowInstance;
 
 trait WindowManagerMailboxForward {
     fn forward<K>(&self, payload: &K)
@@ -108,75 +125,43 @@ pub trait WindowManagerMailboxExt: WindowManagerMailboxForward + Sized {
 
 impl<T: WindowManagerMailboxForward> WindowManagerMailboxExt for T {}
 
-/// Compatibility facade for the existing manager-addressed window surface.
-///
-/// New manager-only call sites should prefer [`WindowManagerMailboxExt`].
-/// The id-bearing control wrappers remain here until per-window runtimes take
-/// ownership of the control transport.
+trait WindowMailboxForward {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowInstance: HandlesKind<K>,
+        K: Kind;
+}
+
+/// Sender-side convenience methods for one resolved window endpoint.
 #[allow(private_bounds)]
-pub trait WindowMailboxExt: WindowManagerMailboxForward + Sized {
-    /// Request every live window in ascending id order.
-    fn list(&self) {
-        WindowManagerMailboxExt::list(self);
+pub trait WindowMailboxExt: WindowMailboxForward + Sized {
+    /// Request closure of this window.
+    fn close(&self) {
+        self.forward(&CloseWindow);
     }
 
-    /// Request creation of a new window.
-    fn create(&self, spec: WindowSpec) {
-        WindowManagerMailboxExt::create(self, spec);
+    /// Change this window's presentation mode.
+    fn set_mode(&self, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
+        self.forward(&SetWindowMode { mode, width, height });
     }
 
-    /// Request closure of one explicit window.
-    fn close(&self, window: WindowId) {
-        self.forward(&CloseWindow { window });
+    /// Change this window's title.
+    fn set_title(&self, title: &str) {
+        self.forward(&SetWindowTitle { title: title.to_owned() });
     }
 
-    /// Change one window's presentation mode.
-    fn set_mode(&self, window: WindowId, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
-        self.forward(&SetWindowMode { window, mode, width, height });
+    /// Bring this window to the foreground.
+    fn focus(&self) {
+        self.forward(&FocusWindow);
     }
 
-    /// Change one window's title.
-    fn set_title(&self, window: WindowId, title: &str) {
-        self.forward(&SetWindowTitle { window, title: title.to_owned() });
-    }
-
-    /// Bring one window to the foreground.
-    fn focus(&self, window: WindowId) {
-        self.forward(&FocusWindow { window });
-    }
-
-    /// Ask the platform to schedule one window for redraw.
-    fn request_redraw(&self, window: WindowId) {
-        self.forward(&RequestWindowRedraw { window });
-    }
-
-    /// Subscribe the calling actor to kind `K` for `selector`.
-    fn subscribe<K: Kind>(&self, selector: WindowSelector) {
-        WindowManagerMailboxExt::subscribe::<K>(self, selector);
-    }
-
-    /// Subscribe an explicit mailbox to kind `K` for `selector`.
-    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
-        WindowManagerMailboxExt::subscribe_for::<K>(self, selector, mailbox);
-    }
-
-    /// Remove the calling actor's kind-`K` subscription for `selector`.
-    fn unsubscribe<K: Kind>(&self, selector: WindowSelector) {
-        WindowManagerMailboxExt::unsubscribe::<K>(self, selector);
-    }
-
-    /// Remove an explicit mailbox's kind-`K` subscription for `selector`.
-    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId) {
-        WindowManagerMailboxExt::unsubscribe_for::<K>(self, selector, mailbox);
-    }
-
-    /// Remove an explicit mailbox from every window-event subscription.
-    fn unsubscribe_all(&self, mailbox: MailboxId) {
-        WindowManagerMailboxExt::unsubscribe_all(self, mailbox);
+    /// Ask the platform to schedule this window for redraw.
+    fn request_redraw(&self) {
+        self.forward(&RequestWindowRedraw);
     }
 }
 
-impl<T: WindowManagerMailboxForward> WindowMailboxExt for T {}
+impl<T: WindowMailboxForward> WindowMailboxExt for T {}
 
 impl WindowManagerMailboxForward for WasmActorMailbox<'_, WindowCapability> {
     fn forward<K>(&self, payload: &K)
@@ -192,6 +177,26 @@ impl<C: Kind> WindowManagerMailboxForward for WasmActorMailboxWithContext<'_, '_
     fn forward<K>(&self, payload: &K)
     where
         WindowCapability: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
+    }
+}
+
+impl WindowMailboxForward for WasmActorMailbox<'_, WindowInstance> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowInstance: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
+    }
+}
+
+impl<C: Kind> WindowMailboxForward for WasmActorMailboxWithContext<'_, '_, WindowInstance, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowInstance: HandlesKind<K>,
         K: Kind,
     {
         let _ = self.send(payload);
@@ -220,6 +225,29 @@ impl<C: Kind> WindowManagerMailboxForward for NativeActorMailboxWithContext<'_, 
     }
 }
 
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+impl WindowMailboxForward for NativeActorMailbox<'_, WindowInstance> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowInstance: HandlesKind<K>,
+        K: Kind,
+    {
+        self.send(payload);
+    }
+}
+
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+impl<C: Kind> WindowMailboxForward for NativeActorMailboxWithContext<'_, '_, WindowInstance, C> {
+    fn forward<K>(&self, payload: &K)
+    where
+        WindowInstance: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.send(payload);
+    }
+}
+
+#[cfg(any(feature = "desktop", feature = "synthetic"))]
 fn validate_window_name(name: &str) -> Result<(), String> {
     validate_namespace_segment(name).map_err(|reason| format!("invalid window name `{name}`: {reason:?}"))
 }
@@ -255,8 +283,8 @@ mod tests {
 
     #[test]
     fn neutral_facade_is_available_to_wasm_senders() {
-        assert_facade::<WasmActorMailbox<'static, WindowCapability>>();
-        assert_facade::<WasmActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
+        assert_facade::<WasmActorMailbox<'static, WindowInstance>>();
+        assert_facade::<WasmActorMailboxWithContext<'static, 'static, WindowInstance, ListWindows>>();
         assert_manager_facade::<WasmActorMailbox<'static, WindowCapability>>();
         assert_manager_facade::<WasmActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
     }
@@ -264,8 +292,8 @@ mod tests {
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     #[test]
     fn neutral_facade_is_available_to_native_senders() {
-        assert_facade::<super::NativeActorMailbox<'static, WindowCapability>>();
-        assert_facade::<super::NativeActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
+        assert_facade::<super::NativeActorMailbox<'static, WindowInstance>>();
+        assert_facade::<super::NativeActorMailboxWithContext<'static, 'static, WindowInstance, ListWindows>>();
         assert_manager_facade::<super::NativeActorMailbox<'static, WindowCapability>>();
         assert_manager_facade::<super::NativeActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>(
         );
