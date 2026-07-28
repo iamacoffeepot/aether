@@ -29,7 +29,7 @@ use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::persistence::Persistence;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
-    Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
+    Addressable, ChildOf, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
 use crate::wasm::bridge::{mail, persist};
 use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
@@ -279,15 +279,29 @@ impl ActorTypeTag {
 
 /// Why a synchronous spawn verb failed.
 ///
-/// For the detached [`WasmCtx::spawn_child`] (ADR-0097), only subname
-/// validation can fail here — a spawn-time failure (a retired / in-use
-/// subname, or the sibling's `init` returning `Err`) surfaces
-/// asynchronously on the trampoline, not through this `Result`. For the
+/// Both typed spawn verbs validate the ctx's registry-derived parent actor
+/// identity before doing spawn work. For detached [`WasmCtx::spawn_child`]
+/// (ADR-0097), a later spawn-time failure (a retired / in-use subname, or the
+/// sibling's `init` returning `Err`) surfaces asynchronously on the
+/// trampoline, not through this `Result`. For the
 /// inline [`WasmCtx::spawn_inline_child`] (ADR-0114) the child's `init`
 /// runs in-process, synchronously, so its failure is reported here as
 /// [`SpawnError::InitFailed`].
 #[derive(Debug, Clone)]
 pub enum SpawnError {
+    /// The ctx's mailbox did not identify either the constructed entry actor
+    /// or a registered inline actor, so its logical parent type could not be
+    /// validated before spawning.
+    ParentIdentityUnavailable(MailboxId),
+    /// The typed spawn named parent `expected`, but the ctx is executing the
+    /// logically distinct actor type `actual`.
+    ParentIdentityMismatch { expected: ActorTypeTag, actual: ActorTypeTag },
+    /// A by-tag spawn selected an exported actor whose generated cardinality
+    /// is not [`Instanced`].
+    ActorNotInstanced(ActorTypeTag),
+    /// A by-tag spawn selected an instanced actor that declares neither an
+    /// exact relationship to `parent` nor module-child composability.
+    PlacementDenied { parent: ActorTypeTag, child: ActorTypeTag },
     /// A [`Subname::Named`] discriminator failed
     /// [`validate_namespace_segment`].
     SubnameInvalid(NamespaceError),
@@ -517,28 +531,29 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     }
 
     /// ADR-0097: spawn a sibling actor type from the same resident
-    /// module — the wasm analogue of native `ctx.spawn_child::<A>`. `A`
-    /// is one of this module's exported `Instanced` types; the SDK
-    /// resolves its actor-type tag (`mailbox_id_from_name(A::NAMESPACE)`)
-    /// and encodes `A::Config`, both at compile time. Returns the new
+    /// module — the wasm analogue of native `ctx.spawn_child::<P, C>`.
+    /// `C` is one of this module's exported `Instanced` types and must
+    /// declare `ChildOf<P>`; the SDK verifies that this ctx's actual actor
+    /// tag is `P`, resolves `C`'s tag, and encodes `C::Config`. Returns the new
     /// instance's [`MailboxId`] synchronously — it is `hash(name)`
     /// (ADR-0029) — and the instance becomes addressable at
     /// `aether.embedded:<name>`.
     ///
-    /// Only synchronous subname validation can `Err` here; a spawn-time
-    /// failure (a retired / in-use subname, or the sibling's `init`
-    /// returning `Err`) is logged on the trampoline and does not come
-    /// back through this `Result` (ADR-0097 §4). The spawned sibling's
-    /// `Source` is this actor's mailbox, so its replies route here.
-    pub fn spawn_child<A>(&self, subname: Subname<'_>, config: &A::Config) -> Result<MailboxId, SpawnError>
+    /// Parent identity and subname validation can `Err` synchronously. A
+    /// later spawn-time failure (a retired / in-use subname, or the sibling's
+    /// `init` returning `Err`) is logged on the trampoline and does not come
+    /// back through this `Result` (ADR-0097 §4). The spawned sibling's Source
+    /// is this actor's mailbox, so its replies route here.
+    pub fn spawn_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
     where
-        A: Instanced + WasmActor,
+        P: WasmActor,
+        C: ChildOf<P> + Instanced + WasmActor,
     {
+        self.validate_spawn_parent::<P>()?;
         // Compile-time actor-type tag for the spawned sibling (hash(NAMESPACE),
         // ADR-0029) — this is the id definition for the new instance, computed
         // before any lineage carry exists.
-        #[allow(clippy::disallowed_methods)]
-        let type_tag = mailbox_id_from_name(<A as Addressable>::NAMESPACE).0;
+        let type_tag = ActorTypeTag::of::<C>().0;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
         let id = mail::spawn_sibling(type_tag, is_counter, &full_subname, &config_bytes);
@@ -573,40 +588,53 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// `ctx.child(name)`) resolves over the registry. Per-parent subname
     /// scoping (the nested-alias fold, ADR-0117) is a follow-up needing a
     /// substrate change.
-    pub fn spawn_inline_child<A>(&self, subname: Subname<'_>, config: &A::Config) -> Result<MailboxId, SpawnError>
+    pub fn spawn_inline_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
     where
+        P: WasmActor,
         // `ErasedWasmActor` is the boxing seam every `#[actor]` type emits
         // (ADR-0096) — the registry stores the child as `dyn
         // ErasedWasmActor`, so the bound is the mechanical realisation of
         // "reuse the existing erasure" (no new child-dispatch trait).
-        A: Instanced + WasmActor + ErasedWasmActor,
-        // iamacoffeepot/aether#2311: `A::init` returns the runtime state, boxed
+        C: ChildOf<P> + Instanced + WasmActor + ErasedWasmActor,
+        // iamacoffeepot/aether#2311: `C::init` returns the runtime state, boxed
         // as the erased child (`State = Self` for an un-split component).
-        <A as WasmActor>::State: ErasedWasmActor,
+        <C as WasmActor>::State: ErasedWasmActor,
     {
+        self.validate_spawn_parent::<P>()?;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let alias = MailboxId(mail::spawn_inline_child(is_counter, &full_subname));
-        // Re-decode an owned `A::Config` for the in-guest `init` from the
+        // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
         // it sidesteps a `Clone` bound the detached verb also lacks.
         let bytes = config.encode_into_bytes();
-        let Some(owned) = <A::Config as Kind>::decode_from_bytes(&bytes) else {
+        let Some(owned) = <C::Config as Kind>::decode_from_bytes(&bytes) else {
             return Err(SpawnError::InitFailed(ActorInitError::new("spawn_inline_child: Config round-trip failed")));
         };
         // The actor-type tag the rehydrate reconstruct matches against the
         // module's exported types (ADR-0114 §5) — the same `hash(NAMESPACE)`
         // tag `init_typed_p32` selects on. This is the id definition for the
         // child type, so the disallowed-method allow mirrors `spawn_child`.
-        #[allow(clippy::disallowed_methods)]
-        let type_tag = mailbox_id_from_name(<A as Addressable>::NAMESPACE).0;
+        let type_tag = ActorTypeTag::of::<C>().0;
         // The spawner's real folded id is recorded as the child's logical
         // parent so relative addressing (`ctx.parent()` / `ctx.sibling()`)
         // resolves over the registry. The alias fold itself stays flat on
         // the instance carry (the substrate's current `spawn_inline_child`),
         // so subnames are cluster-unique; per-parent subname scoping (the
         // nested-alias fold) is a follow-up needing a substrate change.
-        install_inline_child::<A>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
+        install_inline_child::<C>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
+    }
+
+    fn validate_spawn_parent<P: WasmActor>(&self) -> Result<ActorTypeTag, SpawnError> {
+        let actual = self
+            .inline
+            .actor_type_tag(MailboxId(self.mailbox))
+            .ok_or(SpawnError::ParentIdentityUnavailable(MailboxId(self.mailbox)))?;
+        let expected = ActorTypeTag::of::<P>();
+        if actual != expected {
+            return Err(SpawnError::ParentIdentityMismatch { expected, actual });
+        }
+        Ok(actual)
     }
 
     /// ADR-0114 / issue 2692: spawn an **inline child** whose type is
@@ -627,11 +655,11 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// in-guest `encode` / `decode` round-trip.
     ///
     /// A [`Subname::Named`] that fails validation returns
-    /// [`SpawnError::SubnameInvalid`] before any type lookup; a tag matching
-    /// no exported type returns [`SpawnError::UnknownActorTag`] with **no**
-    /// host alias allocated (the export-set fall-through precedes
-    /// allocation); a synchronous `init` `Err` or a `Config` decode miss
-    /// returns [`SpawnError::InitFailed`].
+    /// [`SpawnError::SubnameInvalid`] before any type lookup. The generated
+    /// resolver rejects an unknown tag, a non-instanced actor, an unavailable
+    /// parent identity, or denied placement before allocating a host alias. A
+    /// synchronous `init` `Err` or a `Config` decode miss returns
+    /// [`SpawnError::InitFailed`].
     pub fn spawn_inline_child_by_tag(
         &self,
         tag: ActorTypeTag,
@@ -1233,9 +1261,13 @@ mod tests {
     use crate::model::Subname;
     use crate::wasm::inline::RouteDecision;
     use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child, spawn_one_child};
-    use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx, WasmPlacementFacts};
+    use crate::wasm::{
+        __validate_inline_child_placement, ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx,
+        WasmPlacementFacts,
+    };
     use crate::{Addressable, ChildOf, HandlesKind, ModuleChild, WasmActorMailbox};
     use aether_data::{Kind, MailboxId, Source};
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::Cell;
@@ -1327,11 +1359,45 @@ mod tests {
     #[test]
     fn spawn_inline_child_rejects_invalid_subname() {
         let registry = Registry::new();
+        registry.set_self_id(0);
+        registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
         let ctx = WasmCtx::__new(0, &registry, NO_INBOUND_SOURCE);
-        let result = ctx.spawn_inline_child::<FailingChild>(Subname::Named("bad:name"), &());
+        let result = ctx.spawn_inline_child::<NestingParent, FailingChild>(Subname::Named("bad:name"), &());
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
             "a separator-bearing subname must return SubnameInvalid, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn typed_spawn_rejects_unavailable_parent_identity_before_host_call() {
+        let registry = Registry::new();
+        registry.set_self_id(0x6010);
+        let ctx = WasmCtx::__new(0x6010, &registry, NO_INBOUND_SOURCE);
+
+        let result = ctx.spawn_inline_child::<NestingParent, SucceedingChild>(Subname::Named("bad:name"), &());
+        assert!(
+            matches!(result, Err(SpawnError::ParentIdentityUnavailable(MailboxId(0x6010)))),
+            "a ctx with no registry actor identity is rejected before subname handling or allocation, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn typed_spawn_rejects_mismatched_parent_identity_before_host_call() {
+        let registry = Registry::new();
+        registry.set_self_id(0x6020);
+        registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
+        let ctx = WasmCtx::__new(0x6020, &registry, NO_INBOUND_SOURCE);
+
+        let result = ctx.spawn_inline_child::<NestingParent, SucceedingChild>(Subname::Named("bad:name"), &());
+        assert!(
+            matches!(
+                result,
+                Err(SpawnError::ParentIdentityMismatch { expected, actual })
+                    if expected == ActorTypeTag::of::<NestingParent>()
+                        && actual == ActorTypeTag::of::<LifecycleProbe>()
+            ),
+            "a ctx executing a different actor is rejected before subname handling or allocation, got {result:?}",
         );
     }
 
@@ -1641,6 +1707,7 @@ mod tests {
         config_bytes: &[u8],
     ) -> Result<MailboxId, SpawnError> {
         if tag == ActorTypeTag::of::<StubChild>() {
+            __validate_inline_child_placement(registry, parent, tag, StubChild::__AETHER_PLACEMENT)?;
             let alias = MailboxId(0xABCD_0001);
             spawn_one_child::<StubChild>(
                 registry,
@@ -1676,6 +1743,8 @@ mod tests {
     #[test]
     fn spawn_inline_child_by_tag_spawns_matched_type_and_threads_config() {
         let registry = Registry::new();
+        registry.set_self_id(0x10);
+        registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
         registry.set_spawn_resolver(stub_resolver);
         STUB_INIT_CONFIG.set(None);
 
@@ -1705,6 +1774,16 @@ mod tests {
     fn spawn_inline_child_by_tag_parents_to_the_spawner_not_the_root() {
         let registry = Registry::new();
         registry.set_self_id(0x1111);
+        registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
+        registry.insert_child(
+            MailboxId(0x5AFE),
+            ActorTypeTag::of::<NestingParent>().0,
+            String::from("spawner"),
+            false,
+            0x1111,
+            Vec::new(),
+            Box::new(NestingParent),
+        );
         registry.set_spawn_resolver(stub_resolver);
         STUB_INIT_CONFIG.set(None);
 
@@ -1758,6 +1837,52 @@ mod tests {
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
             "a separator-bearing subname is rejected before the resolver runs, got {result:?}",
         );
+    }
+
+    #[test]
+    fn by_tag_placement_rejects_non_instanced_selection() {
+        let registry = Registry::new();
+        registry.set_self_id(0x20);
+        registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+        let child = ActorTypeTag(0xDEAD);
+
+        let result = __validate_inline_child_placement(
+            &registry,
+            0x20,
+            child,
+            WasmPlacementFacts { is_instanced: false, module_child: true, exact_parent_tags: &[] },
+        );
+        assert!(matches!(result, Err(SpawnError::ActorNotInstanced(tag)) if tag == child));
+    }
+
+    #[test]
+    fn by_tag_placement_rejects_disallowed_parent() {
+        let registry = Registry::new();
+        registry.set_self_id(0x30);
+        let parent = ActorTypeTag::of::<LifecycleProbe>();
+        registry.set_entry_actor_tag(parent);
+        let child = ActorTypeTag::of::<StubChild>();
+
+        let result = __validate_inline_child_placement(&registry, 0x30, child, StubChild::__AETHER_PLACEMENT);
+        assert!(
+            matches!(result, Err(SpawnError::PlacementDenied { parent: actual, child: selected }) if actual == parent && selected == child),
+            "an exact child rejects a different runtime parent, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn by_tag_placement_accepts_module_child() {
+        let registry = Registry::new();
+        registry.set_self_id(0x40);
+        registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
+
+        let result = __validate_inline_child_placement(
+            &registry,
+            0x40,
+            ActorTypeTag::of::<SucceedingChild>(),
+            SucceedingChild::__AETHER_PLACEMENT,
+        );
+        assert!(result.is_ok(), "a composable instanced actor accepts the actual module parent: {result:?}");
     }
 
     std::thread_local! {
@@ -1928,7 +2053,7 @@ mod tests {
         install_inline_child::<NestingParent>(
             &registry,
             parent,
-            0,
+            ActorTypeTag::of::<NestingParent>().0,
             String::from("nesting"),
             false,
             0x9000,

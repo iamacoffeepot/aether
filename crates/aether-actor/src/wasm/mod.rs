@@ -335,6 +335,29 @@ pub fn install_guest_logging() {
     crate::log::install_forwarding_subscriber();
 }
 
+/// Validate an export-selected inline actor before its alias is allocated.
+/// Membership is established by the generated resolver branch that calls
+/// this helper; cardinality and exact-or-module-child placement come from the
+/// selected actor's generated [`WasmPlacementFacts`].
+#[doc(hidden)]
+pub fn __validate_inline_child_placement(
+    registry: &inline::Registry,
+    parent: u64,
+    child: ActorTypeTag,
+    facts: WasmPlacementFacts,
+) -> Result<(), SpawnError> {
+    let parent = registry
+        .actor_type_tag(aether_data::MailboxId(parent))
+        .ok_or(SpawnError::ParentIdentityUnavailable(aether_data::MailboxId(parent)))?;
+    if !facts.is_instanced {
+        return Err(SpawnError::ActorNotInstanced(child));
+    }
+    if !facts.module_child && !facts.exact_parent_tags.contains(&parent) {
+        return Err(SpawnError::PlacementDenied { parent, child });
+    }
+    Ok(())
+}
+
 /// Allocate an inline child's first-class alias via the substrate's
 /// `spawn_inline_child` host fn (issue 2692). The `export!`-generated
 /// by-tag resolver calls this from its matched branch — before the shared
@@ -591,6 +614,7 @@ macro_rules! __export_internal {
             let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(mailbox_id);
             match <$component as $crate::Lifecycle<$component>>::init(config, params, &mut ctx) {
                 Ok(instance) => {
+                    __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$component>());
                     unsafe {
                         __AETHER_COMPONENT.set(instance);
                     }
@@ -951,6 +975,12 @@ macro_rules! __export_internal {
          -> ::core::result::Result<$crate::MailboxId, $crate::SpawnError> {
             $(
                 if __aether_tag == $crate::ActorTypeTag::of::<$candidate>() {
+                    $crate::wasm::__validate_inline_child_placement(
+                        __aether_registry,
+                        __aether_parent,
+                        __aether_tag,
+                        <$candidate>::__AETHER_PLACEMENT,
+                    )?;
                     let __aether_alias = $crate::wasm::__alloc_inline_child_alias(
                         __aether_is_counter,
                         __aether_subname,
@@ -1578,6 +1608,7 @@ macro_rules! __export_multi_internal {
         let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new($mailbox_id);
         match <$ty as $crate::Lifecycle<$ty>>::init(config, params, &mut ctx) {
             ::core::result::Result::Ok(instance) => {
+                __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$ty>());
                 unsafe {
                     __AETHER_MULTI.set(
                         $crate::__macro_internals::Box::new(instance)

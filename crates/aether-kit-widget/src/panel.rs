@@ -647,10 +647,10 @@ fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effe
 /// the per-widget spawn sites in [`WidgetPanel::ensure_spawned`] to one line.
 fn spawn<A>(ctx: &mut WasmCtx<'_, Manual>, subname: &str, config: &A::Config) -> Option<MailboxId>
 where
-    A: aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
+    A: aether_actor::ChildOf<WidgetPanel> + aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
     <A as WasmActor>::State: aether_actor::ErasedWasmActor,
 {
-    match ctx.spawn_inline_child::<A>(Subname::Named(subname), config) {
+    match ctx.spawn_inline_child::<WidgetPanel, A>(Subname::Named(subname), config) {
         Ok(id) => Some(id),
         Err(error) => {
             tracing::warn!(

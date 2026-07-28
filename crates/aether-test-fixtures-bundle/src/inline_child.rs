@@ -7,7 +7,7 @@
 //!
 //! ADR-0114 inline-child fixture (#1916). The entry `InlineParent`
 //! spawns a co-located `InlineChild` in `wire` via
-//! `ctx.spawn_inline_child::<InlineChild>` (ADR-0114). The child gets a
+//! `ctx.spawn_inline_child::<InlineParent, InlineChild>` (ADR-0114). The child gets a
 //! first-class lineage address (`{parent}/aether.embedded:widget`) routed
 //! to the parent's one slot; the `export!` membrane demuxes mail
 //! addressed to that alias to the child.
@@ -125,7 +125,7 @@ impl WasmActor for InlineParent {
     /// `widget`. The returned alias `MailboxId` is fire-and-forget here —
     /// the `FleetHarness` addresses the child by its rendered lineage name.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let _ = ctx.spawn_inline_child::<InlineChild>(Subname::Named("widget"), &());
+        let _ = ctx.spawn_inline_child::<InlineParent, InlineChild>(Subname::Named("widget"), &());
     }
 
     /// Answer an `InlineProbe` addressed to the parent's own mailbox with
@@ -177,7 +177,7 @@ impl WasmActor for InlineStatefulParent {
     /// name (`{parent}/aether.embedded:widget`); the membrane demuxes
     /// the `Bump` / `CountQuery` mail to it.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let _ = ctx.spawn_inline_child::<InlineStatefulChild>(Subname::Named("widget"), &());
+        let _ = ctx.spawn_inline_child::<InlineStatefulParent, InlineStatefulChild>(Subname::Named("widget"), &());
     }
 
     /// The parent ignores mail addressed to its own id — only the child
@@ -260,7 +260,9 @@ impl WasmActor for InlineDespawnParent {
     /// `widget` and store the returned alias so the `DespawnChild` handler
     /// can tear it down.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        if let Ok(alias) = ctx.spawn_inline_child::<InlineDespawnChild>(Subname::Named("widget"), &()) {
+        if let Ok(alias) =
+            ctx.spawn_inline_child::<InlineDespawnParent, InlineDespawnChild>(Subname::Named("widget"), &())
+        {
             self.child = Some(alias);
         }
     }
@@ -332,7 +334,7 @@ impl WasmActor for InlineConfiguredParent {
     /// subname `widget`, spawned with a non-default config so the child's
     /// durable counter starts from `CONFIGURED_CHILD_INITIAL`, not `0`.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let _ = ctx.spawn_inline_child::<InlineConfiguredChild>(
+        let _ = ctx.spawn_inline_child::<InlineConfiguredParent, InlineConfiguredChild>(
             Subname::Named("widget"),
             &InlineConfiguredChildConfig { initial: CONFIGURED_CHILD_INITIAL },
         );
@@ -412,6 +414,10 @@ pub struct InlineTagParent {
     /// Whether the deliberately-unknown-tag spawn attempted in `wire`
     /// returned [`SpawnError::UnknownActorTag`] — the only correct outcome.
     unknown_tag_rejected: bool,
+    /// Whether an exact child declared for another parent was denied.
+    wrong_parent_rejected: bool,
+    /// Whether selecting an exported non-instanced actor was denied.
+    non_instanced_rejected: bool,
 }
 
 #[actor]
@@ -419,7 +425,12 @@ impl WasmActor for InlineTagParent {
     const NAMESPACE: &'static str = "test.inline.tag_parent";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(InlineTagParent { child: None, unknown_tag_rejected: false })
+        Ok(InlineTagParent {
+            child: None,
+            unknown_tag_rejected: false,
+            wrong_parent_rejected: false,
+            non_instanced_rejected: false,
+        })
     }
 
     /// Issue 2692: spawn `InlineStatefulChild` **by tag** — the tag resolves
@@ -433,6 +444,18 @@ impl WasmActor for InlineTagParent {
         {
             self.child = Some(alias);
         }
+        self.wrong_parent_rejected = matches!(
+            ctx.spawn_inline_child_by_tag(
+                ActorTypeTag::of::<InlineConfiguredChild>(),
+                Subname::Named("wrong_parent"),
+                &[],
+            ),
+            Err(SpawnError::PlacementDenied { .. }),
+        );
+        self.non_instanced_rejected = matches!(
+            ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<InlineTagParent>(), Subname::Named("non_instanced"), &[],),
+            Err(SpawnError::ActorNotInstanced(_)),
+        );
         let bogus = ActorTypeTag(0xFFFF_FFFF_FFFF_FFFF);
         self.unknown_tag_rejected = matches!(
             ctx.spawn_inline_child_by_tag(bogus, Subname::Named("nope"), &[]),
@@ -446,7 +469,12 @@ impl WasmActor for InlineTagParent {
     #[handler::manual]
     fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: TagSpawnQuery) {
         if ctx.reply_target().is_some() {
-            ctx.reply(&TagSpawnReport { unknown_tag_rejected: self.unknown_tag_rejected });
+            ctx.reply(&TagSpawnReport {
+                composable_spawned: self.child.is_some(),
+                wrong_parent_rejected: self.wrong_parent_rejected,
+                non_instanced_rejected: self.non_instanced_rejected,
+                unknown_tag_rejected: self.unknown_tag_rejected,
+            });
         }
     }
 

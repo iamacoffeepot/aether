@@ -211,6 +211,11 @@ pub struct Registry {
     /// `wire`, which should not happen). The instance's runtime identity at
     /// any depth, not the ADR-0099 depth-1 fixed point.
     self_id: Cell<u64>,
+    /// The logical actor type actually constructed in the module's entry
+    /// slot. Combined with each [`InlineSlot::type_tag`], this lets a ctx
+    /// recover the actor identity for its own mailbox at any cluster depth.
+    /// `None` until a successful export-generated construction records it.
+    entry_actor_tag: Cell<Option<ActorTypeTag>>,
     /// The cluster-local mail queue. A send to a cluster member is pushed
     /// here ([`Self::route_or_enqueue`]) instead of going to the host;
     /// [`drain_cluster_queue`] dispatches each item through the membrane
@@ -252,6 +257,7 @@ impl Registry {
         Self {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
+            entry_actor_tag: Cell::new(None),
             queue: UnsafeCell::new(VecDeque::new()),
             request_contexts: UnsafeCell::new(RequestContextTable::new()),
             spawn_resolver: Cell::new(None),
@@ -299,6 +305,28 @@ impl Registry {
     #[must_use]
     pub fn self_id(&self) -> u64 {
         self.self_id.get()
+    }
+
+    /// Record the logical actor type actually constructed in the module's
+    /// entry slot. The export-generated init paths call this only after the
+    /// selected actor has initialized successfully.
+    pub fn set_entry_actor_tag(&self, tag: ActorTypeTag) {
+        self.entry_actor_tag.set(Some(tag));
+    }
+
+    /// Resolve the logical actor type at `mailbox`: the entry actor when it
+    /// matches [`Self::self_id`], or an inline slot's recorded type tag at
+    /// any nested depth. Slot lookup is independent of whether its actor box
+    /// is resident or temporarily taken out for dispatch.
+    #[must_use]
+    pub fn actor_type_tag(&self, mailbox: MailboxId) -> Option<ActorTypeTag> {
+        if mailbox.0 == self.self_id.get() {
+            return self.entry_actor_tag.get();
+        }
+        // SAFETY: see [`Self::insert_child`]. This immutable borrow is taken
+        // fresh and released before return; it never spans dispatch.
+        let map = unsafe { &*self.inner.get() };
+        map.get(&mailbox).map(|slot| ActorTypeTag(slot.type_tag))
     }
 
     /// Install the module's by-tag spawn resolver (issue 2692), emitted by
@@ -677,9 +705,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
-    use crate::WasmCtx;
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ErasedWasmActor;
+    use crate::{ActorTypeTag, WasmCtx};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
     use alloc::rc::Rc;
@@ -826,6 +854,75 @@ mod tests {
         assert_eq!(meta.type_tag, tag, "the meta carries the actor-type tag");
         assert_eq!(meta.full_subname, "widget", "the meta carries the subname");
         assert!(!meta.is_counter, "a Named subname is not a counter");
+    }
+
+    #[test]
+    fn actor_type_tag_resolves_entry_actor() {
+        let registry = Registry::new();
+        let entry = MailboxId(0x8100);
+        let tag = ActorTypeTag(0xA100);
+        registry.set_self_id(entry.0);
+        registry.set_entry_actor_tag(tag);
+
+        assert_eq!(registry.actor_type_tag(entry), Some(tag));
+    }
+
+    #[test]
+    fn actor_type_tag_resolves_nested_inline_actor() {
+        let registry = Registry::new();
+        let entry = MailboxId(0x8200);
+        let parent = MailboxId(0x8201);
+        let nested = MailboxId(0x8202);
+        let nested_tag = ActorTypeTag(0xA202);
+        registry.set_self_id(entry.0);
+        registry.insert_child(
+            parent,
+            0xA201,
+            String::from("parent"),
+            false,
+            entry.0,
+            Vec::new(),
+            Box::new(RecordingChild::new().0),
+        );
+        registry.insert_child(
+            nested,
+            nested_tag.0,
+            String::from("nested"),
+            false,
+            parent.0,
+            Vec::new(),
+            Box::new(RecordingChild::new().0),
+        );
+
+        assert_eq!(registry.actor_type_tag(nested), Some(nested_tag));
+    }
+
+    #[test]
+    fn actor_type_tag_returns_none_for_missing_mailbox() {
+        let registry = Registry::new();
+        registry.set_self_id(0x8300);
+        registry.set_entry_actor_tag(ActorTypeTag(0xA300));
+
+        assert_eq!(registry.actor_type_tag(MailboxId(0x83FF)), None);
+    }
+
+    #[test]
+    fn actor_type_tag_survives_taken_inline_slot() {
+        let registry = Registry::new();
+        let child = MailboxId(0x8401);
+        let tag = ActorTypeTag(0xA401);
+        registry.insert_child(
+            child,
+            tag.0,
+            String::from("child"),
+            false,
+            0x8400,
+            Vec::new(),
+            Box::new(RecordingChild::new().0),
+        );
+
+        let _taken = registry.take(child).expect("the child is resident before dispatch");
+        assert_eq!(registry.actor_type_tag(child), Some(tag));
     }
 
     /// Step 4 coverage: recipient == own id dispatches the parent, never

@@ -27,6 +27,7 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_actor_composable_child_of.rs");
     t.compile_fail("tests/ui/rejects_actor_composable_native.rs");
     t.compile_fail("tests/ui/rejects_malformed_actor_composable.rs");
+    t.compile_fail("tests/ui/rejects_wasm_child_spawn_without_placement.rs");
     t.compile_fail("tests/ui/rejects_generic_native_lineage_impl.rs");
     t.compile_fail("tests/ui/rejects_generic_native_lineage_struct.rs");
     // ADR-0112: the manual reply class compiles. The native manual-class

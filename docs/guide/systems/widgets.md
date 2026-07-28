@@ -37,7 +37,7 @@ widget sends can misreport it.
   `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
   `SegmentedConfig`, `NumericConfig` — each embedding a `theme: Theme`. The
   config is both the value
-  `spawn_inline_child::<W>(subname, &config)` boots the widget with and a
+  `spawn_inline_child::<WidgetPanel, W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
 - **Style, down.** `SetTheme { theme }` re-fans a live restyle. A widget adopts
@@ -77,6 +77,14 @@ widget sends can misreport it.
   `ToggleChanged { on }`, `SegmentedSelected { index }`, and
   `NumericChanged { value, committed }` use that same source-attributed lane;
   Numeric applies the preview/commit distinction to typed values.
+
+Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
+`ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
+widget intended for one panel can instead declare
+`#[actor(instanced, child_of(MyPanel))]`. Typed inline spawn names both types
+and verifies the ctx is actually running `MyPanel` before allocating the child
+alias; data-driven by-tag composition enforces the same cardinality and
+placement facts at runtime.
 
 ## Fixed-row virtual lists
 
