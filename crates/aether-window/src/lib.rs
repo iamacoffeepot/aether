@@ -283,8 +283,10 @@ mod tests {
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     #[test]
     fn typed_and_external_window_instance_addresses_resolve_to_one_live_mailbox() {
+        use std::collections::BTreeSet;
+
         use aether_actor::wasm::inline::Registry as InlineRegistry;
-        use aether_data::name_inventory::{child_entries, name_entries, template_entries};
+        use aether_data::name_inventory::{ParamKind, child_entries, template_entries};
         use aether_substrate::Registry;
         use aether_substrate::mail::registry::noop_handler;
 
@@ -299,24 +301,22 @@ mod tests {
             .expect("register canonical live window mailbox");
 
         for address in [canonical, "aether.window://main", "aether.window://aether.window.instance:main"] {
-            assert_eq!(registry.resolve_address(address).expect("resolve live window address").mailbox_id, typed);
+            let resolved = registry.resolve_address(address).expect("resolve live window address");
+            assert_eq!(resolved.mailbox_id, typed);
+            assert_eq!(resolved.canonical_path, canonical);
         }
-        assert_eq!(
-            template_entries()
-                .filter(|entry| entry.domain == aether_data::MAILBOX_DOMAIN)
-                .filter(|entry| entry.prefix == super::WINDOW_INSTANCE_NAMESPACE)
-                .count(),
-            1,
-        );
-        assert_eq!(
-            child_entries()
-                .filter(|entry| {
-                    entry.parent_namespace == WindowCapability::NAMESPACE
-                        && entry.child_namespace == WindowInstance::NAMESPACE
-                })
-                .count(),
-            1,
-        );
-        assert!(name_entries().all(|entry| entry.name != canonical && !entry.name.contains("aether.window://")));
+        assert_eq!(registry.mailbox_name(typed).as_deref(), Some(canonical));
+        assert!(registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("://")));
+        let template_facts = template_entries()
+            .filter(|entry| entry.prefix == super::WINDOW_INSTANCE_NAMESPACE)
+            .map(|entry| (entry.domain, entry.template, matches!(&entry.param, ParamKind::Dynamic)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(template_facts, BTreeSet::from([(aether_data::MAILBOX_DOMAIN, ":{subname}", true)]),);
+
+        let child_facts = child_entries()
+            .filter(|entry| entry.child_namespace == WindowInstance::NAMESPACE)
+            .map(|entry| (entry.parent_namespace, entry.child_namespace))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(child_facts, BTreeSet::from([(WindowCapability::NAMESPACE, WindowInstance::NAMESPACE)]));
     }
 }
