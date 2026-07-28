@@ -1233,8 +1233,8 @@ mod tests {
     use crate::model::Subname;
     use crate::wasm::inline::RouteDecision;
     use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child, spawn_one_child};
-    use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
-    use crate::{Addressable, HandlesKind, WasmActorMailbox};
+    use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx, WasmPlacementFacts};
+    use crate::{Addressable, ChildOf, HandlesKind, ModuleChild, WasmActorMailbox};
     use aether_data::{Kind, MailboxId, Source};
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1423,6 +1423,13 @@ mod tests {
         type Persist = ();
     }
 
+    impl ModuleChild for SucceedingChild {}
+
+    impl SucceedingChild {
+        const __AETHER_PLACEMENT: WasmPlacementFacts =
+            WasmPlacementFacts { is_instanced: true, module_child: true, exact_parent_tags: &[] };
+    }
+
     impl crate::WasmDispatch<Self> for SucceedingChild {
         fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
             unreachable!("the despawn test never dispatches this child")
@@ -1589,6 +1596,14 @@ mod tests {
     impl WasmActor for StubChild {
         type State = Self;
         type Persist = ();
+    }
+
+    impl StubChild {
+        const __AETHER_PLACEMENT: WasmPlacementFacts = WasmPlacementFacts {
+            is_instanced: true,
+            module_child: false,
+            exact_parent_tags: &[ActorTypeTag::of::<NestingParent>()],
+        };
     }
 
     impl crate::WasmDispatch<Self> for StubChild {
@@ -1834,6 +1849,44 @@ mod tests {
     impl WasmActor for NestingParent {
         type State = Self;
         type Persist = ();
+    }
+
+    impl ChildOf<NestingParent> for FailingChild {}
+    impl ChildOf<NestingParent> for StubChild {}
+
+    #[test]
+    fn placement_fixtures_cover_exact_and_composable_lineage() {
+        const EXACT_PARENT: ActorTypeTag = ActorTypeTag::of::<NestingParent>();
+        const MISMATCH_PARENT: ActorTypeTag = ActorTypeTag::of::<LifecycleProbe>();
+
+        fn assert_child_of<P: Addressable, C: ChildOf<P>>() {}
+        fn assert_module_child<C: ModuleChild>() {}
+
+        assert_child_of::<NestingParent, FailingChild>();
+        assert_child_of::<NestingParent, StubChild>();
+        assert_module_child::<SucceedingChild>();
+        assert_child_of::<NestingParent, SucceedingChild>();
+        assert_child_of::<LifecycleProbe, SucceedingChild>();
+
+        assert_ne!(EXACT_PARENT, MISMATCH_PARENT, "the rejection candidate must have a distinct parent tag");
+        assert_eq!(
+            StubChild::__AETHER_PLACEMENT,
+            WasmPlacementFacts { is_instanced: true, module_child: false, exact_parent_tags: &[EXACT_PARENT] },
+            "the exact candidate must name only its declared parent",
+        );
+        assert!(
+            !StubChild::__AETHER_PLACEMENT.exact_parent_tags.contains(&MISMATCH_PARENT),
+            "the exact candidate must reject a different parent tag",
+        );
+        assert_eq!(
+            SucceedingChild::__AETHER_PLACEMENT,
+            WasmPlacementFacts { is_instanced: true, module_child: true, exact_parent_tags: &[] },
+            "the composable candidate carries module permission without exact parents",
+        );
+        assert!(
+            SucceedingChild::__AETHER_PLACEMENT.exact_parent_tags.is_empty(),
+            "a composable candidate must not also carry exact parents",
+        );
     }
 
     impl crate::WasmDispatch<Self> for NestingParent {

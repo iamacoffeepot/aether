@@ -54,12 +54,13 @@ impl WasmActor for RootManager {
 
 /// Sibling export — selectable at load via `export: "test.ui.panel"`
 /// (ADR-0096) and spawnable at runtime by `RootManager` (ADR-0097).
-/// `Instanced` so it satisfies the `spawn_child` bound. Carries a
-/// `#[fallback]` so its capability group is observably distinct from the
-/// entry type's strict receiver.
+/// `RootManager` is its only sibling spawner, so `Panel` declares that exact
+/// parent rather than general module-child composability. `Instanced` satisfies
+/// the `spawn_child` bound; its `#[fallback]` distinguishes its capability
+/// group from the entry type's strict receiver.
 pub struct Panel;
 
-#[actor(instanced)]
+#[actor(instanced, child_of(RootManager))]
 impl WasmActor for Panel {
     const NAMESPACE: &'static str = "test.ui.panel";
 
