@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-28
+- **Amends:** ADR-0164
 
 ## Context
 
