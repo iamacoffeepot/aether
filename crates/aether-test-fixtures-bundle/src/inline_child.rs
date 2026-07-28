@@ -65,9 +65,10 @@
 //! spawns the (already-exported) `InlineStatefulChild` in `wire` by
 //! *runtime tag* — `ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<
 //! InlineStatefulChild>(), …)` — rather than the compile-time-typed verb,
-//! exercising the real `export!`-generated resolver. It also attempts a
-//! deliberately-unknown-tag spawn and records whether the resolver returned
-//! `UnknownActorTag`, surfaced on a `TagSpawnQuery`. Because the tagged
+//! exercising the real `export!`-generated resolver. It records all four
+//! outcomes surfaced on a `TagSpawnQuery`: the composable instanced child
+//! spawns successfully, while an exact child of another parent, an exported
+//! non-instanced actor, and an unknown tag are rejected. Because the accepted
 //! child is `InlineStatefulChild`, its state reconstructs across a
 //! `replace_component` swap through the same reconstruct arm the tag came
 //! from.
@@ -403,8 +404,8 @@ impl WasmActor for InlineConfiguredChild {
 
 /// Entry export for the issue 2692 by-tag inline-spawn fixture. Spawns the
 /// exported `InlineStatefulChild` by runtime [`ActorTypeTag`] (not the typed
-/// verb) in `wire`, storing the alias, and records whether a bogus tag was
-/// correctly rejected.
+/// verb) in `wire`, storing the alias, and records rejection of a wrong exact
+/// parent, an exported non-instanced actor, and an unknown tag.
 ///
 /// Load from the `inline_child` bundle with
 /// `export: Some("test.inline.tag_parent")`.
@@ -433,11 +434,9 @@ impl WasmActor for InlineTagParent {
         })
     }
 
-    /// Issue 2692: spawn `InlineStatefulChild` **by tag** — the tag resolves
-    /// against the module's `export!` set (which includes that child), so no
-    /// generic parameter names the child type here. Then attempt a
-    /// deliberately-bogus tag and record that the generated resolver rejects
-    /// it with `UnknownActorTag` rather than spawning or panicking.
+    /// Spawn the composable `InlineStatefulChild` by tag, then exercise the
+    /// generated resolver's three rejection guards: an exact child of another
+    /// parent, an exported non-instanced actor, and an unknown tag.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if let Ok(alias) =
             ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<InlineStatefulChild>(), Subname::Named("tagged"), &[])
@@ -463,9 +462,8 @@ impl WasmActor for InlineTagParent {
         );
     }
 
-    /// Report whether the bogus-tag spawn was correctly rejected — the
-    /// over-the-wire observable for the generated resolver's `UnknownActorTag`
-    /// fall-through.
+    /// Report the accepted composable spawn and all three rejected selections
+    /// over the wire.
     #[handler::manual]
     fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: TagSpawnQuery) {
         if ctx.reply_target().is_some() {

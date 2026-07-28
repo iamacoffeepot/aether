@@ -264,10 +264,9 @@ pub struct InlineConfiguredChildConfig {
 pub const CONFIGURED_CHILD_INITIAL: u32 = 100;
 
 /// Issue 2692 by-tag inline-spawn fixture driver. Sent to the tag-parent's
-/// own address; the parent replies a [`TagSpawnReport`] carrying the outcome
-/// of the deliberately-unknown-tag spawn it attempted in `wire`, so a
-/// scenario can assert the generated resolver returns `UnknownActorTag`
-/// rather than spawning or panicking. Structured-shaped unit struct.
+/// own address; the parent replies a [`TagSpawnReport`] covering the accepted
+/// composable spawn plus wrong-parent, non-instanced, and unknown-tag
+/// rejections. Structured-shaped unit struct.
 #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.tag_spawn_query")]
 pub struct TagSpawnQuery;
