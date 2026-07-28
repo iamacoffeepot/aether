@@ -67,6 +67,12 @@ impl NativeActor for SyntheticWindowCapability {
 
     #[handler::single]
     fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> CreateWindowResult {
+        if let Err(error) = crate::validate_window_name(&mail.spec.name) {
+            return CreateWindowResult::Err { error };
+        }
+        if state.windows.values().any(|window| window.name == mail.spec.name) {
+            return CreateWindowResult::Err { error: format!("window name `{}` is already in use", mail.spec.name) };
+        }
         let id = match state.allocate_window_id() {
             Ok(id) => id,
             Err(error) => return CreateWindowResult::Err { error },
@@ -74,6 +80,7 @@ impl NativeActor for SyntheticWindowCapability {
         let (width, height) = mail.spec.size.map_or((DEFAULT_WIDTH, DEFAULT_HEIGHT), |size| (size.width, size.height));
         let window = WindowInfo {
             id,
+            name: mail.spec.name,
             title: mail.spec.title,
             mode: mail.spec.mode,
             width,
@@ -227,16 +234,29 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn explicit_subscriptions_validate_before_mutating_routes() {
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), aether_data::MailboxId(1)));
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let mut state = SyntheticWindowCapabilityState {
+    fn test_state() -> SyntheticWindowCapabilityState {
+        SyntheticWindowCapabilityState {
             next_window_id: 1,
             windows: BTreeMap::new(),
             subscribers: WindowSubscribers::new(),
-        };
+        }
+    }
+
+    fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
+        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), aether_data::MailboxId(1)));
+        (binding, mailer)
+    }
+
+    fn spec(name: &str, title: &str) -> crate::WindowSpec {
+        crate::WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+    }
+
+    #[test]
+    fn explicit_subscriptions_validate_before_mutating_routes() {
+        let (binding, mailer) = test_ctx();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut state = test_state();
         let unknown = aether_data::MailboxId(0xBAD);
 
         assert!(matches!(
@@ -263,5 +283,78 @@ mod tests {
             SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
         ));
         assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([dropped]));
+    }
+
+    #[test]
+    fn invalid_names_are_rejected_before_id_allocation() {
+        let (binding, _mailer) = test_ctx();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        for name in ["", "two words", "bad:name"] {
+            let mut state = test_state();
+            assert!(matches!(
+                SyntheticWindowCapability::on_create(
+                    &mut state,
+                    &mut ctx,
+                    CreateWindow { spec: spec(name, "Invalid") },
+                ),
+                CreateWindowResult::Err { .. }
+            ));
+            assert_eq!(state.next_window_id, 1);
+            assert!(state.windows.is_empty());
+        }
+    }
+
+    #[test]
+    fn duplicate_live_names_are_rejected_and_distinct_names_succeed() {
+        let (binding, _mailer) = test_ctx();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut state = test_state();
+
+        assert!(matches!(
+            SyntheticWindowCapability::on_create(&mut state, &mut ctx, CreateWindow { spec: spec("main", "Game") },),
+            CreateWindowResult::Ok { .. }
+        ));
+        assert!(matches!(
+            SyntheticWindowCapability::on_create(
+                &mut state,
+                &mut ctx,
+                CreateWindow { spec: spec("main", "Other title") },
+            ),
+            CreateWindowResult::Err { .. }
+        ));
+        assert_eq!(state.next_window_id, 2);
+        assert!(matches!(
+            SyntheticWindowCapability::on_create(&mut state, &mut ctx, CreateWindow { spec: spec("palette", "Tools") },),
+            CreateWindowResult::Ok { .. }
+        ));
+        assert_eq!(
+            state.windows.values().map(|window| window.name.as_str()).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["main", "palette"]),
+        );
+    }
+
+    #[test]
+    fn name_is_stable_after_title_mutation() {
+        let (binding, _mailer) = test_ctx();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut state = test_state();
+        let CreateWindowResult::Ok { window } =
+            SyntheticWindowCapability::on_create(&mut state, &mut ctx, CreateWindow { spec: spec("main", "Game") })
+        else {
+            panic!("create succeeds");
+        };
+
+        assert!(matches!(
+            SyntheticWindowCapability::on_set_title(
+                &mut state,
+                &mut ctx,
+                SetWindowTitle { window: window.id, title: "Renamed".to_owned() },
+            ),
+            SetWindowTitleResult::Ok { .. }
+        ));
+
+        assert_eq!(state.windows[&window.id].name, "main");
+        assert_eq!(state.windows[&window.id].title, "Renamed");
     }
 }

@@ -36,7 +36,7 @@ use aether_substrate::{
 };
 use aether_window::{
     DesktopWindowApplication, DesktopWindowCapability, DesktopWindowIntegration, DesktopWindowParams,
-    WindowSizeRequest, WindowSpec,
+    INITIAL_WINDOW_NAME, WindowSizeRequest, WindowSpec,
 };
 use crossbeam_channel::{Receiver, Sender};
 use winit::event_loop::EventLoop;
@@ -404,7 +404,7 @@ impl DriverCapability for DesktopDriverCapability {
         // reserves both driver-as-actor inboxes at the Claim stage;
         // `boot_pumped_actor` recovers each at Start. `aether.render` is no
         // longer claimed by a pooled `RenderCapability` on desktop.
-        ctx.claim_driver_mailbox("aether.window")?;
+        ctx.claim_driver_mailbox(DesktopWindowCapability::NAMESPACE)?;
         ctx.claim_driver_mailbox("aether.render")
     }
 
@@ -431,8 +431,12 @@ impl DriverCapability for DesktopDriverCapability {
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let Self { event_loop, boot, window, render_config, assets_dir } = self;
         let aether_chassis::WindowSettings { mode, size, title, wireframe } = window;
-        let initial_window =
-            WindowSpec { title, mode, size: size.map(|(width, height)| WindowSizeRequest { width, height }) };
+        let initial_window = WindowSpec {
+            name: INITIAL_WINDOW_NAME.to_owned(),
+            title,
+            mode,
+            size: size.map(|(width, height)| WindowSizeRequest { width, height }),
+        };
 
         // ADR-0161: the desktop driver boots the pumped `aether.render` actor
         // itself (below). There is no cross-thread render seam — the pumped

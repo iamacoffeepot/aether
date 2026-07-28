@@ -19,6 +19,8 @@ fn unsupported() -> String {
     "unsupported on this chassis — no window peripheral".to_owned()
 }
 
+mod instance;
+
 #[runtime]
 impl NativeActor for HeadlessWindowCapability {
     type State = HeadlessWindowCapabilityState;

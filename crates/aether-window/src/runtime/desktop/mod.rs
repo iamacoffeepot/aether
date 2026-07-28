@@ -80,6 +80,7 @@ enum DesktopWindowLifecycle {
 }
 
 struct DesktopWindowState {
+    name: String,
     title: String,
     mode: WindowMode,
     width: u32,
@@ -97,6 +98,7 @@ impl DesktopWindowState {
     fn info(&self, id: WindowId) -> WindowInfo {
         WindowInfo {
             id,
+            name: self.name.clone(),
             title: self.title.clone(),
             mode: self.mode.clone(),
             width: self.width,
@@ -132,8 +134,9 @@ impl DesktopWindowCapabilityState {
         if self.initial_window_reserved {
             return Ok(());
         }
+        self.queue_create(spec, None, true).map_err(|(error, _)| error)?;
         self.initial_window_reserved = true;
-        self.queue_create(spec, None, true).map(|_| ()).map_err(|(error, _)| error)
+        Ok(())
     }
 
     /// Consume work accumulated by mail handlers and the current native
@@ -156,6 +159,7 @@ impl DesktopWindowCapabilityState {
         self.windows.insert(
             id,
             DesktopWindowState {
+                name: pending.spec.name.clone(),
                 title: pending.spec.title.clone(),
                 mode: pending.spec.mode.clone(),
                 width: size.width,
@@ -438,6 +442,14 @@ impl DesktopWindowCapabilityState {
         reply: Option<Box<InboundMail>>,
         shutdown_on_failure: bool,
     ) -> Result<WindowId, (String, Option<Box<InboundMail>>)> {
+        if let Err(error) = crate::validate_window_name(&spec.name) {
+            return Err((error, reply));
+        }
+        if self.pending_creates.values().any(|pending| pending.spec.name == spec.name)
+            || self.windows.values().any(|window| window.name == spec.name)
+        {
+            return Err((format!("window name `{}` is already in use", spec.name), reply));
+        }
         let id = match self.allocate_window_id() {
             Ok(id) => id,
             Err(error) => return Err((error, reply)),
@@ -744,14 +756,15 @@ mod tests {
         (binding, mailer)
     }
 
-    fn spec(title: &str) -> WindowSpec {
-        WindowSpec { title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+    fn spec(name: &str, title: &str) -> WindowSpec {
+        WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
     }
 
-    fn insert_window(state: &mut DesktopWindowCapabilityState, id: WindowId, closing: bool) {
+    fn insert_window(state: &mut DesktopWindowCapabilityState, id: WindowId, name: &str, closing: bool) {
         state.windows.insert(
             id,
             DesktopWindowState {
+                name: name.to_owned(),
                 title: format!("window-{}", id.0),
                 mode: WindowMode::Windowed,
                 width: 640,
@@ -807,8 +820,8 @@ mod tests {
     #[test]
     fn window_ids_are_monotonic_and_actions_remain_ordered() {
         let mut state = test_state();
-        assert!(state.queue_create(spec("first"), None, false).is_ok());
-        assert!(state.queue_create(spec("second"), None, false).is_ok());
+        assert!(state.queue_create(spec("first", "First"), None, false).is_ok());
+        assert!(state.queue_create(spec("second", "Second"), None, false).is_ok());
 
         let (actions, _) = state.take_host_work();
         assert!(matches!(actions[0], WindowHostAction::Create { id: WindowId(1), .. }));
@@ -817,10 +830,61 @@ mod tests {
     }
 
     #[test]
+    fn invalid_names_are_rejected_before_initial_reservation_or_id_allocation() {
+        for name in ["", "two words", "bad:name"] {
+            let mut state = test_state();
+
+            assert!(state.queue_initial_window(spec(name, "Invalid")).is_err());
+            assert_eq!(state.next_window_id, 1);
+            assert!(!state.initial_window_reserved);
+            assert!(state.pending_creates.is_empty());
+            assert!(state.pending_host_actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn duplicate_pending_and_live_names_are_rejected_without_allocating_ids() {
+        let mut pending = test_state();
+        assert!(pending.queue_create(spec("tools", "Tools"), None, false).is_ok());
+        assert!(pending.queue_create(spec("tools", "Other title"), None, false).is_err());
+        assert_eq!(pending.next_window_id, 2);
+
+        let mut live = test_state();
+        insert_window(&mut live, WindowId(7), "tools", false);
+        assert!(live.queue_create(spec("tools", "Other title"), None, false).is_err());
+        assert_eq!(live.next_window_id, 1);
+        assert!(live.pending_host_actions.is_empty());
+    }
+
+    #[test]
+    fn distinct_valid_names_are_reserved_independently() {
+        let mut state = test_state();
+        assert!(state.queue_create(spec("main", "Game"), None, false).is_ok());
+        assert!(state.queue_create(spec("palette", "Tools"), None, false).is_ok());
+
+        assert_eq!(
+            state.pending_creates.values().map(|pending| pending.spec.name.as_str()).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["main", "palette"]),
+        );
+    }
+
+    #[test]
+    fn window_name_is_stable_when_title_changes() {
+        let mut state = test_state();
+        insert_window(&mut state, WindowId(1), "main", false);
+
+        state.windows.get_mut(&WindowId(1)).expect("live window").title = "Renamed".to_owned();
+        let info = state.windows[&WindowId(1)].info(WindowId(1));
+
+        assert_eq!(info.name, "main");
+        assert_eq!(info.title, "Renamed");
+    }
+
+    #[test]
     fn list_windows_is_sorted_by_engine_identity() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(9), false);
-        insert_window(&mut state, WindowId(2), false);
+        insert_window(&mut state, WindowId(9), "nine", false);
+        insert_window(&mut state, WindowId(2), "two", false);
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
@@ -835,8 +899,8 @@ mod tests {
     #[test]
     fn initial_window_is_reserved_once_across_repeated_resumes() {
         let mut state = test_state();
-        state.queue_initial_window(spec("boot")).expect("first resume");
-        state.queue_initial_window(spec("ignored")).expect("second resume");
+        state.queue_initial_window(spec("main", "boot")).expect("first resume");
+        state.queue_initial_window(spec("ignored", "ignored")).expect("second resume");
 
         let (actions, _) = state.take_host_work();
         assert_eq!(actions.len(), 1);
@@ -846,8 +910,8 @@ mod tests {
     #[test]
     fn closing_one_window_does_not_request_global_shutdown() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), true);
-        insert_window(&mut state, WindowId(2), false);
+        insert_window(&mut state, WindowId(1), "first", true);
+        insert_window(&mut state, WindowId(2), "second", false);
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
@@ -860,7 +924,7 @@ mod tests {
     #[test]
     fn closing_the_last_window_requests_shutdown_after_removal() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), true);
+        insert_window(&mut state, WindowId(1), "first", true);
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
@@ -873,9 +937,9 @@ mod tests {
     #[test]
     fn pending_replacement_defers_last_window_shutdown_until_create_resolves() {
         let mut state = test_state();
-        insert_window(&mut state, WindowId(1), true);
+        insert_window(&mut state, WindowId(1), "first", true);
         state.next_window_id = 2;
-        assert!(state.queue_create(spec("replacement"), None, false).is_ok());
+        assert!(state.queue_create(spec("replacement", "Replacement"), None, false).is_ok());
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
@@ -889,7 +953,7 @@ mod tests {
     #[test]
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
         let mut state = test_state();
-        state.queue_initial_window(spec("boot")).expect("reserve boot window");
+        state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
         let effects = state.fail_window_creation(WindowId(1), "native create failed".to_owned());
 
         assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
@@ -899,8 +963,8 @@ mod tests {
     #[test]
     fn successful_attachment_makes_the_staged_window_live() {
         let mut state = test_state();
-        assert!(state.queue_create(spec("tools"), None, false).is_ok());
-        insert_window(&mut state, WindowId(1), false);
+        assert!(state.queue_create(spec("tools", "Tools"), None, false).is_ok());
+        insert_window(&mut state, WindowId(1), "tools", false);
         state.windows.get_mut(&WindowId(1)).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
@@ -915,8 +979,8 @@ mod tests {
     #[test]
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
         let mut state = test_state();
-        state.queue_initial_window(spec("boot")).expect("reserve boot window");
-        insert_window(&mut state, WindowId(1), false);
+        state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+        insert_window(&mut state, WindowId(1), "main", false);
         state.windows.get_mut(&WindowId(1)).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
