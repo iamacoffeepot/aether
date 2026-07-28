@@ -1,6 +1,6 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_data::{KindId, MailboxId};
+use aether_data::{KindId, MailId, MailboxId};
 use aether_kinds::{WindowId, WindowMode};
 use serde::{Deserialize, Serialize};
 
@@ -73,19 +73,17 @@ pub enum CreateWindowResult {
     Err { error: String },
 }
 
-/// Begin closing one explicitly addressed window.
+/// Begin closing the addressed window.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.close")]
-pub struct CloseWindow {
-    pub window: WindowId,
-}
+pub struct CloseWindow;
 
 /// Reply to [`CloseWindow`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.close_result")]
 pub enum CloseWindowResult {
-    Ok { window: WindowId },
-    Err { window: WindowId, error: String },
+    Ok,
+    Err { error: String },
 }
 
 /// Change one window's presentation mode.
@@ -94,7 +92,6 @@ pub enum CloseWindowResult {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.set_mode")]
 pub struct SetWindowMode {
-    pub window: WindowId,
     pub mode: WindowMode,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -104,15 +101,14 @@ pub struct SetWindowMode {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.set_mode_result")]
 pub enum SetWindowModeResult {
-    Ok { window: WindowId, mode: WindowMode, width: u32, height: u32 },
-    Err { window: WindowId, error: String },
+    Ok { mode: WindowMode, width: u32, height: u32 },
+    Err { error: String },
 }
 
 /// Change one window's title.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.set_title")]
 pub struct SetWindowTitle {
-    pub window: WindowId,
     pub title: String,
 }
 
@@ -120,39 +116,75 @@ pub struct SetWindowTitle {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.set_title_result")]
 pub enum SetWindowTitleResult {
-    Ok { window: WindowId, title: String },
-    Err { window: WindowId, error: String },
+    Ok { title: String },
+    Err { error: String },
 }
 
-/// Bring one window to the foreground.
+/// Bring the addressed window to the foreground.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.focus")]
-pub struct FocusWindow {
-    pub window: WindowId,
-}
+pub struct FocusWindow;
 
 /// Reply to [`FocusWindow`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.focus_result")]
 pub enum FocusWindowResult {
-    Ok { window: WindowId },
-    Err { window: WindowId, error: String },
+    Ok,
+    Err { error: String },
 }
 
-/// Ask the platform to schedule a redraw for one window.
+/// Ask the platform to schedule the addressed window for redraw.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.request_redraw")]
-pub struct RequestWindowRedraw {
-    pub window: WindowId,
-}
+pub struct RequestWindowRedraw;
 
 /// Reply to [`RequestWindowRedraw`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[kind(name = "aether.window.request_redraw_result")]
 pub enum RequestWindowRedrawResult {
-    Ok { window: WindowId },
-    Err { window: WindowId, error: String },
+    Ok,
+    Err { error: String },
 }
+
+/// Manager-private id-bearing command forwarded by one window child.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.internal.apply_command")]
+pub(crate) struct ApplyWindowCommand {
+    pub window: WindowId,
+    pub command: WindowCommand,
+}
+
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WindowCommand {
+    Close,
+    SetMode { mode: WindowMode, width: Option<u32>, height: Option<u32> },
+    SetTitle { title: String },
+    Focus,
+    RequestRedraw,
+}
+
+/// Manager-private result returned to the forwarding child.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.internal.apply_command_result")]
+pub(crate) enum ApplyWindowCommandResult {
+    Close(CloseWindowResult),
+    SetMode(SetWindowModeResult),
+    SetTitle(SetWindowTitleResult),
+    Focus(FocusWindowResult),
+    RequestRedraw(RequestWindowRedrawResult),
+}
+
+/// Correlation stored on the private manager request.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.internal.forward_context")]
+pub(crate) struct WindowForwardContext {
+    pub inbound: MailId,
+}
+
+/// Manager-private request that retires a child after platform-originated close.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+#[kind(name = "aether.window.internal.retire")]
+pub(crate) struct RetireWindow;
 
 /// Subscribe an explicit mailbox to a kind for a window selector.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
@@ -272,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_and_control_kinds_round_trip_with_explicit_window_ids() {
+    fn lifecycle_and_addressed_control_kinds_round_trip() {
         let window = WindowId(7);
         let window_info = info();
 
@@ -280,16 +312,16 @@ mod tests {
         assert_round_trip(ListWindowsResult::Ok { windows: vec![window_info.clone()] });
         assert_round_trip(CreateWindow { spec: spec() });
         assert_round_trip(CreateWindowResult::Ok { window: window_info.clone() });
-        assert_round_trip(CloseWindow { window });
-        assert_round_trip(CloseWindowResult::Ok { window });
-        assert_round_trip(SetWindowMode { window, mode: WindowMode::FullscreenBorderless, width: None, height: None });
-        assert_round_trip(SetWindowModeResult::Ok { window, mode: WindowMode::Windowed, width: 1280, height: 720 });
-        assert_round_trip(SetWindowTitle { window, title: "scene".to_owned() });
-        assert_round_trip(SetWindowTitleResult::Ok { window, title: "scene".to_owned() });
-        assert_round_trip(FocusWindow { window });
-        assert_round_trip(FocusWindowResult::Ok { window });
-        assert_round_trip(RequestWindowRedraw { window });
-        assert_round_trip(RequestWindowRedrawResult::Ok { window });
+        assert_round_trip(CloseWindow);
+        assert_round_trip(CloseWindowResult::Ok);
+        assert_round_trip(SetWindowMode { mode: WindowMode::FullscreenBorderless, width: None, height: None });
+        assert_round_trip(SetWindowModeResult::Ok { mode: WindowMode::Windowed, width: 1280, height: 720 });
+        assert_round_trip(SetWindowTitle { title: "scene".to_owned() });
+        assert_round_trip(SetWindowTitleResult::Ok { title: "scene".to_owned() });
+        assert_round_trip(FocusWindow);
+        assert_round_trip(FocusWindowResult::Ok);
+        assert_round_trip(RequestWindowRedraw);
+        assert_round_trip(RequestWindowRedrawResult::Ok);
         assert_round_trip(WindowOpened { window: window_info });
         assert_round_trip(WindowClosed { window });
     }
@@ -306,5 +338,12 @@ mod tests {
         assert_round_trip(UnsubscribeWindow { selector: WindowSelector::All, kind, mailbox });
         assert_round_trip(SubscribeWindowResult::Ok);
         assert_round_trip(UnsubscribeAllWindows { mailbox });
+    }
+
+    #[test]
+    fn private_forward_context_round_trips_the_actual_inbound_mail_id() {
+        let inbound = MailId::new(MailboxId(0xA37E), 41);
+
+        assert_round_trip(WindowForwardContext { inbound });
     }
 }

@@ -1,17 +1,25 @@
 //! Deterministic in-memory `aether.window` runtime for substrate harnesses.
 
-use std::collections::BTreeMap;
+// The scoped runtime layout keeps this established manager file while its
+// concrete child runtime lives beneath the matching module directory.
+#![allow(clippy::self_named_module_files)]
+
+mod instance;
+
+use std::collections::{BTreeMap, HashMap};
 
 use aether_actor::runtime;
 use aether_kinds::MonitorNotice;
+use aether_substrate::{MonitorHandle, Subname};
 
 use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
-    CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult,
-    InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult,
-    SubscribeWindowSelf, SyntheticWindowCapability, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
-    WindowClosed, WindowId, WindowInfo, WindowMode, WindowOpened,
+    ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
+    FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
+    SetWindowModeResult, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
+    SyntheticWindowCapability, SyntheticWindowInstance, UnsubscribeAllWindows, UnsubscribeWindow,
+    UnsubscribeWindowSelf, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
+    WindowMode, WindowOpened,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -21,21 +29,12 @@ const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
 
 pub struct SyntheticWindowCapabilityState {
-    next_window_id: u64,
     windows: BTreeMap<WindowId, WindowInfo>,
+    child_monitors: HashMap<WindowId, MonitorHandle>,
     subscribers: WindowSubscribers,
 }
 
 impl SyntheticWindowCapabilityState {
-    fn allocate_window_id(&mut self) -> Result<WindowId, String> {
-        let id = self.next_window_id;
-        if id == 0 {
-            return Err("window identity space exhausted".to_owned());
-        }
-        self.next_window_id = self.next_window_id.wrapping_add(1);
-        Ok(WindowId(id))
-    }
-
     fn window_mut(&mut self, window: WindowId) -> Result<&mut WindowInfo, String> {
         self.windows.get_mut(&window).ok_or_else(|| format!("unknown window {window:?}"))
     }
@@ -54,8 +53,8 @@ impl NativeActor for SyntheticWindowCapability {
 
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<SyntheticWindowCapabilityState, BootError> {
         Ok(SyntheticWindowCapabilityState {
-            next_window_id: 1,
             windows: BTreeMap::new(),
+            child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
         })
     }
@@ -73,9 +72,27 @@ impl NativeActor for SyntheticWindowCapability {
         if state.windows.values().any(|window| window.name == mail.spec.name) {
             return CreateWindowResult::Err { error: format!("window name `{}` is already in use", mail.spec.name) };
         }
-        let id = match state.allocate_window_id() {
-            Ok(id) => id,
-            Err(error) => return CreateWindowResult::Err { error },
+        let predicted = ctx.actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
+        let id = WindowId(predicted.0);
+        let spawned = match ctx
+            .spawn_child::<WindowCapability, SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
+            .finish()
+        {
+            Ok(spawned) => spawned,
+            Err(error) => return CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
+        };
+        if spawned != predicted {
+            ctx.actor_at::<SyntheticWindowInstance>(spawned).send(&RetireWindow);
+            return CreateWindowResult::Err {
+                error: format!("spawned window child {spawned:?} did not match predicted mailbox {predicted:?}"),
+            };
+        }
+        let monitor = match ctx.monitor(spawned) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                ctx.actor_at::<SyntheticWindowInstance>(spawned).send(&RetireWindow);
+                return CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") };
+            }
         };
         let (width, height) = mail.spec.size.map_or((DEFAULT_WIDTH, DEFAULT_HEIGHT), |size| (size.width, size.height));
         let window = WindowInfo {
@@ -88,69 +105,75 @@ impl NativeActor for SyntheticWindowCapability {
             focused: false,
             occluded: width == 0 || height == 0,
         };
+        state.child_monitors.insert(id, monitor);
         state.windows.insert(id, window.clone());
         state.publish(ctx, id, &WindowOpened { window: window.clone() });
         CreateWindowResult::Ok { window }
     }
 
     #[handler::single]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CloseWindow) -> CloseWindowResult {
-        if state.windows.remove(&mail.window).is_none() {
-            return CloseWindowResult::Err { window: mail.window, error: format!("unknown window {:?}", mail.window) };
-        }
-        state.publish(ctx, mail.window, &WindowClosed { window: mail.window });
-        CloseWindowResult::Ok { window: mail.window }
-    }
-
-    #[handler::single]
-    fn on_set_mode(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowMode) -> SetWindowModeResult {
-        let window = match state.window_mut(mail.window) {
-            Ok(window) => window,
-            Err(error) => return SetWindowModeResult::Err { window: mail.window, error },
-        };
-        window.mode.clone_from(&mail.mode);
-        if matches!(mail.mode, WindowMode::Windowed)
-            && let (Some(width), Some(height)) = (mail.width, mail.height)
-        {
-            window.width = width;
-            window.height = height;
-            window.occluded = width == 0 || height == 0;
-        }
-        SetWindowModeResult::Ok { window: mail.window, mode: mail.mode, width: window.width, height: window.height }
-    }
-
-    #[handler::single]
-    fn on_set_title(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: SetWindowTitle) -> SetWindowTitleResult {
-        let window = match state.window_mut(mail.window) {
-            Ok(window) => window,
-            Err(error) => return SetWindowTitleResult::Err { window: mail.window, error },
-        };
-        window.title.clone_from(&mail.title);
-        SetWindowTitleResult::Ok { window: mail.window, title: mail.title }
-    }
-
-    #[handler::single]
-    fn on_focus(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FocusWindow) -> FocusWindowResult {
-        if !state.windows.contains_key(&mail.window) {
-            return FocusWindowResult::Err { window: mail.window, error: format!("unknown window {:?}", mail.window) };
-        }
-        for (id, window) in &mut state.windows {
-            window.focused = *id == mail.window;
-        }
-        FocusWindowResult::Ok { window: mail.window }
-    }
-
-    #[handler::single]
-    fn on_request_redraw(
+    fn on_apply_command(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: RequestWindowRedraw,
-    ) -> RequestWindowRedrawResult {
-        match state.windows.get(&mail.window) {
-            Some(_) => RequestWindowRedrawResult::Ok { window: mail.window },
-            None => RequestWindowRedrawResult::Err {
-                window: mail.window,
-                error: format!("unknown window {:?}", mail.window),
+        ctx: &mut NativeCtx<'_>,
+        mail: ApplyWindowCommand,
+    ) -> ApplyWindowCommandResult {
+        match mail.command {
+            WindowCommand::Close => {
+                if state.windows.remove(&mail.window).is_none() {
+                    return ApplyWindowCommandResult::Close(CloseWindowResult::Err {
+                        error: format!("unknown window {:?}", mail.window),
+                    });
+                }
+                state.publish(ctx, mail.window, &WindowClosed { window: mail.window });
+                ApplyWindowCommandResult::Close(CloseWindowResult::Ok)
+            }
+            WindowCommand::SetMode { mode, width, height } => {
+                let window = match state.window_mut(mail.window) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        return ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error });
+                    }
+                };
+                window.mode.clone_from(&mode);
+                if matches!(mode, WindowMode::Windowed)
+                    && let (Some(width), Some(height)) = (width, height)
+                {
+                    window.width = width;
+                    window.height = height;
+                    window.occluded = width == 0 || height == 0;
+                }
+                ApplyWindowCommandResult::SetMode(SetWindowModeResult::Ok {
+                    mode,
+                    width: window.width,
+                    height: window.height,
+                })
+            }
+            WindowCommand::SetTitle { title } => {
+                let window = match state.window_mut(mail.window) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        return ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error });
+                    }
+                };
+                window.title.clone_from(&title);
+                ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
+            }
+            WindowCommand::Focus => {
+                if !state.windows.contains_key(&mail.window) {
+                    return ApplyWindowCommandResult::Focus(FocusWindowResult::Err {
+                        error: format!("unknown window {:?}", mail.window),
+                    });
+                }
+                for (id, window) in &mut state.windows {
+                    window.focused = *id == mail.window;
+                }
+                ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
+            }
+            WindowCommand::RequestRedraw => match state.windows.get(&mail.window) {
+                Some(_) => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Ok),
+                None => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err {
+                    error: format!("unknown window {:?}", mail.window),
+                }),
             },
         }
     }
@@ -214,7 +237,11 @@ impl NativeActor for SyntheticWindowCapability {
     }
 
     #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
+        let id = WindowId(notice.target.0);
+        if state.child_monitors.remove(&id).is_some() && state.windows.remove(&id).is_some() {
+            state.publish(ctx, id, &WindowClosed { window: id });
+        }
         state.subscribers.purge_departed(notice.target);
     }
 }
@@ -224,7 +251,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
+    use aether_actor::Addressable;
     use aether_data::Kind;
+    use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_kinds::Key;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -236,8 +265,8 @@ mod tests {
 
     fn test_state() -> SyntheticWindowCapabilityState {
         SyntheticWindowCapabilityState {
-            next_window_id: 1,
             windows: BTreeMap::new(),
+            child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
         }
     }
@@ -286,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_names_are_rejected_before_id_allocation() {
+    fn invalid_names_are_rejected_before_child_spawn() {
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
@@ -300,21 +329,29 @@ mod tests {
                 ),
                 CreateWindowResult::Err { .. }
             ));
-            assert_eq!(state.next_window_id, 1);
             assert!(state.windows.is_empty());
         }
     }
 
     #[test]
-    fn duplicate_live_names_are_rejected_and_distinct_names_succeed() {
+    fn duplicate_live_names_are_rejected_and_distinct_names_predict_distinct_children() {
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mut state = test_state();
+        state.windows.insert(
+            WindowId(7),
+            WindowInfo {
+                id: WindowId(7),
+                name: "main".to_owned(),
+                title: "Game".to_owned(),
+                mode: WindowMode::Windowed,
+                width: DEFAULT_WIDTH,
+                height: DEFAULT_HEIGHT,
+                focused: false,
+                occluded: false,
+            },
+        );
 
-        assert!(matches!(
-            SyntheticWindowCapability::on_create(&mut state, &mut ctx, CreateWindow { spec: spec("main", "Game") },),
-            CreateWindowResult::Ok { .. }
-        ));
         assert!(matches!(
             SyntheticWindowCapability::on_create(
                 &mut state,
@@ -323,14 +360,9 @@ mod tests {
             ),
             CreateWindowResult::Err { .. }
         ));
-        assert_eq!(state.next_window_id, 2);
-        assert!(matches!(
-            SyntheticWindowCapability::on_create(&mut state, &mut ctx, CreateWindow { spec: spec("palette", "Tools") },),
-            CreateWindowResult::Ok { .. }
-        ));
-        assert_eq!(
-            state.windows.values().map(|window| window.name.as_str()).collect::<BTreeSet<_>>(),
-            BTreeSet::from(["main", "palette"]),
+        assert_ne!(
+            WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main"),
+            WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "palette"),
         );
     }
 
@@ -339,22 +371,73 @@ mod tests {
         let (binding, _mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mut state = test_state();
-        let CreateWindowResult::Ok { window } =
-            SyntheticWindowCapability::on_create(&mut state, &mut ctx, CreateWindow { spec: spec("main", "Game") })
-        else {
-            panic!("create succeeds");
-        };
+        let id = WindowId(7);
+        state.windows.insert(
+            id,
+            WindowInfo {
+                id,
+                name: "main".to_owned(),
+                title: "Game".to_owned(),
+                mode: WindowMode::Windowed,
+                width: DEFAULT_WIDTH,
+                height: DEFAULT_HEIGHT,
+                focused: false,
+                occluded: false,
+            },
+        );
 
         assert!(matches!(
-            SyntheticWindowCapability::on_set_title(
+            SyntheticWindowCapability::on_apply_command(
                 &mut state,
                 &mut ctx,
-                SetWindowTitle { window: window.id, title: "Renamed".to_owned() },
+                ApplyWindowCommand { window: id, command: WindowCommand::SetTitle { title: "Renamed".to_owned() } },
             ),
-            SetWindowTitleResult::Ok { .. }
+            ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { .. })
         ));
 
-        assert_eq!(state.windows[&window.id].name, "main");
-        assert_eq!(state.windows[&window.id].title, "Renamed");
+        assert_eq!(state.windows[&id].name, "main");
+        assert_eq!(state.windows[&id].title, "Renamed");
+    }
+
+    #[test]
+    fn unexpected_child_departure_closes_only_its_window() {
+        let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+        harness
+            .execute(vec![
+                (
+                    "first",
+                    HarnessOp::send_and_await(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("first", "First") },
+                    ),
+                ),
+                (
+                    "second",
+                    HarnessOp::send_and_await(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("second", "Second") },
+                    ),
+                ),
+                (
+                    "depart-first",
+                    HarnessOp::send_mail(
+                        format!("{}/{}:first", WindowCapability::NAMESPACE, WindowInstance::NAMESPACE),
+                        &RetireWindow,
+                    ),
+                ),
+                ("remaining", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows)),
+            ])
+            .expect("unexpected child departure settles");
+
+        let second = WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "second").0);
+        let ListWindowsResult::Ok { windows } = harness
+            .execute(vec![("listed", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows))])
+            .expect("process child monitor notice")
+            .reply::<ListWindowsResult>("listed")
+            .expect("surviving sibling list reply")
+        else {
+            panic!("synthetic list succeeds");
+        };
+        assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [second]);
     }
 }
