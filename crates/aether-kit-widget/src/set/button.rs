@@ -82,7 +82,7 @@ impl ButtonWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ButtonConfig` again to relabel or restyle it in place.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for ButtonWidget {
     type Config = ButtonConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.button";

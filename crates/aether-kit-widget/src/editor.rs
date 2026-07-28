@@ -39,7 +39,7 @@ impl EditorShell {
     }
 }
 
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for EditorShell {
     type Config = EditorConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.editor";

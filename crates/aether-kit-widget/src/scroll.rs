@@ -282,7 +282,7 @@ impl ScrollWidget {
 /// Stateful scroll viewport. Spawned through `WidgetKind::Scroll`; its parent
 /// assigns a `WidgetFrame`, sends `Collect`, and routes wheel input by cursor
 /// hit testing. The actor emits `ScrollOutcome` and any exact residual upward.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for ScrollWidget {
     type Config = ScrollConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.scroll";

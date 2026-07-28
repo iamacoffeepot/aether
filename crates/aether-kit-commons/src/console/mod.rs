@@ -401,7 +401,7 @@ impl ConsoleOverlay {
     }
 }
 
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for ConsoleOverlay {
     type Config = ConsoleConfig;
     const NAMESPACE: &'static str = "aether.kit.console";
@@ -580,6 +580,13 @@ fn f32_floor_to_usize(value: f32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_overlay_is_module_child() {
+        fn assert_module_child<T: aether_actor::ModuleChild>() {}
+
+        assert_module_child::<ConsoleOverlay>();
+    }
 
     fn overlay(config: ConsoleConfig) -> ConsoleOverlay {
         ConsoleOverlay {

@@ -234,7 +234,7 @@ fn finite_f32(value: f64) -> Option<f32> {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ImageConfig` again to replace texture or presentation in place.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for ImageWidget {
     type Config = ImageConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.image";

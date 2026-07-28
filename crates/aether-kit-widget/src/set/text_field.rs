@@ -104,7 +104,7 @@ impl TextFieldWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `TextFieldConfig` again to reset its contents or theme in place.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for TextFieldWidget {
     type Config = TextFieldConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_field";

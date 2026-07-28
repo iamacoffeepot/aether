@@ -75,7 +75,7 @@ struct ScriptLoadContext {
 /// The reference behavior host. Load it wrapped over a widget slot through the
 /// kit's declarative `WidgetKind::BehaviorHost` attachment (issue 2681 / 2692);
 /// the full live scripted-behavior e2e is #2688.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for BehaviorHost {
     type Config = HostConfig;
     const NAMESPACE: &'static str = "aether.behavior.host";
@@ -560,6 +560,13 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn behavior_host_is_module_child() {
+        fn assert_module_child<T: aether_actor::ModuleChild>() {}
+
+        assert_module_child::<BehaviorHost>();
+    }
 
     #[derive(Default)]
     struct RecordingSink {

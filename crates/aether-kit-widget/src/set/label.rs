@@ -34,7 +34,7 @@ pub struct LabelWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `LabelConfig` again to change the text or theme in place.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for LabelWidget {
     type Config = LabelConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.label";

@@ -320,7 +320,7 @@ impl TextAreaWidget {
 /// # Agent
 /// Not loaded directly — a panel spawns it from [`TextAreaConfig`]. Plain
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_area";

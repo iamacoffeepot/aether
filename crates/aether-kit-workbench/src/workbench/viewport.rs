@@ -20,7 +20,7 @@ use aether_kit_terrain::world::{
 };
 use aether_kit_widget::EditorRegionRect;
 
-use super::{WorkbenchCamera, WorkbenchControl, WorkbenchFailure, valid_region};
+use super::{TerrainWorkbench, WorkbenchCamera, WorkbenchControl, WorkbenchFailure, valid_region};
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[kind(name = "aether.kit.workbench.viewport.config")]
@@ -196,7 +196,7 @@ impl TerrainViewport {
     }
 }
 
-#[actor(instanced)]
+#[actor(instanced, child_of(TerrainWorkbench))]
 impl WasmActor for TerrainViewport {
     type Config = TerrainViewportConfig;
     const NAMESPACE: &'static str = "aether.kit.workbench.viewport";
