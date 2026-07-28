@@ -97,8 +97,25 @@ HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
 ```
 
 The constructor accepts only root identities and `send` compiles only when the
-actor handles that direct kind. Synthetic window events deliberately use a
-separate generic convenience constructor:
+actor handles that direct kind. Once a root `CreateWindow` operation has
+settled, send an id-less control to its addressed child. Derive the boundary
+address from the manager identity rather than copying its namespace literal:
+
+```rust
+use aether_actor::Addressable;
+
+let main = format!("{}://main", WindowCapability::NAMESPACE);
+
+HarnessOp::send_and_await(
+    main,
+    &SetWindowTitle { title: "Inspector".to_owned() },
+);
+```
+
+The canonical spelling of that recipient is
+`aether.window/aether.window.instance:main`; both forms resolve to the same
+live child mailbox. Synthetic window events deliberately use a separate
+generic convenience constructor:
 
 ```rust
 HarnessOp::window_event(WindowId(2), &Key { window: WindowId(2), code: keycode });

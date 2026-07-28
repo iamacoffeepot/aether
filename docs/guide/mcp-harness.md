@@ -269,8 +269,12 @@ one handler.
   flipped.)
 - **Desktop-only surfaces fail fast.** `capture_frame` and the window ops need the
   desktop chassis; the headless chassis replies with an error rather than hanging.
-  To read back a backgrounded or minimized window, mail `aether.window.focus`
-  first to foreground it — see [Window](systems/window.md).
+  Before reading back a backgrounded or minimized window, mail
+  `aether.window.focus` to a named child recipient such as
+  `aether.window://main` (canonical
+  `aether.window/aether.window.instance:main`). Success acknowledges the focus
+  request; the OS may decline it or apply it asynchronously, so it does not
+  prove the window is already foregrounded. See [Window](systems/window.md).
 - **`describe_component` resolves names before consulting its cache.** Address
   it by the lineage returned by `load_component`, an unambiguous abbreviation,
   or a retained boot-spec lineage. The selected engine first returns the live

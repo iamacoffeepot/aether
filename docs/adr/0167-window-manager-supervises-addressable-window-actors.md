@@ -1,7 +1,8 @@
 # ADR-0167: Window manager supervises addressable window actors
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-28
+- **Accepted:** 2026-07-28
 - **Amends:** ADR-0164
 
 ## Context
