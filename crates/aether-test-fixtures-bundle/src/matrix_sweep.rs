@@ -180,7 +180,7 @@ impl WasmActor for MatrixParent {
 /// the multi-actor module's type set includes it.
 pub struct MatrixChild;
 
-#[actor(instanced)]
+#[actor(instanced, child_of(MatrixParent))]
 impl WasmActor for MatrixChild {
     const NAMESPACE: &'static str = "test.matrix.child";
 

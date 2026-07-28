@@ -59,7 +59,7 @@ impl WasmActor for RootManager {
 /// entry type's strict receiver.
 pub struct Panel;
 
-#[actor(instanced)]
+#[actor(instanced, child_of(RootManager))]
 impl WasmActor for Panel {
     const NAMESPACE: &'static str = "test.ui.panel";
 

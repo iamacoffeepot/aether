@@ -141,7 +141,7 @@ impl WasmActor for InlineParent {
 /// constructs it in-process).
 pub struct InlineChild;
 
-#[actor(instanced)]
+#[actor(instanced, child_of(InlineParent))]
 impl WasmActor for InlineChild {
     const NAMESPACE: &'static str = "test.inline.child";
 
@@ -188,13 +188,13 @@ impl WasmActor for InlineStatefulParent {
 
 /// Inline child for the stateful fixture, co-located in the parent's wasm
 /// instance, carrying a counter that survives a `replace_component` swap.
-/// `Instanced` satisfies the `spawn_inline_child` bound; it is in the
-/// `export!` list so the rehydrate reconstruct can re-`init` it by type.
+/// It is composable because both `InlineStatefulParent` and `InlineTagParent`
+/// spawn this exported identity from the same resident module.
 pub struct InlineStatefulChild {
     count: u32,
 }
 
-#[actor(instanced)]
+#[actor(instanced, composable)]
 impl WasmActor for InlineStatefulChild {
     const NAMESPACE: &'static str = "test.inline.stateful_child";
 
@@ -289,7 +289,7 @@ impl WasmActor for InlineDespawnParent {
 /// not exported (the parent constructs it in-process).
 pub struct InlineDespawnChild;
 
-#[actor(instanced)]
+#[actor(instanced, child_of(InlineDespawnParent))]
 impl WasmActor for InlineDespawnChild {
     const NAMESPACE: &'static str = "test.inline.despawn_child";
 
@@ -356,7 +356,7 @@ pub struct InlineConfiguredChild {
     count: u32,
 }
 
-#[actor(instanced)]
+#[actor(instanced, child_of(InlineConfiguredParent))]
 impl WasmActor for InlineConfiguredChild {
     type Config = InlineConfiguredChildConfig;
     const NAMESPACE: &'static str = "test.inline.configured_child";
