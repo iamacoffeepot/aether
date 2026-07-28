@@ -175,9 +175,9 @@ impl WasmActor for MatrixParent {
     }
 }
 
-/// Inline child — co-located in the parent's wasm instance. `Instanced`
-/// satisfies the `spawn_inline_child` bound; it rides the `export!` list so
-/// the multi-actor module's type set includes it.
+/// Inline child co-located beneath `MatrixParent`, the only actor that builds
+/// this fixed matrix topology. It declares that exact parent rather than
+/// general module-child composability; `Instanced` satisfies the spawn bound.
 pub struct MatrixChild;
 
 #[actor(instanced, child_of(MatrixParent))]
