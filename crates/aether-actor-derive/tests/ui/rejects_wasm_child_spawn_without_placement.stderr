@@ -1,0 +1,22 @@
+error[E0277]: the trait bound `UnplacedChild: ChildOf<Parent>` is not satisfied
+  --> tests/ui/rejects_wasm_child_spawn_without_placement.rs:32:39
+   |
+32 |     let _ = ctx.spawn_child::<Parent, UnplacedChild>(Subname::Named("child"), &());
+   |                 -----------           ^^^^^^^^^^^^^ unsatisfied trait bound
+   |                 |
+   |                 required by a bound introduced by this call
+   |
+help: the trait `ModuleChild` is not implemented for `UnplacedChild`
+  --> tests/ui/rejects_wasm_child_spawn_without_placement.rs:17:1
+   |
+17 | struct UnplacedChild;
+   | ^^^^^^^^^^^^^^^^^^^^
+   = note: required for `UnplacedChild` to implement `ChildOf<Parent>`
+note: required by a bound in `WasmCtx::<'_, M>::spawn_child`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx.rs
+   |
+   |     pub fn spawn_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
+   |            ----------- required by a bound in this associated function
+...
+   |         C: ChildOf<P> + Instanced + WasmActor,
+   |            ^^^^^^^^^^ required by this bound in `WasmCtx::<'_, M>::spawn_child`

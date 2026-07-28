@@ -134,9 +134,10 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 /// `inline_child` bundle via `export: Some("test.inline.tag_parent")`; the
 /// parent's `wire` spawns `InlineStatefulChild` **by tag** (not the typed
 /// verb) under `Named("tagged")` and also attempts a bogus tag. The scenario
-/// asserts (1) the bogus-tag spawn was rejected with `UnknownActorTag` (via a
-/// `TagSpawnQuery`), (2) the tag-spawned child is live and stateful — its
-/// counter climbs to 2 through its own alias — and (3) after a
+/// asserts (1) a composable instanced child spawns, while a wrong exact
+/// parent, an exported non-instanced actor, and a bogus tag are rejected,
+/// (2) the tag-spawned child is live and stateful — its counter climbs to 2
+/// through its own alias — and (3) after a
 /// `replace_component` swap the child's count is still 2, i.e. the by-tag
 /// child rides the same reconstruct arm its tag came from. Exercises the
 /// generated resolver + host alias allocation end-to-end, which the
@@ -181,10 +182,10 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
         LoadResult::Err { error } => panic!("inline_child_tag load failed: {error}"),
     };
 
-    // (1) The parent's `wire` attempted a bogus-tag spawn: assert the
-    // generated resolver rejected it with `UnknownActorTag` (never spawned,
-    // never panicked). (2) The known-tag child is live and stateful — bump
-    // it to 2 through its own alias and read it back.
+    // (1) Assert the generated resolver accepted only the composable child
+    // and rejected wrong-parent, non-instanced, and unknown selections before
+    // allocation. (2) The accepted child is live and stateful — bump it to 2
+    // through its own alias and read it back.
     let pre = harness
         .execute(vec![
             ("tag_report", HarnessOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery)),
@@ -195,8 +196,13 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
         .expect("tag report + bump + query sequence");
     assert_eq!(
         pre.reply::<TagSpawnReport>("tag_report").expect("decode TagSpawnReport"),
-        TagSpawnReport { unknown_tag_rejected: true },
-        "a bogus ActorTypeTag must be rejected with UnknownActorTag by the generated resolver",
+        TagSpawnReport {
+            composable_spawned: true,
+            wrong_parent_rejected: true,
+            non_instanced_rejected: true,
+            unknown_tag_rejected: true,
+        },
+        "the generated resolver must enforce membership, instanced cardinality, and placement",
     );
     assert_eq!(
         pre.reply::<CountReport>("query").expect("decode pre-replace CountReport"),

@@ -307,7 +307,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
 }
 
 /// ADR-0097: a loaded `RootManager` spawns a `Panel` sibling at runtime
-/// via `ctx.spawn_child::<Panel>`. Pinging `RootManager` triggers the
+/// via `ctx.spawn_child::<RootManager, Panel>`. Pinging `RootManager` triggers the
 /// spawn; the spawned `Panel` registers at
 /// `aether.embedded:0` (Counter discriminator — a flat segment, no type
 /// prefix), and pinging *it* makes it broadcast a `TickObserved` to the

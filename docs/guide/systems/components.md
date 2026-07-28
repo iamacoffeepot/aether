@@ -132,16 +132,31 @@ component's advertised capabilities, so `describe_kinds` can resolve its schema.
 
 A running instance can stand up another actor from its **own module** — a *sibling*
 type — without a fresh load ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)). Where a native capability spawns
-any `Instanced` actor with `ctx.spawn_child`, a component spawns one of the
-`Instanced` types its `export!` listed:
+any permitted `Instanced` actor with `ctx.spawn_child`, a component spawns one
+of the `Instanced` types its `export!` listed. The child declares either an
+exact `child_of(Parent)` edge or `composable` module-local placement, and the
+call names both identities:
 
 ```rust
 #[handler::single]
 fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
     // -> Result<MailboxId, SpawnError>: the new instance's address
-    let panel = ctx.spawn_child::<Panel>(Subname::Counter, &PanelConfig { /* … */ });
+    let panel = ctx.spawn_child::<RootManager, Panel>(
+        Subname::Counter,
+        &PanelConfig { /* … */ },
+    );
 }
 ```
+
+The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
+At runtime the ctx also verifies that its actual registry actor tag is
+`RootManager` before config encoding or the sibling-spawn host call. Inline
+composition uses the same rule with
+`spawn_inline_child::<RootManager, Panel>(...)`. The dynamic
+`spawn_inline_child_by_tag` form remains available for data-driven assembly,
+but its generated export resolver rejects unknown exports, non-instanced
+actors, and actors without an exact-or-`composable` relationship to the actual
+runtime parent before allocating an alias.
 
 `Subname::Counter` has the host assign a bare monotonic counter — `0`, `1`, … —
 for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`

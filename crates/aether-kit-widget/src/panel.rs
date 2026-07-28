@@ -187,7 +187,7 @@ impl WidgetPanel {
             // from any arm (an undecodable config, a spawn failure, or a
             // rejected container) skips the slot entirely so the stack
             // stays honest.
-            let placed = spawn_widget_child(ctx, spec, ChildLayout::Panel { row_height_pixels: row });
+            let placed = spawn_widget_child::<Self>(ctx, spec, ChildLayout::Panel { row_height_pixels: row });
             let Some(placed) = placed else {
                 continue;
             };
@@ -269,15 +269,18 @@ impl WidgetPanel {
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-pub fn spawn_widget_child(
+pub fn spawn_widget_child<P>(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
-) -> Option<SpawnedChild> {
+) -> Option<SpawnedChild>
+where
+    P: WasmActor,
+{
     let row = layout.row_height_pixels();
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
-            let id = spawn::<LabelWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<P, LabelWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -290,7 +293,7 @@ pub fn spawn_widget_child(
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
-            let id = spawn::<ImageWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<P, ImageWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -303,7 +306,7 @@ pub fn spawn_widget_child(
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
-            let id = spawn::<SliderWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<P, SliderWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -317,7 +320,7 @@ pub fn spawn_widget_child(
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
             let height = row * config.options.len() as f32;
-            let id = spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<P, RadioGroupWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -330,7 +333,7 @@ pub fn spawn_widget_child(
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
-            let id = spawn::<TextFieldWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<P, TextFieldWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -344,7 +347,7 @@ pub fn spawn_widget_child(
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
             let height = row * config.rows.max(1) as f32;
-            let id = spawn::<TextAreaWidget>(ctx, &spec.subname, &config)?;
+            let id = spawn::<P, TextAreaWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 id,
                 width_pixels: None,
@@ -356,18 +359,24 @@ pub fn spawn_widget_child(
                 scroll_viewport: None,
             })
         }),
-        WidgetKind::Button => spawn_button_child(ctx, spec, row),
-        WidgetKind::VirtualList => spawn_virtual_list_child(ctx, spec, row),
-        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => spawn_row_control_child(ctx, spec, row),
+        WidgetKind::Button => spawn_button_child::<P>(ctx, spec, row),
+        WidgetKind::VirtualList => spawn_virtual_list_child::<P>(ctx, spec, row),
+        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => {
+            spawn_row_control_child::<P>(ctx, spec, row)
+        }
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
-        WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
-        WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
+        WidgetKind::Composite => spawn_composite_child::<P>(ctx, spec, layout, row),
+        WidgetKind::Scroll => spawn_scroll_child::<P>(ctx, spec, layout),
     }
 }
 
-fn spawn_button_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+fn spawn_button_child<P: WasmActor>(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
     let config = decode_child::<ButtonConfig>(spec)?;
-    let id = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
+    let id = spawn::<P, ButtonWidget>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
         id,
         width_pixels: None,
@@ -380,11 +389,15 @@ fn spawn_button_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row
     })
 }
 
-fn spawn_virtual_list_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+fn spawn_virtual_list_child<P: WasmActor>(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
     let config = decode_child::<VirtualListConfig>(spec)?;
     let profile = virtual_list_profile(&spec.subname, row, &config)?;
     let state = config.state.clone();
-    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+    spawn::<P, VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
         id,
         width_pixels: None,
         height_pixels: profile.height,
@@ -418,7 +431,7 @@ fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
     (height.is_finite() && height >= 0.0).then_some(height)
 }
 
-fn spawn_composite_child(
+fn spawn_composite_child<P: WasmActor>(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -434,7 +447,7 @@ fn spawn_composite_child(
     }
     decode_nested_widget_config(spec).and_then(|config| {
         let intrinsic = config.intrinsic;
-        spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+        spawn::<P, Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
             id,
             width_pixels: intrinsic.and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
             height_pixels: intrinsic
@@ -449,7 +462,7 @@ fn spawn_composite_child(
     })
 }
 
-fn spawn_scroll_child(
+fn spawn_scroll_child<P: WasmActor>(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -468,7 +481,7 @@ fn spawn_scroll_child(
             return None;
         }
         let viewport = config.viewport_extent;
-        spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+        spawn::<P, ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
             id,
             width_pixels: Some(viewport.width_pixels),
             height_pixels: viewport.height_pixels,
@@ -484,10 +497,14 @@ fn spawn_scroll_child(
 /// Spawn the three issue-2926 one-row control children. Keeping their
 /// mechanical decode/spawn profiles together prevents the main exhaustive
 /// dispatcher from becoming a second long-form implementation surface.
-fn spawn_row_control_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+fn spawn_row_control_child<P: WasmActor>(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
-            spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<P, ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -499,7 +516,7 @@ fn spawn_row_control_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
-            spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<P, SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -511,7 +528,7 @@ fn spawn_row_control_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
-            spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            spawn::<P, NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
@@ -643,14 +660,15 @@ fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effe
     }
 }
 
-/// Spawn one inline widget, logging and dropping the slot on failure. Keeps
-/// the per-widget spawn sites in [`WidgetPanel::ensure_spawned`] to one line.
-fn spawn<A>(ctx: &mut WasmCtx<'_, Manual>, subname: &str, config: &A::Config) -> Option<MailboxId>
+/// Spawn one inline widget under the caller's actual logical actor type,
+/// logging and dropping the slot on failure.
+fn spawn<P, A>(ctx: &mut WasmCtx<'_, Manual>, subname: &str, config: &A::Config) -> Option<MailboxId>
 where
-    A: aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
+    P: WasmActor,
+    A: aether_actor::ChildOf<P> + aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
     <A as WasmActor>::State: aether_actor::ErasedWasmActor,
 {
-    match ctx.spawn_inline_child::<A>(Subname::Named(subname), config) {
+    match ctx.spawn_inline_child::<P, A>(Subname::Named(subname), config) {
         Ok(id) => Some(id),
         Err(error) => {
             tracing::warn!(

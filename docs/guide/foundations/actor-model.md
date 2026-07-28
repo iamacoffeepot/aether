@@ -433,12 +433,18 @@ parent and child types, and can spawn an `Instanced` native actor only when the
 child declares `ChildOf<Parent>`:
 `ctx.spawn_child::<TcpListenerActor, TcpSessionActor>(subname, config, params)`.
 The runtime also verifies that the binding executing the handler has the
-declared parent's logical namespace before constructing the child. A wasm
-component preserves the one-type form and spawns its own **sibling** types — `Instanced` actors
-its module also exports ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)). One wasm crate can export several
+declared parent's logical namespace before constructing the child. Wasm uses
+the same two-type permission: a component spawns its own **sibling** types —
+`Instanced` actors its module also exports
+([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)) — only when the child declares the exact
+`child_of(Parent)` relationship or is an instanced `composable` module child.
+One wasm crate can export several
 actor types (`export!(RootManager, Panel, …)`), and a running instance stands up a
 sibling just as the listener stands up a session:
-`ctx.spawn_child::<Panel>(Subname::Counter, &config)`. A component spawns within the
+`ctx.spawn_child::<RootManager, Panel>(Subname::Counter, &config)`. The SDK
+checks the ctx's actual registry-backed actor tag against `RootManager` before
+encoding config or calling the host, so writing a different parent type cannot
+bypass the declared edge. A component spawns within the
 module it was built from; a foreign module comes in through `load_component`, which
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).

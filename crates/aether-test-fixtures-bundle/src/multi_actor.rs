@@ -5,7 +5,7 @@
 //! that the entry type (the first export, `RootManager`) loads through
 //! an unmodified host, that the host can select the non-entry export
 //! (`Panel`) by its `Addressable::NAMESPACE` (ADR-0096), and that `RootManager`
-//! can spawn a `Panel` sibling at runtime via `ctx.spawn_child::<Panel>`
+//! can spawn a `Panel` sibling at runtime via `ctx.spawn_child::<RootManager, Panel>`
 //! (ADR-0097).
 //!
 //! Receive surfaces are deliberately distinct so a load test can prove
@@ -47,7 +47,7 @@ impl WasmActor for RootManager {
     #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
         for _ in 0..ping.seq.max(1) {
-            let _ = ctx.spawn_child::<Panel>(Subname::Counter, &());
+            let _ = ctx.spawn_child::<RootManager, Panel>(Subname::Counter, &());
         }
     }
 }

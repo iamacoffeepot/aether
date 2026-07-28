@@ -353,10 +353,10 @@ impl TerrainToolPanel {
 
     fn spawn_child<A>(&mut self, ctx: &mut WasmCtx<'_, Manual>, child: PanelChild, config: &A::Config)
     where
-        A: aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
+        A: aether_actor::ChildOf<Self> + aether_actor::Instanced + WasmActor + aether_actor::ErasedWasmActor,
         <A as WasmActor>::State: aether_actor::ErasedWasmActor,
     {
-        match ctx.spawn_inline_child::<A>(Subname::Named(child.subname()), config) {
+        match ctx.spawn_inline_child::<Self, A>(Subname::Named(child.subname()), config) {
             Ok(id) => self.children.push(PanelChildRef { id, child }),
             Err(error) => Self::send_intent(
                 ctx,

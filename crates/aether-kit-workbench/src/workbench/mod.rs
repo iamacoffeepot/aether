@@ -130,7 +130,7 @@ impl TerrainWorkbench {
         if self.children.is_some() || self.failure.is_some() {
             return;
         }
-        let panel = match ctx.spawn_inline_child::<TerrainToolPanel>(
+        let panel = match ctx.spawn_inline_child::<Self, TerrainToolPanel>(
             Subname::Named(PANEL_SUBNAME),
             &TerrainToolPanelConfig {
                 region: self.config.layout.tools,
@@ -150,7 +150,7 @@ impl TerrainWorkbench {
                 return;
             }
         };
-        let viewport = match ctx.spawn_inline_child::<TerrainViewport>(
+        let viewport = match ctx.spawn_inline_child::<Self, TerrainViewport>(
             Subname::Named(VIEWPORT_SUBNAME),
             &TerrainViewportConfig {
                 world_mailbox: self.config.world_mailbox,
@@ -174,20 +174,21 @@ impl TerrainWorkbench {
         };
         let mut console_config = self.config.console.clone();
         console_config.owns_input = false;
-        let console = match ctx.spawn_inline_child::<ConsoleOverlay>(Subname::Named(CONSOLE_SUBNAME), &console_config) {
-            Ok(console) => console,
-            Err(error) => {
-                Self::despawn_partial_children(ctx, &[panel, viewport]);
-                self.record_failure(
-                    ctx,
-                    WorkbenchFailure::Control {
-                        control: WorkbenchControl::Protocol,
-                        reason: format!("workbench console spawn failed: {error:?}"),
-                    },
-                );
-                return;
-            }
-        };
+        let console =
+            match ctx.spawn_inline_child::<Self, ConsoleOverlay>(Subname::Named(CONSOLE_SUBNAME), &console_config) {
+                Ok(console) => console,
+                Err(error) => {
+                    Self::despawn_partial_children(ctx, &[panel, viewport]);
+                    self.record_failure(
+                        ctx,
+                        WorkbenchFailure::Control {
+                            control: WorkbenchControl::Protocol,
+                            reason: format!("workbench console spawn failed: {error:?}"),
+                        },
+                    );
+                    return;
+                }
+            };
         let shell_config = EditorConfig {
             regions: vec![
                 RegionSpec {
@@ -252,7 +253,7 @@ impl TerrainWorkbench {
                 },
             ],
         };
-        let shell = match ctx.spawn_inline_child::<EditorShell>(Subname::Named(SHELL_SUBNAME), &shell_config) {
+        let shell = match ctx.spawn_inline_child::<Self, EditorShell>(Subname::Named(SHELL_SUBNAME), &shell_config) {
             Ok(shell) => shell,
             Err(error) => {
                 Self::despawn_partial_children(ctx, &[panel, viewport, console]);

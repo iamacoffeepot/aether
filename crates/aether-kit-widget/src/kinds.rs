@@ -370,7 +370,7 @@ impl Default for ScrollConfig {
 /// compositing [`WidgetConfig`] tree (every child a `Composite`) and the
 /// heterogeneous reference panel (a leaf per widget type). The spawnable set
 /// is closed and kit-owned — every variant maps to a compile-time
-/// `spawn_inline_child::<A>` call — so the dispatch match is exhaustive and
+/// `spawn_inline_child::<P, A>` call — so the dispatch match is exhaustive and
 /// an unknown widget is a compile error, not a runtime failure.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WidgetKind {

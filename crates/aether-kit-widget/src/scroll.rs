@@ -179,9 +179,11 @@ impl ScrollWidget {
             return;
         }
         self.spawned = true;
-        let Some(spawned) =
-            spawn_widget_child(ctx, &self.content_spec, ChildLayout::Content { assigned_extent: self.content_extent })
-        else {
+        let Some(spawned) = spawn_widget_child::<Self>(
+            ctx,
+            &self.content_spec,
+            ChildLayout::Content { assigned_extent: self.content_extent },
+        ) else {
             return;
         };
         self.composite.register_slot(
