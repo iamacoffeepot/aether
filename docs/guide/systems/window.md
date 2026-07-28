@@ -5,14 +5,14 @@
 > [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
 > (the application-scoped multi-window manager), and
 > [ADR-0167](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0167-window-manager-supervises-addressable-window-actors.md)
-> (named child identities; Proposed and landing incrementally).
+> (addressable named window children).
 
-`aether-window` is the bespoke home of window behavior. One application-scoped
-actor owns every live window, translates native window events, routes the
-resulting Aether kinds, and exposes window lifecycle and control over mail.
-Callers use the platform-neutral `WindowCapability` manager identity, stable
-window names, and explicit `WindowId` values; they never hold a native window
-handle or address a desktop-, headless-, or test-specific implementation.
+`aether-window` is the bespoke home of window behavior. The application-scoped
+`WindowCapability` manager owns global lifecycle and event routing, while each
+live named window has an addressable `WindowInstance` child for control mail.
+Callers use those platform-neutral identities, stable window names, and
+`WindowId` values; they never hold a native window handle or address a
+desktop-, headless-, or test-specific implementation.
 
 The desktop chassis still owns the application thread and the call to winit's
 event loop. That is thread ownership, not window-domain ownership:
@@ -24,6 +24,7 @@ aether-chassis-desktop
               ├── winit ApplicationHandler
               ├── PumpedSlot<DesktopWindowCapability>
               ├── WindowId ↔ winit WindowId maps
+              ├── monitored pooled DesktopWindowInstance children
               └── DesktopWindowIntegration // semantic chassis seam
                     ├── attach/detach render target
                     ├── mark windows dirty
@@ -39,26 +40,28 @@ callbacks enter its state synchronously through same-thread host ingress, while
 actor requests arrive through the normal mailbox and settlement graph.
 
 Keeping the whole native application in `aether-window` also gives
-multi-window behavior one owner. The manager allocates stable engine
-`WindowId`s, maps them to platform ids, retains per-window cursor/IME/focus
-state, publishes events with their source id, and coordinates the matching
-render target. The chassis composes this application with render, lifecycle,
-and shutdown; it does not interpret raw winit events.
+multi-window behavior one owner. The manager uses each child's raw mailbox
+identity as its stable engine `WindowId`, maps it to a platform id, retains
+per-window cursor/IME/focus state, publishes events with their source id, and
+coordinates the matching render target. The chassis composes this application
+with render, lifecycle, and shutdown; it does not interpret raw winit events.
 
 ## The public surface
 
-Consumers address the neutral manager identity and use
-`WindowManagerMailboxExt` for list, create, and subscription operations:
+Consumers use `WindowCapability` and `WindowManagerMailboxExt` for list,
+create, and subscription operations. They resolve a named `WindowInstance`
+from that typed manager identity and use `WindowMailboxExt` for id-less control:
 
 ```rust
 use aether_kinds::{Key, WindowMode};
 use aether_window::{
-    WindowCapability, WindowManagerMailboxExt, WindowSelector, WindowSizeRequest,
-    WindowSpec,
+    WindowCapability, WindowInstance, WindowMailboxExt, WindowManagerMailboxExt,
+    WindowSelector, WindowSizeRequest, WindowSpec,
 };
 
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let windows = ctx.actor::<WindowCapability>();
+    let main = windows.resolve::<WindowInstance>("main");
 
     windows.list();
     windows.create(WindowSpec {
@@ -68,33 +71,51 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
         size: Some(WindowSizeRequest { width: 960, height: 540 }),
     });
     windows.subscribe::<Key>(WindowSelector::All);
+
+    main.set_title("Aether");
+    main.request_redraw();
 }
 ```
 
-The compatibility `WindowMailboxExt` facade continues to expose the existing
-id-bearing control methods while named desktop and synthetic child runtimes
-are introduced in later increments.
+Typed Rust code should resolve through the actor identities rather than copy
+the root namespace. At string-addressed boundaries such as MCP and harness
+operations, the same live child may be named by either its canonical or
+abbreviated recipient:
+
+```text
+aether.window/aether.window.instance:main
+aether.window://main
+```
 
 The request/reply families are:
 
-| Operation | Target or input | Successful reply |
+| Operation | Recipient and input | Successful reply |
 |---|---|---|
-| `list` | none | every live `WindowInfo`, ordered by `WindowId` |
-| `create` | `WindowSpec` | the attached window's `WindowInfo` |
-| `close` | `WindowId` | the window whose close began |
-| `set_mode` | `WindowId`, mode, optional windowed size | resolved mode and size |
-| `set_title` | `WindowId`, title | applied title |
-| `focus` | `WindowId` | acknowledgement |
-| `request_redraw` | `WindowId` | acknowledgement |
+| `list` | manager; no input | every live `WindowInfo`, ordered by `WindowId` |
+| `create` | manager; `WindowSpec` | the attached window's `WindowInfo` |
+| subscribe/unsubscribe | manager; selector, kind, and optional explicit mailbox | acknowledgement |
+| `unsubscribe_all` | manager; explicit mailbox | normal no-reply settlement |
+| `close` | named child; no input | acknowledgement |
+| `set_mode` | named child; mode and optional windowed size | resolved mode and size |
+| `set_title` | named child; title | applied title |
+| `focus` | named child; no input | request acknowledgement |
+| `request_redraw` | named child; no input | request acknowledgement |
 
 `WindowSpec::name` is an immutable actor instance segment: it cannot be empty,
 contain whitespace or `:`, or duplicate a pending or live window name. The
-mutable title remains independent of that stable name. Every targeted
-operation rejects an unknown or already-closing id. Window requests are
-advisory: an OS may clamp a size or decline to focus exactly as asked, so
-callers should treat the reply's applied state as authoritative.
+native actor tombstone also prevents reuse of a closed name during the same
+chassis lifetime. The mutable title remains independent of that stable name. A
+child control request requires a live, non-closing window endpoint. Mode
+changes report the resolved size, which an OS may clamp. Focus success only
+acknowledges that Aether issued the platform request: the OS may decline it or
+apply it asynchronously, so the reply does not prove observed focus.
 There is no implicit focused or current target. The boot window is named
 `main` and is simply the first `WindowSpec` realized after winit resumes.
+
+`WindowId` is the raw mailbox identity of the named child, wrapped as a
+wire-safe `u64` newtype. That same value keys manager state, render targets,
+input events, and `WindowSelector::One`; callers do not maintain a separate
+name-to-id mapping for control.
 
 `WindowInfo` reports:
 
@@ -171,29 +192,34 @@ state and never becomes a wire payload.
 
 ## Runtime variants
 
-All manager variants claim the one shared window namespace:
+All manager variants claim the one shared window namespace, and all child
+variants share the neutral `WindowInstance` identity:
 
 - `DesktopWindowCapability` is pumped by `DesktopWindowApplication` and owns
-  real winit state.
+  real winit state. It spawns and monitors a pooled `DesktopWindowInstance`
+  for every attached window.
 - `HeadlessWindowCapability` is the production headless runtime and fails
-  every request immediately because there is no window peripheral;
-  `WindowCapability` remains its neutral compatibility alias.
+  every manager request immediately because there is no window peripheral, so
+  it never creates a child.
 - `SyntheticWindowCapability`, declared with
   `#[actor(singleton, runtime::synthetic)]`, is test-only. It keeps a
-  deterministic in-memory window map and the same selector-aware routing
-  behavior.
-- `WindowInstance` is the neutral named child identity. Its headless runtime
-  has only the five typed control handlers and fails them immediately; desktop
-  and synthetic managers do not spawn child actors in this increment.
+  deterministic in-memory window map, the same selector-aware routing
+  behavior, and monitored pooled `SyntheticWindowInstance` children.
+- `WindowInstance` is the neutral named child facade. Its desktop and synthetic
+  runtimes forward the five id-less controls to their manager. A matching
+  headless runtime defines fail-fast handlers, but the headless manager does not
+  spawn child endpoints.
 - The hub installs no window actor.
 
 The neutral `WindowCapability` and `WindowInstance` aliases are the identities
 consumer code should name. Concrete manager runtime identities share one
 namespace constant inside `aether-window`; variants do not repeat a namespace
-literal. The default headless manager implementation is `runtime/mod.rs`, the
-headless named endpoint is `runtime/instance.rs`, and the desktop and synthetic
-manager implementations are keyed at `runtime/desktop/` and
-`runtime/synthetic.rs`.
+literal. Native, winit, and render ownership does not move to the children:
+desktop host work stays on the pumped manager/driver boundary, while child
+actors only forward control. The default headless manager implementation is
+`runtime/mod.rs`, the headless named endpoint is `runtime/instance.rs`, and the
+desktop and synthetic implementations live under their matching runtime
+modules.
 
 The initial desktop window still reads `AETHER_WINDOW_MODE` and
 `AETHER_WINDOW_TITLE`. `AETHER_WINDOW_MODE` accepts `windowed`,
@@ -202,10 +228,13 @@ warns and falls back to windowed mode. See [Configuration](configuration.md).
 
 ## Testing and extension
 
-`SubstrateHarness` composes the synthetic runtime. Use typed actor operations
-for controls and `HarnessOp::window_event` for an event:
+`SubstrateHarness` composes the synthetic manager and its supervised children.
+Use the root typed actor sender for manager operations, an addressed child for
+controls, and `HarnessOp::window_event` for an event:
 
 ```rust
+use aether_actor::Addressable;
+
 let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
     &SubscribeWindow {
         selector: WindowSelector::One(window),
@@ -214,11 +243,22 @@ let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
     },
 );
 
+let main = format!("{}://main", WindowCapability::NAMESPACE);
+let title = HarnessOp::send_and_await(
+    main,
+    &SetWindowTitle { title: "Inspector".to_owned() },
+);
+
 let press = HarnessOp::window_event(
     window,
     &Key { window, code: keycode::KEY_ENTER },
 );
 ```
+
+The child-control operation assumes the named window has already been created
+and its creation operation has settled. Derive string recipients from
+`WindowCapability::NAMESPACE` when Rust genuinely needs a boundary address;
+ordinary actor code should use typed `resolve::<WindowInstance>(name)` instead.
 
 Synthetic injection is not a headless production API. The headless runtime
 stays fail-fast so tests cannot accidentally turn unsupported production
