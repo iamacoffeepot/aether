@@ -18,6 +18,7 @@ pub(crate) mod effect;
 mod errors;
 mod handlers;
 mod mailbox;
+mod metrics;
 mod names;
 #[allow(dead_code, reason = "owner submission is installed now and consumed by staged-writer arc follow-ups")]
 mod owner;
@@ -40,6 +41,7 @@ pub use errors::{DropError, KindConflict, NameConflict};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
 pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use mailbox::{MailboxEntry, Registry};
+pub use metrics::RegistryQueueMetrics;
 pub(crate) use owner::ParkAdmission;
 pub(crate) use owner::RegistryOwnerLease;
 pub(crate) use relay::RouteRelayHandle;

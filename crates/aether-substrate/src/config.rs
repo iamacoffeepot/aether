@@ -111,6 +111,62 @@ pub fn parse_csv_set(s: &str) -> Result<HashSet<String>, Infallible> {
     Ok(s.split(',').map(str::trim).filter(|element| !element.is_empty()).map(str::to_string).collect())
 }
 
+/// Default admission bound for the ADR-0165 registry owner queue, in
+/// commands. Sized so a legitimate burst never touches it — a birth storm
+/// parks tens of envelopes, and a batch is one per handler flush — while a
+/// sender spraying nonexistent recipients is capped at a few megabytes of
+/// owner-held memory rather than growing without limit.
+pub const DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY: usize = 4096;
+
+/// Default admission bound for the ADR-0165 route relay queue, in
+/// continuations. The relay's whole inflow is work the owner already
+/// committed to delivering, so crossing this bound is counted and warned
+/// rather than shed — see [`RegistryQueueCapacities::relay`].
+pub const DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY: usize = 4096;
+
+/// The two ADR-0165 serialized-queue admission bounds, resolved once at
+/// chassis boot and handed to the registry owner and route relay leases at
+/// attach. `Copy` so it rides the builder seam as an ordinary value. The
+/// chassis-bin `RegistryQueueConfig` derive-`Config` knob lowers to this;
+/// substrate-core never reads env (issue 464), so the resolution lives
+/// bundle-side and only the resolved capacities reach here.
+///
+/// The two bounds mean different things because their traffic differs, and
+/// the difference is the point of the split (issue 4122):
+///
+/// - the **owner** queue carries a genuinely sheddable class — an ordinary
+///   route-view miss, whose volume no engine component controls — alongside
+///   a reserved class (effect batches, activation cancellations, activation
+///   barriers) whose loss is a correctness failure. Its bound refuses the
+///   sheddable class and never the reserved one.
+/// - the **relay** queue carries only continuations the owner already
+///   decided the fate of, including the parked FIFO released at Live
+///   publication. Dropping one loses mail the registry promised to deliver
+///   and breaks the ADR's birth-ordering contract, so the relay never sheds;
+///   its bound is the declared pressure line whose crossing is counted
+///   (`over_capacity`) and warned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegistryQueueCapacities {
+    /// Owner-queue admission bound in commands (env
+    /// `AETHER_REGISTRY_OWNER_QUEUE_CAPACITY`; default
+    /// [`DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY`]). At or past this depth an
+    /// ordinary route-view miss is shed to the existing unknown-recipient
+    /// policy instead of being parked; effect batches, activation
+    /// cancellations, and activation barriers are always admitted.
+    pub owner: usize,
+    /// Relay-queue pressure bound in continuations (env
+    /// `AETHER_REGISTRY_RELAY_QUEUE_CAPACITY`; default
+    /// [`DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY`]). Continuations past this
+    /// depth are still admitted — the class is not sheddable — and counted.
+    pub relay: usize,
+}
+
+impl Default for RegistryQueueCapacities {
+    fn default() -> Self {
+        Self { owner: DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY, relay: DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY }
+    }
+}
+
 /// The two per-actor ring capacities resolved once at chassis boot and
 /// threaded down the spawn path (ADR-0081 log ring + ADR-0086 trace
 /// ring). `Copy` so it rides every `Spawner` / builder seam as an

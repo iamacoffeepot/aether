@@ -34,7 +34,9 @@ use aether_substrate::chassis::{
     BootableChassis, BuildProvenance, Chassis, ComposeBase, PreludeAction, PreludeFlags, run_chassis_prelude,
 };
 use aether_substrate::config::{
-    ConfigError, ConfigMember, ConfigSources, KnobKind, KnobRecord, RingCapacities, SchedulerTuning,
+    ConfigError, ConfigMember, ConfigSources, DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY,
+    DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, KnobKind, KnobRecord, RegistryQueueCapacities, RingCapacities,
+    SchedulerTuning,
 };
 
 use aether_tcp::TcpCapability;
@@ -169,6 +171,67 @@ impl ActorRingConfig {
             trace: self.trace_ring_capacity,
             trace_max: self.trace_ring_max_size,
         }
+    }
+}
+
+/// The two ADR-0165 serialized-queue admission bounds (issue 4122),
+/// resolved once at chassis boot and lowered via
+/// [`Self::to_registry_queue_capacities`] to the `Copy`
+/// [`RegistryQueueCapacities`] the chassis builder hands the registry owner
+/// and route relay leases at attach. The
+/// `#[derive(aether_substrate::Config)]` emits the env-shaped
+/// `RegistryQueueConfigLayer`, the clap-shaped `RegistryQueueOverlay`, the
+/// `FromArgvThenEnv` impl, and the inherent `from_env` / `from_argv_then_env`
+/// shims (ADR-0090 unit g) — mirrors [`ActorRingConfig`].
+///
+/// `env_prefix = "AETHER_REGISTRY"` joins the field env keys, so the flags
+/// and keys follow the mechanical shape (`AETHER_REGISTRY_OWNER_QUEUE_CAPACITY`
+/// → `--registry-owner-queue-capacity`) with no historical name to pin.
+///
+/// The two are declared together because the owner and the relay are the two
+/// halves of one serialization — the owner decides, the relay delivers — and
+/// an operator retuning one almost always wants to see the other. What they
+/// *mean* differs, and that difference is documented on
+/// [`RegistryQueueCapacities`]: the owner's bound sheds, the relay's does not.
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_REGISTRY", cli_prefix = "registry")]
+pub struct RegistryQueueConfig {
+    /// Registry owner queue admission bound in commands.
+    ///
+    /// At or past this depth an ordinary route-view miss is shed to the
+    /// existing unknown-recipient policy rather than parked; effect batches,
+    /// activation cancellations, and activation barriers are always admitted.
+    /// Default [`DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY`]; a resolved `0`
+    /// coerces to it.
+    #[config(default = 4096, nonzero)]
+    pub owner_queue_capacity: usize,
+    /// Route relay queue pressure bound in continuations.
+    ///
+    /// The relay carries no sheddable class, so continuations past this depth
+    /// are still admitted and counted (`over_capacity`) rather than dropped.
+    /// Default [`DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY`]; a resolved `0`
+    /// coerces to it.
+    #[config(default = 4096, nonzero)]
+    pub relay_queue_capacity: usize,
+}
+
+impl Default for RegistryQueueConfig {
+    fn default() -> Self {
+        // These literals must equal `RegistryQueueCapacities::default()`;
+        // `registry_queue_defaults_match` guards the pair.
+        Self {
+            owner_queue_capacity: DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY,
+            relay_queue_capacity: DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY,
+        }
+    }
+}
+
+impl RegistryQueueConfig {
+    /// Lower the resolved knob to the `Copy` [`RegistryQueueCapacities`] the
+    /// chassis builder hands both leases.
+    #[must_use]
+    pub fn to_registry_queue_capacities(&self) -> RegistryQueueCapacities {
+        RegistryQueueCapacities { owner: self.owner_queue_capacity, relay: self.relay_queue_capacity }
     }
 }
 
@@ -618,6 +681,12 @@ impl ChassisConfigMember for SchedulerTuningConfig {
     }
 }
 
+impl ChassisConfigMember for RegistryQueueConfig {
+    fn install<C: Chassis>(&self, builder: Builder<C>) -> Builder<C> {
+        builder.with_registry_queue_capacities(self.to_registry_queue_capacities())
+    }
+}
+
 impl ChassisConfigMember for SettlementConfig {
     fn install<C: Chassis>(&self, builder: Builder<C>) -> Builder<C> {
         builder.with_teardown_budget(self.to_cap())
@@ -678,6 +747,9 @@ pub struct ChassisBase {
     /// Issue 2485: the resolved scheduler hot-path tuning knob, fused onto
     /// `with_scheduler_tuning`.
     pub scheduler_tuning: SchedulerTuningConfig,
+    /// Issue 4122: the resolved ADR-0165 serialized-queue bounds, fused onto
+    /// `with_registry_queue_capacities`.
+    pub registry_queues: RegistryQueueConfig,
     /// Issue #2509: the resolved settlement/teardown knob, fused onto
     /// `with_teardown_budget`.
     pub settlement: SettlementConfig,
@@ -694,6 +766,7 @@ impl<C: Chassis> ComposeBase<C> for ChassisBase {
             // left at the builder's default.
             .with_chassis_config_member(&self.actor_ring)
             .with_chassis_config_member(&self.scheduler_tuning)
+            .with_chassis_config_member(&self.registry_queues)
             .with_chassis_config_member(&self.settlement)
             // ADR-0156 §6: the wire-frame-size knob (#3850) — its value is pushed
             // into the codec by `install_frame_size` at env time (off the
@@ -871,6 +944,7 @@ impl CommonEnv {
         let namespace_roots = sources.resolve::<NamespaceRoots>()?;
         let actor_ring = sources.resolve::<ActorRingConfig>()?;
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?;
+        let registry_queues = sources.resolve::<RegistryQueueConfig>()?;
         let settlement = sources.resolve::<SettlementConfig>()?;
         // #3849: resolve the substrate runtime knobs (log filter + panic-hook
         // knobs) off the same stack; `Chassis::build` re-applies `log_filter` once
@@ -903,7 +977,7 @@ impl CommonEnv {
         // non-cap members `composed` installs ahead of the chassis's own delta —
         // embedded here so each `Chassis::build` can resolve its driver knobs off
         // `base.sources` before lifting the base out.
-        let base = ChassisBase { sources, actor_ring, scheduler_tuning, settlement };
+        let base = ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement };
         Ok(Self { base, namespace_roots, runtime, chassis_boot, autoload, package_settings })
     }
 
@@ -1060,8 +1134,11 @@ mod tests {
     use super::ActorRingConfig;
     use super::ActorRingConfigLayer;
     use super::ChassisBootConfig;
-    use super::SchedulerTuningConfigLayer;
     use super::chassis_residual_knobs;
+    use super::{
+        DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY, DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, RegistryQueueCapacities,
+        RegistryQueueConfig, RegistryQueueConfigLayer, SchedulerTuningConfigLayer,
+    };
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_lifecycle::{LifecycleConfig, LifecycleConfigLayer};
@@ -1148,6 +1225,21 @@ mod tests {
         }
         assert_eq!(resolved.trace, 7777, "argv overlay wins over env");
         assert_eq!(resolved.log, DEFAULT_RING_CAP, "unset log falls to default");
+    }
+
+    #[test]
+    fn registry_queue_defaults_match() {
+        use confique::Config as _;
+        // Tripwire: the `RegistryQueueConfigLayer` `default = ...` literals
+        // must equal `RegistryQueueCapacities::default()` (issue 4122). The
+        // confique layer and the `Copy` `RegistryQueueCapacities` carry the
+        // bounds independently, so a change to one and not the other would
+        // silently give an unset knob a different admission bound than the
+        // one the substrate documents.
+        let layer = RegistryQueueConfigLayer::builder().load().expect("defaults load");
+        assert_eq!(layer.owner_queue_capacity, DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY);
+        assert_eq!(layer.relay_queue_capacity, DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY);
+        assert_eq!(RegistryQueueConfig::default().to_registry_queue_capacities(), RegistryQueueCapacities::default());
     }
 
     #[test]

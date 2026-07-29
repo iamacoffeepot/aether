@@ -65,7 +65,9 @@ use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::{ConfigError, ConfigSources, StageArgv};
 use clap::Args;
 
-use crate::boot::{ActorRingOverlay, ChassisBootOverlay, SchedulerTuningOverlay, load_chassis_config};
+use crate::boot::{
+    ActorRingOverlay, ChassisBootOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, load_chassis_config,
+};
 
 /// The three source-selecting meta flags every chassis root carries. They name
 /// the file source and the print/describe exits, so they belong to no cap
@@ -151,6 +153,12 @@ pub struct CommonOverlay {
     /// (issue 3882).
     #[command(flatten)]
     pub scheduler: SchedulerTuningOverlay,
+    /// ADR-0165 serialized-queue bounds (issue 4122):
+    /// `--registry-owner-queue-capacity` / `--registry-relay-queue-capacity`,
+    /// shadowing the `AETHER_REGISTRY_*_QUEUE_CAPACITY` env. Both full-stack
+    /// chassis resolve `RegistryQueueConfig` off the shared stack.
+    #[command(flatten)]
+    pub registry_queues: RegistryQueueOverlay,
     /// Settlement-patience backstop (issue 2062): `--settlement-cap-secs`, shadowing
     /// `AETHER_SETTLEMENT_CAP_SECS`. Resolved for both the settlement gates and the
     /// teardown budget (issue 3882 flattened its overlay here).

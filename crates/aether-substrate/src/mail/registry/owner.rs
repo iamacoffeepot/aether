@@ -4,12 +4,17 @@ use std::sync::{Arc, Mutex, Weak};
 #[cfg(test)]
 use std::thread;
 #[cfg(test)]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 use crossbeam_channel::Sender;
 
-use super::effect::{ActivationToken, EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffectError};
+use super::effect::{
+    ACTIVATION_BARRIER_KIND, ActivationToken, EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffectError,
+};
 use super::mailbox::Registry;
+use super::metrics::{INITIAL_QUEUE_RESERVE, QueueMeter, RegistryQueueMetrics};
+use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::{Mail, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState, WakeHandle, WakeSink};
@@ -25,22 +30,90 @@ pub(super) enum OwnerCommand {
     ActivationCancelled { id: MailboxId, token: ActivationToken },
 }
 
+impl OwnerCommand {
+    /// Whether the bound may refuse this command (issue 4122).
+    ///
+    /// Only an ordinary route-view miss is sheddable. Its volume is set by
+    /// whoever is addressing mail — a buggy or hostile sender spraying
+    /// nonexistent recipients turns wrong addressing into owner work — and
+    /// shedding one applies the same terminal treatment the owner would give
+    /// an absent recipient anyway (ADR-0165 §"Pending mail and birth
+    /// ordering": `absent -> apply the existing unknown-recipient policy`),
+    /// so nothing downstream can tell the two apart.
+    ///
+    /// Everything else is reserved. An effect batch carries prepared registry
+    /// state whose loss is a correctness failure, not a delayed delivery; an
+    /// `ActivationCancelled` releases a reservation, and losing it strands a
+    /// `Starting` route and every envelope parked behind it; an activation
+    /// barrier is the control envelope that promotes a birth to `Live`.
+    /// Their volume is bounded by real engine work — one batch per handler
+    /// flush, one barrier per birth — so admitting them past the bound cannot
+    /// be driven from outside. `over_capacity` counts when it happens.
+    fn sheddable(&self) -> bool {
+        match self {
+            Self::ParkOrDrop { mail, .. } => mail.kind != ACTIVATION_BARRIER_KIND,
+            Self::Batch(_) | Self::ActivationCancelled { .. } => false,
+        }
+    }
+}
+
 pub enum ParkAdmission {
     Queued,
     Retry(Mail),
     Closed(Mail),
+    /// The owner queue stood at its bound and this envelope was sheddable.
+    /// The caller applies the existing unknown-recipient policy to the
+    /// returned `Mail`, which is what the owner would have applied to an
+    /// absent recipient.
+    ///
+    /// Shedding removes an envelope; it never moves one. The parked FIFO
+    /// still receives what it receives in owner-observed order, so ADR-0165's
+    /// birth-ordering contract holds — a shed is a loss under saturation, not
+    /// a reordering.
+    Shed(Mail),
 }
 
 #[derive(Clone)]
 pub(super) struct RegistryOwnerHandle {
     state: Arc<Mutex<OwnerQueue>>,
+    meter: Arc<QueueMeter>,
     wake: WakeHandle,
 }
 
 struct OwnerQueue {
     accepting: bool,
+    /// Admission bound in commands. Refuses the sheddable class only; see
+    /// [`OwnerCommand::sheddable`].
+    capacity: usize,
+    /// Whether the queue is inside a saturation episode. Latches on the first
+    /// shed so the warn fires once per episode instead of once per shed
+    /// envelope — a spraying sender must not be able to turn a shed policy
+    /// into a log storm. Cleared by the drain that empties the queue.
+    saturated: bool,
     route_generation: u64,
     commands: VecDeque<OwnerCommand>,
+}
+
+impl OwnerQueue {
+    /// Admit `command` unless the bound refuses it, in which case it is
+    /// handed back for the caller to shed. Records the outcome on `meter`.
+    fn admit(&mut self, meter: &QueueMeter, command: OwnerCommand) -> Option<OwnerCommand> {
+        if command.sheddable() && self.commands.len() >= self.capacity {
+            meter.shed();
+            if !self.saturated {
+                self.saturated = true;
+                tracing::warn!(
+                    target: "aether_substrate::registry",
+                    capacity = self.capacity,
+                    "registry owner queue at capacity — shedding route-view misses to the unknown-recipient policy",
+                );
+            }
+            return Some(command);
+        }
+        self.commands.push_back(command);
+        meter.admit(self.commands.len());
+        None
+    }
 }
 
 impl RegistryOwnerHandle {
@@ -50,7 +123,8 @@ impl RegistryOwnerHandle {
         if !state.accepting {
             return None;
         }
-        state.commands.push_back(OwnerCommand::Batch(BatchEnvelope { batch, completion: sender }));
+        let refused = state.admit(&self.meter, OwnerCommand::Batch(BatchEnvelope { batch, completion: sender }));
+        debug_assert!(refused.is_none(), "an effect batch is reserved and is never refused by the bound");
         drop(state);
         let _ = self.wake.wake();
         Some(RegistryCompletion::new(receiver))
@@ -67,7 +141,15 @@ impl RegistryOwnerHandle {
             }
             return ParkAdmission::Retry(mail);
         }
-        state.commands.push_back(OwnerCommand::ParkOrDrop { mail, observed_generation });
+        if let Some(refused) = state.admit(&self.meter, OwnerCommand::ParkOrDrop { mail, observed_generation }) {
+            drop(state);
+            // A refusal hands back the command it never pushed, and only the
+            // `ParkOrDrop` arm is sheddable, so the envelope is intact here.
+            let OwnerCommand::ParkOrDrop { mail, .. } = refused else {
+                unreachable!("only a ParkOrDrop command is sheddable")
+            };
+            return ParkAdmission::Shed(mail);
+        }
         drop(state);
         let _ = self.wake.wake();
         ParkAdmission::Queued
@@ -78,7 +160,8 @@ impl RegistryOwnerHandle {
         if !state.accepting {
             return false;
         }
-        state.commands.push_back(OwnerCommand::ActivationCancelled { id, token });
+        let refused = state.admit(&self.meter, OwnerCommand::ActivationCancelled { id, token });
+        debug_assert!(refused.is_none(), "an activation cancellation is reserved and is never refused by the bound");
         drop(state);
         let _ = self.wake.wake();
         true
@@ -87,6 +170,10 @@ impl RegistryOwnerHandle {
     pub(super) fn is_accepting(&self) -> bool {
         self.state.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063").accepting
     }
+
+    pub(super) fn metrics(&self) -> RegistryQueueMetrics {
+        self.meter.snapshot()
+    }
 }
 
 pub struct RegistryOwnerLease {
@@ -94,22 +181,37 @@ pub struct RegistryOwnerLease {
 }
 
 impl RegistryOwnerLease {
-    pub fn attach(registry: &Arc<Registry>, mailer: &Arc<Mailer>, sink: WakeSink) -> Self {
+    /// Attach the owner slot with an explicit admission bound. `capacities`
+    /// is the whole resolved knob so the owner and its sibling relay read one
+    /// value rather than two loose numbers; the owner takes
+    /// [`RegistryQueueCapacities::owner`]. A configured `0` clamps to one
+    /// command so the queue can always hold the item it is about to drain.
+    pub fn attach(
+        registry: &Arc<Registry>,
+        mailer: &Arc<Mailer>,
+        sink: WakeSink,
+        capacities: RegistryQueueCapacities,
+    ) -> Self {
+        let capacity = capacities.owner.max(1);
         let state = Arc::new(Mutex::new(OwnerQueue {
             accepting: true,
+            capacity,
+            saturated: false,
             route_generation: registry.current_route_generation(),
-            commands: VecDeque::new(),
+            commands: VecDeque::with_capacity(capacity.min(INITIAL_QUEUE_RESERVE)),
         }));
+        let meter = Arc::new(QueueMeter::new(capacity));
         let slot = Arc::new(RegistryOwnerSlot {
             registry: Arc::downgrade(registry),
             mailer: Arc::clone(mailer),
             queue: Arc::clone(&state),
+            meter: Arc::clone(&meter),
             apply_lock: Mutex::new(()),
             state: Arc::new(SlotState::new()),
         });
         let erased: Arc<dyn Drainable> = slot.clone();
         let wake = WakeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&erased), sink);
-        let handle = RegistryOwnerHandle { state, wake };
+        let handle = RegistryOwnerHandle { state, meter, wake };
         registry.install_owner(handle);
 
         Self { slot }
@@ -147,12 +249,14 @@ impl RegistryOwnerLease {
 
 impl Drop for RegistryOwnerLease {
     fn drop(&mut self) {
+        let started = Instant::now();
         let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
         let queued = {
             let mut state = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
             state.accepting = false;
             state.commands.drain(..).collect::<Vec<_>>()
         };
+        self.slot.meter.drain(queued.len(), started.elapsed());
         drop(apply);
         if let Some(registry) = self.slot.registry.upgrade() {
             registry.close_owner_commands(queued, &self.slot.mailer);
@@ -182,6 +286,7 @@ struct RegistryOwnerSlot {
     registry: Weak<Registry>,
     mailer: Arc<Mailer>,
     queue: Arc<Mutex<OwnerQueue>>,
+    meter: Arc<QueueMeter>,
     apply_lock: Mutex<()>,
     state: Arc<SlotState>,
 }
@@ -193,9 +298,19 @@ impl Drainable for RegistryOwnerSlot {
         }
 
         {
+            // The drain is measured from the serialization it holds, not just
+            // the apply: the owner is one authority, and time spent waiting
+            // for its own lock is time it is not retiring commands. This is
+            // the `busy_nanos` that ADR-0165's 5%-of-ceiling sharding trigger
+            // divides by.
+            let started = Instant::now();
             let _apply = self.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
             let mut queue = self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+            // Draining to empty ends any saturation episode, so the next one
+            // warns again rather than staying silent behind a stale latch.
+            queue.saturated = false;
             let commands = queue.commands.drain(..).collect::<Vec<_>>();
+            let drained = commands.len();
             let accepting = queue.accepting;
             let mut orphaned = None;
 
@@ -214,6 +329,7 @@ impl Drainable for RegistryOwnerSlot {
             if let Some(commands) = orphaned {
                 close_orphaned_commands(commands);
             }
+            self.meter.drain(drained, started.elapsed());
         }
 
         self.state.mark_idle();

@@ -911,6 +911,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "activation lifecycle tests use bounded channels and fixture-only setup")]
 
     use super::*;
+    use crate::config::RegistryQueueCapacities;
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::effect::{ActivationToken, EffectBatch, RegistryApplied, RegistryEffect};
     use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease};
@@ -1021,7 +1022,8 @@ mod tests {
     #[test]
     fn successful_prepared_activation_enters_ordinary_dispatch_once() {
         let (spawner, registry, mailer, pool) = activation_fixture();
-        let owner = RegistryOwnerLease::attach(&registry, &mailer, pool.wake_sink());
+        let owner =
+            RegistryOwnerLease::attach(&registry, &mailer, pool.wake_sink(), RegistryQueueCapacities::default());
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
         let commit = prepared_probe(&spawner, "live", events_tx);
         let id = commit.route.id;
@@ -1050,8 +1052,9 @@ mod tests {
     #[test]
     fn owner_close_after_wire_cleans_starting_activation_at_home() {
         let (spawner, registry, mailer, pool) = activation_fixture();
-        let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink());
-        let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+        let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+        let owner =
+            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
         let commit = prepared_probe(&spawner, "owner-close", events_tx);
         let id = commit.route.id;

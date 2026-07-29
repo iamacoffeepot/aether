@@ -9,6 +9,7 @@ use aether_data::{Kind, KindDescriptor, MailboxCategory, SchemaType};
 use aether_kinds::trace::Nanos;
 
 use crate::chassis::settlement::SettlementRegistry;
+use crate::config::RegistryQueueCapacities;
 use crate::mail::cost::CostCell;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
@@ -1147,7 +1148,8 @@ fn activation_barrier(id: MailboxId, token: ActivationToken, sequence: u64) -> M
 fn prepared_births_publish_together_then_promote_independently_with_exact_cost_cells() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let scheduled = Arc::new(AtomicUsize::new(0));
     let first_id = MailboxId::from_name("prepared-first");
     let second_id = MailboxId::from_name("prepared-second");
@@ -1198,7 +1200,8 @@ fn prepared_births_publish_together_then_promote_independently_with_exact_cost_c
 fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let scheduled = Arc::new(AtomicUsize::new(0));
     let id = MailboxId::from_name("prepared-cancel-rollback");
     let (_, _, cancelled, effect) = prepared_test_spawn(
@@ -1236,7 +1239,8 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
 fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_consumed() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let deliveries = Arc::new(Mutex::new(Vec::new()));
     let scheduled = Arc::new(AtomicUsize::new(0));
     let id = MailboxId::from_name("prepared-fifo");
@@ -1291,7 +1295,8 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
 fn owner_shutdown_discards_unapplied_prepared_state_at_home_and_joins() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let (dropped_tx, dropped_rx) = crossbeam_channel::bounded(1);
     let id = MailboxId::from_name("queued-discard");
     let completion = registry
@@ -1326,7 +1331,7 @@ fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
     sink.schedule(Arc::new(WorkerBlocker { started: block_started_tx, release: block_release_rx }));
     block_started_rx.recv_timeout(Duration::from_secs(1)).expect("single worker enters blocker");
 
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, sink.clone());
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, sink.clone(), RegistryQueueCapacities::default());
     let (cancel_started_tx, cancel_started_rx) = crossbeam_channel::bounded(1);
     let id = MailboxId::from_name("owner-drop-home-cancel");
     let birth = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
@@ -1380,7 +1385,8 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
     let acknowledged = registry.inventory();
     subscription.acknowledge(acknowledged.mailbox_generation, acknowledged.kind_generation);
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let initial_route_generation = registry.route_generation();
     let initial_mailbox_generation = registry.mailbox_generation();
     let name = "aether.component/starting-only";
@@ -1413,7 +1419,8 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
 fn starting_tokens_are_unique_stale_safe_and_transactional() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     registry.register_inbox("occupied", noop_handler());
     let before_rollback = registry.route_generation();
     let rolled_back = registry
@@ -1462,7 +1469,8 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
 fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let id = MailboxId::from_name("ordered");
     let endpoint = || MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() };
     let first = registry
@@ -1508,8 +1516,9 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
 fn owner_admission_catches_up_after_transitional_direct_publication() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     registry.register_inbox("direct-generation-advance", noop_handler());
     let unknown = MailboxId::from_name("unknown-after-direct-generation-advance");
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -1529,8 +1538,9 @@ fn owner_admission_catches_up_after_transitional_direct_publication() {
 fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let received = Arc::new(Mutex::new(Vec::new()));
     let received_for_handler = Arc::clone(&received);
     let handler: Arc<dyn InlineHandler> = Arc::new(move |dispatch: MailDispatch<'_>| {
@@ -1563,8 +1573,9 @@ fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
 fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let wakes = Arc::new(AtomicU32::new(0));
     let wakes_for_handler = Arc::clone(&wakes);
     let target = registry.register_inline(
@@ -1600,7 +1611,7 @@ fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let drainable = relay.drainable_for_test();
     let order = Arc::new(Mutex::new(Vec::new()));
     let order_for_handler = Arc::clone(&order);
@@ -1641,6 +1652,138 @@ fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
     assert_eq!(order.lock().unwrap().as_slice(), [1, 2], "lease close cannot overtake the running drained prefix");
 }
 
+/// Issue 4122: at its bound the owner refuses the one class it is allowed to
+/// refuse — an ordinary route-view miss — and refuses nothing else.
+///
+/// The two halves are one test because the policy is the *split*: a bound
+/// that also refused effect batches would be a correctness regression that a
+/// shed-only test would pass, and a bound that refused nothing would be a
+/// memory regression that a batch-only test would pass. Both directions have
+/// to be pinned against the same saturated queue.
+///
+/// The shed envelope must land on the existing unknown-recipient policy —
+/// egressed to the attached hub, settlement balanced — not vanish. A shed
+/// that skipped `record_finished` would hang every caller's settlement chain,
+/// which is the failure mode that makes silent dropping unacceptable.
+#[test]
+fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
+    let registry = Arc::new(Registry::new());
+    let (outbound, outbound_rx) = HubOutbound::attached_loopback();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+    let settlement = Arc::new(SettlementRegistry::new());
+    mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
+    let capacities = RegistryQueueCapacities { owner: 2, relay: 64 };
+    let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), capacities);
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), capacities);
+    let name = "owner-shed-at-capacity";
+    let id = MailboxId::from_name(name);
+    let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
+    owner.run_once();
+    let _token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+
+    // Fill the queue to its bound with parkable misses.
+    let parked = [1u8, 2].map(|payload| {
+        let (mail, settled) = traced_unknown_mail(&mailer, &settlement, id, u64::from(payload), vec![payload]);
+        mailer.push(mail);
+        settled
+    });
+    assert_eq!(registry.owner_queue_metrics().unwrap().depth, 2, "both misses parked under the bound");
+
+    // The next miss is refused and takes the unknown-recipient policy.
+    let (shed, shed_settled) = traced_unknown_mail(&mailer, &settlement, id, 3, vec![3]);
+    mailer.push(shed);
+    assert!(shed_settled.recv_timeout(Duration::from_millis(100)).is_ok(), "a shed envelope settles rather than hangs");
+    assert!(
+        matches!(outbound_rx.recv_timeout(Duration::from_millis(100)).unwrap(), EgressEvent::UnresolvedMail { payload, .. } if payload == [3])
+    );
+    for settled in &parked {
+        assert!(settled.try_recv().is_err(), "shedding one miss does not disturb the misses already parked");
+    }
+
+    // The reserved class is admitted past the same bound.
+    let queued = registry.submit(EffectBatch::new(vec![RegistryEffect::publish_named(
+        "owner-shed-reserved".to_owned(),
+        MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() },
+    )]));
+    assert!(queued.is_some(), "an effect batch is never refused by the bound");
+    let metrics = registry.owner_queue_metrics().unwrap();
+    assert_eq!(metrics.capacity, 2);
+    assert_eq!(metrics.shed, 1, "exactly the one over-bound miss was shed");
+    assert_eq!(metrics.over_capacity, 1, "the reserved batch is admitted past the bound and counted");
+    assert_eq!(metrics.depth, 3);
+
+    owner.run_once();
+    assert!(queued.unwrap().wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert_eq!(registry.owner_queue_metrics().unwrap().shed, 1, "draining does not retroactively shed");
+}
+
+/// Issue 4122: the owner's drain accounting is per batch, not per command —
+/// ADR-0165's sharding trigger reads a ceiling (commands per busy nanosecond)
+/// and a duty cycle, and both collapse if one drain of `n` commands is booked
+/// as `n` drains.
+#[test]
+fn owner_drain_metrics_measure_whole_batches_and_busy_time() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let first = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named("drain-metrics-a".to_owned())]));
+    let second = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named("drain-metrics-b".to_owned())]));
+    owner.run_once();
+    for completion in [first, second] {
+        assert!(completion.unwrap().wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    }
+
+    let metrics = registry.owner_queue_metrics().unwrap();
+    assert_eq!(metrics.admitted, 2);
+    assert_eq!(metrics.drained, 2);
+    assert_eq!(metrics.drains, 1, "two commands drained together are one drain cycle");
+    assert_eq!(metrics.drain_max, 2);
+    assert_eq!(metrics.depth_max, 2);
+    assert_eq!(metrics.depth, 0);
+    assert!(metrics.busy_nanos > 0, "an applied batch records the owner's busy time");
+
+    registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named("drain-metrics-c".to_owned())])).unwrap();
+    owner.run_once();
+    let metrics = registry.owner_queue_metrics().unwrap();
+    assert_eq!((metrics.drained, metrics.drains, metrics.drain_max), (3, 2, 2), "a smaller drain leaves the max alone");
+}
+
+/// Issue 4122: the relay never sheds. Everything it holds is a continuation
+/// the owner already decided the fate of — losing one drops mail the registry
+/// committed to delivering and strands its settlement chain — so its bound
+/// records pressure rather than refusing work, and every continuation past it
+/// still arrives, in order.
+#[test]
+fn relay_admits_owner_committed_continuations_past_capacity_in_order() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities { owner: 64, relay: 1 });
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let delivered_for_handler = Arc::clone(&delivered);
+    let target = registry.register_inline(
+        "relay-past-capacity",
+        Arc::new(move |dispatch: MailDispatch<'_>| {
+            delivered_for_handler.lock().unwrap().push(dispatch.payload[0]);
+        }),
+    );
+    for payload in 1u8..=3 {
+        mailer.relay_mail(Mail::new(target, KindId(1), vec![payload], 1));
+    }
+
+    let metrics = mailer.route_relay_metrics().unwrap();
+    assert_eq!(metrics.capacity, 1);
+    assert_eq!(metrics.admitted, 3, "the relay admits every owner-committed continuation");
+    assert_eq!(metrics.shed, 0, "the relay has no sheddable class");
+    assert_eq!(metrics.over_capacity, 2, "the two continuations past the bound are counted");
+    assert_eq!(metrics.depth_max, 3);
+
+    relay.run_once();
+    assert_eq!(delivered.lock().unwrap().as_slice(), [1, 2, 3], "over-capacity admission preserves route order");
+    let metrics = mailer.route_relay_metrics().unwrap();
+    assert_eq!((metrics.drained, metrics.drains, metrics.depth), (3, 1, 0));
+}
+
 fn traced_unknown_mail(
     mailer: &Mailer,
     settlement: &SettlementRegistry,
@@ -1661,8 +1804,9 @@ fn starting_parks_fifo_and_owner_close_routes_every_accepted_mail_once() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let settlement = Arc::new(SettlementRegistry::new());
     mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
-    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let name = "starting-close-fifo";
     let id = MailboxId::from_name(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
@@ -1703,8 +1847,9 @@ fn cancellation_holds_settlement_until_relay_terminal_delivery() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let settlement = Arc::new(SettlementRegistry::new());
     mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
-    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let name = "starting-cancel-settlement";
     let id = MailboxId::from_name(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
@@ -1738,7 +1883,8 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
             "shared-writer".to_owned(),
@@ -1765,7 +1911,8 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
 fn owner_close_rejects_queued_and_future_submissions_without_stranding_completion() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
             "queued-at-close".to_owned(),
@@ -1789,7 +1936,8 @@ fn owner_submit_racing_close_is_rejected_or_completed() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
     let barrier = Arc::new(Barrier::new(2));
     let submitting_registry = Arc::clone(&registry);
     let submitting_barrier = Arc::clone(&barrier);

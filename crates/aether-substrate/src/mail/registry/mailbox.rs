@@ -22,7 +22,7 @@ use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::registry::owner::{BatchEnvelope, OwnerCommand, ParkAdmission, RegistryOwnerHandle};
 use crate::mail::registry::{
-    ActorAddressInventoryError, AddressResolutionError, ResolvedAddress, address::AddressIndex,
+    ActorAddressInventoryError, AddressResolutionError, RegistryQueueMetrics, ResolvedAddress, address::AddressIndex,
 };
 use crate::mail::view::{DoubleBuffer, Update, View, ViewPublisher};
 use crate::mail::{KindId, Mail, MailId, MailboxId};
@@ -499,6 +499,15 @@ impl Registry {
             Some(owner) => owner.park_or_drop(mail, observed_generation),
             None => ParkAdmission::Closed(mail),
         }
+    }
+
+    /// The registry owner queue's admission and drain accounting (issue
+    /// 4122), or `None` before an owner is attached. ADR-0165 §Consequences
+    /// makes owner throughput the input to its own sharding decision; this is
+    /// where that measurement is read.
+    #[must_use]
+    pub fn owner_queue_metrics(&self) -> Option<RegistryQueueMetrics> {
+        self.owner.get().map(RegistryOwnerHandle::metrics)
     }
 
     pub(crate) fn activation_cancelled(&self, id: MailboxId, token: ActivationToken) {

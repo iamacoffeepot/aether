@@ -8,7 +8,7 @@ use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::SettlementRegistry;
-use crate::config::{ConfigSources, RingCapacities, SchedulerTuning};
+use crate::config::{ConfigSources, RegistryQueueCapacities, RingCapacities, SchedulerTuning};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease};
@@ -145,6 +145,10 @@ pub(super) fn boot_passives(
     workers: Option<usize>,
     ring_capacities: RingCapacities,
     scheduler_tuning: SchedulerTuning,
+    // Issue 4122: the ADR-0165 owner / relay admission bounds. Both leases
+    // take the whole value and each reads its own field, so the pair can
+    // never be crossed at a call site.
+    registry_queues: RegistryQueueCapacities,
     teardown_budget: Duration,
     // ADR-0156 §5: the builder's config source stack (programmatic > argv >
     // env > file > default). The Pass 0 resolve loop resolves each passive's
@@ -187,8 +191,8 @@ pub(super) fn boot_passives(
     // install-before-`Pool::start` ordering invariant).
     install_tuning(scheduler_tuning);
     let pool = Pool::start(pool_config, Arc::clone(aborter));
-    let route_relay = RouteRelayLease::attach(mailer, pool.wake_sink());
-    let registry_owner = RegistryOwnerLease::attach(registry, mailer, pool.wake_sink());
+    let route_relay = RouteRelayLease::attach(mailer, pool.wake_sink(), registry_queues);
+    let registry_owner = RegistryOwnerLease::attach(registry, mailer, pool.wake_sink(), registry_queues);
 
     // iamacoffeepot/aether#1182: calibrate this box's cross-worker handoff
     // cost once at boot and log the keep-local budget the adaptive valve
