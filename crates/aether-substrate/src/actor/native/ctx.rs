@@ -724,7 +724,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         subname: super::spawn::Subname<'b>,
         config: A::Config,
         params: A::Params,
-    ) -> super::spawn::SpawnBuilder<'b, A>
+    ) -> super::spawn::HandlerSpawnBuilder<'b, A>
     where
         P: Addressable,
         A: aether_actor::ChildOf<P> + aether_actor::Instanced + NativeActor,
@@ -743,7 +743,14 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
             .runtime_identity()
             .expect("NativeCtx::spawn_child requires a typed production binding")
             .clone();
-        super::spawn::SpawnBuilder::new_child::<P>(Arc::clone(spawner), subname, config, params, sender, parent)
+        let builder =
+            super::spawn::SpawnBuilder::new_child::<P>(Arc::clone(spawner), subname, config, params, sender, parent);
+        super::spawn::HandlerSpawnBuilder::new(
+            builder,
+            Arc::clone(self.binding),
+            self.in_flight_root,
+            self.reply_target(),
+        )
     }
 }
 

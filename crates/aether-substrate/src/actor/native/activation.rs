@@ -2,21 +2,25 @@
 
 use std::any::{Any, TypeId};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use aether_actor::local::ActorSlots;
 
 use super::binding::NativeBinding;
+use super::dispatch_blocking::DeferredCompletion;
 use super::dispatcher_slot::DispatcherSlot;
+use super::reservation::ParentReservation;
+use super::spawn::{SpawnApplied, SpawnError};
 use super::{Envelope, NativeActor};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
+use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation, PreparedMail,
-    PreparedSpawnActivation,
+    PreparedSpawnActivation, PreparedSpawnFailure,
 };
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, SeizeCell};
-use crate::mail::{MailId, MailboxId};
+use crate::mail::{Mail, MailId, MailboxId};
 use crate::scheduler::pending_depth;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeHandle};
 use aether_kinds::trace::Nanos;
@@ -31,6 +35,72 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     binding: Arc<NativeBinding>,
     slots: Box<ActorSlots>,
     state: A::State,
+    finalizer: Option<Arc<NativeSpawnFinalizer>>,
+}
+
+pub(super) struct NativeSpawnFinalizer {
+    state: Mutex<Option<NativeSpawnFinalizerState>>,
+    retained: Mutex<Vec<(MailId, MailId)>>,
+    mailer: Arc<Mailer>,
+}
+
+struct NativeSpawnFinalizerState {
+    parent_reservation: ParentReservation,
+    completion: DeferredCompletion<Result<SpawnApplied, SpawnError>>,
+    applied: SpawnApplied,
+    child: Weak<NativeBinding>,
+}
+
+impl NativeSpawnFinalizer {
+    pub(super) fn new(
+        parent_reservation: ParentReservation,
+        completion: DeferredCompletion<Result<SpawnApplied, SpawnError>>,
+        applied: SpawnApplied,
+        child: Weak<NativeBinding>,
+        mailer: Arc<Mailer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Some(NativeSpawnFinalizerState { parent_reservation, completion, applied, child })),
+            retained: Mutex::new(Vec::new()),
+            mailer,
+        })
+    }
+
+    fn retain(&self, mail: &Mail) {
+        if mail.mail_id != MailId::NONE {
+            self.retained.lock().expect("native spawn retained-mail lock poisoned").push((mail.mail_id, mail.root));
+        }
+    }
+
+    fn reject(&self, failure: PreparedSpawnFailure) {
+        let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
+            return;
+        };
+        for (mail_id, root) in self.retained.lock().expect("native spawn retained-mail lock poisoned").drain(..) {
+            self.mailer.record_finished(mail_id, root);
+        }
+        state.parent_reservation.reject();
+        state.completion.complete(Err(match failure {
+            PreparedSpawnFailure::NamespaceOwnedByOtherType { namespace, owning_type } => {
+                SpawnError::NamespaceOwnedByOtherType { namespace, owning_type }
+            }
+            PreparedSpawnFailure::SubnameRetired { full_name } => SpawnError::SubnameRetired { full_name },
+            PreparedSpawnFailure::SubnameInUse { full_name } => SpawnError::SubnameInUse { full_name },
+            PreparedSpawnFailure::ActivationRejected => SpawnError::ActivationRejected,
+            PreparedSpawnFailure::OwnerClosed => SpawnError::OwnerClosed,
+        }));
+    }
+
+    fn promote(&self) {
+        let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
+            return;
+        };
+        let live = state.parent_reservation.promote();
+        if let Some(child) = state.child.upgrade() {
+            child.retain_parent_child_reservation(live);
+        }
+        state.completion.complete(Ok(state.applied));
+    }
 }
 
 impl<A: NativeActor> LegacyPreparedActivation<A> {
@@ -43,7 +113,12 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         slots: Box<ActorSlots>,
         state: A::State,
     ) -> Self {
-        Self { spawner, id, subname, sender, binding, slots, state }
+        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None }
+    }
+
+    pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer>) -> Self {
+        self.finalizer = Some(finalizer);
+        self
     }
 }
 
@@ -51,10 +126,24 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
     fn reserve(
         self: Box<Self>,
         token: ActivationToken,
-    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
-        if !self.spawner.actor_registry().reserve_starting(self.id, token) {
-            return Err(self);
+    ) -> Result<Arc<dyn ActivationReservation>, (Box<dyn PreparedSpawnActivation>, PreparedSpawnFailure)> {
+        if let Err(owning_type) = self.spawner.actor_registry().try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
+            return Err((
+                self,
+                PreparedSpawnFailure::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type },
+            ));
         }
+        if self.spawner.actor_registry().is_tombstoned(self.id) {
+            let full_name =
+                self.binding.runtime_identity().expect("prepared binding is typed").canonical_name().to_string();
+            return Err((self, PreparedSpawnFailure::SubnameRetired { full_name }));
+        }
+        if !self.spawner.actor_registry().reserve_starting(self.id, token) {
+            let full_name =
+                self.binding.runtime_identity().expect("prepared binding is typed").canonical_name().to_string();
+            return Err((self, PreparedSpawnFailure::SubnameInUse { full_name }));
+        }
+        let failure = Arc::new(Mutex::new(None));
         Ok(Arc::new(LegacyActivationControl {
             actor_registry: Arc::clone(self.spawner.actor_registry()),
             registry: Arc::clone(self.spawner.registry()),
@@ -66,19 +155,27 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
             cancel_done: Arc::new(Mutex::new(None)),
             barrier_mail_id: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(AtomicBool::new(false)),
+            failure,
         }))
     }
 
-    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+    fn discard_at_home(self: Box<Self>, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
         let sink = self.spawner.wake_sink().clone();
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let job: Arc<dyn Drainable> = Arc::new(DiscardJob {
             prepared: Mutex::new(Some(*self)),
             done: Mutex::new(Some(done_tx)),
             ran: AtomicBool::new(false),
+            failure: Mutex::new(Some(failure)),
         });
         sink.schedule(job);
         done_rx
+    }
+
+    fn retain_mail(&mut self, mail: &Mail) {
+        if let Some(finalizer) = &self.finalizer {
+            finalizer.retain(mail);
+        }
     }
 }
 
@@ -86,12 +183,26 @@ struct DiscardJob<A: NativeActor> {
     prepared: Mutex<Option<LegacyPreparedActivation<A>>>,
     done: Mutex<Option<crossbeam_channel::Sender<()>>>,
     ran: AtomicBool,
+    failure: Mutex<Option<PreparedSpawnFailure>>,
 }
 
 impl<A: NativeActor> Drainable for DiscardJob<A> {
     fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
         if !self.ran.swap(true, Ordering::AcqRel) {
-            drop(self.prepared.lock().expect("prepared activation discard lock poisoned").take());
+            let prepared = self.prepared.lock().expect("prepared activation discard lock poisoned").take();
+            if let Some(prepared) = prepared {
+                let finalizer = prepared.finalizer.as_ref().map(Arc::clone);
+                drop(prepared);
+                if let Some(finalizer) = finalizer {
+                    finalizer.reject(
+                        self.failure
+                            .lock()
+                            .expect("prepared activation failure lock poisoned")
+                            .take()
+                            .unwrap_or(PreparedSpawnFailure::ActivationRejected),
+                    );
+                }
+            }
             let done = self.done.lock().expect("prepared activation discard completion lock poisoned").take();
             if let Some(done) = done {
                 let _ = done.send(());
@@ -120,6 +231,7 @@ struct LegacyActivationControl<A: NativeActor> {
     cancel_done: Arc<Mutex<Option<crossbeam_channel::Receiver<()>>>>,
     barrier_mail_id: Arc<Mutex<Option<MailId>>>,
     cancelled: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
 }
 
 impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
@@ -135,6 +247,7 @@ impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
             prepared: Mutex::new(Some(prepared)),
             live: Arc::clone(&self.live),
             cancelled: Arc::clone(&self.cancelled),
+            failure: Arc::clone(&self.failure),
             cancel_done: Arc::clone(&self.cancel_done),
             barrier_mail_id: Arc::clone(&self.barrier_mail_id),
             token: self.token,
@@ -158,6 +271,15 @@ impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
         if let Some(live) = self.take_live() {
             self.cancel_done.lock().expect("activation cancel completion lock poisoned").replace(live.cancel_at_home());
         }
+    }
+
+    fn reject(&self, failure: PreparedSpawnFailure) {
+        let mut slot = self.failure.lock().expect("activation failure lock poisoned");
+        if slot.is_none() {
+            *slot = Some(failure);
+        }
+        drop(slot);
+        self.cancel();
     }
 
     fn join(&self) {
@@ -184,6 +306,7 @@ struct ActivationJob<A: NativeActor> {
     prepared: Mutex<Option<LegacyPreparedActivation<A>>>,
     live: Arc<Mutex<Option<Box<dyn LiveActivation>>>>,
     cancelled: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     cancel_done: Arc<Mutex<Option<crossbeam_channel::Receiver<()>>>>,
     barrier_mail_id: Arc<Mutex<Option<MailId>>>,
     token: ActivationToken,
@@ -213,14 +336,24 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
             return CycleResult::Closed;
         };
         if self.cancelled.load(Ordering::Acquire) {
+            let finalizer = prepared.finalizer.as_ref().map(Arc::clone);
             drop(prepared);
             self.actor_registry.rollback_starting(self.id, self.token);
             self.registry.activation_cancelled(self.id, self.token);
+            if let Some(finalizer) = finalizer {
+                finalizer.reject(
+                    self.failure
+                        .lock()
+                        .expect("activation failure lock poisoned")
+                        .take()
+                        .unwrap_or(PreparedSpawnFailure::ActivationRejected),
+                );
+            }
             self.finish();
             return CycleResult::Closed;
         }
 
-        let live = LegacyLiveActivation::wire(prepared, self.token);
+        let live = LegacyLiveActivation::wire(prepared, self.token, Arc::clone(&self.failure));
         if self.cancelled.load(Ordering::Acquire) {
             live.cancel_here();
             self.actor_registry.rollback_starting(self.id, self.token);
@@ -272,11 +405,17 @@ struct LegacyLiveActivation<A: NativeActor> {
     strong_sender: Arc<mpsc::Sender<Envelope>>,
     binding: Arc<NativeBinding>,
     slot: Arc<DispatcherSlot<A>>,
+    finalizer: Option<Arc<NativeSpawnFinalizer>>,
+    failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
 }
 
 impl<A: NativeActor> LegacyLiveActivation<A> {
-    fn wire(prepared: LegacyPreparedActivation<A>, token: ActivationToken) -> Self {
-        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state } = prepared;
+    fn wire(
+        prepared: LegacyPreparedActivation<A>,
+        token: ActivationToken,
+        failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
+    ) -> Self {
+        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer } = prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
             Arc::clone(&binding),
@@ -287,17 +426,39 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         );
         slot.wire_activation();
 
-        Self { spawner, id, token, subname, sender: sender.clone(), strong_sender: Arc::new(sender), binding, slot }
+        Self {
+            spawner,
+            id,
+            token,
+            subname,
+            sender: sender.clone(),
+            strong_sender: Arc::new(sender),
+            binding,
+            slot,
+            finalizer,
+            failure,
+        }
     }
 
     fn cancel_here(self) {
+        let finalizer = self.finalizer.as_ref().map(Arc::clone);
         self.slot.cancel_activation();
+        if let Some(finalizer) = finalizer {
+            finalizer.reject(
+                self.failure
+                    .lock()
+                    .expect("activation failure lock poisoned")
+                    .take()
+                    .unwrap_or(PreparedSpawnFailure::ActivationRejected),
+            );
+        }
     }
 }
 
 impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
-        let Self { spawner, id, token, subname, sender, strong_sender, binding: _, slot } = *self;
+        let Self { spawner, id, token, subname, sender, strong_sender, binding: _, slot, finalizer, failure: _ } =
+            *self;
         for prepared in bootstrap.into_iter().chain(parked) {
             let PreparedMail { mail, kind_name, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
@@ -374,6 +535,9 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             }));
             let _ = wake.wake();
             assert!(seize_cell.set(seize).is_ok(), "fresh activation seize cell accepts its handle");
+            if let Some(finalizer) = finalizer {
+                finalizer.promote();
+            }
         });
 
         InstalledActivation { entry, catch_up }

@@ -30,6 +30,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
+use crate::actor::native::reservation::ChildReservationKey;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
@@ -89,6 +90,29 @@ pub enum SpawnError {
     /// `A::init` returned an error. The actor's partial state dropped
     /// before this returns; no dispatcher thread was spawned.
     InitFailed(BootError),
+    /// The registry owner closed before it could authoritatively apply the
+    /// staged birth.
+    OwnerClosed,
+    /// Storage or cost reservation rejected the prepared activation.
+    ActivationRejected,
+}
+
+/// Deterministic result returned when a handler has locally prepared and
+/// staged a child birth. It names a reservation, not proof that the child is
+/// live; the authoritative result arrives as a later `TaskDone`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpawnReceipt {
+    pub mailbox_id: MailboxId,
+    pub canonical_name: Arc<str>,
+    pub completion: super::DispatchId,
+}
+
+/// Authoritative successful promotion delivered through the ADR-0093 task
+/// completion path after the child is published Live and catch-up is armed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpawnApplied {
+    pub mailbox_id: MailboxId,
+    pub canonical_name: Arc<str>,
 }
 
 /// Chassis-level spawn machinery (Phase 3). One per chassis; cloned as
@@ -357,7 +381,7 @@ impl Spawner {
     /// Resolve identity and perform the current namespace and tombstone
     /// preflight before actor construction. Named-subname and typed-parent
     /// gates run in `SpawnBuilder` before this can allocate a counter.
-    fn preflight<A>(
+    fn prepare_identity<A>(
         &self,
         subname: Subname<'_>,
         parent: Option<&ActorRuntimeIdentity>,
@@ -372,12 +396,7 @@ impl Spawner {
         };
         validate_namespace_segment(&subname).map_err(SpawnError::SubnameInvalid)?;
 
-        // 2. Claim namespace ownership (or verify).
-        if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
-            return Err(SpawnError::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type: owning });
-        }
-
-        // 3. Compute the lineage carry, id, and rendered name (ADR-0099
+        // Compute the lineage carry, id, and rendered name (ADR-0099
         //    §3). The child's `ActorId` is its instanced node,
         //    `hash(NAMESPACE:subname)`. Under a parent the carry folds
         //    that node onto the parent's carry and the id is the lineage
@@ -396,11 +415,28 @@ impl Spawner {
             },
         );
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
-        if self.actor_registry.is_tombstoned(id) {
-            return Err(SpawnError::SubnameRetired { full_name: full_name.to_string() });
-        }
-
         Ok(SpawnIdentity { id, carry, canonical_name: full_name, subname })
+    }
+
+    /// Legacy eager preflight. Handler staging deliberately uses only
+    /// [`Self::prepare_identity`]; namespace ownership and liveness are global
+    /// facts and therefore move to owner-time activation reservation.
+    fn preflight<A>(
+        &self,
+        subname: Subname<'_>,
+        parent: Option<&ActorRuntimeIdentity>,
+    ) -> Result<SpawnIdentity, SpawnError>
+    where
+        A: Instanced + NativeActor,
+    {
+        let identity = self.prepare_identity::<A>(subname, parent)?;
+        if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
+            return Err(SpawnError::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type: owning });
+        }
+        if self.actor_registry.is_tombstoned(identity.id) {
+            return Err(SpawnError::SubnameRetired { full_name: identity.canonical_name.to_string() });
+        }
+        Ok(identity)
     }
 
     /// Construct all actor-local state with no builder or context borrow.
@@ -488,6 +524,28 @@ impl Spawner {
     where
         A: Instanced + NativeActor,
     {
+        self.prepare_commit_inner(staged, None)
+    }
+
+    fn prepare_commit_with_finalizer<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Arc<super::activation::NativeSpawnFinalizer>,
+    ) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
+        self.prepare_commit_inner(staged, Some(finalizer))
+    }
+
+    fn prepare_commit_inner<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Option<Arc<super::activation::NativeSpawnFinalizer>>,
+    ) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
         let StagedActor { identity, sender, transport, slots, state, after_init } = staged;
         let SpawnIdentity { id, canonical_name, subname, .. } = identity;
         let mut costs = local::with_stamped(&slots, || {
@@ -512,17 +570,22 @@ impl Spawner {
                 )
             })
             .collect();
+        let activation = super::activation::LegacyPreparedActivation::<A>::new(
+            Arc::clone(self),
+            id,
+            subname,
+            sender,
+            transport,
+            slots,
+            state,
+        );
+        let activation = match finalizer {
+            Some(finalizer) => activation.with_finalizer(finalizer),
+            None => activation,
+        };
         PreparedSpawnCommit::new(
             PreparedRoute::with_id(id, canonical_name.to_string()),
-            Box::new(super::activation::LegacyPreparedActivation::<A>::new(
-                Arc::clone(self),
-                id,
-                subname,
-                sender,
-                transport,
-                slots,
-                state,
-            )),
+            Box::new(activation),
             PreparedCostCells::new(Arc::clone(self.mailer.cost_table()), costs),
             after_init,
         )
@@ -763,6 +826,130 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     /// to whatever borrow it was constructed from at the call site,
     /// so a stack-local subname doesn't dangle past `finish()`.
     _ctx: PhantomData<&'ctx ()>,
+}
+
+/// Handler-owned child builder. Its staged terminal performs only local
+/// preparation during the actor turn and appends one ordered prepared birth
+/// to the parent binding. The eager terminals are a transitional bridge for
+/// the unmigrated #4065-#4069 consumers and are removed by #4070.
+pub struct HandlerSpawnBuilder<'ctx, A: Instanced + NativeActor> {
+    inner: SpawnBuilder<'ctx, A>,
+    parent_binding: Arc<NativeBinding>,
+    completion_root: MailId,
+    completion_reply_to: Source,
+}
+
+impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
+    pub(super) fn new(
+        inner: SpawnBuilder<'ctx, A>,
+        parent_binding: Arc<NativeBinding>,
+        completion_root: MailId,
+        completion_reply_to: Source,
+    ) -> Self {
+        Self { inner, parent_binding, completion_root, completion_reply_to }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[must_use]
+    pub fn after_init<K>(mut self, mail: K) -> Self
+    where
+        A: HandlesKind<K>,
+        K: Kind,
+    {
+        self.inner = self.inner.after_init(mail);
+        self
+    }
+
+    /// Prepare and stage a birth whose later typed completion carries unit
+    /// context.
+    pub fn stage(self) -> Result<SpawnReceipt, SpawnError> {
+        self.stage_with(())
+    }
+
+    /// Prepare and stage a birth with caller-owned continuation context. The
+    /// authoritative result later lands as
+    /// `TaskDone<Result<SpawnApplied, SpawnError>, C>`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internal builder state has already been consumed, which
+    /// safe code cannot do because this method takes ownership of `self`.
+    pub fn stage_with<C>(self, context: C) -> Result<SpawnReceipt, SpawnError>
+    where
+        C: Send + 'static,
+    {
+        let Self { inner, parent_binding, completion_root, completion_reply_to } = self;
+        let SpawnBuilder {
+            spawner,
+            subname,
+            config,
+            params,
+            sender,
+            parent,
+            declared_parent_namespace,
+            after_init,
+            ..
+        } = inner;
+        let config = config.expect("HandlerSpawnBuilder::stage consumed exactly once");
+        let params = params.expect("HandlerSpawnBuilder::stage consumed exactly once");
+        if let Subname::Named(subname) = subname {
+            validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)?;
+        }
+        let parent = parent.expect("handler child builder always carries a typed parent identity");
+        let declared_namespace = declared_parent_namespace.expect("handler child builder names its declared parent");
+        if parent.logical() != ActorId::singleton(declared_namespace) {
+            return Err(SpawnError::ParentTypeMismatch {
+                declared_namespace,
+                actual_logical: parent.logical(),
+                actual_canonical_name: Arc::clone(parent.canonical_name()),
+            });
+        }
+
+        let identity = spawner.prepare_identity::<A>(subname, Some(&parent))?;
+        let key = ChildReservationKey::new(
+            ActorId::singleton(A::NAMESPACE),
+            ActorId::instanced(A::NAMESPACE, &identity.subname),
+        );
+        let parent_reservation = parent_binding
+            .reserve_child(key)
+            .ok_or_else(|| SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() })?;
+        let staged = spawner.build::<A>(identity, config, params, after_init)?;
+        let applied = SpawnApplied {
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
+        };
+        let completion = parent_binding.dispatch_arm(
+            spawner.mailer().acquire_settlement_hold(completion_root),
+            completion_reply_to,
+            context,
+        );
+        let receipt = SpawnReceipt {
+            mailbox_id: applied.mailbox_id,
+            canonical_name: Arc::clone(&applied.canonical_name),
+            completion: completion.dispatch_id(),
+        };
+        let finalizer = super::activation::NativeSpawnFinalizer::new(
+            parent_reservation,
+            completion,
+            applied,
+            Arc::downgrade(&staged.transport),
+            Arc::clone(spawner.mailer()),
+        );
+        let commit = spawner.prepare_commit_with_finalizer(staged, finalizer);
+        parent_binding.stage_child_birth(commit);
+        let _ = sender;
+        Ok(receipt)
+    }
+
+    /// Transitional handler-eager bridge for #4065-#4069.
+    pub fn finish(self) -> Result<MailboxId, SpawnError> {
+        self.inner.finish()
+    }
+
+    /// Transitional handler-eager bridge for #4065-#4069.
+    pub fn finish_with_name(self) -> Result<(MailboxId, String), SpawnError> {
+        self.inner.finish_with_name()
+    }
 }
 
 impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {

@@ -14,8 +14,8 @@ use aether_data::{
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, ChangeSubscriber, EffectBatch, PreparedCostCells,
-    PreparedMail, RegistryApplied, RegistryCompletion, RegistryEffect, RegistryEffectError, RegistryInventory,
-    RegistrySubscription, StartingCancellation, barrier_token, bytes_kind, subscriber,
+    PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryCompletion, RegistryEffect, RegistryEffectError,
+    RegistryInventory, RegistrySubscription, StartingCancellation, barrier_token, bytes_kind, subscriber,
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
@@ -115,6 +115,7 @@ pub struct Registry {
     inner: RwLock<Inner>,
     routes: View<FxHashMap<MailboxId, RouteRecord>>,
     kinds: View<KindTable>,
+    empty_kind_name: Arc<str>,
     inventory: View<RegistryInventory>,
     addresses: Result<AddressIndex, ActorAddressInventoryError>,
     subscribers: Mutex<Vec<Weak<ChangeSubscriber>>>,
@@ -197,7 +198,7 @@ impl Drop for PendingBirth {
             return;
         }
         if let Some(activation) = self.activation.take() {
-            activation.cancel();
+            activation.reject(PreparedSpawnFailure::ActivationRejected);
         }
         if let Some(costs) = self.costs.take() {
             costs.rollback(self.id, self.token);
@@ -206,7 +207,7 @@ impl Drop for PendingBirth {
 }
 
 pub enum CapturedDisposition {
-    Live { endpoint: RouteEndpoint, kind_name: String },
+    Live { endpoint: RouteEndpoint, kind_name: Arc<str> },
     Dropped,
     Unknown,
 }
@@ -221,7 +222,7 @@ pub struct RouteLookup {
     endpoint: Option<RouteEndpoint>,
     starting: bool,
     dropped: bool,
-    kind_name: String,
+    kind_name: Arc<str>,
     generation: u64,
 }
 
@@ -234,8 +235,8 @@ impl RouteLookup {
         self.endpoint.is_none() && !self.starting && !self.dropped
     }
 
-    pub(crate) fn kind_name(&self) -> &str {
-        &self.kind_name
+    pub(crate) fn kind_name_shared(&self) -> Arc<str> {
+        Arc::clone(&self.kind_name)
     }
 
     pub(crate) fn seize_handle(&self) -> Option<&SeizeHandle> {
@@ -264,7 +265,7 @@ impl RouteLookup {
 /// One kind's bookkeeping, keyed in the registry on the hashed id.
 #[derive(Clone)]
 struct KindSlot {
-    name: String,
+    name: Arc<str>,
     descriptor: KindDescriptor,
 }
 
@@ -293,6 +294,7 @@ struct Inner {
     /// Every insert into `kinds` mirrors into `name_index`; every slot
     /// has exactly one entry here.
     name_index: HashMap<String, KindId>,
+    empty_kind_name: Arc<str>,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
     inventory_publisher: ViewPublisher<RegistryInventory>,
@@ -417,7 +419,7 @@ fn commit_staged(
         }
     }
     for (id, slot) in kinds {
-        inner.name_index.insert(slot.name.clone(), id);
+        inner.name_index.insert(slot.descriptor.name.clone(), id);
         inner.kinds.insert(id, slot);
     }
     for (id, token) in pending {
@@ -452,6 +454,7 @@ fn staged_pending_token(
 impl Registry {
     #[must_use]
     pub fn new() -> Self {
+        let empty_kind_name: Arc<str> = Arc::from("");
         let route_publisher = DoubleBuffer::default();
         let routes = route_publisher.view();
         let kind_publisher = ViewPublisher::new(KindTable::default());
@@ -470,6 +473,7 @@ impl Registry {
                 next_activation_token: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
+                empty_kind_name: Arc::clone(&empty_kind_name),
                 route_publisher,
                 kind_publisher,
                 inventory_publisher,
@@ -478,6 +482,7 @@ impl Registry {
             }),
             routes,
             kinds,
+            empty_kind_name,
             inventory,
             addresses: AddressIndex::from_inventory(),
             subscribers: Mutex::new(Vec::new()),
@@ -662,7 +667,8 @@ impl Registry {
 
         for (_, birth) in &mut pending_births {
             if let Some(activation) = &birth.activation {
-                activation.cancel_and_join();
+                activation.reject(PreparedSpawnFailure::OwnerClosed);
+                activation.join();
             }
             if let Some(costs) = &birth.costs {
                 costs.rollback(birth.id, birth.token);
@@ -743,31 +749,31 @@ impl Registry {
                 RegistryEffect::PreparedSpawn(mut commit) => {
                     let id = commit.route.id;
                     if id == MailboxId::NONE || id == MailboxId::CHASSIS_MAILBOX_ID {
-                        return Err(RegistryEffectError::Name(NameConflict {
-                            name: commit.route.canonical_name.clone(),
-                        }));
+                        let name = commit.route.canonical_name.clone();
+                        drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
+                        return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
                     match staged_route(&staged_routes, inner, id) {
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
                                 && existing.canonical_name == commit.route.canonical_name => {}
                         Some(_) => {
-                            return Err(RegistryEffectError::Name(NameConflict {
-                                name: commit.route.canonical_name.clone(),
-                            }));
+                            let name = commit.route.canonical_name.clone();
+                            drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
+                            return Err(RegistryEffectError::Name(NameConflict { name }));
                         }
                         None => {}
                     }
                     let token = ActivationToken::next(&mut next_activation_token);
                     let activation = match commit.take_activation().reserve(token) {
                         Ok(activation) => activation,
-                        Err(prepared) => {
-                            drop(prepared.discard_at_home());
+                        Err((prepared, failure)) => {
+                            drop(prepared.discard_at_home(failure));
                             return Err(RegistryEffectError::ActivationRejected);
                         }
                     };
                     if !commit.costs.prepare(id, token) {
-                        activation.cancel();
+                        activation.reject(PreparedSpawnFailure::ActivationRejected);
                         return Err(RegistryEffectError::ActivationRejected);
                     }
                     let route = commit.route;
@@ -934,7 +940,8 @@ impl Registry {
                             }));
                         }
                     } else {
-                        staged_kinds.insert(id, KindSlot { name: descriptor.name.clone(), descriptor });
+                        let name = Arc::from(descriptor.name.as_str());
+                        staged_kinds.insert(id, KindSlot { name, descriptor });
                         publication.kinds_dirty = true;
                     }
                     applied.push(RegistryApplied::Kind(id));
@@ -1022,7 +1029,10 @@ impl Registry {
             .parked
             .drain(..)
             .map(|mail| {
-                let kind_name = inner.kinds.get(&mail.kind).map(|slot| slot.name.clone()).unwrap_or_default();
+                let kind_name = inner
+                    .kinds
+                    .get(&mail.kind)
+                    .map_or_else(|| Arc::clone(&inner.empty_kind_name), |slot| Arc::clone(&slot.name));
                 PreparedMail::parked(mail, kind_name)
             })
             .collect();
@@ -1059,7 +1069,10 @@ impl Registry {
             Some(RouteLifecycle::Live { endpoint }) => Some(RouteContinuation {
                 disposition: CapturedDisposition::Live {
                     endpoint,
-                    kind_name: inner.kinds.get(&mail.kind).map(|slot| slot.name.clone()).unwrap_or_default(),
+                    kind_name: inner
+                        .kinds
+                        .get(&mail.kind)
+                        .map_or_else(|| Arc::clone(&inner.empty_kind_name), |slot| Arc::clone(&slot.name)),
                 },
                 mail,
             }),
@@ -1386,7 +1399,11 @@ impl Registry {
             endpoint,
             starting,
             dropped,
-            kind_name: kinds.table().kinds.get(&kind).map(|slot| slot.name.clone()).unwrap_or_default(),
+            kind_name: kinds
+                .table()
+                .kinds
+                .get(&kind)
+                .map_or_else(|| Arc::clone(&self.empty_kind_name), |slot| Arc::clone(&slot.name)),
             generation: routes.generation(),
         }
     }
@@ -1472,7 +1489,17 @@ impl Registry {
     /// closure handlers a kind name without them keeping their own
     /// map.
     pub fn kind_name(&self, kind: KindId) -> Option<String> {
-        self.kinds.load().table().kinds.get(&kind).map(|slot| slot.name.clone())
+        self.kind_name_shared(kind).map(|name| name.to_string())
+    }
+
+    /// Crate-private shared projection for dispatch paths that must not
+    /// reallocate the immutable registered kind name.
+    pub(crate) fn kind_name_shared(&self, kind: KindId) -> Option<Arc<str>> {
+        self.kinds.load().table().kinds.get(&kind).map(|slot| Arc::clone(&slot.name))
+    }
+
+    pub(crate) fn kind_name_or_empty_shared(&self, kind: KindId) -> Arc<str> {
+        self.kind_name_shared(kind).unwrap_or_else(|| Arc::clone(&self.empty_kind_name))
     }
 
     /// The descriptor stored for a given kind id, or `None` if the id

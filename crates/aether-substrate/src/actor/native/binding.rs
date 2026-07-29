@@ -44,6 +44,7 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::effect::{EffectBatch, PreparedSpawnCommit, RegistryEffect};
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -51,7 +52,7 @@ use crate::runtime::trace::SettlementHold;
 use aether_actor::RequestContextTable;
 use aether_data::{Kind, RequestId};
 
-use super::reservation::{ChildReservationKey, ChildReservationTable, ParentReservation};
+use super::reservation::{ChildReservationKey, ChildReservationTable, LiveChildReservation, ParentReservation};
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
@@ -88,6 +89,12 @@ struct PendingMail {
     parent_mail: Option<MailId>,
 }
 
+struct PendingBirthWork {
+    after_mail: usize,
+    recipient: MailboxId,
+    commit: PreparedSpawnCommit,
+}
+
 /// Per-actor send-side buffer that builds blobs **in place** (2c,
 /// iamacoffeepot/aether#1110). `push_envelope_buffered` writes each send
 /// straight into the ring as it happens — the blob is opened lazily on
@@ -117,11 +124,14 @@ struct OutboundBuffer {
     construct_start: Option<Nanos>,
     /// Per-mail route metadata for the current flush window.
     mails: Vec<PendingMail>,
+    /// Births are rare; this vector remains unallocated on the ordinary
+    /// mail-only handler path.
+    births: Vec<PendingBirthWork>,
 }
 
 impl OutboundBuffer {
     fn new() -> Self {
-        Self { ring: None, blob_open: false, construct_start: None, mails: Vec::new() }
+        Self { ring: None, blob_open: false, construct_start: None, mails: Vec::new(), births: Vec::new() }
     }
 }
 
@@ -260,6 +270,10 @@ pub struct NativeBinding {
     /// child-lifetime cascade.
     #[allow(dead_code, reason = "ADR-0165 reservation storage lands before production staged spawn wiring")]
     child_reservations: Mutex<ChildReservationTable>,
+    /// Live lease back into this actor's spawning parent's local key table.
+    /// The lease is weak and creates no parent/child lifetime cascade; dropping
+    /// this binding during ordinary teardown releases the parent's live key.
+    parent_child_reservation: Mutex<Option<LiveChildReservation>>,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
     request_contexts: Mutex<RequestContextTable>,
 }
@@ -301,6 +315,7 @@ impl NativeBinding {
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
             child_reservations: Mutex::new(ChildReservationTable::new()),
+            parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
         }
     }
@@ -348,6 +363,7 @@ impl NativeBinding {
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
             child_reservations: Mutex::new(ChildReservationTable::new()),
+            parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
         }
     }
@@ -763,6 +779,16 @@ impl NativeBinding {
         mail_id
     }
 
+    /// Append one prepared child birth at its exact declaration point in the
+    /// current handler's outbound work. The ordinary no-spawn path pays only
+    /// the empty-vector check at flush.
+    pub(crate) fn stage_child_birth(&self, commit: PreparedSpawnCommit) {
+        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        let after_mail = buffer.mails.len();
+        let recipient = commit.route.id;
+        buffer.births.push(PendingBirthWork { after_mail, recipient, commit });
+    }
+
     /// ADR-0087 / 2c: seal the open ring blob and route the buffered
     /// mail. Called at handler end (via [`super::ctx::NativeCtx`]'s
     /// `Drop`). A no-op when nothing is buffered.
@@ -823,7 +849,7 @@ impl NativeBinding {
         // (construct ≈ 0) on the impossible `None` so the field is never
         // a wire hole.
         let construct_start;
-        let routed: Vec<Mail> = {
+        let (routed, births): (Vec<Mail>, Vec<PendingBirthWork>) = {
             let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
             // Seal the open blob first (publishes the in-ring locks), so a
             // `MailRef::InRing` minted below reads a finalized header.
@@ -833,7 +859,7 @@ impl NativeBinding {
                 }
                 buf.blob_open = false;
             }
-            if buf.mails.is_empty() {
+            if buf.mails.is_empty() && buf.births.is_empty() {
                 // Reset the stale anchor so the next window re-stamps.
                 buf.construct_start = None;
                 return;
@@ -843,7 +869,7 @@ impl NativeBinding {
             construct_start = buf.construct_start.take().unwrap_or(flush_begin);
             let OutboundBuffer { ring, mails, .. } = &mut *buf;
             let ring = ring.as_ref();
-            mails
+            let routed = mails
                 .drain(..)
                 .map(|p| {
                     let payload = match p.payload {
@@ -856,7 +882,8 @@ impl NativeBinding {
                         .with_reply_to(p.reply_to)
                         .with_lineage(p.mail_id, p.root, p.parent_mail)
                 })
-                .collect()
+                .collect();
+            (routed, buf.births.drain(..).collect())
         };
 
         // iamacoffeepot/aether#1150: emit each buffered mail's deferred
@@ -876,6 +903,31 @@ impl NativeBinding {
                 flush_begin,
             );
         }
+
+        let routed = if births.is_empty() {
+            routed
+        } else {
+            let mut routed = routed.into_iter().map(Some).collect::<Vec<_>>();
+            let mut effects = Vec::with_capacity(births.len());
+            for mut birth in births {
+                for mail in routed.iter_mut().skip(birth.after_mail) {
+                    if mail.as_ref().is_some_and(|mail| mail.recipient == birth.recipient) {
+                        let mail = mail.take().expect("matched same-flush child mail remains present");
+                        let kind_name = self
+                            .spawner
+                            .as_ref()
+                            .expect("staged births require a spawner")
+                            .registry()
+                            .kind_name_or_empty_shared(mail.kind);
+                        birth.commit.retain_after_init(mail, kind_name);
+                    }
+                }
+                effects.push(RegistryEffect::PreparedSpawn(birth.commit));
+            }
+            let registry = self.spawner.as_ref().expect("staged births require a spawner").registry();
+            drop(registry.submit(EffectBatch::new(effects)));
+            routed.into_iter().flatten().collect()
+        };
 
         // ADR-0087 / iamacoffeepot/aether#1137: fold the blob into this
         // actor's single active cursor-shared blob (recipient-grouped,
@@ -937,6 +989,15 @@ impl NativeBinding {
             .lock()
             .expect("child reservation table poisoned; fail-fast per ADR-0063")
             .release_live(key);
+    }
+
+    pub(crate) fn retain_parent_child_reservation(&self, reservation: LiveChildReservation) {
+        let previous = self
+            .parent_child_reservation
+            .lock()
+            .expect("parent child reservation slot poisoned; fail-fast per ADR-0063")
+            .replace(reservation);
+        assert!(previous.is_none(), "a child binding retains exactly one parent-local live reservation");
     }
 }
 

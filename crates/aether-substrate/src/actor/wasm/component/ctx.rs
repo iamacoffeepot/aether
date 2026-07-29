@@ -430,7 +430,7 @@ impl ComponentCtx {
         // [`MailboxEntry`] docs for the contract.
         match self.registry.entry(recipient) {
             Some(MailboxEntry::Inbox { handler, .. }) => {
-                let kind_name = self.registry.kind_name(kind).unwrap_or_default();
+                let kind_name = self.registry.kind_name_or_empty_shared(kind);
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any
                 // sink cares about (ADR-0011), and the same mailbox id
@@ -470,7 +470,7 @@ impl ComponentCtx {
                 return;
             }
             Some(MailboxEntry::Inline(handler)) => {
-                let kind_name = self.registry.kind_name(kind).unwrap_or_default();
+                let kind_name = self.registry.kind_name_or_empty_shared(kind);
                 let origin = self.registry.mailbox_name(identity);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind,

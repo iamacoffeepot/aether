@@ -217,11 +217,11 @@ pub(crate) enum RelayOutcome {
     /// The `Weak` sender could not be upgraded — the actor's strong
     /// sender is gone (it dropped its `MailboxSender` during shutdown).
     /// The mail was transferred (not dropped armed) before returning.
-    SenderGone { kind_name: String },
+    SenderGone { kind_name: Arc<str> },
     /// The sender upgraded but the receiver had disconnected, so the
     /// `mpsc::send` failed. The returned envelope was transferred before
     /// returning.
-    ReceiverGone { kind_name: String },
+    ReceiverGone { kind_name: Arc<str> },
 }
 
 /// The shared inbox-relay core (ADR-0094): upgrade the actor's `Weak`
@@ -855,7 +855,7 @@ mod tests {
         drop(tx);
         match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
             RelayOutcome::SenderGone { kind_name } => {
-                assert_eq!(kind_name, "aether.lifecycle.subscribe_self");
+                assert_eq!(kind_name.as_ref(), "aether.lifecycle.subscribe_self");
             }
             other => panic!("expected SenderGone, got {other:?}"),
         }
@@ -868,7 +868,7 @@ mod tests {
         drop(rx);
         match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
             RelayOutcome::ReceiverGone { kind_name } => {
-                assert_eq!(kind_name, "aether.lifecycle.subscribe_self");
+                assert_eq!(kind_name.as_ref(), "aether.lifecycle.subscribe_self");
             }
             other => panic!("expected ReceiverGone, got {other:?}"),
         }

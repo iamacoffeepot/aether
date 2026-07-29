@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -15,8 +15,8 @@ use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, EffectBatch, InstalledActivation, LiveActivation,
-    PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnActivation, PreparedSpawnCommit, RegistryApplied,
-    RegistryEffect, RegistryEffectError, StartingCancellation,
+    PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
+    RegistryApplied, RegistryEffect, RegistryEffectError, StartingCancellation,
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
@@ -24,7 +24,7 @@ use crate::mail::registry::{
     AddressResolutionError, DropError, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch,
     Registry, noop_handler, test_dispatch, test_owned_dispatch,
 };
-use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
+use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, SeizeHandle, WakeSink};
 
@@ -581,6 +581,50 @@ fn kind_name_reverse_lookup() {
     assert!(r.kind_name(KindId(999)).is_none());
 }
 
+#[test]
+fn repeated_routed_inbox_mail_shares_registered_kind_name_and_preserves_metadata() {
+    let registry = Arc::new(Registry::new());
+    let kind = registry.register_kind("aether.shared.kind");
+    let (tx, rx) = mpsc::channel();
+    let recipient = registry.register_inbox(
+        "shared-kind-recipient",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let mailer = Mailer::new(Arc::clone(&registry));
+    let first_id = MailId::new(MailboxId(11), 1);
+    let second_id = MailId::new(MailboxId(11), 2);
+    mailer.push(
+        Mail::new(recipient, kind, vec![1, 2], 1)
+            .with_reply_to(Source::with_correlation(SourceAddr::Component(MailboxId(11)), 41))
+            .with_lineage(first_id, first_id, None),
+    );
+    mailer.push(
+        Mail::new(recipient, kind, vec![3, 4], 2)
+            .with_reply_to(Source::with_correlation(SourceAddr::Component(MailboxId(11)), 42))
+            .with_lineage(second_id, first_id, Some(first_id)),
+    );
+
+    let first = rx.recv().expect("first routed dispatch");
+    let second = rx.recv().expect("second routed dispatch");
+    assert!(Arc::ptr_eq(&first.kind_name, &second.kind_name));
+    assert_eq!(first.kind_name.as_ref(), "aether.shared.kind");
+    assert_eq!(first.payload.bytes(), [1, 2]);
+    assert_eq!(second.payload.bytes(), [3, 4]);
+    assert_eq!(second.count, 2);
+    assert_eq!(second.mail_id, second_id);
+    assert_eq!(second.root, first_id);
+    assert_eq!(second.parent_mail, Some(first_id));
+    first.discharge();
+    second.discharge();
+
+    let unknown_a = registry.route_lookup(KindId(u64::MAX - 1), recipient).kind_name_shared();
+    let unknown_b = registry.route_lookup(KindId(u64::MAX - 2), recipient).kind_name_shared();
+    assert!(unknown_a.is_empty());
+    assert!(Arc::ptr_eq(&unknown_a, &unknown_b), "unknown kinds reuse the registry's startup sentinel");
+}
+
 fn unit_desc(name: &str) -> KindDescriptor {
     KindDescriptor { name: name.to_string(), schema: SchemaType::Unit }
 }
@@ -900,7 +944,7 @@ impl PreparedSpawnActivation for FakePreparedActivation {
     fn reserve(
         self: Box<Self>,
         _token: ActivationToken,
-    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
+    ) -> Result<Arc<dyn ActivationReservation>, (Box<dyn PreparedSpawnActivation>, PreparedSpawnFailure)> {
         Ok(Arc::new(FakeActivationReservation {
             live: Mutex::new(Some(Box::new(FakeLiveActivation { deliveries: self.deliveries }))),
             scheduled: self.scheduled,
@@ -911,7 +955,7 @@ impl PreparedSpawnActivation for FakePreparedActivation {
         }))
     }
 
-    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+    fn discard_at_home(self: Box<Self>, _failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         drop(self);
         let _ = tx.send(());
@@ -994,7 +1038,7 @@ impl PreparedSpawnActivation for HomeCancelPrepared {
     fn reserve(
         self: Box<Self>,
         _token: ActivationToken,
-    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
+    ) -> Result<Arc<dyn ActivationReservation>, (Box<dyn PreparedSpawnActivation>, PreparedSpawnFailure)> {
         Ok(Arc::new(HomeCancelReservation {
             sink: self.sink,
             cancel_started: self.cancel_started,
@@ -1003,7 +1047,7 @@ impl PreparedSpawnActivation for HomeCancelPrepared {
         }))
     }
 
-    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+    fn discard_at_home(self: Box<Self>, _failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let _ = tx.send(());
         rx
@@ -1091,11 +1135,11 @@ impl PreparedSpawnActivation for DiscardProbeActivation {
     fn reserve(
         self: Box<Self>,
         _token: ActivationToken,
-    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
-        Err(self)
+    ) -> Result<Arc<dyn ActivationReservation>, (Box<dyn PreparedSpawnActivation>, PreparedSpawnFailure)> {
+        Err((self, PreparedSpawnFailure::ActivationRejected))
     }
 
-    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+    fn discard_at_home(self: Box<Self>, _failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         #[allow(clippy::disallowed_methods, reason = "test probe models an execution-home discard thread")]
         thread::Builder::new()
@@ -1132,7 +1176,7 @@ fn prepared_test_spawn(
             cancelled: Arc::clone(&cancelled),
         }),
         PreparedCostCells::new(Arc::clone(mailer.cost_table()), vec![(KindId(7), Arc::clone(&cell))]),
-        vec![PreparedMail::bootstrap(Mail::new(id, KindId(7), vec![bootstrap], 1), "test.activation".into())],
+        vec![PreparedMail::bootstrap(Mail::new(id, KindId(7), vec![bootstrap], 1), "test.activation")],
     ));
     (id, cell, cancelled, effect)
 }
@@ -1140,7 +1184,7 @@ fn prepared_test_spawn(
 fn activation_barrier(id: MailboxId, token: ActivationToken, sequence: u64) -> Mail {
     let mail_id = MailId::new(id, sequence);
     Mail::new(id, ACTIVATION_BARRIER_KIND, token.value().to_le_bytes().to_vec(), 1)
-        .with_reply_to(Source::with_correlation(aether_data::SourceAddr::Component(id), sequence))
+        .with_reply_to(Source::with_correlation(SourceAddr::Component(id), sequence))
         .with_lineage(mail_id, mail_id, None)
 }
 
@@ -2086,7 +2130,7 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
 
     let received = rx.try_recv().expect("hand-rolled enqueue should send");
     assert_eq!(received.kind, KindId(42));
-    assert_eq!(received.kind_name, "aether.fs.write");
+    assert_eq!(received.kind_name.as_ref(), "aether.fs.write");
     assert_eq!(received.payload.into_vec(), vec![0xAB, 0xCD]);
     assert!(rx.try_recv().is_err(), "exactly one enqueue should send exactly one envelope");
 }

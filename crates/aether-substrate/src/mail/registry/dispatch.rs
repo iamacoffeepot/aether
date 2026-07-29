@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::{cell::Cell, thread};
 
@@ -39,7 +40,7 @@ pub fn test_dispatch<'a>(kind: KindId, kind_name: &'a str, payload: &'a [u8], co
 pub fn test_owned_dispatch(kind: KindId, kind_name: &str, payload: &[u8], count: u32) -> OwnedDispatch {
     OwnedDispatch::disarmed(
         kind,
-        kind_name.to_owned(),
+        kind_name,
         None,
         Source::NONE,
         MailRef::from(payload.to_vec()),
@@ -121,7 +122,7 @@ pub struct MailDispatch<'a> {
 #[derive(Debug)]
 struct ObligationGuard {
     mail_id: MailId,
-    kind_name: String,
+    kind_name: Arc<str>,
     mailbox: MailboxId,
     armed: Cell<bool>,
 }
@@ -142,13 +143,13 @@ impl ObligationGuard {
     /// condition matches `record_finished`'s NONE no-op exactly — a
     /// dispatch carries a guard obligation iff it carries a real
     /// settlement obligation (ADR-0094, issue 1326).
-    fn armed(mail_id: MailId, kind_name: String, mailbox: MailboxId) -> Self {
+    fn armed(mail_id: MailId, kind_name: Arc<str>, mailbox: MailboxId) -> Self {
         Self { mail_id, kind_name, mailbox, armed: Cell::new(mail_id != MailId::NONE) }
     }
 
     /// A guard that carries no obligation — test/helper mints and the
     /// disarmed result of a `Clone`.
-    fn disarmed(mail_id: MailId, kind_name: String, mailbox: MailboxId) -> Self {
+    fn disarmed(mail_id: MailId, kind_name: Arc<str>, mailbox: MailboxId) -> Self {
         Self { mail_id, kind_name, mailbox, armed: Cell::new(false) }
     }
 
@@ -213,9 +214,9 @@ impl Drop for ObligationGuard {
 pub struct OwnedDispatch {
     /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
     pub kind: KindId,
-    /// Kind's registered name. Owned `String` so the handler can move
-    /// it into a downstream envelope without cloning.
-    pub kind_name: String,
+    /// Kind's registered name. Shared with the registry's immutable kind
+    /// slot so ordinary dispatch only clones an [`Arc`].
+    pub kind_name: Arc<str>,
     /// Sending mailbox's registered name, if the mail came from a
     /// component. `None` for substrate-core pushes with no sending
     /// mailbox (ADR-0011).
@@ -290,7 +291,7 @@ impl OwnedDispatch {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn armed(
         kind: KindId,
-        kind_name: String,
+        kind_name: impl Into<Arc<str>>,
         origin: Option<String>,
         sender: Source,
         payload: MailRef,
@@ -302,6 +303,7 @@ impl OwnedDispatch {
         enqueue_depth: u32,
         recipient: MailboxId,
     ) -> Self {
+        let kind_name = kind_name.into();
         #[cfg(debug_assertions)]
         let obligation = ObligationGuard::armed(mail_id, kind_name.clone(), recipient);
         Self {
@@ -338,7 +340,7 @@ impl OwnedDispatch {
     #[allow(clippy::too_many_arguments)]
     pub fn disarmed(
         kind: KindId,
-        kind_name: String,
+        kind_name: impl Into<Arc<str>>,
         origin: Option<String>,
         sender: Source,
         payload: MailRef,
@@ -350,6 +352,7 @@ impl OwnedDispatch {
         enqueue_depth: u32,
         recipient: MailboxId,
     ) -> Self {
+        let kind_name = kind_name.into();
         #[cfg(debug_assertions)]
         let obligation = ObligationGuard::disarmed(mail_id, kind_name.clone(), recipient);
         Self {

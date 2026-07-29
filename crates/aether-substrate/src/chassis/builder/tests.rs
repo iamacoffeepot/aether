@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::actor::monitor::MonitorHandle;
-use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
+use crate::actor::native::{Dispatch, DispatchId, TaskCompletionWake};
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
@@ -51,53 +51,6 @@ macro_rules! pod_kind {
 
             fn encode_into_bytes(&self) -> Vec<u8> {
                 bytemuck::bytes_of(self).to_vec()
-            }
-        }
-    };
-}
-
-macro_rules! count_on_kind_actor {
-    ($type:ident, $namespace:literal, $kind:ty, $field:ident) => {
-        struct $type {
-            $field: Arc<AtomicU32>,
-        }
-
-        impl Addressable for $type {
-            const NAMESPACE: &'static str = $namespace;
-            type Resolver = aether_actor::Many;
-        }
-
-        impl HandlesKind<$kind> for $type {}
-
-        impl aether_actor::Lifecycle<Self> for $type {
-            type Config = ();
-            type Params = Arc<AtomicU32>;
-            type InitError = BootError;
-            type InitCtx<'a> = NativeInitCtx<'a>;
-            type Ctx<'a> = NativeCtx<'a>;
-
-            fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self { $field: params })
-            }
-        }
-
-        impl NativeActor for $type {
-            type State = Self;
-        }
-
-        impl Dispatch<Self> for $type {
-            fn dispatch(
-                state: &mut Self,
-                _ctx: &mut NativeCtx<'_, crate::Manual>,
-                kind: KindId,
-                payload: &[u8],
-            ) -> Option<()> {
-                if kind.0 == <$kind as aether_data::Kind>::ID.0 {
-                    let _ = <$kind as aether_data::Kind>::decode_from_bytes(payload)?;
-                    state.$field.fetch_add(1, AtomicOrdering::SeqCst);
-                    return Some(());
-                }
-                None
             }
         }
     };
@@ -861,8 +814,9 @@ fn with_actor_stamps_local_for_init_and_handler() {
     drop(chassis);
 }
 
-/// Issue 607 Phase 3b verify: a singleton parent's handler calls
-/// `ctx.spawn_child::<Parent, Child>(...)` to launch an instanced actor.
+/// ADR-0165 scheduler proof: on a real one-worker pool a singleton parent's
+/// handler stages a child without waiting, the owner and activation make
+/// progress after that turn returns, and the typed completion wakes the parent.
 /// Asserts the child's `MailboxId` lands in the chassis's
 /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
 /// `after_init` mail dispatches as the child's first envelope.
@@ -878,11 +832,47 @@ fn ctx_spawn_child_routes_through_handler() {
 
     pod_kind!(Ping { tag: u32 }, "test.spawn_child.ping", 0xD0D1_D2D3_D4D5_D6D7);
 
-    count_on_kind_actor!(ChildCap, "test.spawn_child.child", Ping, received);
+    struct ChildCap {
+        received: Arc<Mutex<Vec<u32>>>,
+    }
+    impl Addressable for ChildCap {
+        const NAMESPACE: &'static str = "test.spawn_child.child";
+        type Resolver = aether_actor::Many;
+    }
+    impl HandlesKind<Ping> for ChildCap {}
+    impl aether_actor::Lifecycle<Self> for ChildCap {
+        type Config = ();
+        type Params = Arc<Mutex<Vec<u32>>>;
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), received: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received })
+        }
+    }
+    impl NativeActor for ChildCap {
+        type State = Self;
+    }
+    impl Dispatch<Self> for ChildCap {
+        fn dispatch(
+            state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            kind: KindId,
+            payload: &[u8],
+        ) -> Option<()> {
+            if kind != Ping::ID {
+                return None;
+            }
+            state.received.lock().unwrap().push(Ping::decode_from_bytes(payload)?.tag);
+            Some(())
+        }
+    }
 
     struct ParentCap {
         spawn_count: Arc<AtomicU32>,
-        child_received: Arc<AtomicU32>,
+        failure_count: Arc<AtomicU32>,
+        child_received: Arc<Mutex<Vec<u32>>>,
     }
     impl Addressable for ParentCap {
         const NAMESPACE: &'static str = "test.spawn_child.parent";
@@ -892,16 +882,16 @@ fn ctx_spawn_child_routes_through_handler() {
     impl HandlesKind<Hatch> for ParentCap {}
     impl aether_actor::Lifecycle<Self> for ParentCap {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<AtomicU32>);
+        type Params = (Arc<AtomicU32>, Arc<AtomicU32>, Arc<Mutex<Vec<u32>>>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init(
             (): (),
-            (spawn_count, child_received): Self::Params,
+            (spawn_count, failure_count, child_received): Self::Params,
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
-            Ok(Self { spawn_count, child_received })
+            Ok(Self { spawn_count, failure_count, child_received })
         }
     }
     impl NativeActor for ParentCap {
@@ -916,13 +906,49 @@ fn ctx_spawn_child_routes_through_handler() {
             payload: &[u8],
         ) -> Option<()> {
             if kind.0 == Hatch::ID.0 {
-                let _ = Hatch::decode_from_bytes(payload)?;
-                let _id = ctx
+                let hatch = Hatch::decode_from_bytes(payload)?;
+                if hatch.tag == 2 {
+                    ctx.spawn_child::<Self, ChildCap>(
+                        Subname::Named("conflict"),
+                        (),
+                        Arc::clone(&state.child_received),
+                    )
+                    .stage()
+                    .expect("the conflict is authoritative owner state, not a local preparation failure");
+                    return Some(());
+                }
+                let receipt = ctx
                     .spawn_child::<Self, ChildCap>(Subname::Counter, (), Arc::clone(&state.child_received))
                     .after_init(Ping { tag: 42 })
-                    .finish()
-                    .expect("spawn_child must succeed");
-                state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    .stage()
+                    .expect("spawn_child local preparation must succeed");
+                assert!(
+                    ctx.mailer().registry().entry(receipt.mailbox_id).is_none(),
+                    "staging performs no global route write before handler flush"
+                );
+                let duplicate = ctx
+                    .spawn_child::<Self, ChildCap>(Subname::Named("0"), (), Arc::clone(&state.child_received))
+                    .stage()
+                    .expect_err("the parent-local staged key rejects a duplicate synchronously");
+                assert!(matches!(duplicate, crate::SpawnError::SubnameInUse { .. }));
+                let _ = ctx.send_envelope_tracked(receipt.mailbox_id, Ping::ID, &Ping { tag: 43 }.encode_into_bytes());
+                return Some(());
+            }
+            if kind == TaskCompletionWake::ID {
+                let wake = TaskCompletionWake::decode_from_bytes(payload)?;
+                let done = ctx.take_task_done::<Result<crate::SpawnApplied, crate::SpawnError>, ()>(DispatchId(
+                    wake.dispatch_id,
+                ))?;
+                match done.output() {
+                    Ok(_) => {
+                        state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    }
+                    Err(crate::SpawnError::SubnameInUse { .. }) => {
+                        state.failure_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    }
+                    Err(error) => panic!("unexpected staged-birth completion: {error:?}"),
+                }
+                done.release_no_reply();
                 return Some(());
             }
             None
@@ -931,10 +957,11 @@ fn ctx_spawn_child_routes_through_handler() {
 
     let (registry, mailer) = bare_substrate();
     let spawn_count = Arc::new(AtomicU32::new(0));
-    let child_received = Arc::new(AtomicU32::new(0));
+    let failure_count = Arc::new(AtomicU32::new(0));
+    let child_received = Arc::new(Mutex::new(Vec::new()));
 
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&child_received)))
+        .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&failure_count), Arc::clone(&child_received)))
         .build_passive()
         .expect("ParentCap boots");
 
@@ -945,18 +972,44 @@ fn ctx_spawn_child_routes_through_handler() {
     let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
         panic!("expected mailbox entry");
     };
+    let conflict_id = MailboxId(aether_data::with_tag(
+        aether_data::Tag::Mailbox,
+        aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced("test.spawn_child.child", "conflict")),
+    ));
+    registry
+        .try_register_inbox_with_id(
+            conflict_id,
+            "test.spawn_child.parent/test.spawn_child.child:conflict".to_owned(),
+            registry::noop_handler(),
+        )
+        .expect("fixture owns the authoritative conflicting route");
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
     handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, Hatch::NAME, &bytes, 1));
+    let conflict = (Hatch { tag: 2 }).encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, Hatch::NAME, &conflict, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
-    while child_received.load(AtomicOrdering::SeqCst) < 1 && Instant::now() < deadline {
+    while (child_received.lock().unwrap().len() < 2
+        || spawn_count.load(AtomicOrdering::SeqCst) < 1
+        || failure_count.load(AtomicOrdering::SeqCst) < 1)
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(spawn_count.load(AtomicOrdering::SeqCst), 1, "parent's handler ran spawn_child exactly once");
     assert_eq!(
-        child_received.load(AtomicOrdering::SeqCst),
+        spawn_count.load(AtomicOrdering::SeqCst),
         1,
-        "spawn_child's after_init mail dispatched as the child's first envelope"
+        "the staged birth's authoritative completion returned to the parent on one worker"
+    );
+    assert_eq!(
+        failure_count.load(AtomicOrdering::SeqCst),
+        1,
+        "an authoritative apply conflict returns exactly one typed TaskDone failure"
+    );
+    assert_eq!(
+        child_received.lock().unwrap().as_slice(),
+        [42, 43],
+        "the explicit bootstrap prefix precedes same-flush child mail"
     );
 
     // Child is Live in the chassis's actor registry under the
@@ -971,6 +1024,123 @@ fn ctx_spawn_child_routes_through_handler() {
         chassis.actor_registry().is_live(child_id),
         "spawned child should be Live in the actor registry under the lineage-folded id"
     );
+
+    drop(chassis);
+}
+
+#[test]
+fn staged_child_init_failure_releases_parent_reservation_without_registry_write() {
+    use crate::actor::native::spawn::{SpawnError, Subname};
+    use crate::mail::registry::MailboxEntry;
+    use aether_data::Kind;
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    pod_kind!(Hatch { tag: u32 }, "test.spawn_init_failure.hatch", 0xD1D2_D3D4_D5D6_D7D8);
+
+    struct FailingChild;
+    impl Addressable for FailingChild {
+        const NAMESPACE: &'static str = "test.spawn_init_failure.child";
+        type Resolver = aether_actor::Many;
+    }
+    impl aether_actor::Lifecycle<Self> for FailingChild {
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), attempts: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(BootError::Other(Box::new(io::Error::other("intentional staged child init failure"))))
+        }
+    }
+    impl NativeActor for FailingChild {
+        type State = Self;
+    }
+    impl Dispatch<Self> for FailingChild {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    struct ParentCap {
+        attempts: Arc<AtomicU32>,
+        observed: Arc<AtomicBool>,
+    }
+    impl Addressable for ParentCap {
+        const NAMESPACE: &'static str = "test.spawn_init_failure.parent";
+        type Resolver = aether_actor::One;
+    }
+    impl aether_actor::Root for ParentCap {}
+    impl HandlesKind<Hatch> for ParentCap {}
+    impl ChildOf<ParentCap> for FailingChild {}
+    impl aether_actor::Lifecycle<Self> for ParentCap {
+        type Config = ();
+        type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), (attempts, observed): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { attempts, observed })
+        }
+    }
+    impl NativeActor for ParentCap {
+        type State = Self;
+    }
+    impl Dispatch<Self> for ParentCap {
+        fn dispatch(
+            state: &mut Self,
+            ctx: &mut NativeCtx<'_, crate::Manual>,
+            kind: KindId,
+            payload: &[u8],
+        ) -> Option<()> {
+            if kind != Hatch::ID {
+                return None;
+            }
+            let _ = Hatch::decode_from_bytes(payload)?;
+            for _ in 0..2 {
+                let error = ctx
+                    .spawn_child::<Self, FailingChild>(Subname::Named("retry"), (), Arc::clone(&state.attempts))
+                    .stage()
+                    .expect_err("the child fixture always fails initialization");
+                assert!(matches!(error, SpawnError::InitFailed(_)));
+            }
+            state.observed.store(true, AtomicOrdering::SeqCst);
+            Some(())
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let attempts = Arc::new(AtomicU32::new(0));
+    let observed = Arc::new(AtomicBool::new(false));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<ParentCap>((Arc::clone(&attempts), Arc::clone(&observed)))
+        .build_passive()
+        .expect("ParentCap boots");
+    let parent_id = registry.lookup(ParentCap::NAMESPACE).expect("ParentCap claimed");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("parent sink") else {
+        panic!("expected parent inbox")
+    };
+    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(observed.load(AtomicOrdering::SeqCst), "parent handler completed both local attempts");
+    assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2, "init failure releases the parent-local key for retry");
+    let child_id = MailboxId(aether_data::with_tag(
+        aether_data::Tag::Mailbox,
+        aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced(FailingChild::NAMESPACE, "retry")),
+    ));
+    assert!(registry.entry(child_id).is_none(), "failed initialization performs no registry write");
 
     drop(chassis);
 }
