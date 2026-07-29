@@ -312,10 +312,9 @@ impl ComponentHostCapabilityState {
         // `ActorLogRing` like every other actor; no drain
         // configuration is needed.
 
-        // 7. Announce the new kind vocabulary AND mailbox inventory
-        // upstream so the hub (and attached MCP sessions) see the
-        // post-load surface. Mailboxes ship symmetrically with
-        // kinds (issue iamacoffeepot/aether#730) — every load adds
+        // Inventory egress is publication-driven through the component host's
+        // RegistryChanged handler; this mutation site no longer reads the
+        // freshly-published registry back.
         LoadResult::Ok {
             mailbox_id,
             // ADR-0099 §3/§4: report the exact `/`-rendered lineage

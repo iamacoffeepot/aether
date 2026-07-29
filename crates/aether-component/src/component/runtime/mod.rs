@@ -307,9 +307,9 @@ impl NativeActor for ComponentHostCapability {
     /// Enumerate the components this engine has actually loaded and
     /// registered, by their ADR-0099 lineage names (issue 2020).
     ///
-    /// Reads the registry's live mailbox snapshot — the same list
-    /// already egressed to the hub after each load — and keeps only the
-    /// [`MailboxCategory::Trampoline`] entries, the loaded-component set.
+    /// Reads the registry's live mailbox snapshot — the same coherent
+    /// inventory projected to the hub by `RegistryChanged` — and keeps only
+    /// the [`MailboxCategory::Trampoline`] entries, the loaded-component set.
     /// Chassis caps are boot-present and static, so the trampolines are
     /// the only registry membership a readiness poll cares about. The
     /// reply is names only: the mailbox id is a deterministic hash-chain
