@@ -17,7 +17,8 @@ use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
 use crate::chassis::error::BootError;
 use crate::config::{
-    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, RingCapacities, SchedulerTuning,
+    ConfigManifest, ConfigMember, ConfigMemberRecord, ConfigProvenance, ConfigSources, RegistryQueueCapacities,
+    RingCapacities, SchedulerTuning,
 };
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::Registry;
@@ -107,6 +108,13 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`);
     /// tests / `SubstrateHarness` leave it [`SchedulerTuning::default`].
     scheduler_tuning: SchedulerTuning,
+    /// Issue 4122: the ADR-0165 registry owner / route relay admission
+    /// bounds, handed to the two leases in `boot_passives`. Production
+    /// chassis mains populate this from the bundle-side `RegistryQueueConfig`
+    /// derive-`Config` knob (env `AETHER_REGISTRY_*_QUEUE_CAPACITY`);
+    /// tests / `SubstrateHarness` leave it
+    /// [`RegistryQueueCapacities::default`].
+    registry_queues: RegistryQueueCapacities,
     /// Issue #2509: cumulative patience the instanced-actor teardown
     /// close-done gate (`Spawner::shutdown_instanced`) waits before
     /// declaring a slot wedged. Defaults to the generous 300s backstop
@@ -158,6 +166,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             workers: None,
             ring_capacities: RingCapacities::default(),
             scheduler_tuning: SchedulerTuning::default(),
+            registry_queues: RegistryQueueCapacities::default(),
             teardown_budget: DEFAULT_TEARDOWN_BUDGET,
             config_members: Vec::new(),
             config_sources: ConfigSources::default(),
@@ -194,6 +203,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             workers: self.workers,
             ring_capacities: self.ring_capacities,
             scheduler_tuning: self.scheduler_tuning,
+            registry_queues: self.registry_queues,
             teardown_budget: self.teardown_budget,
             config_members: self.config_members,
             config_sources: self.config_sources,
@@ -234,6 +244,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             workers,
             self.ring_capacities,
             self.scheduler_tuning,
+            self.registry_queues,
             self.teardown_budget,
             &mut config_sources,
             self.passives,
@@ -404,6 +415,20 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
         self
     }
 
+    /// Issue 4122: override the ADR-0165 serialized-queue admission bounds
+    /// ([`RegistryQueueCapacities`]). Default is
+    /// [`RegistryQueueCapacities::default`]. Production chassis mains resolve
+    /// the bundle-side `RegistryQueueConfig` derive-`Config` knob (env
+    /// `AETHER_REGISTRY_OWNER_QUEUE_CAPACITY` /
+    /// `AETHER_REGISTRY_RELAY_QUEUE_CAPACITY`) and pass the lowered value
+    /// here; `boot_passives` hands it to the registry owner and route relay
+    /// leases at attach.
+    #[must_use]
+    pub fn with_registry_queue_capacities(mut self, registry_queues: RegistryQueueCapacities) -> Self {
+        self.registry_queues = registry_queues;
+        self
+    }
+
     /// Issue #2509: override the instanced-actor teardown close-done
     /// gate's cumulative patience cap. Default is `DEFAULT_TEARDOWN_BUDGET`
     /// (the 300s backstop). Production chassis mains resolve the shared
@@ -507,6 +532,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             workers,
             ring_capacities,
             scheduler_tuning,
+            registry_queues,
             teardown_budget,
             config_sources: mut sources,
             ..
@@ -524,6 +550,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
             workers,
             ring_capacities,
             scheduler_tuning,
+            registry_queues,
             teardown_budget,
             &mut sources,
             passives,

@@ -22,8 +22,8 @@ use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, RuntimeConfig, SchedulerTuningConfig, SettlementConfig, hub_residual_knobs,
-    install_frame_size,
+    ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    hub_residual_knobs, install_frame_size,
 };
 use aether_chassis::cli::ChassisCli;
 use std::thread;
@@ -116,6 +116,7 @@ impl BootableChassis for HubChassis {
         // #3930: resolve the three base non-cap members off the stack as structs.
         let actor_ring = sources.resolve::<ActorRingConfig>()?;
         let scheduler_tuning = sources.resolve::<SchedulerTuningConfig>()?;
+        let registry_queues = sources.resolve::<RegistryQueueConfig>()?;
         let settlement = sources.resolve::<SettlementConfig>()?;
         // #3849: the hub always binds (unlike desktop / headless) — resolve the
         // RPC port off the source stack (argv `--rpc-port` > `AETHER_RPC_PORT` >
@@ -126,7 +127,8 @@ impl BootableChassis for HubChassis {
         // Install the shared base stratum by reusing `ChassisBase`'s own
         // `ComposeBase::install` — the drift-free single definition — even though
         // the hub's `Base` is the unit no-op.
-        let builder = ChassisBase { sources, actor_ring, scheduler_tuning, settlement }.install(builder);
+        let builder =
+            ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement }.install(builder);
         Ok(builder.with_actor::<FleetServer>(()).with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
                 peer_kind: PeerKind::Substrate {

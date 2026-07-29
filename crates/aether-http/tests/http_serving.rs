@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 
 use aether_chassis::autoload::AutoloadComponent;
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RegistryQueueConfig, RuntimeConfig,
+    SchedulerTuningConfig, SettlementConfig,
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
@@ -362,6 +363,7 @@ mod tests {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
+                registry_queues: RegistryQueueConfig::default(),
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
@@ -471,6 +473,7 @@ mod tests {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
+                registry_queues: RegistryQueueConfig::default(),
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
@@ -575,6 +578,7 @@ mod tests {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
+                registry_queues: RegistryQueueConfig::default(),
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
@@ -684,6 +688,7 @@ mod tests {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
+                registry_queues: RegistryQueueConfig::default(),
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
@@ -907,6 +912,7 @@ mod tests {
                 sources: base_sources(server_config),
                 actor_ring: ActorRingConfig::default(),
                 scheduler_tuning: SchedulerTuningConfig::default(),
+                registry_queues: RegistryQueueConfig::default(),
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),

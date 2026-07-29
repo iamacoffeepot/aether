@@ -5,7 +5,7 @@
 //! shared staging / flag-naming / help-forwarding machinery lives in
 //! `aether_chassis::cli`.
 
-use aether_chassis::boot::{ActorRingOverlay, SchedulerTuningOverlay, env_only_after_help};
+use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, env_only_after_help};
 use aether_chassis::cli::{ChassisCli, ChassisMeta};
 use aether_fleet::FleetOverlay;
 use aether_harness_substrate::SettlementOverlay;
@@ -44,6 +44,11 @@ pub struct HubCli {
     /// resolves `SchedulerTuningConfig` off its own source stack (issue 3882).
     #[command(flatten)]
     pub scheduler: SchedulerTuningOverlay,
+    /// ADR-0165 serialized-queue bounds (issue 4122): the hub resolves
+    /// `RegistryQueueConfig` off its own source stack for the actors its
+    /// registry hosts.
+    #[command(flatten)]
+    pub registry_queues: RegistryQueueOverlay,
     /// Settlement-patience backstop (issue 2062): `--settlement-cap-secs`. The hub
     /// resolves `SettlementConfig` for its own teardown budget (issue 3882).
     #[command(flatten)]
@@ -69,7 +74,7 @@ mod tests {
     //! so a dropped or stale flatten fails honestly.
 
     use super::HubCli;
-    use aether_chassis::boot::{ActorRingOverlay, SchedulerTuningOverlay};
+    use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay};
     use aether_chassis::cli::{long_flags, meta_flags, overlay_flags};
     use aether_fleet::FleetOverlay;
     use aether_harness_substrate::SettlementOverlay;
@@ -87,6 +92,7 @@ mod tests {
         expected.extend(overlay_flags::<RpcServerOverlay>());
         expected.extend(overlay_flags::<ActorRingOverlay>());
         expected.extend(overlay_flags::<SchedulerTuningOverlay>());
+        expected.extend(overlay_flags::<RegistryQueueOverlay>());
         expected.extend(overlay_flags::<SettlementOverlay>());
         expected.extend(meta_flags());
         assert_eq!(long_flags(&HubCli::command()), expected);

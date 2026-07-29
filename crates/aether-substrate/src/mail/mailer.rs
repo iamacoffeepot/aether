@@ -27,8 +27,8 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RouteContinuation, RouteEndpoint,
-    RouteRelayHandle,
+    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RegistryQueueMetrics, RouteContinuation,
+    RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
@@ -349,6 +349,15 @@ impl Mailer {
         assert!(self.route_relay.set(relay).is_ok(), "a mailer can attach only one registry route relay");
     }
 
+    /// The route relay queue's admission and drain accounting (issue 4122),
+    /// or `None` before a relay is attached. The sibling of
+    /// [`Registry::owner_queue_metrics`] — read together they say which of
+    /// the two ADR-0165 drainers is the one falling behind.
+    #[must_use]
+    pub fn route_relay_metrics(&self) -> Option<RegistryQueueMetrics> {
+        self.route_relay.get().map(RouteRelayHandle::metrics)
+    }
+
     pub(super) fn relay_captured(&self, continuation: RouteContinuation) {
         let relay = self.route_relay.get().expect("registry-owner routing requires an attached route relay");
         assert!(
@@ -556,7 +565,16 @@ fn route_mail(mail: Mail, mailer: &Mailer) {
                     mailer.record_finished(returned.mail_id, returned.root);
                     return;
                 }
-                ParkAdmission::Closed(returned) => {
+                // A closed owner and a shed miss (issue 4122) end the same
+                // way: the envelope never reaches an owner turn, so the
+                // terminal tail runs here. For the shed that is precisely
+                // ADR-0165's "absent -> apply the existing unknown-recipient
+                // policy" — bubble to the hub if one is attached, otherwise
+                // warn-drop, balancing settlement either way so no chain is
+                // left open. Only an ordinary miss is sheddable (an
+                // activation barrier takes the `activation_control` arm
+                // above), so the disposition here is always `Unknown`.
+                ParkAdmission::Closed(returned) | ParkAdmission::Shed(returned) => {
                     route_tail(returned, lookup.into_captured(), mailer);
                     return;
                 }
