@@ -24,7 +24,7 @@
 // rationale as the routing registry's guard policy.
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +32,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use aether_actor::Local;
 use aether_kinds::{CostRow, CostTail, CostTailResult};
 
+use crate::mail::registry::effect::ActivationToken;
 use crate::mail::{KindId, MailboxId};
 
 /// Constant EWMA shift `k`: `mean += (x − mean) >> k`. `k = 4` is an α of
@@ -192,7 +193,13 @@ pub struct CostSample {
 /// / `cells_for`.
 #[derive(Debug, Default)]
 pub struct CostTable {
-    cells: RwLock<HashMap<(MailboxId, KindId), Arc<CostCell>>>,
+    cells: RwLock<HashMap<(MailboxId, KindId), CostEntry>>,
+}
+
+#[derive(Debug)]
+struct CostEntry {
+    cell: Arc<CostCell>,
+    activation: Option<ActivationToken>,
 }
 
 impl CostTable {
@@ -224,10 +231,80 @@ impl CostTable {
         kinds
             .iter()
             .map(|&kind| {
-                let cell = guard.entry((mailbox, kind)).or_insert_with(|| Arc::new(CostCell::new()));
-                (kind, Arc::clone(cell))
+                let entry = guard
+                    .entry((mailbox, kind))
+                    .or_insert_with(|| CostEntry { cell: Arc::new(CostCell::new()), activation: None });
+                (kind, Arc::clone(&entry.cell))
             })
             .collect()
+    }
+
+    /// Install actor-local cells as token-owned rows for a prepared birth.
+    /// Every row must be vacant; live/replacement rows remain under the
+    /// existing [`Self::seed`] lifecycle.
+    pub(crate) fn prepare(
+        &self,
+        mailbox: MailboxId,
+        token: ActivationToken,
+        cells: &[(KindId, Arc<CostCell>)],
+    ) -> bool {
+        let mut guard = self.cells.write().expect("cost table lock poisoned");
+        let mut kinds = HashSet::with_capacity(cells.len());
+        if guard.keys().any(|(row_mailbox, _)| *row_mailbox == mailbox)
+            || cells.iter().any(|(kind, _)| !kinds.insert(*kind))
+        {
+            return false;
+        }
+        for (kind, cell) in cells {
+            guard.insert((mailbox, *kind), CostEntry { cell: Arc::clone(cell), activation: Some(token) });
+        }
+        true
+    }
+
+    /// Install already actor-local cells as ordinary live rows. This is the
+    /// eager compatibility path for actors whose `init` selected a dynamic
+    /// handler set without mutating shared state.
+    pub(crate) fn install_live(&self, mailbox: MailboxId, cells: &[(KindId, Arc<CostCell>)]) -> bool {
+        let mut guard = self.cells.write().expect("cost table lock poisoned");
+        let mut kinds = HashSet::with_capacity(cells.len());
+        if guard.keys().any(|(row_mailbox, _)| *row_mailbox == mailbox)
+            || cells.iter().any(|(kind, _)| !kinds.insert(*kind))
+        {
+            return false;
+        }
+        for (kind, cell) in cells {
+            guard.insert((mailbox, *kind), CostEntry { cell: Arc::clone(cell), activation: None });
+        }
+        true
+    }
+
+    /// Convert all rows owned by `token` into ordinary live rows.
+    pub(crate) fn promote(&self, mailbox: MailboxId, token: ActivationToken, cells: &[(KindId, Arc<CostCell>)]) {
+        let mut guard = self.cells.write().expect("cost table lock poisoned");
+        let owned = guard
+            .iter()
+            .filter(|((row_mailbox, _), entry)| *row_mailbox == mailbox && entry.activation == Some(token))
+            .count();
+        assert_eq!(owned, cells.len(), "valid activation token must own exactly its prepared cost rows");
+        for (kind, cell) in cells {
+            let entry = guard.get_mut(&(mailbox, *kind)).expect("valid activation token missing a prepared cost row");
+            assert_eq!(entry.activation, Some(token), "prepared cost row belongs to a different activation");
+            assert!(Arc::ptr_eq(&entry.cell, cell), "prepared cost row no longer contains the actor-local cell");
+            entry.activation = None;
+        }
+    }
+
+    /// Roll back only rows installed by the named activation.
+    pub(crate) fn rollback(&self, mailbox: MailboxId, token: ActivationToken, cells: &[(KindId, Arc<CostCell>)]) {
+        let mut guard = self.cells.write().expect("cost table lock poisoned");
+        for (kind, cell) in cells {
+            let matches = guard
+                .get(&(mailbox, *kind))
+                .is_some_and(|entry| entry.activation == Some(token) && Arc::ptr_eq(&entry.cell, cell));
+            if matches {
+                guard.remove(&(mailbox, *kind));
+            }
+        }
     }
 
     /// Remove every cell for `mailbox`. Called on `aether.component.drop` /
@@ -253,7 +330,7 @@ impl CostTable {
     #[must_use]
     pub fn cells_for(&self, mailbox: MailboxId) -> Vec<(KindId, Arc<CostCell>)> {
         let guard = self.cells.read().expect("cost table lock poisoned");
-        guard.iter().filter(|((m, _), _)| *m == mailbox).map(|((_, k), c)| (*k, Arc::clone(c))).collect()
+        guard.iter().filter(|((m, _), _)| *m == mailbox).map(|((_, k), entry)| (*k, Arc::clone(&entry.cell))).collect()
     }
 
     /// Acquire one read-lock over the table and hand back a
@@ -290,12 +367,12 @@ impl CostTable {
             .iter()
             .filter(|((m, _), _)| *m == mailbox)
             .filter(|((_, k), _)| request.kind.is_none_or(|want| *k == want))
-            .map(|((_, k), c)| CostRow {
+            .map(|((_, k), entry)| CostRow {
                 kind_id: *k,
                 kind_name: None,
-                mean_nanos: c.mean_nanos(),
-                mad_nanos: c.mad_nanos(),
-                samples: c.samples(),
+                mean_nanos: entry.cell.mean_nanos(),
+                mad_nanos: entry.cell.mad_nanos(),
+                samples: entry.cell.samples(),
             })
             .collect();
         CostTailResult::Ok { rows }
@@ -309,7 +386,7 @@ impl CostTable {
 /// under a single read acquire, not one per mail.
 #[derive(Debug)]
 pub struct CostLookup<'a> {
-    cells: RwLockReadGuard<'a, HashMap<(MailboxId, KindId), Arc<CostCell>>>,
+    cells: RwLockReadGuard<'a, HashMap<(MailboxId, KindId), CostEntry>>,
 }
 
 impl CostLookup<'_> {
@@ -321,10 +398,10 @@ impl CostLookup<'_> {
     /// distinction is preserved for the dump / future callers.
     #[must_use]
     pub fn get(&self, mailbox: MailboxId, kind: KindId) -> Option<CostSample> {
-        self.cells.get(&(mailbox, kind)).map(|cell| CostSample {
-            mean_nanos: cell.mean_nanos(),
-            samples: cell.samples(),
-            mad_nanos: cell.mad_nanos(),
+        self.cells.get(&(mailbox, kind)).map(|entry| CostSample {
+            mean_nanos: entry.cell.mean_nanos(),
+            samples: entry.cell.samples(),
+            mad_nanos: entry.cell.mad_nanos(),
         })
     }
 }
@@ -510,6 +587,68 @@ mod tests {
         assert_eq!(cells.len(), 2);
         assert!(cells.iter().any(|(k, _)| *k == KindId(10)));
         assert!(cells.iter().any(|(k, _)| *k == KindId(20)));
+    }
+
+    #[test]
+    fn prepared_rows_reject_duplicate_kinds_atomically() {
+        let table = CostTable::new();
+        let mailbox = MailboxId(7);
+        let token = ActivationToken::from_value(1).expect("nonzero token");
+        let first = Arc::new(CostCell::new());
+        let duplicate = Arc::new(CostCell::new());
+
+        assert!(!table.prepare(mailbox, token, &[(KindId(10), Arc::clone(&first)), (KindId(10), duplicate)]));
+        assert!(table.cells_for(mailbox).is_empty(), "duplicate rejection leaves no partial row");
+    }
+
+    #[test]
+    fn prepared_rollback_preserves_a_replaced_row() {
+        let table = CostTable::new();
+        let mailbox = MailboxId(7);
+        let token = ActivationToken::from_value(1).expect("nonzero token");
+        let replacement_token = ActivationToken::from_value(2).expect("nonzero token");
+        let prepared = Arc::new(CostCell::new());
+        let replacement = Arc::new(CostCell::new());
+        let cells = vec![(KindId(10), Arc::clone(&prepared))];
+        assert!(table.prepare(mailbox, token, &cells));
+
+        table.cells.write().expect("cost table lock remains healthy").insert(
+            (mailbox, KindId(10)),
+            CostEntry { cell: Arc::clone(&replacement), activation: Some(replacement_token) },
+        );
+        table.rollback(mailbox, token, &cells);
+
+        let surviving = table.cells_for(mailbox);
+        assert_eq!(surviving.len(), 1);
+        assert!(Arc::ptr_eq(&surviving[0].1, &replacement));
+    }
+
+    #[test]
+    fn live_install_preserves_exact_actor_local_cells() {
+        let table = CostTable::new();
+        let mailbox = MailboxId(7);
+        let local = Arc::new(CostCell::new());
+        assert!(table.install_live(mailbox, &[(KindId(10), Arc::clone(&local))]));
+
+        let global = table.cells_for(mailbox);
+        assert_eq!(global.len(), 1);
+        assert!(Arc::ptr_eq(&local, &global[0].1));
+    }
+
+    #[test]
+    fn fresh_mailbox_installs_reject_disjoint_stale_rows_without_partial_writes() {
+        let table = CostTable::new();
+        let mailbox = MailboxId(7);
+        let stale = table.seed(mailbox, &[KindId(20)]);
+        let incoming = Arc::new(CostCell::new());
+        let token = ActivationToken::from_value(1).expect("nonzero token");
+
+        assert!(!table.prepare(mailbox, token, &[(KindId(10), Arc::clone(&incoming))]));
+        assert!(!table.install_live(mailbox, &[(KindId(10), incoming)]));
+        let rows = table.cells_for(mailbox);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, KindId(20));
+        assert!(Arc::ptr_eq(&rows[0].1, &stale[0].1));
     }
 
     /// The batch [`CostTable::lookup`] resolves a seeded handler's folded

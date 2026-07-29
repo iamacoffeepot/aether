@@ -25,8 +25,10 @@ use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
+use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    CapturedDisposition, MailDispatch, OwnedDispatch, Registry, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RouteContinuation, RouteEndpoint,
+    RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
@@ -340,7 +342,7 @@ impl Mailer {
     /// unknown recipients warn-and-discard (or bubble up to the
     /// hub-substrate when a `HubOutbound` is connected, per ADR-0037).
     pub fn push(&self, mail: Mail) {
-        route_mail(mail, self, true);
+        route_mail(mail, self);
     }
 
     pub(super) fn install_route_relay(&self, relay: RouteRelayHandle) {
@@ -471,7 +473,7 @@ impl Mailer {
 // the per-mail buffer handling and lose the linear "where does this
 // envelope go?" read.
 #[allow(clippy::too_many_lines)]
-fn route_mail(mut mail: Mail, mailer: &Mailer, resubmit: bool) {
+fn route_mail(mail: Mail, mailer: &Mailer) {
     let registry = &mailer.registry;
     let outbound = mailer.outbound.as_ref();
     let chassis_router = mailer.chassis_router.get().map(|router| &**router);
@@ -520,11 +522,7 @@ fn route_mail(mut mail: Mail, mailer: &Mailer, resubmit: bool) {
                     // ADR-0100: encode through the kind's declared codec.
                     let payload = result.encode_into_bytes();
                     let reply_to = Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
-                    route_mail(
-                        Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to),
-                        mailer,
-                        false,
-                    );
+                    route_mail(Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to), mailer);
                 }
                 SourceAddr::None => {}
             }
@@ -543,14 +541,30 @@ fn route_mail(mut mail: Mail, mailer: &Mailer, resubmit: bool) {
 
     // Route and immutable kind metadata come from wait-free point-in-time
     // publications. The lookup owns the endpoint facade used below.
-    let lookup = registry.route_lookup(mail.kind, mail.recipient);
-    if resubmit && (lookup.is_starting() || lookup.is_unknown()) {
-        match registry.park_or_drop(mail) {
-            None => return,
-            Some(returned) => mail = returned,
+    let mut current = mail;
+    loop {
+        let lookup = registry.route_lookup(current.kind, current.recipient);
+        let activation_control = current.kind == ACTIVATION_BARRIER_KIND;
+        if activation_control || lookup.is_starting() || lookup.is_unknown() {
+            match registry.park_or_drop(current, lookup.generation()) {
+                ParkAdmission::Queued => return,
+                ParkAdmission::Retry(returned) => {
+                    current = returned;
+                    continue;
+                }
+                ParkAdmission::Closed(returned) if activation_control => {
+                    mailer.record_finished(returned.mail_id, returned.root);
+                    return;
+                }
+                ParkAdmission::Closed(returned) => {
+                    route_tail(returned, lookup.into_captured(), mailer);
+                    return;
+                }
+            }
         }
+        route_tail(current, lookup.into_captured(), mailer);
+        return;
     }
-    route_tail(mail, lookup.into_captured(), mailer);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -716,7 +730,6 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
                         Mail::new(target, <aether_kinds::LogTailResult as Kind>::ID, payload, 1)
                             .with_reply_to(reply_to),
                         mailer,
-                        false,
                     );
                 }
                 // The synthesized reply is a fresh un-lineaged mail

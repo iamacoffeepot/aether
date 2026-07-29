@@ -37,7 +37,8 @@ pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx}
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::{CostCells, KindId, Mail};
+#[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
+pub use aether_substrate::mail::{CostCell, CostCells, KindId, Mail};
 
 #[runtime]
 impl NativeActor for WasmTrampoline {
@@ -102,13 +103,13 @@ impl NativeActor for WasmTrampoline {
         // path's `with_stamped(&slots, …)`, so the per-actor
         // `CostCells` cache is stamped directly here — the cap's
         // thread vs the trampoline's is irrelevant: the stamp binds to
-        // the actor's `ActorSlots`, not to a thread. The same
-        // `Arc<CostCell>`s seed the global `CostTable` for the cold
-        // `cost.tail` dump and the iamacoffeepot/aether#1178
-        // producer-side read. Replace re-seeds on the trampoline's own
-        // dispatch (`on_replace_component`); drop clears both indexes.
-        let handler_kinds: Vec<KindId> = config.capabilities.handlers.iter().map(|h| h.id).collect();
-        let seeded = mailer.cost_table().seed(mailbox, &handler_kinds);
+        // the actor's `ActorSlots`, not to a thread. Exact
+        // `Arc<CostCell>`s stay actor-local until the fused owner
+        // commit installs those same arcs globally. Replace continues to
+        // re-seed on the live trampoline's own dispatch; drop clears both
+        // indexes.
+        let seeded =
+            config.capabilities.handlers.iter().map(|handler| (handler.id, Arc::new(CostCell::new()))).collect();
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
         Ok(WasmTrampolineState {

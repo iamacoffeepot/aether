@@ -62,6 +62,7 @@
 //! rejected by the macro: strict receivers shouldn't silently swallow
 //! unknown kinds.
 
+pub(crate) mod activation;
 pub mod binding;
 pub(crate) mod blob_lifecycle;
 pub(crate) mod blob_work;
