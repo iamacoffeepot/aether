@@ -312,16 +312,9 @@ impl ComponentHostCapabilityState {
         // `ActorLogRing` like every other actor; no drain
         // configuration is needed.
 
-        // 7. Announce the new kind vocabulary AND mailbox inventory
-        // upstream so the hub (and attached MCP sessions) see the
-        // post-load surface. Mailboxes ship symmetrically with
-        // kinds (issue iamacoffeepot/aether#730) — every load adds
-        // exactly one trampoline mailbox at
-        // `aether.embedded:NAME`, and the snapshot
-        // gives the hub the freshly-published name + category.
-        self.outbound.egress_kinds_changed(self.registry.list_kind_descriptors());
-        self.outbound.egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
-
+        // Inventory egress is publication-driven through the component host's
+        // RegistryChanged handler; this mutation site no longer reads the
+        // freshly-published registry back.
         LoadResult::Ok {
             mailbox_id,
             // ADR-0099 §3/§4: report the exact `/`-rendered lineage
@@ -467,12 +460,11 @@ impl ComponentHostCapabilityState {
             if !self.boot_registry.contains_key(&hash) {
                 // Propagate a boot spawn failure rather than discarding it: the
                 // old refcount is already decremented, so the new boot is missing
-                // and the caller must know. Announce the freshly-spawned boot
-                // mailbox on success so `ListComponents` and the hub see it (a
-                // load egresses this; a replace otherwise would not).
+                // and the caller must know. The registry publication wakes the
+                // component host, which egresses the coherent inventory after
+                // this mutation settles.
                 let boot_mailbox = self.spawn_boot_singleton(ctx, &module, &boot_ns, &actors, Arc::from(new_wasm))?;
                 self.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot_mailbox, refcount: 0 });
-                self.outbound.egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
             }
             if let Some(entry) = self.boot_registry.get_mut(&hash) {
                 entry.refcount += 1;

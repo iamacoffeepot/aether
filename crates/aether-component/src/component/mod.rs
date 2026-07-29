@@ -81,7 +81,7 @@ use aether_kinds::{
 // once by `feature = "runtime"`; the body sources those names beside itself, so
 // only the handler-argument kinds the emitted markers lift verbatim must keep
 // resolving at this file's root (the `aether_kinds` import above).
-use aether_actor::actor;
+use aether_actor::{RegistryChanged, actor};
 
 /// `aether.component` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),
