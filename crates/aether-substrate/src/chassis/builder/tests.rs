@@ -1042,7 +1042,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
                 return Some(());
             }
             let error = ctx
-                .spawn_child::<DeclaredParent, Child>(Subname::Named("never-built"), (), Arc::clone(&state.init_count))
+                .spawn_child::<DeclaredParent, Child>(Subname::Counter, (), Arc::clone(&state.init_count))
                 .finish()
                 .expect_err("the executing binding is not DeclaredParent");
             if let SpawnError::ParentTypeMismatch { declared_namespace, actual_logical, actual_canonical_name } = error
@@ -1082,8 +1082,13 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     }
     assert!(mismatch_observed.load(AtomicOrdering::SeqCst), "mismatch facts should name both parent identities");
     assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "a false parent must not construct or init the child");
+    assert_eq!(chassis.booted.spawner.next_counter(), 0, "a false parent must be rejected before allocating a counter");
     assert!(
-        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:never-built").is_none(),
+        chassis.actor_registry().namespace_owner(Child::NAMESPACE).is_none(),
+        "a false parent must be rejected before claiming the child namespace",
+    );
+    assert!(
+        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:0").is_none(),
         "a false parent must not mutate the mailbox registry",
     );
 
@@ -2154,6 +2159,7 @@ fn instanced_can_spawn_grandchild() {
 
     struct Parent {
         grandchild_received: Arc<AtomicU32>,
+        spawned_name: Arc<Mutex<Option<(MailboxId, String)>>>,
     }
     impl Addressable for Parent {
         const NAMESPACE: &'static str = "test.recursive.parent";
@@ -2164,12 +2170,16 @@ fn instanced_can_spawn_grandchild() {
     impl HandlesKind<Quit> for Parent {}
     impl aether_actor::Lifecycle<Self> for Parent {
         type Config = ();
-        type Params = Arc<AtomicU32>;
+        type Params = (Arc<AtomicU32>, Arc<Mutex<Option<(MailboxId, String)>>>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { grandchild_received: params })
+        fn init(
+            (): (),
+            (grandchild_received, spawned_name): Self::Params,
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
+            Ok(Self { grandchild_received, spawned_name })
         }
     }
     impl NativeActor for Parent {
@@ -2189,11 +2199,12 @@ fn instanced_can_spawn_grandchild() {
                 // grandchild. Pre-load a Ping so the grandchild's
                 // first envelope dispatches without an external
                 // mail step.
-                let _id = ctx
+                let result = ctx
                     .spawn_child::<Self, Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
                     .after_init(Ping { tag: 0xCAFE })
-                    .finish()
+                    .finish_with_name()
                     .expect("recursive spawn must succeed");
+                *state.spawned_name.lock().expect("spawned-name mutex poisoned") = Some(result);
                 return Some(());
             }
             if kind.0 == Quit::ID.0 {
@@ -2211,8 +2222,9 @@ fn instanced_can_spawn_grandchild() {
         .expect("empty chassis boots");
 
     let grandchild_received = Arc::new(AtomicU32::new(0));
+    let spawned_name = Arc::new(Mutex::new(None));
     let parent_id = chassis
-        .spawn_actor::<Parent>(Subname::Named("p1"), (), Arc::clone(&grandchild_received))
+        .spawn_actor::<Parent>(Subname::Named("p1"), (), (Arc::clone(&grandchild_received), Arc::clone(&spawned_name)))
         .finish()
         .expect("spawn parent");
 
@@ -2233,7 +2245,10 @@ fn instanced_can_spawn_grandchild() {
     // the recursive spawn happened AND the after_init plumbing
     // works through it).
     let deadline = Instant::now() + Duration::from_millis(500);
-    while grandchild_received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+    while (grandchild_received.load(AtomicOrdering::SeqCst) == 0
+        || spawned_name.lock().expect("spawned-name mutex poisoned").is_none())
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
@@ -2250,6 +2265,11 @@ fn instanced_can_spawn_grandchild() {
         aether_data::Tag::Mailbox,
         aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced("test.recursive.grandchild", "only")),
     ));
+    assert_eq!(
+        *spawned_name.lock().expect("spawned-name mutex poisoned"),
+        Some((grandchild_id, "test.recursive.parent:p1/test.recursive.grandchild:only".to_owned())),
+        "finish_with_name must return the exact nested canonical registration name",
+    );
     assert!(
         chassis.actor_registry().is_live(grandchild_id),
         "grandchild should be Live in the registry under the lineage-folded id",
@@ -2381,6 +2401,60 @@ fn spawn_actor_runs_wire_once_after_init() {
 
     drop(chassis);
     let _ = id;
+}
+
+#[test]
+fn spawn_finish_with_name_returns_the_registered_top_level_name() {
+    use crate::actor::native::spawn::Subname;
+
+    struct NamedReturn;
+    impl Addressable for NamedReturn {
+        const NAMESPACE: &'static str = "test.spawn_name.return";
+        type Resolver = aether_actor::Many;
+    }
+    impl aether_actor::Root for NamedReturn {}
+    impl aether_actor::Lifecycle<Self> for NamedReturn {
+        type Config = ();
+        type Params = ();
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+    }
+    impl NativeActor for NamedReturn {
+        type State = Self;
+    }
+    impl Dispatch<Self> for NamedReturn {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .build_passive()
+        .expect("empty chassis boots");
+
+    let id_only =
+        chassis.spawn_actor::<NamedReturn>(Subname::Named("id-only"), (), ()).finish().expect("id-only spawn succeeds");
+    let (named_id, canonical_name) = chassis
+        .spawn_actor::<NamedReturn>(Subname::Named("exact-name"), (), ())
+        .finish_with_name()
+        .expect("named spawn succeeds");
+
+    assert_eq!(registry.lookup("test.spawn_name.return:id-only"), Some(id_only));
+    assert_eq!(canonical_name, "test.spawn_name.return:exact-name");
+    assert_eq!(registry.lookup(&canonical_name), Some(named_id));
+
+    drop(chassis);
 }
 
 /// Issue 584 Phase 2a / 697 wire pass: `wire` runs exactly once
