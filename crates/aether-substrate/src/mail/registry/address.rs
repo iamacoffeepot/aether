@@ -21,7 +21,6 @@ pub enum ActorAddressInventoryError {
     InvalidActorTag { namespace: String, declared: ActorId, expected: ActorId },
     MissingCardinality { namespace: String },
     ContradictoryCardinality { namespace: String },
-    InstancedRoot { namespace: String },
 }
 
 impl fmt::Display for ActorAddressInventoryError {
@@ -39,9 +38,6 @@ impl fmt::Display for ActorAddressInventoryError {
             Self::ContradictoryCardinality { namespace } => {
                 write!(formatter, "actor namespace `{namespace}` has both singleton and instanced name facts")
             }
-            Self::InstancedRoot { namespace } => {
-                write!(formatter, "declared root namespace `{namespace}` is instanced and cannot be abbreviated")
-            }
         }
     }
 }
@@ -52,6 +48,7 @@ impl Error for ActorAddressInventoryError {}
 pub enum AddressResolutionError {
     InvalidInventory(ActorAddressInventoryError),
     UnknownRoot { root: String },
+    InstancedRoot { root: String },
     IllegalSegment { parent: String, segment: String },
     AmbiguousSegment { parent: String, segment: String, candidates: Vec<String> },
     PathTooDeep { limit: usize },
@@ -64,6 +61,9 @@ impl fmt::Display for AddressResolutionError {
         match self {
             Self::InvalidInventory(error) => write!(formatter, "actor address inventory is invalid: {error}"),
             Self::UnknownRoot { root } => write!(formatter, "unknown actor root `{root}`"),
+            Self::InstancedRoot { root } => {
+                write!(formatter, "actor root `{root}` is instanced, so it cannot anchor an abbreviated address")
+            }
             Self::IllegalSegment { parent, segment } => {
                 write!(formatter, "actor address segment `{segment}` is not legal beneath `{parent}`")
             }
@@ -113,6 +113,10 @@ struct ChildNode {
 
 pub(super) struct AddressIndex {
     roots: HashMap<String, ActorId>,
+    /// Declared roots excluded from `roots` because their namespace is
+    /// instanced (ADR-0166 §5). Retained so a `://` prefix naming one
+    /// reports why it cannot anchor rather than reading as unknown.
+    instanced_roots: BTreeSet<String>,
     children: HashMap<ActorId, Vec<ChildNode>>,
 }
 
@@ -222,9 +226,21 @@ impl AddressIndex {
         }
 
         let mut roots = HashMap::new();
+        let mut instanced_roots = BTreeSet::new();
         for fact in root_facts {
+            // ADR-0166 §5: a `://` prefix is the exact NAMESPACE of a declared
+            // root, so an instanced namespace identifies no single actor and
+            // cannot anchor one. Exclude that root alone — rejecting the whole
+            // index would disable abbreviated addressing process-wide over one
+            // unrelated declaration.
             if resolved_cardinalities[&fact.namespace] == Cardinality::Instanced {
-                return Err(ActorAddressInventoryError::InstancedRoot { namespace: fact.namespace.to_owned() });
+                if instanced_roots.insert(fact.namespace.to_owned()) {
+                    tracing::warn!(
+                        namespace = fact.namespace,
+                        "declared root is instanced; excluded as an abbreviated-address anchor"
+                    );
+                }
+                continue;
             }
             roots.insert(fact.namespace.to_owned(), fact.actor);
         }
@@ -251,13 +267,12 @@ impl AddressIndex {
             nodes.sort_by(|left, right| left.namespace.cmp(&right.namespace).then(left.actor.cmp(&right.actor)));
         }
 
-        Ok(Self { roots, children })
+        Ok(Self { roots, instanced_roots, children })
     }
 
     pub(super) fn expand(&self, root: &str, relative: &str) -> Result<String, AddressResolutionError> {
         validate_address_part(root).map_err(|_| AddressResolutionError::UnknownRoot { root: root.to_owned() })?;
-        let mut current =
-            *self.roots.get(root).ok_or_else(|| AddressResolutionError::UnknownRoot { root: root.to_owned() })?;
+        let mut current = *self.roots.get(root).ok_or_else(|| self.unanchored_root(root))?;
         let mut canonical_segments = vec![root.to_owned()];
 
         if !relative.is_empty() {
@@ -278,6 +293,16 @@ impl AddressIndex {
 
         validate_owned_scope_path(&canonical_segments)?;
         Ok(canonical_segments.join("/"))
+    }
+
+    /// Distinguish a prefix that names an instanced declared root — legal
+    /// spelling, deliberately excluded at build — from one nothing declares.
+    fn unanchored_root(&self, root: &str) -> AddressResolutionError {
+        if self.instanced_roots.contains(root) {
+            AddressResolutionError::InstancedRoot { root: root.to_owned() }
+        } else {
+            AddressResolutionError::UnknownRoot { root: root.to_owned() }
+        }
     }
 
     fn expand_segment(
@@ -483,6 +508,27 @@ mod tests {
         assert_eq!(
             index.expand("root", &too_long),
             Err(AddressResolutionError::PathTooLong { limit: aether_data::MAX_SCOPE_PATH_BYTES })
+        );
+    }
+
+    #[test]
+    fn an_instanced_root_is_excluded_without_disabling_the_rest_of_the_index() {
+        let index = AddressIndex::build(
+            [root("root"), root("swarm")],
+            [child("root", "worker"), child("swarm", "worker")],
+            [singleton("root"), instanced("swarm"), instanced("worker")],
+        )
+        .expect("an instanced root excludes itself rather than failing the index");
+
+        assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(index.expand("root", ""), Ok("root".to_owned()));
+        assert_eq!(
+            index.expand("swarm", "camera"),
+            Err(AddressResolutionError::InstancedRoot { root: "swarm".to_owned() })
+        );
+        assert_eq!(
+            index.expand("missing", "camera"),
+            Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
         );
     }
 
