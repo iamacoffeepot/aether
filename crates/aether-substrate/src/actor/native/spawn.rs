@@ -26,6 +26,7 @@ use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::dispatch_blocking::TaskContinuation;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
@@ -942,6 +943,96 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         );
         let commit = spawner.prepare_commit_with_finalizer(staged, finalizer);
         parent_binding.stage_child_birth(commit);
+        let _ = sender;
+        Ok(receipt)
+    }
+
+    /// Stage a successor birth using an existing move-only task continuation.
+    /// Every synchronous validation/build failure returns the continuation
+    /// intact so the original terminal reply can still be sent exactly once.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internal builder state has already been consumed, which
+    /// safe code cannot do because this method takes ownership of `self`.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the cold synchronous rejection returns the move-only continuation intact beside the precise SpawnError"
+    )]
+    pub fn continue_with<C>(
+        self,
+        continuation: TaskContinuation,
+        context: C,
+    ) -> Result<SpawnReceipt, (SpawnError, TaskContinuation)>
+    where
+        C: Send + 'static,
+    {
+        let Self { inner, parent_binding, .. } = self;
+        let SpawnBuilder {
+            spawner,
+            subname,
+            config,
+            params,
+            sender,
+            parent,
+            declared_parent_namespace,
+            after_init,
+            ..
+        } = inner;
+        let config = config.expect("HandlerSpawnBuilder::continue_with consumed exactly once");
+        let params = params.expect("HandlerSpawnBuilder::continue_with consumed exactly once");
+        if let Subname::Named(subname) = subname
+            && let Err(error) = validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)
+        {
+            return Err((error, continuation));
+        }
+        let parent = parent.expect("handler child builder always carries a typed parent identity");
+        let declared_namespace = declared_parent_namespace.expect("handler child builder names its declared parent");
+        if parent.logical() != ActorId::singleton(declared_namespace) {
+            return Err((
+                SpawnError::ParentTypeMismatch {
+                    declared_namespace,
+                    actual_logical: parent.logical(),
+                    actual_canonical_name: Arc::clone(parent.canonical_name()),
+                },
+                continuation,
+            ));
+        }
+
+        let identity = match spawner.prepare_identity::<A>(subname, Some(&parent)) {
+            Ok(identity) => identity,
+            Err(error) => return Err((error, continuation)),
+        };
+        let key = ChildReservationKey::new(
+            ActorId::singleton(A::NAMESPACE),
+            ActorId::instanced(A::NAMESPACE, &identity.subname),
+        );
+        let Some(parent_reservation) = parent_binding.reserve_child(key) else {
+            return Err((SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() }, continuation));
+        };
+        let staged = match spawner.build::<A>(identity, config, params, after_init) {
+            Ok(staged) => staged,
+            Err(error) => return Err((error, continuation)),
+        };
+        let applied = SpawnApplied {
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
+        };
+        let (hold, reply_to) = continuation.into_parts();
+        let completion = parent_binding.dispatch_arm(hold, reply_to, context);
+        let receipt = SpawnReceipt {
+            mailbox_id: applied.mailbox_id,
+            canonical_name: Arc::clone(&applied.canonical_name),
+            completion: completion.dispatch_id(),
+        };
+        let finalizer = super::activation::NativeSpawnFinalizer::new(
+            parent_reservation,
+            completion,
+            applied,
+            Arc::downgrade(&staged.transport),
+            Arc::clone(spawner.mailer()),
+        );
+        parent_binding.stage_child_birth(spawner.prepare_commit_with_finalizer(staged, finalizer));
         let _ = sender;
         Ok(receipt)
     }

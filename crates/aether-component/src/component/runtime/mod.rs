@@ -22,14 +22,14 @@ use aether_actor::{RegistryChanged, runtime};
 mod config;
 mod load;
 
-use super::ComponentHostCapability;
+use super::{ComponentHostCapability, LoadResult};
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
 
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
-    LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
+    LoadComponent, ReplaceComponent, ReplaceResult,
 };
 
 pub use aether_actor::Manual;
@@ -48,7 +48,9 @@ use std::sync::Arc;
 
 use wasmtime::{Engine, Linker};
 
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{
+    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnApplied, SpawnError, TaskDone,
+};
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
@@ -97,6 +99,10 @@ pub struct ComponentHostCapabilityState {
     /// against the module's non-boot actors and empty for every bootless module,
     /// so the common case costs nothing.
     pub boot_registry: HashMap<String, BootEntry>,
+    /// Actor-local reservations for module boots that have been staged but are
+    /// not authoritative `Live` yet. Same-hash loads and replacements retain
+    /// their own move-only continuations here and join the first boot result.
+    pending_boots: HashMap<String, load::PendingBoot>,
     /// ADR-0147: a loaded non-boot actor's own trampoline mailbox → the content
     /// hash of the module it came from. Populated only for actors sourced from a
     /// module that declares a boot slot, so a drop / replace can find and
@@ -116,10 +122,11 @@ pub struct ComponentHostCapabilityState {
 /// to the cap instead, then re-replied here); `actor_mailbox` and `new_wasm`
 /// are what `rebind_boot_ref` needs to commit the boot-refcount transfer once
 /// the swap is confirmed successful.
+#[derive(Clone)]
 pub struct PendingReplace {
     pub source: Source,
     pub actor_mailbox: MailboxId,
-    pub new_wasm: Vec<u8>,
+    pub new_wasm: Arc<[u8]>,
 }
 
 /// ADR-0147: one module's boot singleton. `mailbox_id` addresses the boot
@@ -131,6 +138,8 @@ pub struct PendingReplace {
 pub struct BootEntry {
     pub mailbox_id: MailboxId,
     pub refcount: u32,
+    pub pending_requests: u32,
+    pub orphanable: bool,
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the
@@ -185,6 +194,7 @@ impl NativeActor for ComponentHostCapability {
             last_egressed_inventory: None,
             default_name_counter: 0,
             boot_registry: HashMap::new(),
+            pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
         })
@@ -210,12 +220,27 @@ impl NativeActor for ComponentHostCapability {
     /// Errors (bad wire bytes, kind conflict, name conflict,
     /// invalid wasm, instantiation trap) come back as
     /// `LoadResult::Err`.
-    #[handler::single]
-    fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: LoadComponent) -> LoadResult {
-        // ADR-0109: the return type is the reply contract — the
-        // `#[actor]` macro routes this `LoadResult` back to the sender
-        // through `OutboundReply::reply`, so no manual `ctx.reply`.
-        state.handle_load(ctx, payload)
+    #[handler::manual]
+    fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent) {
+        state.begin_load(ctx, payload);
+    }
+
+    #[handler(task)]
+    fn on_kind_registration_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<RegistryBatchResult, load::KindRegistration>,
+    ) {
+        state.finish_kind_registration(ctx, done);
+    }
+
+    #[handler(task)]
+    fn on_component_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, load::SpawnContinuation>,
+    ) {
+        state.finish_spawn(ctx, done);
     }
 
     /// Refresh the hub's registry projection after a coalesced publication.
@@ -417,6 +442,7 @@ mod tests {
             last_egressed_inventory: None,
             default_name_counter: 0,
             boot_registry: HashMap::new(),
+            pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
         };

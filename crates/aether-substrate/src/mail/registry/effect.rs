@@ -10,6 +10,8 @@ use aether_actor::RegistryChanged;
 use aether_data::Kind;
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
+use crate::actor::native::dispatch_blocking::DeferredCompletion;
+
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
@@ -332,6 +334,51 @@ impl Error for RegistryEffectError {}
 
 pub struct EffectBatch {
     pub(super) effects: Vec<RegistryEffect>,
+}
+
+/// Public, typed owner-batch vocabulary available to native handlers. The
+/// effects remain private; callers can construct only the atomic operations
+/// deliberately exposed here.
+pub struct RegistryBatch {
+    batch: EffectBatch,
+}
+
+impl RegistryBatch {
+    /// Atomically register or match every descriptor. A conflict rejects the
+    /// complete batch and publishes no partial kind view.
+    #[must_use]
+    pub fn register_kinds(descriptors: Vec<KindDescriptor>) -> Self {
+        Self {
+            batch: EffectBatch::new(
+                descriptors
+                    .into_iter()
+                    .map(|descriptor| RegistryEffect::RegisterKind { descriptor, reject_conflict: true })
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(crate) fn into_effects(self) -> EffectBatch {
+        self.batch
+    }
+}
+
+pub type RegistryBatchResult = Result<Vec<RegistryApplied>, RegistryEffectError>;
+
+pub(super) enum RegistryBatchCompletionSink {
+    Channel(crossbeam_channel::Sender<RegistryBatchResult>),
+    Deferred(DeferredCompletion<RegistryBatchResult>),
+}
+
+impl RegistryBatchCompletionSink {
+    pub(super) fn complete(self, result: RegistryBatchResult) {
+        match self {
+            Self::Channel(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Deferred(completion) => completion.complete(result),
+        }
+    }
 }
 
 impl EffectBatch {

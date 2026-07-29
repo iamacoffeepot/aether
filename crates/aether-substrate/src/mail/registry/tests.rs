@@ -16,7 +16,7 @@ use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, EffectBatch, InstalledActivation, LiveActivation,
     PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
-    RegistryApplied, RegistryEffect, RegistryEffectError, StartingCancellation,
+    RegistryApplied, RegistryBatch, RegistryEffect, RegistryEffectError, StartingCancellation,
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
@@ -1554,6 +1554,30 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
     assert_eq!(registry.route_generation(), 1, "one self-sized drain publishes the keyed view once");
     assert_eq!(registry.mailbox_generation(), 1, "one self-sized drain publishes inventory once");
     assert_eq!(registry.lookup("ordered"), Some(id));
+}
+
+#[test]
+fn owner_registers_a_kind_batch_atomically_with_one_publication() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let first = KindDescriptor { name: "test.owner.kind.first".to_owned(), schema: SchemaType::Bytes };
+    let second = KindDescriptor { name: "test.owner.kind.second".to_owned(), schema: SchemaType::String };
+
+    let completion = registry
+        .submit(RegistryBatch::register_kinds(vec![first.clone(), second.clone()]).into_effects())
+        .expect("attached owner reserves a prepared kind batch");
+    owner.run_once();
+
+    let applied = completion
+        .wait_timeout(Duration::from_millis(100))
+        .expect("owner completion arrives")
+        .expect("kind batch applies");
+    assert_eq!(applied.len(), 2);
+    assert!(registry.kind_id(&first.name).is_some());
+    assert!(registry.kind_id(&second.name).is_some());
+    assert_eq!(registry.kind_generation(), 1, "the complete kind batch publishes exactly once");
 }
 
 #[test]

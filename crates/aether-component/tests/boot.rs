@@ -21,7 +21,10 @@ use std::fs;
 use aether_data::MailboxId;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult};
+use aether_kinds::{
+    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
+    ReplaceResult,
+};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
@@ -103,6 +106,49 @@ fn module_boot_singleton_spawns_once_across_selector_loads() {
     assert_eq!(boot_listed, 1, "exactly one boot trampoline should be listed after two selector loads; got {names:?}");
 }
 
+/// Two same-hash loads can both reach the component host before the first
+/// module boot promotes `Live`. The second must join the actor-local pending
+/// boot reservation instead of staging a duplicate deterministic boot name.
+#[test]
+fn concurrent_same_hash_loads_share_the_pending_boot() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let widget_a = harness
+        .send_deferred(
+            "aether.component",
+            &LoadComponent {
+                wasm: wasm.clone(),
+                name: None,
+                config: Vec::new(),
+                export: Some("aether.test.boot.widget_a".to_owned()),
+            },
+        )
+        .expect("queue first load without pumping");
+    let widget_b = harness
+        .send_deferred(
+            "aether.component",
+            &LoadComponent {
+                wasm,
+                name: None,
+                config: Vec::new(),
+                export: Some("aether.test.boot.widget_b".to_owned()),
+            },
+        )
+        .expect("queue second same-hash load before the first boot completion");
+
+    assert!(matches!(harness.await_deferred::<LoadResult>(widget_a).expect("first load reply"), LoadResult::Ok { .. }));
+    assert!(matches!(
+        harness.await_deferred::<LoadResult>(widget_b).expect("second load reply"),
+        LoadResult::Ok { .. }
+    ));
+    settle(&mut harness);
+    assert_eq!(harness.count_observed(BOOT_OBSERVED), 1, "both in-flight loads share one pending module boot");
+}
+
 /// Non-selectability (ADR-0147 §1): a load whose export selector names the boot
 /// actor's own namespace is a clean `LoadResult::Err` citing ADR-0147 — the
 /// boot is unconditional, not caller-selectable — never a second boot-type
@@ -182,4 +228,41 @@ fn module_boot_survives_partial_unload_and_tears_down_on_last() {
         "the boot must be torn down when the last non-boot actor unloads; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+}
+
+#[test]
+fn same_hash_replacement_preserves_the_boot_reference() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_boot") else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let widget = load_boot_export(&mut harness, &wasm, "aether.test.boot.widget_a");
+
+    let replaced = harness
+        .execute(vec![(
+            "replace",
+            HarnessOp::send_and_await(
+                "aether.component",
+                &ReplaceComponent {
+                    mailbox_id: widget,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: Vec::new(),
+                    export: Some("aether.test.boot.widget_a".to_owned()),
+                },
+            ),
+        )])
+        .expect("replace sequence");
+    assert!(matches!(
+        replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult"),
+        ReplaceResult::Ok { .. }
+    ));
+    settle(&mut harness);
+    assert_eq!(harness.count_observed(BOOT_OBSERVED), 1, "same-hash replace must reuse the Live boot");
+    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 0, "same-hash replace must not transiently release the boot");
+
+    drop_actor(&mut harness, widget);
+    settle(&mut harness);
+    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 1, "the preserved reference releases on the later drop");
 }

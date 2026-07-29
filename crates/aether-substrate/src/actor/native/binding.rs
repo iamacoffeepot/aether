@@ -44,7 +44,9 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::effect::{EffectBatch, PreparedSpawnCommit, RegistryEffect};
+use crate::mail::registry::effect::{
+    EffectBatch, PreparedSpawnCommit, RegistryBatch, RegistryBatchResult, RegistryEffect,
+};
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -95,6 +97,11 @@ struct PendingBirthWork {
     commit: PreparedSpawnCommit,
 }
 
+struct PendingOwnerBatchWork {
+    batch: RegistryBatch,
+    completion: super::dispatch_blocking::DeferredCompletion<RegistryBatchResult>,
+}
+
 /// Per-actor send-side buffer that builds blobs **in place** (2c,
 /// iamacoffeepot/aether#1110). `push_envelope_buffered` writes each send
 /// straight into the ring as it happens — the blob is opened lazily on
@@ -127,11 +134,21 @@ struct OutboundBuffer {
     /// Births are rare; this vector remains unallocated on the ordinary
     /// mail-only handler path.
     births: Vec<PendingBirthWork>,
+    /// Handler-staged registry batches are uncommon and stay unallocated on
+    /// the ordinary mail-only path.
+    owner_batches: Vec<PendingOwnerBatchWork>,
 }
 
 impl OutboundBuffer {
     fn new() -> Self {
-        Self { ring: None, blob_open: false, construct_start: None, mails: Vec::new(), births: Vec::new() }
+        Self {
+            ring: None,
+            blob_open: false,
+            construct_start: None,
+            mails: Vec::new(),
+            births: Vec::new(),
+            owner_batches: Vec::new(),
+        }
     }
 }
 
@@ -788,6 +805,20 @@ impl NativeBinding {
         buffer.births.push(PendingBirthWork { after_mail, recipient, commit });
     }
 
+    /// Append one typed registry batch to the handler's ordered outbound work.
+    /// Submission happens at flush through the reserved owner-batch path.
+    pub(crate) fn stage_owner_batch(
+        &self,
+        batch: RegistryBatch,
+        completion: super::dispatch_blocking::DeferredCompletion<RegistryBatchResult>,
+    ) {
+        self.outbound
+            .lock()
+            .expect("outbound buffer poisoned; fail-fast per ADR-0063")
+            .owner_batches
+            .push(PendingOwnerBatchWork { batch, completion });
+    }
+
     /// ADR-0087 / 2c: seal the open ring blob and route the buffered
     /// mail. Called at handler end (via [`super::ctx::NativeCtx`]'s
     /// `Drop`). A no-op when nothing is buffered.
@@ -848,7 +879,7 @@ impl NativeBinding {
         // (construct ≈ 0) on the impossible `None` so the field is never
         // a wire hole.
         let construct_start;
-        let (routed, births): (Vec<Mail>, Vec<PendingBirthWork>) = {
+        let (routed, births, owner_batches): (Vec<Mail>, Vec<PendingBirthWork>, Vec<PendingOwnerBatchWork>) = {
             let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
             // Seal the open blob first (publishes the in-ring locks), so a
             // `MailRef::InRing` minted below reads a finalized header.
@@ -858,7 +889,7 @@ impl NativeBinding {
                 }
                 buf.blob_open = false;
             }
-            if buf.mails.is_empty() && buf.births.is_empty() {
+            if buf.mails.is_empty() && buf.births.is_empty() && buf.owner_batches.is_empty() {
                 // Reset the stale anchor so the next window re-stamps.
                 buf.construct_start = None;
                 return;
@@ -882,7 +913,7 @@ impl NativeBinding {
                         .with_lineage(p.mail_id, p.root, p.parent_mail)
                 })
                 .collect();
-            (routed, buf.births.drain(..).collect())
+            (routed, buf.births.drain(..).collect(), buf.owner_batches.drain(..).collect())
         };
 
         // iamacoffeepot/aether#1150: emit each buffered mail's deferred
@@ -901,6 +932,13 @@ impl NativeBinding {
                 construct_start,
                 flush_begin,
             );
+        }
+
+        if !owner_batches.is_empty() {
+            let registry = self.spawner.as_ref().expect("staged owner batches require a spawner").registry();
+            for work in owner_batches {
+                let _ = registry.submit_deferred(work.batch.into_effects(), work.completion);
+            }
         }
 
         let routed = if births.is_empty() {

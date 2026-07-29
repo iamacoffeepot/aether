@@ -33,7 +33,7 @@ pub use aether_actor::Local;
 use aether_actor::runtime;
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -211,6 +211,15 @@ impl NativeActor for WasmTrampoline {
         payload: ReplaceComponent,
     ) -> ReplaceResult {
         state.handle_replace(payload)
+    }
+
+    #[handler(task)]
+    fn on_sibling_spawn_done(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, replace::SiblingSpawnContinuation>,
+    ) {
+        state.finish_sibling_spawn(done);
     }
 
     /// Forward un-handled mail to the wasm guest.

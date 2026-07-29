@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use aether_actor::Local as _;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
-use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::native::spawn::Subname;
+use aether_substrate::actor::native::{NativeCtx, SpawnApplied, SpawnError, TaskDone};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
-use aether_substrate::mail::{CostCells, KindId};
+use aether_substrate::mail::{CostCells, KindId, MailboxId};
 use wasmtime::Module;
 
 use crate::trampoline::WasmTrampoline;
@@ -47,7 +47,7 @@ impl WasmTrampolineState {
             module: self.module.clone(),
             registry: Arc::clone(&self.registry),
             outbound: Arc::clone(&self.outbound),
-            capabilities,
+            capabilities: capabilities.clone(),
             config: pending.config,
             type_tag: Some(pending.tag),
             actor_caps: self.actor_caps.clone(),
@@ -56,7 +56,9 @@ impl WasmTrampolineState {
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
         if let Err(e) =
-            ctx.spawn_child::<WasmTrampoline, WasmTrampoline>(Subname::Named(&pending.subname), config, ()).finish()
+            ctx.spawn_child::<WasmTrampoline, WasmTrampoline>(Subname::Named(&pending.subname), config, ()).stage_with(
+                SiblingSpawnContinuation { parent: self.mailbox, subname: pending.subname.clone(), capabilities },
+            )
         {
             tracing::warn!(
                 target: "aether_component",
@@ -65,6 +67,26 @@ impl WasmTrampolineState {
                 "sibling spawn failed: {e:?}",
             );
         }
+    }
+
+    pub(super) fn finish_sibling_spawn(
+        &self,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, SiblingSpawnContinuation>,
+    ) {
+        match done.output() {
+            Ok(applied) => {
+                self.mailer.capability_registry().register(applied.mailbox_id, &done.context().capabilities);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_component",
+                    parent = %done.context().parent,
+                    subname = %done.context().subname,
+                    "sibling spawn failed after owner staging: {error:?}",
+                );
+            }
+        }
+        done.release_no_reply();
     }
 
     /// ADR-0096: resolve the **effective tag** an export-targeted
@@ -280,4 +302,11 @@ impl WasmTrampolineState {
 
         ReplaceResult::Ok { capabilities }
     }
+}
+
+#[derive(Clone)]
+pub(super) struct SiblingSpawnContinuation {
+    parent: MailboxId,
+    subname: String,
+    capabilities: ComponentCapabilities,
 }

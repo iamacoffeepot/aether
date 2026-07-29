@@ -11,11 +11,13 @@ use aether_data::{
     KindDescriptor, MailboxCategory, MailboxDescriptor, ScopePathError, mailbox_id_from_path, validate_scope_path,
 };
 
+use crate::actor::native::dispatch_blocking::DeferredCompletion;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, ChangeSubscriber, EffectBatch, PreparedCostCells,
-    PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryCompletion, RegistryEffect, RegistryEffectError,
-    RegistryInventory, RegistrySubscription, StartingCancellation, barrier_token, bytes_kind, subscriber,
+    PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryBatchCompletionSink, RegistryBatchResult,
+    RegistryCompletion, RegistryEffect, RegistryEffectError, RegistryInventory, RegistrySubscription,
+    StartingCancellation, barrier_token, bytes_kind, subscriber,
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
@@ -502,6 +504,19 @@ impl Registry {
         owner.submit(batch)
     }
 
+    pub(crate) fn submit_deferred(
+        &self,
+        batch: EffectBatch,
+        completion: DeferredCompletion<RegistryBatchResult>,
+    ) -> bool {
+        let Some(owner) = self.owner.get() else {
+            drop(batch.discard_prepared());
+            completion.complete(Err(RegistryEffectError::OwnerClosed));
+            return false;
+        };
+        owner.submit_deferred(batch, completion)
+    }
+
     pub(crate) fn park_or_drop(&self, mail: Mail, observed_generation: u64) -> ParkAdmission {
         match self.owner.get() {
             Some(owner) => owner.park_or_drop(mail, observed_generation),
@@ -566,10 +581,7 @@ impl Registry {
 
     pub(super) fn apply_owner_commands(&self, commands: Vec<OwnerCommand>, mailer: &Mailer) -> u64 {
         enum AfterLock {
-            Batch(
-                crossbeam_channel::Sender<Result<Vec<RegistryApplied>, RegistryEffectError>>,
-                Result<Vec<RegistryApplied>, RegistryEffectError>,
-            ),
+            Batch(RegistryBatchCompletionSink, RegistryBatchResult),
             Route(RouteContinuation),
             Schedule(Arc<dyn ActivationReservation>),
             CatchUp(Box<dyn FnOnce() + Send>),
@@ -626,7 +638,7 @@ impl Registry {
         for continuation in after_lock {
             match continuation {
                 AfterLock::Batch(completion, result) => {
-                    let _ = completion.send(result);
+                    completion.complete(result);
                 }
                 AfterLock::Route(continuation) => mailer.relay_captured(continuation),
                 AfterLock::Schedule(activation) => activation.schedule(),
@@ -699,7 +711,7 @@ impl Registry {
             self.relay_inventory_changed();
         }
         for completion in completions {
-            let _ = completion.send(Err(RegistryEffectError::OwnerClosed));
+            completion.complete(Err(RegistryEffectError::OwnerClosed));
         }
         for continuation in continuations {
             mailer.relay_captured(continuation);

@@ -7,13 +7,13 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
-use crossbeam_channel::Sender;
-
 use super::effect::{
-    ACTIVATION_BARRIER_KIND, ActivationToken, EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffectError,
+    ACTIVATION_BARRIER_KIND, ActivationToken, EffectBatch, RegistryApplied, RegistryBatchCompletionSink,
+    RegistryBatchResult, RegistryCompletion, RegistryEffectError,
 };
 use super::mailbox::Registry;
 use super::metrics::{INITIAL_QUEUE_RESERVE, QueueMeter, RegistryQueueMetrics};
+use crate::actor::native::dispatch_blocking::DeferredCompletion;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::{Mail, MailboxId};
@@ -21,7 +21,7 @@ use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState, WakeHandl
 
 pub(super) struct BatchEnvelope {
     pub(super) batch: EffectBatch,
-    pub(super) completion: Sender<Result<Vec<RegistryApplied>, RegistryEffectError>>,
+    pub(super) completion: RegistryBatchCompletionSink,
 }
 
 pub(super) enum OwnerCommand {
@@ -119,17 +119,31 @@ impl OwnerQueue {
 impl RegistryOwnerHandle {
     pub(super) fn submit(&self, batch: EffectBatch) -> Option<RegistryCompletion<Vec<RegistryApplied>>> {
         let (sender, receiver) = crossbeam_channel::bounded(1);
+        self.submit_with(batch, RegistryBatchCompletionSink::Channel(sender))?;
+        Some(RegistryCompletion::new(receiver))
+    }
+
+    pub(super) fn submit_deferred(
+        &self,
+        batch: EffectBatch,
+        completion: DeferredCompletion<RegistryBatchResult>,
+    ) -> bool {
+        self.submit_with(batch, RegistryBatchCompletionSink::Deferred(completion)).is_some()
+    }
+
+    fn submit_with(&self, batch: EffectBatch, completion: RegistryBatchCompletionSink) -> Option<()> {
         let mut state = self.state.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
         if !state.accepting {
             drop(state);
             drop(batch.discard_prepared());
+            completion.complete(Err(RegistryEffectError::OwnerClosed));
             return None;
         }
-        let refused = state.admit(&self.meter, OwnerCommand::Batch(BatchEnvelope { batch, completion: sender }));
+        let refused = state.admit(&self.meter, OwnerCommand::Batch(BatchEnvelope { batch, completion }));
         debug_assert!(refused.is_none(), "an effect batch is reserved and is never refused by the bound");
         drop(state);
         let _ = self.wake.wake();
-        Some(RegistryCompletion::new(receiver))
+        Some(())
     }
 
     pub(super) fn park_or_drop(&self, mail: Mail, observed_generation: u64) -> ParkAdmission {
@@ -274,7 +288,7 @@ fn close_orphaned_commands(commands: Vec<OwnerCommand>) {
         match command {
             OwnerCommand::Batch(envelope) => {
                 discarded.extend(envelope.batch.discard_prepared());
-                let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+                envelope.completion.complete(Err(RegistryEffectError::OwnerClosed));
             }
             OwnerCommand::ParkOrDrop { .. } | OwnerCommand::ActivationCancelled { .. } => {}
         }
