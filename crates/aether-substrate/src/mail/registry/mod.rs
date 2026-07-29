@@ -13,10 +13,14 @@
 
 mod address;
 mod dispatch;
+#[allow(dead_code, reason = "owner effects and inventory subscriptions are foundations consumed by arc follow-ups")]
+mod effect;
 mod errors;
 mod handlers;
 mod mailbox;
 mod names;
+#[allow(dead_code, reason = "owner submission is installed now and consumed by staged-writer arc follow-ups")]
+mod owner;
 
 #[cfg(test)]
 #[allow(
@@ -29,6 +33,9 @@ pub use address::{ActorAddressInventoryError, AddressResolutionError, ResolvedAd
 pub use dispatch::{MailDispatch, OwnedDispatch};
 #[cfg(test)]
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
+#[doc(hidden)]
+pub use effect::{RegistryInventory, RegistrySubscription};
 pub use errors::{DropError, KindConflict, NameConflict};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
-pub use mailbox::{MailboxChangeHook, MailboxEntry, Registry};
+pub use mailbox::{MailboxEntry, Registry};
+pub(crate) use owner::RegistryOwnerLease;

@@ -77,7 +77,7 @@ pub use request_context::{
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
-pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
+pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 
 // Wasm surface promoted to the crate root so consumers see
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without

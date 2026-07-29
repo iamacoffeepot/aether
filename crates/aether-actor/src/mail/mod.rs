@@ -28,6 +28,24 @@ use aether_data::{
     wire,
 };
 
+/// Framework wake emitted after the registry publishes a new live-mailbox
+/// inventory generation. The inventory rides a pinned registry view, so the
+/// wake is intentionally empty and coalescible. This is hand-written rather
+/// than derived so it is never submitted to application kind inventory.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RegistryChanged;
+
+impl Kind for RegistryChanged {
+    const NAME: &'static str = "aether.registry.changed";
+    const ID: KindId = KindId(aether_data::with_tag(
+        aether_data::Tag::Kind,
+        aether_data::fnv1a_64_prefixed(aether_data::KIND_DOMAIN, Self::NAME.as_bytes()),
+    ));
+
+    aether_data::pod_kind_codec!();
+}
+
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
 /// component-originated mail (no Claude session involved) and for

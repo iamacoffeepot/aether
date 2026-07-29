@@ -11,7 +11,7 @@ use crate::chassis::settlement::SettlementRegistry;
 use crate::config::{ConfigSources, RingCapacities, SchedulerTuning};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::Registry;
+use crate::mail::registry::{Registry, RegistryOwnerLease};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle, install_tuning, log_handoff_calibration};
 
@@ -52,6 +52,10 @@ pub(super) struct BootedPassives {
     /// without separate plumbing.
     pub(super) actor_registry: Arc<crate::ActorRegistry>,
     pub(super) spawner: Arc<crate::Spawner>,
+    /// ADR-0165 additive owner foundation. Retains the scheduler slot and
+    /// keeps effect submission accepting until chassis teardown. Declared
+    /// before `_pool` so the owner detaches before workers join.
+    _registry_owner: RegistryOwnerLease,
     /// Issue 635 PR C: chassis-owned worker pool. Boots empty in
     /// [`boot_passives`] before any cap, then drains every actor (all
     /// pool-dispatched since issue 635 Phase 3 / issue 1187). Drops
@@ -175,6 +179,7 @@ pub(super) fn boot_passives(
     // install-before-`Pool::start` ordering invariant).
     install_tuning(scheduler_tuning);
     let pool = Pool::start(pool_config, Arc::clone(aborter));
+    let registry_owner = RegistryOwnerLease::attach(registry, pool.wake_sink());
 
     // iamacoffeepot/aether#1182: calibrate this box's cross-worker handoff
     // cost once at boot and log the keep-local budget the adaptive valve
@@ -434,6 +439,7 @@ pub(super) fn boot_passives(
         reserved_driver_mailboxes,
         actor_registry,
         spawner,
+        _registry_owner: registry_owner,
         _pool: pool,
         settlement_registry,
         teardown_budget,

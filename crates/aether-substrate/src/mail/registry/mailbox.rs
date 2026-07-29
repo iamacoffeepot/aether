@@ -1,18 +1,24 @@
 use std::collections::HashMap;
 use std::process::abort;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use rustc_hash::FxHashMap;
 
+use aether_actor::{HandlesKind, RegistryChanged};
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{
-    KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, ScopePathError, mailbox_id_from_path,
-    validate_scope_path,
+    KindDescriptor, MailboxCategory, MailboxDescriptor, ScopePathError, mailbox_id_from_path, validate_scope_path,
 };
 
+use crate::mail::mailer::Mailer;
+use crate::mail::registry::effect::{
+    ChangeSubscriber, EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffect, RegistryEffectError,
+    RegistryInventory, RegistrySubscription, bytes_kind, subscriber,
+};
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::names::categorise_mailbox_name;
+use crate::mail::registry::owner::{BatchEnvelope, RegistryOwnerHandle};
 use crate::mail::registry::{
     ActorAddressInventoryError, AddressResolutionError, MailDispatch, OwnedDispatch, ResolvedAddress,
     address::AddressIndex,
@@ -108,24 +114,11 @@ pub struct Registry {
     inner: RwLock<Inner>,
     routes: View<FxHashMap<MailboxId, RouteRecord>>,
     kinds: View<KindTable>,
+    inventory: View<RegistryInventory>,
     addresses: Result<AddressIndex, ActorAddressInventoryError>,
-    /// Issue iamacoffeepot/aether#742: notification hook fired after
-    /// every successful mailbox registration. The chassis (or any
-    /// hub-aware boot path) installs a closure that pushes the full
-    /// inventory snapshot to the hub via `HubOutbound::egress_mailboxes_changed`,
-    /// keeping the hub's per-engine mailbox cache in sync without
-    /// requiring callers (chassis caps, the component-load cap) to
-    /// remember to publish manually after each registration. Default
-    /// `None` — registry stays decoupled from the hub layer.
-    on_mailbox_change: RwLock<Option<MailboxChangeHook>>,
+    subscribers: Mutex<Vec<Weak<ChangeSubscriber>>>,
+    owner: OnceLock<RegistryOwnerHandle>,
 }
-
-/// Issue iamacoffeepot/aether#742: hook signature. Receives the full
-/// post-registration mailbox inventory so the chassis-installed
-/// implementation can hand it straight to `HubOutbound::egress_mailboxes_changed`,
-/// matching the existing `MailboxesChanged` wire shape (full snapshot
-/// per replace, not deltas).
-pub type MailboxChangeHook = Arc<dyn Fn(Vec<MailboxDescriptor>) + Send + Sync>;
 
 #[derive(Clone)]
 struct RouteRecord {
@@ -246,32 +239,128 @@ struct Inner {
     name_index: HashMap<String, KindId>,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
+    inventory_publisher: ViewPublisher<RegistryInventory>,
+    mailbox_generation: u64,
+    kind_generation: u64,
 }
 
 impl Inner {
-    fn publish_route(&mut self, id: MailboxId, route: RouteRecord) {
-        if self.route_publisher.publish([Update::Insert(id, route)]).is_err() {
+    fn publish(&mut self, publication: Publication) -> bool {
+        let inventory_dirty = publication.inventory_dirty;
+        let kinds_dirty = publication.kinds_dirty;
+        if !publication.route_updates.is_empty() && self.route_publisher.publish(publication.route_updates).is_err() {
             tracing::error!("route publication generation exhausted; registry cannot remain coherent");
             abort();
         }
-    }
-
-    fn publish_route_removal(&mut self, id: MailboxId) {
-        if self.route_publisher.publish([Update::Remove(id)]).is_err() {
-            tracing::error!("route publication generation exhausted; registry cannot remain coherent");
-            abort();
-        }
-    }
-
-    fn publish_kinds(&mut self) {
-        if self
-            .kind_publisher
-            .publish(KindTable { kinds: self.kinds.clone(), name_index: self.name_index.clone() })
-            .is_err()
+        if kinds_dirty
+            && self
+                .kind_publisher
+                .publish(KindTable { kinds: self.kinds.clone(), name_index: self.name_index.clone() })
+                .is_err()
         {
             tracing::error!("kind publication generation exhausted; registry cannot remain coherent");
             abort();
         }
+        if inventory_dirty || kinds_dirty {
+            if inventory_dirty {
+                self.mailbox_generation = self.mailbox_generation.checked_add(1).unwrap_or_else(|| {
+                    tracing::error!("mailbox inventory generation exhausted; registry cannot remain coherent");
+                    abort();
+                });
+            }
+            if kinds_dirty {
+                self.kind_generation = self.kind_generation.checked_add(1).unwrap_or_else(|| {
+                    tracing::error!("kind inventory generation exhausted; registry cannot remain coherent");
+                    abort();
+                });
+            }
+            if self
+                .inventory_publisher
+                .publish(RegistryInventory {
+                    mailboxes: live_inventory(&self.mailboxes),
+                    kinds: kind_inventory(&self.kinds),
+                    mailbox_generation: self.mailbox_generation,
+                    kind_generation: self.kind_generation,
+                })
+                .is_err()
+            {
+                tracing::error!(
+                    "combined registry inventory publication generation exhausted; registry cannot remain coherent"
+                );
+                abort();
+            }
+        }
+        inventory_dirty || kinds_dirty
+    }
+}
+
+#[derive(Default)]
+struct Publication {
+    route_updates: Vec<Update<MailboxId, RouteRecord>>,
+    kinds_dirty: bool,
+    inventory_dirty: bool,
+}
+
+impl Publication {
+    fn append(&mut self, mut other: Self) {
+        self.route_updates.append(&mut other.route_updates);
+        self.kinds_dirty |= other.kinds_dirty;
+        self.inventory_dirty |= other.inventory_dirty;
+    }
+}
+
+fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> Vec<MailboxDescriptor> {
+    let mut inventory = mailboxes
+        .iter()
+        .filter(|(_, route)| !matches!(route.endpoint, RouteEndpoint::Dropped))
+        .map(|(id, route)| MailboxDescriptor {
+            id: *id,
+            name: route.canonical_name.clone(),
+            category: categorise_mailbox_name(&route.canonical_name),
+        })
+        .collect::<Vec<_>>();
+    inventory.push(MailboxDescriptor {
+        id: MailboxId::CHASSIS_MAILBOX_ID,
+        name: "aether.chassis".to_owned(),
+        category: Some(MailboxCategory::ChassisSentinel),
+    });
+    inventory.sort_by(|left, right| left.name.cmp(&right.name));
+    inventory
+}
+
+fn kind_inventory(kinds: &FxHashMap<KindId, KindSlot>) -> Vec<KindDescriptor> {
+    let mut descriptors = kinds.values().map(|slot| slot.descriptor.clone()).collect::<Vec<_>>();
+    descriptors.sort_by(|left, right| left.name.cmp(&right.name));
+    descriptors
+}
+
+fn staged_route<'a>(
+    staged: &'a FxHashMap<MailboxId, Option<RouteRecord>>,
+    inner: &'a Inner,
+    id: MailboxId,
+) -> Option<&'a RouteRecord> {
+    staged.get(&id).map_or_else(|| inner.mailboxes.get(&id), |route| route.as_ref())
+}
+
+fn staged_kind<'a>(staged: &'a FxHashMap<KindId, KindSlot>, inner: &'a Inner, id: KindId) -> Option<&'a KindSlot> {
+    staged.get(&id).or_else(|| inner.kinds.get(&id))
+}
+
+fn commit_staged(
+    inner: &mut Inner,
+    routes: FxHashMap<MailboxId, Option<RouteRecord>>,
+    kinds: FxHashMap<KindId, KindSlot>,
+) {
+    for (id, route) in routes {
+        if let Some(route) = route {
+            inner.mailboxes.insert(id, route);
+        } else {
+            inner.mailboxes.remove(&id);
+        }
+    }
+    for (id, slot) in kinds {
+        inner.name_index.insert(slot.name.clone(), id);
+        inner.kinds.insert(id, slot);
     }
 }
 
@@ -282,6 +371,13 @@ impl Registry {
         let routes = route_publisher.view();
         let kind_publisher = ViewPublisher::new(KindTable::default());
         let kinds = kind_publisher.view();
+        let inventory_publisher = ViewPublisher::new(RegistryInventory {
+            mailboxes: live_inventory(&FxHashMap::default()),
+            kinds: Vec::new(),
+            mailbox_generation: 0,
+            kind_generation: 0,
+        });
+        let inventory = inventory_publisher.view();
         Self {
             inner: RwLock::new(Inner {
                 mailboxes: FxHashMap::default(),
@@ -289,40 +385,201 @@ impl Registry {
                 name_index: HashMap::default(),
                 route_publisher,
                 kind_publisher,
+                inventory_publisher,
+                mailbox_generation: 0,
+                kind_generation: 0,
             }),
             routes,
             kinds,
+            inventory,
             addresses: AddressIndex::from_inventory(),
-            on_mailbox_change: RwLock::new(None),
+            subscribers: Mutex::new(Vec::new()),
+            owner: OnceLock::new(),
         }
     }
 
-    /// Issue iamacoffeepot/aether#742: install the post-registration
-    /// hook. The chassis calls this once during boot — typically
-    /// inside `connect_hub_client` — to wire up automatic
-    /// `MailboxesChanged` republishing for any subsequent registration
-    /// (chassis-builder `.with_actor::<...>` chain, runtime
-    /// `load_component`, etc.). Subsequent calls overwrite the
-    /// previous hook.
-    ///
-    /// # Panics
-    /// Panics if the `on_mailbox_change` `RwLock` is poisoned —
-    /// fail-fast per ADR-0063: a poisoned lock means a prior holder
-    /// panicked under the guard.
-    pub fn set_on_mailbox_change(&self, hook: MailboxChangeHook) {
-        *self.on_mailbox_change.write().expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063") = Some(hook);
+    pub(super) fn install_owner(&self, owner: RegistryOwnerHandle) {
+        assert!(self.owner.set(owner).is_ok(), "a registry can attach only one owner");
     }
 
-    /// Snapshot the published inventory and invoke the hook (if installed).
-    /// Called from every successful `register_inbox` /
-    /// `try_register_inbox`. Successful registration publishes before
-    /// this method runs, so the hook sees at least that registration.
-    fn notify_mailbox_change(&self) {
-        let hook =
-            self.on_mailbox_change.read().expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063").clone();
-        if let Some(hook) = hook {
-            hook(self.list_mailbox_descriptors());
+    #[allow(dead_code, reason = "staged registry writers begin using the owner seam in the next migration issues")]
+    pub(super) fn submit(&self, batch: EffectBatch) -> Option<RegistryCompletion<Vec<RegistryApplied>>> {
+        self.owner.get()?.submit(batch)
+    }
+
+    #[doc(hidden)]
+    pub fn subscribe_inventory<A>(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription
+    where
+        A: HandlesKind<RegistryChanged>,
+    {
+        let mut subscribers =
+            self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
+        let (subscriber, subscription) = subscriber(target, mailer, self.inventory.clone());
+        subscribers.retain(|subscriber| subscriber.strong_count() != 0);
+        subscribers.push(Arc::downgrade(&subscriber));
+        drop(subscribers);
+        subscriber.notify();
+        subscription
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn inventory(&self) -> RegistryInventory {
+        self.inventory.load().table().clone()
+    }
+
+    fn notify_inventory_changed(&self) {
+        let subscribers = {
+            let mut retained =
+                self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
+            let subscribers = retained.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            retained.retain(|subscriber| subscriber.strong_count() != 0);
+            subscribers
+        };
+        for subscriber in subscribers {
+            subscriber.notify();
         }
+    }
+
+    pub(super) fn apply_owner_envelopes(&self, envelopes: Vec<BatchEnvelope>) {
+        let (batches, completions): (Vec<_>, Vec<_>) =
+            envelopes.into_iter().map(|envelope| (envelope.batch, envelope.completion)).unzip();
+        let results = self.apply_batches(batches);
+        for (completion, result) in completions.into_iter().zip(results) {
+            let _ = completion.send(result);
+        }
+    }
+
+    fn apply_batches(&self, batches: Vec<EffectBatch>) -> Vec<Result<Vec<RegistryApplied>, RegistryEffectError>> {
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut publication = Publication::default();
+        let results = batches
+            .into_iter()
+            .map(|batch| match Self::apply_batch_locked(&mut inner, batch) {
+                Ok((applied, batch_publication)) => {
+                    publication.append(batch_publication);
+                    Ok(applied)
+                }
+                Err(error) => Err(error),
+            })
+            .collect();
+        let inventory_changed = inner.publish(publication);
+        drop(inner);
+        if inventory_changed {
+            self.notify_inventory_changed();
+        }
+        results
+    }
+
+    fn apply_batch_locked(
+        inner: &mut Inner,
+        batch: EffectBatch,
+    ) -> Result<(Vec<RegistryApplied>, Publication), RegistryEffectError> {
+        let mut staged_routes = FxHashMap::<MailboxId, Option<RouteRecord>>::default();
+        let mut staged_kinds = FxHashMap::<KindId, KindSlot>::default();
+        let mut publication = Publication::default();
+        let mut applied = Vec::with_capacity(batch.effects.len());
+
+        for effect in batch.effects {
+            match effect {
+                RegistryEffect::PublishLive { route, activation } => {
+                    if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
+                        return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                    }
+                    let record = RouteRecord {
+                        canonical_name: route.canonical_name.clone(),
+                        endpoint: RouteEndpoint::from_entry(activation.into_legacy()),
+                    };
+                    match staged_route(&staged_routes, inner, route.id) {
+                        Some(existing)
+                            if matches!(existing.endpoint, RouteEndpoint::Dropped)
+                                && existing.canonical_name == route.canonical_name => {}
+                        Some(_) => {
+                            return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                        }
+                        None => {}
+                    }
+                    staged_routes.insert(route.id, Some(record.clone()));
+                    publication.route_updates.push(Update::Insert(route.id, record));
+                    publication.inventory_dirty = true;
+                    applied.push(RegistryApplied::Mailbox(route.id));
+                }
+                RegistryEffect::DropMailbox(id) => {
+                    let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
+                        return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
+                    };
+                    if matches!(record.endpoint, RouteEndpoint::Dropped) {
+                        return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
+                    }
+                    record.endpoint = RouteEndpoint::Dropped;
+                    let name = record.canonical_name.clone();
+                    staged_routes.insert(id, Some(record.clone()));
+                    publication.route_updates.push(Update::Insert(id, record.clone()));
+                    publication.inventory_dirty = true;
+                    applied.push(RegistryApplied::Dropped(name));
+                }
+                RegistryEffect::RemoveMailbox(id) => {
+                    let removable = staged_route(&staged_routes, inner, id)
+                        .is_some_and(|record| !matches!(record.endpoint, RouteEndpoint::Dropped));
+                    if removable {
+                        staged_routes.insert(id, None);
+                        publication.route_updates.push(Update::Remove(id));
+                        publication.inventory_dirty = true;
+                    }
+                    applied.push(RegistryApplied::Removed(removable));
+                }
+                RegistryEffect::InstallSeize { id, handle } => {
+                    let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
+                        applied.push(RegistryApplied::SeizeInstalled(false));
+                        continue;
+                    };
+                    let RouteEndpoint::Inbox { handler, seize } = &record.endpoint else {
+                        applied.push(RegistryApplied::SeizeInstalled(false));
+                        continue;
+                    };
+                    if seize.get().is_some() {
+                        applied.push(RegistryApplied::SeizeInstalled(false));
+                        continue;
+                    }
+                    let replacement = SeizeCell::default();
+                    assert!(replacement.set(handle).is_ok(), "fresh seize cell must accept its first handle");
+                    record.endpoint = RouteEndpoint::Inbox { handler: Arc::clone(handler), seize: replacement };
+                    staged_routes.insert(id, Some(record.clone()));
+                    publication.route_updates.push(Update::Insert(id, record.clone()));
+                    applied.push(RegistryApplied::SeizeInstalled(true));
+                }
+                RegistryEffect::RegisterKind { descriptor, reject_conflict } => {
+                    let id = KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema));
+                    if let Some(slot) = staged_kind(&staged_kinds, inner, id) {
+                        if reject_conflict
+                            && canonical_kind_bytes(&slot.descriptor.name, &slot.descriptor.schema)
+                                != canonical_kind_bytes(&descriptor.name, &descriptor.schema)
+                        {
+                            return Err(RegistryEffectError::Kind(KindConflict {
+                                name: descriptor.name,
+                                existing: slot.descriptor.schema.clone(),
+                                requested: descriptor.schema,
+                            }));
+                        }
+                    } else {
+                        staged_kinds.insert(id, KindSlot { name: descriptor.name.clone(), descriptor });
+                        publication.kinds_dirty = true;
+                    }
+                    applied.push(RegistryApplied::Kind(id));
+                }
+            }
+        }
+
+        commit_staged(inner, staged_routes, staged_kinds);
+        Ok((applied, publication))
+    }
+
+    fn apply_one(&self, effect: RegistryEffect) -> Result<RegistryApplied, RegistryEffectError> {
+        self.apply_batches(vec![EffectBatch::new(vec![effect])])
+            .pop()
+            .expect("one submitted batch returns one result")?
+            .pop()
+            .ok_or_else(|| RegistryEffectError::Name(NameConflict { name: "empty registry effect".to_owned() }))
     }
 
     /// Insert a mailbox, allocating its id from the name hash (ADR-0029).
@@ -343,35 +600,11 @@ impl Registry {
     /// of letting the name derive it. [`Self::insert`] is the depth-1
     /// case where the two coincide.
     fn insert_with_id(&self, id: MailboxId, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
-        if id == MailboxId::NONE || id == MailboxId::CHASSIS_MAILBOX_ID {
-            // Sentinel collisions are reserved: NONE shadows the
-            // "absent/uninit" id (Option<MailboxId> semantics break if
-            // a real mailbox claims it), and CHASSIS_MAILBOX_ID is the
-            // chassis-router short-circuit target — registering a real
-            // handler at that name would silently shadow chassis routing
-            // (issue iamacoffeepot/aether#725). Hash collision against
-            // either is practically impossible at 64 bits, but the
-            // CHASSIS check also blocks the obvious footgun: a caller
-            // literally registering "aether.chassis".
-            return Err(NameConflict { name });
+        match self.apply_one(RegistryEffect::publish_with_id(id, name, entry)) {
+            Ok(RegistryApplied::Mailbox(id)) => Ok(id),
+            Err(RegistryEffectError::Name(error)) => Err(error),
+            Ok(_) | Err(_) => unreachable!("publish-live returns mailbox or name conflict"),
         }
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
-        let route = RouteRecord { canonical_name: name.clone(), endpoint: RouteEndpoint::from_entry(entry) };
-        let result = match inner.mailboxes.get(&id) {
-            Some(slot) if matches!(slot.endpoint, RouteEndpoint::Dropped) && slot.canonical_name == name => {
-                inner.mailboxes.insert(id, route.clone());
-                inner.publish_route(id, route);
-                Ok(id)
-            }
-            Some(_) => Err(NameConflict { name }),
-            None => {
-                inner.mailboxes.insert(id, route.clone());
-                inner.publish_route(id, route);
-                Ok(id)
-            }
-        };
-        drop(inner);
-        result
     }
 
     /// Invalidate a live mailbox (ADR-0010). Transitions the entry
@@ -392,20 +625,11 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
-        let Some(slot) = inner.mailboxes.get_mut(&id) else {
-            return Err(DropError::UnknownId(id));
-        };
-        match slot.endpoint {
-            RouteEndpoint::Inbox { .. } | RouteEndpoint::Inline(_) => {}
-            RouteEndpoint::Dropped => return Err(DropError::AlreadyDropped(id)),
+        match self.apply_one(RegistryEffect::DropMailbox(id)) {
+            Ok(RegistryApplied::Dropped(name)) => Ok(name),
+            Err(RegistryEffectError::Drop(error)) => Err(error),
+            Ok(_) | Err(_) => unreachable!("drop effect returns a name or drop error"),
         }
-        slot.endpoint = RouteEndpoint::Dropped;
-        let name = slot.canonical_name.clone();
-        let route = slot.clone();
-        inner.publish_route(id, route);
-        drop(inner);
-        Ok(name)
     }
 
     /// Register a mailbox whose handler body forwards the envelope
@@ -444,10 +668,7 @@ impl Registry {
     /// outcome rather than a bug.
     pub fn register_inbox(&self, name: impl Into<String>, handler: Arc<dyn InboxHandler>) -> MailboxId {
         match self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() }) {
-            Ok(id) => {
-                self.notify_mailbox_change();
-                id
-            }
+            Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
             }
@@ -471,11 +692,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() });
-        if result.is_ok() {
-            self.notify_mailbox_change();
-        }
-        result
+        self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
     }
 
     /// ADR-0099 §3: [`Self::try_register_inbox`] but under an explicit,
@@ -489,11 +706,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert_with_id(id, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() });
-        if result.is_ok() {
-            self.notify_mailbox_change();
-        }
-        result
+        self.insert_with_id(id, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
     }
 
     /// Issue 838: register a mailbox whose handler runs inline on
@@ -528,10 +741,7 @@ impl Registry {
     /// outcome rather than a bug.
     pub fn register_inline(&self, name: impl Into<String>, handler: Arc<dyn InlineHandler>) -> MailboxId {
         match self.insert(name.into(), MailboxEntry::Inline(handler)) {
-            Ok(id) => {
-                self.notify_mailbox_change();
-                id
-            }
+            Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
             }
@@ -550,11 +760,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InlineHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert(name.into(), MailboxEntry::Inline(handler));
-        if result.is_ok() {
-            self.notify_mailbox_change();
-        }
-        result
+        self.insert(name.into(), MailboxEntry::Inline(handler))
     }
 
     /// Issue 607 Phase 7: fully remove a registered mailbox. Used in
@@ -570,14 +776,9 @@ impl Registry {
     /// a drop, chassis-bound mailboxes are torn down on cap
     /// teardown and the id can be freshly recreated.
     pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
-        match inner.mailboxes.get(&id) {
-            Some(slot) if matches!(slot.endpoint, RouteEndpoint::Inbox { .. } | RouteEndpoint::Inline(_)) => {
-                inner.mailboxes.remove(&id);
-                inner.publish_route_removal(id);
-                true
-            }
-            _ => false,
+        match self.apply_one(RegistryEffect::RemoveMailbox(id)) {
+            Ok(RegistryApplied::Removed(removed)) => removed,
+            Ok(_) | Err(_) => unreachable!("remove effect is infallible and returns a bool"),
         }
     }
 
@@ -661,26 +862,10 @@ impl Registry {
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn install_seize_handle(&self, id: MailboxId, handle: SeizeHandle) -> bool {
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
-        let Some(route) = inner.mailboxes.get(&id) else {
-            return false;
-        };
-        let RouteEndpoint::Inbox { handler, seize } = &route.endpoint else {
-            return false;
-        };
-        if seize.get().is_some() {
-            return false;
+        match self.apply_one(RegistryEffect::InstallSeize { id, handle }) {
+            Ok(RegistryApplied::SeizeInstalled(installed)) => installed,
+            Ok(_) | Err(_) => unreachable!("seize effect is infallible and returns a bool"),
         }
-
-        let replacement = SeizeCell::default();
-        assert!(replacement.set(handle).is_ok(), "fresh seize cell must accept its first handle");
-        let route = RouteRecord {
-            canonical_name: route.canonical_name.clone(),
-            endpoint: RouteEndpoint::Inbox { handler: Arc::clone(handler), seize: replacement },
-        };
-        inner.mailboxes.insert(id, route.clone());
-        inner.publish_route(id, route);
-        true
     }
 
     /// Hot-path combined lookup for the mailer's route step.
@@ -722,7 +907,7 @@ impl Registry {
     /// the guard. The internal `expect("Bytes default cannot produce a
     /// conflict")` is unreachable by construction.
     pub fn register_kind(&self, name: impl Into<String>) -> KindId {
-        let descriptor = KindDescriptor { name: name.into(), schema: SchemaType::Bytes };
+        let descriptor = bytes_kind(name.into());
         // A fresh `Bytes` descriptor can only conflict with a prior
         // `Bytes` registration under the same name — in which case the
         // schemas match and the call is idempotent. Not reachable.
@@ -757,33 +942,11 @@ impl Registry {
         descriptor: KindDescriptor,
         reject_conflict: bool,
     ) -> Result<KindId, KindConflict> {
-        let id = KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema));
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
-        if let Some(slot) = inner.kinds.get(&id) {
-            if reject_conflict
-                && canonical_kind_bytes(&slot.descriptor.name, &slot.descriptor.schema)
-                    != canonical_kind_bytes(&descriptor.name, &descriptor.schema)
-            {
-                // Same 64-bit id but distinct canonical bytes — a real
-                // hash collision, keep the loud failure. Comparing
-                // canonical bytes (not `SchemaType` PartialEq) means
-                // nominal-only differences — named fields vs stripped
-                // names from a manifest round-trip — are treated as
-                // identical, since the canonical form is exactly the
-                // structure the id hashes over.
-                return Err(KindConflict {
-                    name: descriptor.name,
-                    existing: slot.descriptor.schema.clone(),
-                    requested: descriptor.schema,
-                });
-            }
-            return Ok(id);
+        match self.apply_one(RegistryEffect::RegisterKind { descriptor, reject_conflict }) {
+            Ok(RegistryApplied::Kind(id)) => Ok(id),
+            Err(RegistryEffectError::Kind(error)) => Err(error),
+            Ok(_) | Err(_) => unreachable!("register-kind returns a kind id or kind conflict"),
         }
-        inner.name_index.insert(descriptor.name.clone(), id);
-        inner.kinds.insert(id, KindSlot { name: descriptor.name.clone(), descriptor });
-        inner.publish_kinds();
-        drop(inner);
-        Ok(id)
     }
 
     /// Look up a kind's id by its canonical name. Under hashed ids the
@@ -831,28 +994,11 @@ impl Registry {
     /// component cap to re-ship via `MailboxesChanged` after a load
     /// registers a new trampoline mailbox (issue iamacoffeepot/aether#730).
     ///
-    /// `Dropped` entries are included with their last-known name so a
-    /// trace tool can still resolve a mailbox that died after the
-    /// trace was captured. Categorisation is a pure function of the
-    /// mailbox name (`categorise_name`); the registry stores no
-    /// per-mailbox category state.
+    /// Only live entries are included. Keyed routes retain `Dropped`
+    /// records for dispatch and trace-name resolution, but public inventory
+    /// is a distinct publication and removes them.
     pub fn list_mailbox_descriptors(&self) -> Vec<MailboxDescriptor> {
-        let routes = self.routes.load();
-        let mut out: Vec<MailboxDescriptor> = routes
-            .entries()
-            .map(|(id, route)| MailboxDescriptor {
-                id: *id,
-                name: route.canonical_name.clone(),
-                category: categorise_mailbox_name(&route.canonical_name),
-            })
-            .collect();
-        out.push(MailboxDescriptor {
-            id: MailboxId::CHASSIS_MAILBOX_ID,
-            name: "aether.chassis".to_owned(),
-            category: Some(MailboxCategory::ChassisSentinel),
-        });
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        out
+        self.inventory.load().table().mailboxes.clone()
     }
 
     /// Number of registered mailbox entries (live + `Dropped`).
@@ -868,6 +1014,21 @@ impl Registry {
     #[cfg(test)]
     pub(super) fn kind_generation(&self) -> u64 {
         self.kinds.load().generation()
+    }
+
+    #[cfg(test)]
+    pub(super) fn route_generation(&self) -> u64 {
+        self.routes.load().generation()
+    }
+
+    #[cfg(test)]
+    pub(super) fn mailbox_generation(&self) -> u64 {
+        self.inventory.load().table().mailbox_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_accepting(&self) -> bool {
+        self.owner.get().is_some_and(RegistryOwnerHandle::is_accepting)
     }
 }
 

@@ -493,6 +493,7 @@ fn driver_claim_reserved_at_claim_is_recovered_at_start() {
 #[test]
 fn duplicate_passive_mailbox_aborts_build_and_shuts_down_prior() {
     let (registry, mailer) = bare_substrate();
+    let registry_probe = Arc::clone(&registry);
 
     let err = Builder::<TestChassis>::new(registry, mailer)
         .with_actor::<StubLog>(())
@@ -501,6 +502,19 @@ fn duplicate_passive_mailbox_aborts_build_and_shuts_down_prior() {
         .expect_err("second passive must fail with duplicate claim");
 
     assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
+    assert!(!registry_probe.owner_accepting(), "boot rollback closes the additive registry owner");
+}
+
+#[test]
+fn registry_owner_is_retained_for_the_chassis_lifetime() {
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
+        .build_passive()
+        .expect("empty passive chassis boots");
+
+    assert!(registry.owner_accepting(), "boot attaches the scheduler-backed owner before returning");
+    drop(chassis);
+    assert!(!registry.owner_accepting(), "chassis teardown closes owner submission before pool teardown");
 }
 
 /// Issue 607 Phase 7: a singleton whose `init` returns `Err`
