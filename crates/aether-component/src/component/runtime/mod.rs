@@ -12,7 +12,7 @@
 // names the `#[runtime]` attribute, the cap struct, the cap kinds (input +
 // reply), and `ComponentHostConfig` (its `Config` type), which previously
 // resolved at `mod.rs` root — now sourced here beside the body.
-use aether_actor::runtime;
+use aether_actor::{RegistryChanged, runtime};
 
 // `load` (the `handle_load` sequence as a method on the state) and `config`
 // (the `ComponentHostConfig` init bundle), now nested under this `runtime`
@@ -53,7 +53,7 @@ use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::Registry;
+use aether_substrate::mail::registry::{Registry, RegistrySubscription};
 use aether_substrate::mail::{KindId, MailboxId};
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
@@ -78,6 +78,14 @@ pub struct ComponentHostCapabilityState {
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
+    /// Retained registry-inventory subscription. `wire` installs the weak sink
+    /// before the registry issues its initial wake, then this handle keeps that
+    /// sink live for the host's lifetime.
+    pub registry_subscription: Option<RegistrySubscription>,
+    /// The coherent inventory generations most recently egressed to the hub.
+    /// Mailbox and kind generations advance independently, so both form the
+    /// idempotence key.
+    pub last_egressed_inventory: Option<(u64, u64)>,
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
     pub default_name_counter: u64,
@@ -173,11 +181,19 @@ impl NativeActor for ComponentHostCapability {
             registry,
             mailer,
             outbound: params.hub_outbound,
+            registry_subscription: None,
+            last_egressed_inventory: None,
             default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
         })
+    }
+
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        state.registry_subscription = Some(
+            state.registry.subscribe_inventory::<ComponentHostCapability>(ctx.self_id(), Arc::clone(&state.mailer)),
+        );
     }
 
     /// Load a fresh wasm component into the substrate.
@@ -200,6 +216,15 @@ impl NativeActor for ComponentHostCapability {
         // `#[actor]` macro routes this `LoadResult` back to the sender
         // through `OutboundReply::reply`, so no manual `ctx.reply`.
         state.handle_load(ctx, payload)
+    }
+
+    /// Refresh the hub's registry projection after a coalesced publication.
+    /// The registry owns publication and wake coalescing; this consumer reads
+    /// one coherent snapshot, egresses it at most once per generation pair,
+    /// and always acknowledges so a publication racing the clear is re-armed.
+    #[handler::manual]
+    fn on_registry_changed(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Manual>, _payload: RegistryChanged) {
+        state.refresh_registry_inventory();
     }
 
     /// Drop a component by its mailbox id. Forwards
@@ -345,5 +370,97 @@ impl NativeActor for ComponentHostCapability {
                 DescribeComponentResult::Err { error: format!("no capabilities retained for name {}", payload.name) }
             }
         }
+    }
+}
+
+impl ComponentHostCapabilityState {
+    fn refresh_registry_inventory(&mut self) {
+        let inventory = self.registry.inventory();
+        let generations = (inventory.mailbox_generation, inventory.kind_generation);
+
+        if self.last_egressed_inventory != Some(generations) {
+            self.outbound.egress_kinds_changed(inventory.kinds);
+            self.outbound.egress_mailboxes_changed(inventory.mailboxes);
+            self.last_egressed_inventory = Some(generations);
+        }
+
+        self.registry_subscription
+            .as_ref()
+            .expect("component host registry subscription installed during wire")
+            .acknowledge(generations.0, generations.1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::mail::registry::noop_handler;
+
+    use super::*;
+
+    #[test]
+    fn registry_inventory_refresh_is_complete_idempotent_and_generation_gated() {
+        let registry = Arc::new(Registry::new());
+        let (outbound, rx) = HubOutbound::attached_loopback();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+        let engine = Arc::new(Engine::default());
+        let subscriber = registry.register_inbox("test.component.inventory-subscriber", noop_handler());
+        let mut state = ComponentHostCapabilityState {
+            linker: Arc::new(Linker::new(&engine)),
+            engine,
+            registry: Arc::clone(&registry),
+            mailer: Arc::clone(&mailer),
+            outbound,
+            registry_subscription: Some(registry.subscribe_inventory::<ComponentHostCapability>(subscriber, mailer)),
+            last_egressed_inventory: None,
+            default_name_counter: 0,
+            boot_registry: HashMap::new(),
+            boot_hash_by_actor: HashMap::new(),
+            pending_replace: HashMap::new(),
+        };
+
+        // Initial wake refreshes both complete inventories in the prescribed
+        // kinds-then-mailboxes order.
+        state.refresh_registry_inventory();
+        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { .. })));
+        let initial_mailbox_count = match rx.try_recv() {
+            Ok(EgressEvent::MailboxesChanged { descriptors }) => descriptors.len(),
+            other => panic!("expected initial mailbox inventory, got {other:?}"),
+        };
+        assert!(rx.try_recv().is_err());
+
+        // A kind-only publication and a mailbox-only publication each refresh
+        // the entire coherent projection. The #4062 registry tests cover the
+        // producer's coalescing and publish-vs-clear re-arm internals.
+        registry.register_kind("test.component.inventory.kind");
+        state.refresh_registry_inventory();
+        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
+        assert!(
+            matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count)
+        );
+
+        registry.register_inbox("test.component.inventory.mailbox", noop_handler());
+        state.refresh_registry_inventory();
+        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
+        assert!(
+            matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count + 1)
+        );
+
+        // Bursts collapse to their latest inventory. An unchanged wake and a
+        // rejected mutation cannot cause another egress.
+        registry.register_kind("test.component.inventory.burst-first");
+        registry.register_kind("test.component.inventory.burst-latest");
+        state.refresh_registry_inventory();
+        assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 3));
+        assert!(
+            matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count + 1)
+        );
+        assert!(registry.try_register_inbox("test.component.inventory.mailbox", noop_handler()).is_err());
+        state.refresh_registry_inventory();
+        assert!(rx.try_recv().is_err());
+        state.refresh_registry_inventory();
+        assert!(rx.try_recv().is_err());
     }
 }
