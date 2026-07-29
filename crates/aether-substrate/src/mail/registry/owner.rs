@@ -6,11 +6,18 @@ use crossbeam_channel::Sender;
 
 use super::effect::{EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffectError};
 use super::mailbox::Registry;
+use crate::mail::Mail;
+use crate::mail::mailer::Mailer;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState, WakeHandle, WakeSink};
 
 pub(super) struct BatchEnvelope {
     pub(super) batch: EffectBatch,
     pub(super) completion: Sender<Result<Vec<RegistryApplied>, RegistryEffectError>>,
+}
+
+pub(super) enum OwnerCommand {
+    Batch(BatchEnvelope),
+    ParkOrDrop(Mail),
 }
 
 #[derive(Clone)]
@@ -21,7 +28,7 @@ pub(super) struct RegistryOwnerHandle {
 
 struct OwnerQueue {
     accepting: bool,
-    envelopes: VecDeque<BatchEnvelope>,
+    commands: VecDeque<OwnerCommand>,
 }
 
 impl RegistryOwnerHandle {
@@ -31,10 +38,21 @@ impl RegistryOwnerHandle {
         if !state.accepting {
             return None;
         }
-        state.envelopes.push_back(BatchEnvelope { batch, completion: sender });
+        state.commands.push_back(OwnerCommand::Batch(BatchEnvelope { batch, completion: sender }));
         drop(state);
         let _ = self.wake.wake();
         Some(RegistryCompletion::new(receiver))
+    }
+
+    pub(super) fn park_or_drop(&self, mail: Mail) -> Option<Mail> {
+        let mut state = self.state.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+        if !state.accepting {
+            return Some(mail);
+        }
+        state.commands.push_back(OwnerCommand::ParkOrDrop(mail));
+        drop(state);
+        let _ = self.wake.wake();
+        None
     }
 
     pub(super) fn is_accepting(&self) -> bool {
@@ -47,11 +65,13 @@ pub struct RegistryOwnerLease {
 }
 
 impl RegistryOwnerLease {
-    pub fn attach(registry: &Arc<Registry>, sink: WakeSink) -> Self {
-        let state = Arc::new(Mutex::new(OwnerQueue { accepting: true, envelopes: VecDeque::new() }));
+    pub fn attach(registry: &Arc<Registry>, mailer: &Arc<Mailer>, sink: WakeSink) -> Self {
+        let state = Arc::new(Mutex::new(OwnerQueue { accepting: true, commands: VecDeque::new() }));
         let slot = Arc::new(RegistryOwnerSlot {
             registry: Arc::downgrade(registry),
+            mailer: Arc::clone(mailer),
             queue: Arc::clone(&state),
+            apply_lock: Mutex::new(()),
             state: Arc::new(SlotState::new()),
         });
         let erased: Arc<dyn Drainable> = slot.clone();
@@ -73,17 +93,26 @@ impl Drop for RegistryOwnerLease {
         let queued = {
             let mut state = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
             state.accepting = false;
-            state.envelopes.drain(..).collect::<Vec<_>>()
+            state.commands.drain(..).collect::<Vec<_>>()
         };
-        for envelope in queued {
-            let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+        let _apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
+        if let Some(registry) = self.slot.registry.upgrade() {
+            registry.close_owner_commands(queued, &self.slot.mailer);
+        } else {
+            for command in queued {
+                if let OwnerCommand::Batch(envelope) = command {
+                    let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+                }
+            }
         }
     }
 }
 
 struct RegistryOwnerSlot {
     registry: Weak<Registry>,
+    mailer: Arc<Mailer>,
     queue: Arc<Mutex<OwnerQueue>>,
+    apply_lock: Mutex<()>,
     state: Arc<SlotState>,
 }
 
@@ -93,26 +122,35 @@ impl Drainable for RegistryOwnerSlot {
             return CycleResult::Idle;
         }
 
-        let envelopes = self
+        let commands = self
             .queue
             .lock()
             .expect("registry owner queue lock poisoned; fail-fast per ADR-0063")
-            .envelopes
+            .commands
             .drain(..)
             .collect::<Vec<_>>();
 
-        if !envelopes.is_empty() {
+        if !commands.is_empty() {
+            let _apply = self.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
             if let Some(registry) = self.registry.upgrade() {
-                registry.apply_owner_envelopes(envelopes);
+                let accepting =
+                    self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063").accepting;
+                if accepting {
+                    registry.apply_owner_commands(commands, &self.mailer);
+                } else {
+                    registry.close_owner_commands(commands, &self.mailer);
+                }
             } else {
-                for envelope in envelopes {
-                    let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+                for command in commands {
+                    if let OwnerCommand::Batch(envelope) = command {
+                        let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+                    }
                 }
             }
         }
 
         self.state.mark_idle();
-        if self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063").envelopes.is_empty() {
+        if self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063").commands.is_empty() {
             CycleResult::Idle
         } else if self.state.try_self_requeue() {
             CycleResult::Requeue
