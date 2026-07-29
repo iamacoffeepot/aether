@@ -47,9 +47,11 @@ where
 /// An ordered double-buffer publisher for map views.
 ///
 /// Each batch updates the standby map with the previous replay lag and then
-/// with the new updates. Publishing swaps the maps in constant time. A reader
-/// that pins the standby map past its next turn causes `Arc::make_mut` to clone
-/// that map before reuse.
+/// with the new updates. Publishing swaps the maps in constant time. Readers
+/// must not pin a published snapshot across a complete two-publication cycle;
+/// debug builds diagnose that contract at the reuse boundary. `Arc::make_mut`
+/// remains a release-build safety valve that preserves coherent publication if
+/// a reader violates the short-hold contract.
 pub struct DoubleBuffer<K, V> {
     publisher: ViewPublisher<FxHashMap<K, V>>,
     standby: Arc<Published<FxHashMap<K, V>>>,
@@ -80,6 +82,11 @@ where
     /// Applies one ordered batch and publishes the resulting map.
     pub fn publish(&mut self, updates: impl IntoIterator<Item = Update<K, V>>) -> Result<u64, GenerationExhausted> {
         let generation = self.publisher.next_generation()?;
+        debug_assert_eq!(
+            Arc::strong_count(&self.standby),
+            1,
+            "DoubleBuffer publication-cycle violation: a reader pinned the standby snapshot across two publishes"
+        );
         let replay_lag = take(&mut self.replay_lag);
         let published = Arc::make_mut(&mut self.standby);
 
@@ -228,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn alternating_buffers_converge_after_each_batch() {
+    fn short_held_snapshots_allow_alternating_buffer_reuse() {
         let mut buffers = DoubleBuffer::default();
         let view = buffers.view();
 
@@ -247,8 +254,22 @@ mod tests {
         assert_eq!(entries(&view), [("b", 2), ("c", 3)]);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn pinned_standby_snapshot_uses_clone_valve() {
+    #[should_panic(expected = "DoubleBuffer publication-cycle violation")]
+    fn pinning_a_snapshot_across_its_reuse_cycle_panics() {
+        let mut buffers = DoubleBuffer::default();
+        let view = buffers.view();
+
+        buffers.publish([Update::Insert("a", 1)]).expect("the first generation should be available");
+        let _pinned = view.load();
+        buffers.publish([Update::Insert("b", 2)]).expect("the second generation should be available");
+        let _ = buffers.publish([Update::Insert("c", 3)]);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_clone_fallback_keeps_a_pinned_snapshot_and_new_view_coherent() {
         let mut buffers = DoubleBuffer::default();
         let view = buffers.view();
 

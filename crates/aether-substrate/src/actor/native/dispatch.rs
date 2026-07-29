@@ -72,7 +72,7 @@ pub fn typed_then_fallback_or_warn<A>(
         tracing::warn!(
             target: "aether_substrate::dispatch",
             actor = A::NAMESPACE,
-            kind = env.kind_name.as_str(),
+            kind = env.kind_name.as_ref(),
             "actor dispatch missed: kind not handled or decode failed"
         );
     }

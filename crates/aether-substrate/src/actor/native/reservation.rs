@@ -4,8 +4,6 @@
 //! one parent's staged and live children without touching the routing or actor
 //! registries, and its weak RAII handles do not create a lifetime cascade.
 
-#![allow(dead_code, reason = "ADR-0165 reservation primitives land before production staged spawn wiring")]
-
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 

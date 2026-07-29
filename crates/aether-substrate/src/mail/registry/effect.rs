@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::error::Error;
 use std::fmt;
 use std::process::abort;
@@ -94,12 +95,28 @@ pub trait PreparedSpawnActivation: Send {
     fn reserve(
         self: Box<Self>,
         token: ActivationToken,
-    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>>;
+    ) -> Result<Arc<dyn ActivationReservation>, (Box<dyn PreparedSpawnActivation>, PreparedSpawnFailure)>;
 
     /// Schedule destruction of initialized actor state at its execution
     /// home. Dropping the returned receiver is the nonblocking rejection
     /// path; shutdown retains it until the home-side drop completes.
-    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()>;
+    fn discard_at_home(self: Box<Self>, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()>;
+
+    /// Remember one non-bootstrap same-flush mail obligation so native
+    /// rejection can settle it after home-side state destruction.
+    fn retain_mail(&mut self, _mail: &Mail) {}
+}
+
+/// Storage-neutral reason supplied to the native finalizer. The registry
+/// owner can reject a birth without knowing how actor state or its typed
+/// completion are represented.
+#[derive(Debug)]
+pub enum PreparedSpawnFailure {
+    NamespaceOwnedByOtherType { namespace: &'static str, owning_type: TypeId },
+    SubnameRetired { full_name: String },
+    SubnameInUse { full_name: String },
+    ActivationRejected,
+    OwnerClosed,
 }
 
 /// Owner-retained handle for one activation running at its execution home.
@@ -107,6 +124,9 @@ pub trait ActivationReservation: Send + Sync {
     fn schedule(&self);
     fn take_live(&self) -> Option<Box<dyn LiveActivation>>;
     fn cancel(&self);
+    fn reject(&self, _failure: PreparedSpawnFailure) {
+        self.cancel();
+    }
     fn join(&self);
     fn barrier_matches(&self, mail_id: MailId) -> bool;
 
@@ -129,17 +149,17 @@ pub struct InstalledActivation {
 
 pub struct PreparedMail {
     pub(crate) mail: Mail,
-    pub(crate) kind_name: String,
+    pub(crate) kind_name: Arc<str>,
     pub(crate) bootstrap: bool,
 }
 
 impl PreparedMail {
-    pub(crate) fn bootstrap(mail: Mail, kind_name: String) -> Self {
-        Self { mail, kind_name, bootstrap: true }
+    pub(crate) fn bootstrap(mail: Mail, kind_name: impl Into<Arc<str>>) -> Self {
+        Self { mail, kind_name: kind_name.into(), bootstrap: true }
     }
 
-    pub(super) fn parked(mail: Mail, kind_name: String) -> Self {
-        Self { mail, kind_name, bootstrap: false }
+    pub(super) fn parked(mail: Mail, kind_name: impl Into<Arc<str>>) -> Self {
+        Self { mail, kind_name: kind_name.into(), bootstrap: false }
     }
 }
 
@@ -158,15 +178,22 @@ impl PreparedActivationGuard {
         self.0.take().expect("prepared spawn activation consumed once")
     }
 
-    fn discard(mut self) -> crossbeam_channel::Receiver<()> {
-        self.take().discard_at_home()
+    fn discard(mut self, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
+        self.take().discard_at_home(failure)
+    }
+
+    fn retain_mail(&mut self, mail: &Mail) {
+        self.0.as_mut().expect("prepared activation remains available while retaining mail").retain_mail(mail);
     }
 }
 
 impl Drop for PreparedActivationGuard {
     fn drop(&mut self) {
         if let Some(activation) = self.0.take() {
-            drop(activation.discard_at_home());
+            // A bare guard drop means its enclosing transaction rejected it.
+            // Every true owner-closure path consumes the batch through
+            // `discard_prepared`, which supplies `OwnerClosed` explicitly.
+            drop(activation.discard_at_home(PreparedSpawnFailure::ActivationRejected));
         }
     }
 }
@@ -185,8 +212,17 @@ impl PreparedSpawnCommit {
         self.activation.take()
     }
 
+    pub(crate) fn retain_after_init(&mut self, mail: Mail, kind_name: Arc<str>) {
+        self.activation.retain_mail(&mail);
+        self.after_init.push(PreparedMail::parked(mail, kind_name));
+    }
+
     pub fn discard_at_home(self) -> crossbeam_channel::Receiver<()> {
-        self.activation.discard()
+        self.activation.discard(PreparedSpawnFailure::OwnerClosed)
+    }
+
+    pub(super) fn reject_at_home(self, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
+        self.activation.discard(failure)
     }
 }
 
@@ -307,7 +343,7 @@ impl EffectBatch {
         self.effects
             .into_iter()
             .filter_map(|effect| match effect {
-                RegistryEffect::PreparedSpawn(commit) => Some(commit.discard_at_home()),
+                RegistryEffect::PreparedSpawn(commit) => Some(commit.reject_at_home(PreparedSpawnFailure::OwnerClosed)),
                 _ => None,
             })
             .collect()

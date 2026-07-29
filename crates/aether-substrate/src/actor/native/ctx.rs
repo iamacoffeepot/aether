@@ -703,16 +703,21 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
 
     /// Spawn an instanced `A` as a child of declared parent `P`. The
     /// `A: ChildOf<P>` bound enforces the ADR-0166 permission, and
-    /// [`SpawnBuilder::finish`](crate::SpawnBuilder::finish) verifies that
-    /// `P` matches the executing binding's logical identity before entering
-    /// the spawn pipeline. The new actor's [`Source`]
+    /// [`HandlerSpawnBuilder::stage`](crate::HandlerSpawnBuilder::stage) and
+    /// [`HandlerSpawnBuilder::stage_with`](crate::HandlerSpawnBuilder::stage_with)
+    /// verify that `P` matches the executing binding's logical identity,
+    /// prepare the child locally, and stage its authoritative owner-time
+    /// activation. The new actor's [`Source`]
     /// stamps the calling actor's mailbox so any reply addressed to
     /// `SourceAddr::Component` routes back here.
     ///
-    /// Returns a [`SpawnBuilder`](crate::SpawnBuilder) the caller chains
-    /// `after_init` / `finish` against. Mirrors the chassis-level
-    /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`
-    /// shape; both flow through the same [`crate::Spawner`].
+    /// Returns a [`HandlerSpawnBuilder`](crate::HandlerSpawnBuilder) the
+    /// caller chains `after_init` and then `stage` or `stage_with` against.
+    /// Its `finish` terminal is only the temporary eager bridge for the
+    /// unmigrated #4065-#4069 consumers. Chassis-level
+    /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor` still use
+    /// [`SpawnBuilder`](crate::SpawnBuilder); both builder shapes flow through
+    /// the same [`crate::Spawner`].
     ///
     /// # Panics
     /// Panics if the transport was constructed via
@@ -724,7 +729,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         subname: super::spawn::Subname<'b>,
         config: A::Config,
         params: A::Params,
-    ) -> super::spawn::SpawnBuilder<'b, A>
+    ) -> super::spawn::HandlerSpawnBuilder<'b, A>
     where
         P: Addressable,
         A: aether_actor::ChildOf<P> + aether_actor::Instanced + NativeActor,
@@ -743,7 +748,14 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
             .runtime_identity()
             .expect("NativeCtx::spawn_child requires a typed production binding")
             .clone();
-        super::spawn::SpawnBuilder::new_child::<P>(Arc::clone(spawner), subname, config, params, sender, parent)
+        let builder =
+            super::spawn::SpawnBuilder::new_child::<P>(Arc::clone(spawner), subname, config, params, sender, parent);
+        super::spawn::HandlerSpawnBuilder::new(
+            builder,
+            Arc::clone(self.binding),
+            self.in_flight_root,
+            self.reply_target(),
+        )
     }
 }
 

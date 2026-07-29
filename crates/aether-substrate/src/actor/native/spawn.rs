@@ -1,19 +1,18 @@
-//! Spawn primitive for instanced actors (ADR-0079, issue 607 Phase 3).
+//! Native spawn lifecycle for instanced actors (ADR-0079, ADR-0165).
 //!
-//! Builds on [`ActorRegistry`] (Phase 2) to add
-//! the atomic register-and-spawn dance: validate subname → check
-//! tombstones + name-owner uniqueness → call `A::init` on the caller's
-//! thread → register the mailbox sink + insert `Live` entry under one
-//! lock → pre-load `after_init` mail → spawn the dispatcher thread.
+//! Chassis and transitional embedder callers use the eager
+//! [`SpawnBuilder::finish`] bridge. Handler callers use
+//! [`HandlerSpawnBuilder::stage`] or [`HandlerSpawnBuilder::stage_with`]:
+//! validate and initialize on the handler thread, append an ordered
+//! `PreparedSpawnCommit` to that turn's outbound work, and return a local
+//! reservation receipt without publishing global state. The registry owner
+//! then authoritatively reserves `Starting`; the scheduler home wires the
+//! initialized actor; an activation barrier promotes it to `Live`; and the
+//! finalizer delivers the typed ADR-0093 `TaskDone` result to the parent.
 //!
-//! Init failure drops partial state and returns `Err(InitFailed)`
-//! before any thread spawns. ADR-0079 §Init lifecycle.
-//!
-//! Termination not implemented yet — instanced actors live for the
-//! chassis's lifetime; their dispatcher thread exits when the
-//! `Registry` drops (the sink handler's `Weak<Sender>` upgrade fails,
-//! the mpsc disconnects). Phase 4 wires `unwire` + the monitor
-//! primitive + tombstone population.
+//! Initialization failure drops partial state synchronously before anything
+//! is staged. Owner-time conflicts and activation failures drop state at its
+//! scheduler home and complete the same typed deferred result exactly once.
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -30,6 +29,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
+use crate::actor::native::reservation::ChildReservationKey;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
@@ -63,9 +63,15 @@ use std::time::Duration;
 /// hashed deterministically (ADR-0029) to the returned `MailboxId`.
 pub use aether_actor::Subname;
 
-/// Failure modes for the [`SpawnBuilder::finish`] spawn pipeline.
-/// Returned in the order the lifecycle checks them: parent identity →
-/// validate → owner check → tombstone check → name uniqueness → init.
+/// Failure modes for native actor spawning.
+///
+/// [`HandlerSpawnBuilder::stage`] and [`HandlerSpawnBuilder::stage_with`]
+/// return local validation, parent-reservation, and initialization failures
+/// synchronously. Global namespace, tombstone, route, storage, and owner
+/// decisions are authoritative only when the registry owner applies the staged
+/// birth; those failures arrive later in the matching ADR-0093
+/// `TaskDone<Result<SpawnApplied, SpawnError>, _>`. The transitional eager
+/// [`SpawnBuilder::finish`] path returns all of its failures directly.
 #[derive(Debug)]
 pub enum SpawnError {
     /// The handler named a declared parent type whose logical namespace does
@@ -89,6 +95,29 @@ pub enum SpawnError {
     /// `A::init` returned an error. The actor's partial state dropped
     /// before this returns; no dispatcher thread was spawned.
     InitFailed(BootError),
+    /// The registry owner closed before it could authoritatively apply the
+    /// staged birth.
+    OwnerClosed,
+    /// Storage or cost reservation rejected the prepared activation.
+    ActivationRejected,
+}
+
+/// Deterministic result returned when a handler has locally prepared and
+/// staged a child birth. It names a reservation, not proof that the child is
+/// live; the authoritative result arrives as a later `TaskDone`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpawnReceipt {
+    pub mailbox_id: MailboxId,
+    pub canonical_name: Arc<str>,
+    pub completion: super::DispatchId,
+}
+
+/// Authoritative successful promotion delivered through the ADR-0093 task
+/// completion path after the child is published Live and catch-up is armed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpawnApplied {
+    pub mailbox_id: MailboxId,
+    pub canonical_name: Arc<str>,
 }
 
 /// Chassis-level spawn machinery (Phase 3). One per chassis; cloned as
@@ -357,7 +386,7 @@ impl Spawner {
     /// Resolve identity and perform the current namespace and tombstone
     /// preflight before actor construction. Named-subname and typed-parent
     /// gates run in `SpawnBuilder` before this can allocate a counter.
-    fn preflight<A>(
+    fn prepare_identity<A>(
         &self,
         subname: Subname<'_>,
         parent: Option<&ActorRuntimeIdentity>,
@@ -372,12 +401,7 @@ impl Spawner {
         };
         validate_namespace_segment(&subname).map_err(SpawnError::SubnameInvalid)?;
 
-        // 2. Claim namespace ownership (or verify).
-        if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
-            return Err(SpawnError::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type: owning });
-        }
-
-        // 3. Compute the lineage carry, id, and rendered name (ADR-0099
+        // Compute the lineage carry, id, and rendered name (ADR-0099
         //    §3). The child's `ActorId` is its instanced node,
         //    `hash(NAMESPACE:subname)`. Under a parent the carry folds
         //    that node onto the parent's carry and the id is the lineage
@@ -396,11 +420,28 @@ impl Spawner {
             },
         );
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
-        if self.actor_registry.is_tombstoned(id) {
-            return Err(SpawnError::SubnameRetired { full_name: full_name.to_string() });
-        }
-
         Ok(SpawnIdentity { id, carry, canonical_name: full_name, subname })
+    }
+
+    /// Legacy eager preflight. Handler staging deliberately uses only
+    /// [`Self::prepare_identity`]; namespace ownership and liveness are global
+    /// facts and therefore move to owner-time activation reservation.
+    fn preflight<A>(
+        &self,
+        subname: Subname<'_>,
+        parent: Option<&ActorRuntimeIdentity>,
+    ) -> Result<SpawnIdentity, SpawnError>
+    where
+        A: Instanced + NativeActor,
+    {
+        let identity = self.prepare_identity::<A>(subname, parent)?;
+        if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
+            return Err(SpawnError::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type: owning });
+        }
+        if self.actor_registry.is_tombstoned(identity.id) {
+            return Err(SpawnError::SubnameRetired { full_name: identity.canonical_name.to_string() });
+        }
+        Ok(identity)
     }
 
     /// Construct all actor-local state with no builder or context borrow.
@@ -480,11 +521,33 @@ impl Spawner {
         })
     }
 
-    /// Convert an initialized legacy actor into the private storage-erased
-    /// owner commit. Production handler egress starts consuming this seam in
-    /// the next slice; the eager terminal remains available meanwhile.
-    #[allow(dead_code, reason = "private staged seam is wired to handler egress by issue #4113")]
+    /// Convert an initialized actor into an unfinalized storage-erased owner
+    /// commit. Retained for focused activation lifecycle tests; production
+    /// handler staging uses [`Self::prepare_commit_with_finalizer`].
+    #[allow(dead_code, reason = "unfinalized adapter helper is retained for focused activation lifecycle tests")]
     fn prepare_commit<A>(self: &Arc<Self>, staged: StagedActor<A>) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
+        self.prepare_commit_inner(staged, None)
+    }
+
+    fn prepare_commit_with_finalizer<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Arc<super::activation::NativeSpawnFinalizer>,
+    ) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
+        self.prepare_commit_inner(staged, Some(finalizer))
+    }
+
+    fn prepare_commit_inner<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Option<Arc<super::activation::NativeSpawnFinalizer>>,
+    ) -> PreparedSpawnCommit
     where
         A: Instanced + NativeActor,
     {
@@ -512,17 +575,22 @@ impl Spawner {
                 )
             })
             .collect();
+        let activation = super::activation::LegacyPreparedActivation::<A>::new(
+            Arc::clone(self),
+            id,
+            subname,
+            sender,
+            transport,
+            slots,
+            state,
+        );
+        let activation = match finalizer {
+            Some(finalizer) => activation.with_finalizer(finalizer),
+            None => activation,
+        };
         PreparedSpawnCommit::new(
             PreparedRoute::with_id(id, canonical_name.to_string()),
-            Box::new(super::activation::LegacyPreparedActivation::<A>::new(
-                Arc::clone(self),
-                id,
-                subname,
-                sender,
-                transport,
-                slots,
-                state,
-            )),
+            Box::new(activation),
             PreparedCostCells::new(Arc::clone(self.mailer.cost_table()), costs),
             after_init,
         )
@@ -729,10 +797,10 @@ impl Spawner {
     }
 }
 
-/// Builder returned from `NativeCtx::spawn_child` /
-/// `BuiltChassis::spawn_actor` / `PassiveChassis::spawn_actor`. Lets
-/// the caller chain `after_init` to pre-load bootstrap mail before
-/// committing with `finish`.
+/// Eager builder returned from `BuiltChassis::spawn_actor` and
+/// `PassiveChassis::spawn_actor`, and wrapped by [`HandlerSpawnBuilder`] for
+/// handler-local child staging. Lets the caller chain `after_init` to pre-load
+/// bootstrap mail before its terminal operation.
 ///
 /// Holds the spawner reference borrowed from the calling ctx's
 /// transport, the resolved subname, the consumed config, and the
@@ -763,6 +831,130 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     /// to whatever borrow it was constructed from at the call site,
     /// so a stack-local subname doesn't dangle past `finish()`.
     _ctx: PhantomData<&'ctx ()>,
+}
+
+/// Handler-owned child builder. Its staged terminal performs only local
+/// preparation during the actor turn and appends one ordered prepared birth
+/// to the parent binding. The eager terminals are a transitional bridge for
+/// the unmigrated #4065-#4069 consumers and are removed by #4070.
+pub struct HandlerSpawnBuilder<'ctx, A: Instanced + NativeActor> {
+    inner: SpawnBuilder<'ctx, A>,
+    parent_binding: Arc<NativeBinding>,
+    completion_root: MailId,
+    completion_reply_to: Source,
+}
+
+impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
+    pub(super) fn new(
+        inner: SpawnBuilder<'ctx, A>,
+        parent_binding: Arc<NativeBinding>,
+        completion_root: MailId,
+        completion_reply_to: Source,
+    ) -> Self {
+        Self { inner, parent_binding, completion_root, completion_reply_to }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[must_use]
+    pub fn after_init<K>(mut self, mail: K) -> Self
+    where
+        A: HandlesKind<K>,
+        K: Kind,
+    {
+        self.inner = self.inner.after_init(mail);
+        self
+    }
+
+    /// Prepare and stage a birth whose later typed completion carries unit
+    /// context.
+    pub fn stage(self) -> Result<SpawnReceipt, SpawnError> {
+        self.stage_with(())
+    }
+
+    /// Prepare and stage a birth with caller-owned continuation context. The
+    /// authoritative result later lands as
+    /// `TaskDone<Result<SpawnApplied, SpawnError>, C>`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if internal builder state has already been consumed, which
+    /// safe code cannot do because this method takes ownership of `self`.
+    pub fn stage_with<C>(self, context: C) -> Result<SpawnReceipt, SpawnError>
+    where
+        C: Send + 'static,
+    {
+        let Self { inner, parent_binding, completion_root, completion_reply_to } = self;
+        let SpawnBuilder {
+            spawner,
+            subname,
+            config,
+            params,
+            sender,
+            parent,
+            declared_parent_namespace,
+            after_init,
+            ..
+        } = inner;
+        let config = config.expect("HandlerSpawnBuilder::stage consumed exactly once");
+        let params = params.expect("HandlerSpawnBuilder::stage consumed exactly once");
+        if let Subname::Named(subname) = subname {
+            validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)?;
+        }
+        let parent = parent.expect("handler child builder always carries a typed parent identity");
+        let declared_namespace = declared_parent_namespace.expect("handler child builder names its declared parent");
+        if parent.logical() != ActorId::singleton(declared_namespace) {
+            return Err(SpawnError::ParentTypeMismatch {
+                declared_namespace,
+                actual_logical: parent.logical(),
+                actual_canonical_name: Arc::clone(parent.canonical_name()),
+            });
+        }
+
+        let identity = spawner.prepare_identity::<A>(subname, Some(&parent))?;
+        let key = ChildReservationKey::new(
+            ActorId::singleton(A::NAMESPACE),
+            ActorId::instanced(A::NAMESPACE, &identity.subname),
+        );
+        let parent_reservation = parent_binding
+            .reserve_child(key)
+            .ok_or_else(|| SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() })?;
+        let staged = spawner.build::<A>(identity, config, params, after_init)?;
+        let applied = SpawnApplied {
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
+        };
+        let completion = parent_binding.dispatch_arm(
+            spawner.mailer().acquire_settlement_hold(completion_root),
+            completion_reply_to,
+            context,
+        );
+        let receipt = SpawnReceipt {
+            mailbox_id: applied.mailbox_id,
+            canonical_name: Arc::clone(&applied.canonical_name),
+            completion: completion.dispatch_id(),
+        };
+        let finalizer = super::activation::NativeSpawnFinalizer::new(
+            parent_reservation,
+            completion,
+            applied,
+            Arc::downgrade(&staged.transport),
+            Arc::clone(spawner.mailer()),
+        );
+        let commit = spawner.prepare_commit_with_finalizer(staged, finalizer);
+        parent_binding.stage_child_birth(commit);
+        let _ = sender;
+        Ok(receipt)
+    }
+
+    /// Transitional handler-eager bridge for #4065-#4069.
+    pub fn finish(self) -> Result<MailboxId, SpawnError> {
+        self.inner.finish()
+    }
+
+    /// Transitional handler-eager bridge for #4065-#4069.
+    pub fn finish_with_name(self) -> Result<(MailboxId, String), SpawnError> {
+        self.inner.finish_with_name()
+    }
 }
 
 impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
@@ -834,13 +1026,14 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         K: Kind,
     {
         let payload = mail.encode_into_bytes();
+        let kind = KindId(<K as Kind>::ID.0);
         // ADR-0094: the bootstrap seed carries no settlement lineage
         // (`MailId::NONE`), so it is built *disarmed* — there is no
         // obligation to discharge (and `dispatch_one` no-ops its
         // `record_finished` on `NONE` anyway).
         let env = Envelope::disarmed(
-            KindId(<K as Kind>::ID.0),
-            <K as Kind>::NAME.to_owned(),
+            kind,
+            self.spawner.registry().kind_name_shared(kind).unwrap_or_else(|| Arc::from(K::NAME)),
             None,
             self.sender,
             MailRef::from(payload),
@@ -911,15 +1104,19 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "activation lifecycle tests use bounded channels and fixture-only setup")]
 
     use super::*;
+    use crate::actor::native::{DispatchId, TaskDone};
     use crate::config::RegistryQueueCapacities;
     use crate::mail::mailer::Mailer;
-    use crate::mail::registry::effect::{ActivationToken, EffectBatch, RegistryApplied, RegistryEffect};
-    use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease};
+    use crate::mail::registry::effect::{
+        ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
+    };
+    use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease, noop_handler};
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, PoolHandle, SlotState};
     use std::any::Any;
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Instant;
 
     #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema)]
     #[kind(name = "test.activation.poke")]
@@ -992,6 +1189,85 @@ mod tests {
         spawner.prepare_commit(staged)
     }
 
+    fn finalized_probe(
+        spawner: &Arc<Spawner>,
+        parent: &Arc<NativeBinding>,
+        name: &str,
+        events: crossbeam_channel::Sender<ActivationEvent>,
+        correlation: u64,
+    ) -> (PreparedSpawnCommit, DispatchId, ChildReservationKey) {
+        let key = ChildReservationKey::new(
+            ActorId::singleton(ActivationProbe::NAMESPACE),
+            ActorId::instanced(ActivationProbe::NAMESPACE, name),
+        );
+        let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
+        let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
+        let staged = spawner.build::<ActivationProbe>(identity, events, (), Vec::new()).unwrap();
+        let applied = SpawnApplied {
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
+        };
+        let deferred = parent.dispatch_arm::<Result<SpawnApplied, SpawnError>, _>(
+            spawner.mailer().acquire_settlement_hold(MailId::new(parent.self_mailbox(), correlation)),
+            Source::NONE,
+            (),
+        );
+        let dispatch_id = deferred.dispatch_id();
+        let finalizer = super::super::activation::NativeSpawnFinalizer::new(
+            parent_reservation,
+            deferred,
+            applied,
+            Arc::downgrade(&staged.transport),
+            Arc::clone(spawner.mailer()),
+        );
+
+        (spawner.prepare_commit_with_finalizer(staged, finalizer), dispatch_id, key)
+    }
+
+    fn await_spawn_done(
+        parent: &NativeBinding,
+        dispatch_id: DispatchId,
+    ) -> TaskDone<Result<SpawnApplied, SpawnError>, ()> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(done) = parent.dispatch_take(dispatch_id) {
+                return done;
+            }
+            assert!(Instant::now() < deadline, "native finalizer filled its typed deferred result");
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn prepared_bootstrap_mail_shares_the_registered_kind_name() {
+        let (spawner, registry, _mailer, pool) = activation_fixture();
+        registry
+            .register_kind_with_descriptor(aether_data::KindDescriptor {
+                name: ActivationPoke::NAME.to_owned(),
+                schema: <ActivationPoke as aether_data::Schema>::SCHEMA,
+            })
+            .unwrap();
+        let registered = registry.kind_name_shared(ActivationPoke::ID).expect("registered kind has a shared name");
+        let (events_tx, _events_rx) = crossbeam_channel::unbounded();
+        let builder = SpawnBuilder::<ActivationProbe>::new(
+            Arc::clone(&spawner),
+            Subname::Named("shared-bootstrap-name"),
+            events_tx,
+            (),
+            Source::NONE,
+            None,
+        )
+        .after_init(ActivationPoke);
+
+        assert_eq!(builder.after_init.len(), 1);
+        assert!(
+            Arc::ptr_eq(&builder.after_init[0].kind_name, &registered),
+            "bootstrap preparation clones the registry-owned Arc"
+        );
+
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
+
     #[test]
     fn prepared_activation_lifecycle_stays_on_scheduler_home() {
         let (spawner, _registry, _mailer, pool) = activation_fixture();
@@ -1016,6 +1292,123 @@ mod tests {
         assert_eq!(cancel_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Drop(home));
         assert!(cancel_rx.try_recv().is_err(), "post-wire cancellation unwires exactly once");
 
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent_key() {
+        let (spawner, registry, mailer, pool) = activation_fixture();
+        let owner =
+            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let caller = thread::current().id();
+        let parent_id = MailboxId::from_name("test.activation.owner-close-parent");
+        let parent = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), parent_id));
+        let key = ChildReservationKey::new(
+            ActorId::singleton(ActivationProbe::NAMESPACE),
+            ActorId::instanced(ActivationProbe::NAMESPACE, "owner-close-before-apply"),
+        );
+        let parent_reservation = parent.reserve_child(key).expect("first staged parent key reservation wins");
+        let (events_tx, events_rx) = crossbeam_channel::unbounded();
+        let identity =
+            spawner.prepare_identity::<ActivationProbe>(Subname::Named("owner-close-before-apply"), None).unwrap();
+        let staged = spawner.build::<ActivationProbe>(identity, events_tx, (), Vec::new()).unwrap();
+        let applied = SpawnApplied {
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
+        };
+        let deferred = parent.dispatch_arm::<Result<SpawnApplied, SpawnError>, _>(
+            mailer.acquire_settlement_hold(MailId::new(parent_id, 1)),
+            Source::NONE,
+            (),
+        );
+        let dispatch_id = deferred.dispatch_id();
+        let finalizer = super::super::activation::NativeSpawnFinalizer::new(
+            parent_reservation,
+            deferred,
+            applied,
+            Arc::downgrade(&staged.transport),
+            Arc::clone(&mailer),
+        );
+        let commit = spawner.prepare_commit_with_finalizer(staged, finalizer);
+        let child_id = commit.route.id;
+        let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+
+        drop(owner);
+
+        assert!(matches!(
+            completion.wait_timeout(Duration::from_secs(1)).unwrap(),
+            Err(RegistryEffectError::OwnerClosed)
+        ));
+        let dropped = events_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(dropped, ActivationEvent::Drop(home) if home != caller));
+        assert!(events_rx.try_recv().is_err(), "pre-apply rejection drops without running unwire");
+        assert!(registry.entry(child_id).is_none(), "owner-close rejection publishes no route");
+
+        let done = parent
+            .dispatch_take::<Result<SpawnApplied, SpawnError>, ()>(dispatch_id)
+            .expect("owner-close finalization fills the typed deferred result");
+        assert!(matches!(done.output(), Err(SpawnError::OwnerClosed)));
+        done.release_no_reply();
+        drop(parent.reserve_child(key).expect("owner-close rejection releases the staged parent key"));
+
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rejected() {
+        let (spawner, registry, mailer, pool) = activation_fixture();
+        let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+        let owner =
+            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let caller = thread::current().id();
+        let parent = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId::from_name("test.activation.rejected-batch-parent"),
+        ));
+        let (first_tx, first_rx) = crossbeam_channel::unbounded();
+        let (middle_tx, middle_rx) = crossbeam_channel::unbounded();
+        let (later_tx, later_rx) = crossbeam_channel::unbounded();
+        let (first, first_dispatch, first_key) = finalized_probe(&spawner, &parent, "batch-first", first_tx, 1);
+        let (middle, middle_dispatch, middle_key) = finalized_probe(&spawner, &parent, "batch-middle", middle_tx, 2);
+        let (later, later_dispatch, later_key) = finalized_probe(&spawner, &parent, "batch-later", later_tx, 3);
+        let first_id = first.route.id;
+        let middle_id = middle.route.id;
+        let later_id = later.route.id;
+        registry.try_register_inbox_with_id(middle_id, middle.route.canonical_name.clone(), noop_handler()).unwrap();
+        let completion = registry
+            .submit(EffectBatch::new(vec![
+                RegistryEffect::PreparedSpawn(first),
+                RegistryEffect::PreparedSpawn(middle),
+                RegistryEffect::PreparedSpawn(later),
+            ]))
+            .unwrap();
+
+        owner.run_once();
+
+        assert!(matches!(completion.wait_timeout(Duration::from_secs(1)).unwrap(), Err(RegistryEffectError::Name(_))));
+        for events in [&first_rx, &middle_rx, &later_rx] {
+            let dropped = events.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(matches!(dropped, ActivationEvent::Drop(home) if home != caller));
+            assert!(events.try_recv().is_err(), "rejected pre-wire state drops without unwire");
+        }
+        assert!(registry.entry(first_id).is_none());
+        assert!(registry.entry(middle_id).is_some(), "the pre-existing middle conflict remains unchanged");
+        assert!(registry.entry(later_id).is_none());
+
+        let first_done = await_spawn_done(&parent, first_dispatch);
+        assert!(matches!(first_done.output(), Err(SpawnError::ActivationRejected)));
+        first_done.release_no_reply();
+        let middle_done = await_spawn_done(&parent, middle_dispatch);
+        assert!(matches!(middle_done.output(), Err(SpawnError::SubnameInUse { .. })));
+        middle_done.release_no_reply();
+        let later_done = await_spawn_done(&parent, later_dispatch);
+        assert!(matches!(later_done.output(), Err(SpawnError::ActivationRejected)));
+        later_done.release_no_reply();
+        for key in [first_key, middle_key, later_key] {
+            drop(parent.reserve_child(key).expect("transactional rejection releases every parent key"));
+        }
+
+        drop(owner);
         assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
     }
 

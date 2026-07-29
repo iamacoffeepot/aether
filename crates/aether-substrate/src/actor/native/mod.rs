@@ -86,7 +86,7 @@ pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
 pub use envelope::Envelope;
 pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
 pub use pumped_slot::PumpedSlot;
-pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
+pub use spawn::{HandlerSpawnBuilder, SpawnApplied, SpawnBuilder, SpawnError, SpawnReceipt, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};
 // iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the
 // ADR-0093 `dispatch_blocking` primitive it wraps — a substrate-tier native
