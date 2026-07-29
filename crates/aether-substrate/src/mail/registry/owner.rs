@@ -121,6 +121,8 @@ impl RegistryOwnerHandle {
         let (sender, receiver) = crossbeam_channel::bounded(1);
         let mut state = self.state.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
         if !state.accepting {
+            drop(state);
+            drop(batch.discard_prepared());
             return None;
         }
         let refused = state.admit(&self.meter, OwnerCommand::Batch(BatchEnvelope { batch, completion: sender }));

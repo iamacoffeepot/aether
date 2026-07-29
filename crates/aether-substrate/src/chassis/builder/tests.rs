@@ -908,13 +908,16 @@ fn ctx_spawn_child_routes_through_handler() {
             if kind.0 == Hatch::ID.0 {
                 let hatch = Hatch::decode_from_bytes(payload)?;
                 if hatch.tag == 2 {
-                    ctx.spawn_child::<Self, ChildCap>(
-                        Subname::Named("conflict"),
-                        (),
-                        Arc::clone(&state.child_received),
-                    )
-                    .stage()
-                    .expect("the conflict is authoritative owner state, not a local preparation failure");
+                    let receipt = ctx
+                        .spawn_child::<Self, ChildCap>(
+                            Subname::Named("conflict"),
+                            (),
+                            Arc::clone(&state.child_received),
+                        )
+                        .stage()
+                        .expect("the conflict is authoritative owner state, not a local preparation failure");
+                    let _ =
+                        ctx.send_envelope_tracked(receipt.mailbox_id, Ping::ID, &Ping { tag: 99 }.encode_into_bytes());
                     return Some(());
                 }
                 let receipt = ctx
@@ -1005,6 +1008,11 @@ fn ctx_spawn_child_routes_through_handler() {
         failure_count.load(AtomicOrdering::SeqCst),
         1,
         "an authoritative apply conflict returns exactly one typed TaskDone failure"
+    );
+    assert_eq!(
+        mailer.trace_handle().settlement_counter().live_roots(),
+        0,
+        "authoritative rejection settles same-flush tracked mail retained with the failed birth"
     );
     assert_eq!(
         child_received.lock().unwrap().as_slice(),

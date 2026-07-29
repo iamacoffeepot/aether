@@ -494,9 +494,12 @@ impl Registry {
         assert!(self.owner.set(owner).is_ok(), "a registry can attach only one owner");
     }
 
-    #[allow(dead_code, reason = "staged registry writers begin using the owner seam in the next migration issues")]
     pub(crate) fn submit(&self, batch: EffectBatch) -> Option<RegistryCompletion<Vec<RegistryApplied>>> {
-        self.owner.get()?.submit(batch)
+        let Some(owner) = self.owner.get() else {
+            drop(batch.discard_prepared());
+            return None;
+        };
+        owner.submit(batch)
     }
 
     pub(crate) fn park_or_drop(&self, mail: Mail, observed_generation: u64) -> ParkAdmission {

@@ -268,7 +268,6 @@ pub struct NativeBinding {
     /// children. This table is actor-local bookkeeping only; reserving or
     /// releasing a key never writes a global registry and does not imply a
     /// child-lifetime cascade.
-    #[allow(dead_code, reason = "ADR-0165 reservation storage lands before production staged spawn wiring")]
     child_reservations: Mutex<ChildReservationTable>,
     /// Live lease back into this actor's spawning parent's local key table.
     /// The lease is weak and creates no parent/child lifetime cascade; dropping
@@ -960,7 +959,6 @@ impl NativeBinding {
 
 /// ADR-0165 parent-local child reservations. Every operation holds only this
 /// binding's table mutex and never reaches a global registry.
-#[allow(dead_code, reason = "ADR-0165 reservation operations land before production staged spawn wiring")]
 impl NativeBinding {
     /// Reserve one distinct child prototype + instanced-node key in this
     /// parent's local table. Staged and live entries both reject duplicates.

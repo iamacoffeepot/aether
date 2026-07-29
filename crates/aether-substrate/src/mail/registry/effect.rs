@@ -190,7 +190,10 @@ impl PreparedActivationGuard {
 impl Drop for PreparedActivationGuard {
     fn drop(&mut self) {
         if let Some(activation) = self.0.take() {
-            drop(activation.discard_at_home(PreparedSpawnFailure::OwnerClosed));
+            // A bare guard drop means its enclosing transaction rejected it.
+            // Every true owner-closure path consumes the batch through
+            // `discard_prepared`, which supplies `OwnerClosed` explicitly.
+            drop(activation.discard_at_home(PreparedSpawnFailure::ActivationRejected));
         }
     }
 }
