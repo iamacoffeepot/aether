@@ -650,7 +650,7 @@ impl BlobWork {
         let lookup = self.mailer.registry().route_lookup(mail.kind, recipient);
         // Direct-dispatch only a recipient that is a `Pooled` slot we win
         // the seize on; everything else deposits through `route_mail`.
-        let seized = lookup.seize.as_ref().and_then(SeizeHandle::try_seize);
+        let seized = lookup.seize_handle().and_then(SeizeHandle::try_seize);
         match seized {
             Some(slot) => {
                 // ADR-0094: the #1135 in-place demux seed is an
@@ -660,7 +660,7 @@ impl BlobWork {
                 // (`dispatch_one` / the finalized-slot seed path).
                 let seed = Envelope::armed(
                     mail.kind,
-                    lookup.kind_name,
+                    lookup.kind_name().to_owned(),
                     None,
                     mail.reply_to,
                     mail.payload,

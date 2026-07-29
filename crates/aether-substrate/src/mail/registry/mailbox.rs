@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::process::abort;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
@@ -13,14 +14,16 @@ use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::registry::{
-    ActorAddressInventoryError, AddressResolutionError, ResolvedAddress, address::AddressIndex,
+    ActorAddressInventoryError, AddressResolutionError, MailDispatch, OwnedDispatch, ResolvedAddress,
+    address::AddressIndex,
 };
+use crate::mail::view::{DoubleBuffer, Update, View, ViewPublisher};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::SeizeHandle;
 
 /// Deferred cell holding a `Pooled` actor's
 /// [`SeizeHandle`], carried on every
-/// [`MailboxEntry::Inbox`] entry (ADR-0087 §4, iamacoffeepot/aether#1135).
+/// inbox route (ADR-0087 §4, iamacoffeepot/aether#1135).
 ///
 /// Registration (`register_inbox` / `try_register_inbox`) happens *before*
 /// the dispatcher slot exists — the actor isn't built into a
@@ -28,16 +31,16 @@ use crate::scheduler::SeizeHandle;
 /// (`None`) at register time and the `Pooled`-branch wiring in
 /// `chassis/builder.rs` + `actor/native/spawn.rs` installs the handle
 /// once the slot is constructed (mirroring the `MailboxWakeSlot`
-/// deferred-population pattern). The same `Arc` is shared between the
-/// registry entry and the wiring caller. Closure / `Inline` handlers
-/// have no slot to seize, so their cell stays empty forever and the blob
-/// demuxer deposits their mail as usual.
+/// deferred-population pattern). Installation replaces the route with a
+/// populated cell so an older published snapshot remains unchanged.
+/// Closure / `Inline` handlers have no slot to seize, so their cell stays
+/// empty forever and the blob demuxer deposits their mail as usual.
 pub type SeizeCell = Arc<OnceLock<SeizeHandle>>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
-/// `Clone` so readers can pull the entry out from under the `RwLock`
-/// guard without holding it for the duration of the handler call.
+/// `Clone` so compatibility callers can own a projection of one published
+/// route generation for the duration of the handler call.
 ///
 /// Issue 634 Phase 4 retired the dedicated `Component` variant —
 /// every loaded wasm component is now a `WasmTrampoline` registered
@@ -74,11 +77,11 @@ pub enum MailboxEntry {
     /// so payload + `kind_name` move into the downstream envelope —
     /// see [`InboxHandler`] for the full contract.
     ///
-    /// iamacoffeepot/aether#1135: `seize` is the deferred
-    /// `SeizeCell` — populated once the recipient's dispatcher slot
-    /// exists so the blob demuxer can resolve recipient → slot and
-    /// dispatch in place (ADR-0087 §4). Empty for closure-backed inboxes
-    /// (no pool slot behind them).
+    /// iamacoffeepot/aether#1135: `seize` is the point-in-time
+    /// `SeizeCell`. The route is replaced with a populated cell once the
+    /// recipient's dispatcher slot exists so older published generations
+    /// remain immutable. Empty for closure-backed inboxes (no pool slot
+    /// behind them).
     Inbox { handler: Arc<dyn InboxHandler>, seize: SeizeCell },
     /// The handler body does its work inline on the pushing thread;
     /// there is no actor dispatch loop behind it. `Mailer::push`
@@ -103,6 +106,8 @@ pub enum MailboxEntry {
 
 pub struct Registry {
     inner: RwLock<Inner>,
+    routes: View<FxHashMap<MailboxId, RouteRecord>>,
+    kinds: View<KindTable>,
     addresses: Result<AddressIndex, ActorAddressInventoryError>,
     /// Issue iamacoffeepot/aether#742: notification hook fired after
     /// every successful mailbox registration. The chassis (or any
@@ -122,40 +127,111 @@ pub struct Registry {
 /// per replace, not deltas).
 pub type MailboxChangeHook = Arc<dyn Fn(Vec<MailboxDescriptor>) + Send + Sync>;
 
-/// One mailbox's bookkeeping. Grouped so a single lookup hits name,
-/// entry, and any future per-mailbox fields together.
-struct Mailbox {
-    name: String,
-    entry: MailboxEntry,
+#[derive(Clone)]
+struct RouteRecord {
+    canonical_name: String,
+    endpoint: RouteEndpoint,
 }
 
-/// Everything [`Registry::route_lookup`] hands `route_mail` for one
-/// mail, resolved under a single read guard.
+#[derive(Clone)]
+enum RouteEndpoint {
+    Inbox { handler: Arc<dyn InboxHandler>, seize: SeizeCell },
+    Inline(Arc<dyn InlineHandler>),
+    Dropped,
+}
+
+impl RouteEndpoint {
+    fn from_entry(entry: MailboxEntry) -> Self {
+        match entry {
+            MailboxEntry::Inbox { handler, seize } => Self::Inbox { handler, seize },
+            MailboxEntry::Inline(handler) => Self::Inline(handler),
+            MailboxEntry::Dropped => Self::Dropped,
+        }
+    }
+
+    fn as_entry(&self) -> MailboxEntry {
+        match self {
+            Self::Inbox { handler, seize } => {
+                MailboxEntry::Inbox { handler: Arc::clone(handler), seize: Arc::clone(seize) }
+            }
+            Self::Inline(handler) => MailboxEntry::Inline(Arc::clone(handler)),
+            Self::Dropped => MailboxEntry::Dropped,
+        }
+    }
+}
+
+/// One point-in-time route and kind-name lookup.
 pub struct RouteLookup {
-    pub(crate) entry: Option<MailboxEntry>,
-    pub(crate) kind_name: String,
-    /// iamacoffeepot/aether#1135: the recipient's
-    /// [`SeizeHandle`], resolved under the
-    /// same read guard. `Some` only when the recipient is an `Inbox`
-    /// entry whose deferred [`SeizeCell`] was populated (a `Pooled`
-    /// actor's slot). `None` for closure / `Inline` / `Dropped` / unknown
-    /// recipients — the blob demuxer deposits their mail through
-    /// `route_mail` instead of dispatching in place.
-    pub(crate) seize: Option<SeizeHandle>,
+    endpoint: Option<RouteEndpoint>,
+    kind_name: String,
+    generation: u64,
+}
+
+impl RouteLookup {
+    pub(crate) fn accepts_owned_dispatch(&self) -> bool {
+        matches!(self.endpoint, Some(RouteEndpoint::Inbox { .. }))
+    }
+
+    pub(crate) fn enqueue_owned(&self, dispatch: OwnedDispatch) {
+        let Some(RouteEndpoint::Inbox { handler, .. }) = &self.endpoint else {
+            panic!("enqueue_owned called for a route that does not accept owned dispatch")
+        };
+        handler.enqueue(dispatch);
+    }
+
+    pub(crate) fn dispatch_inline(&self, dispatch: MailDispatch<'_>) -> bool {
+        let Some(RouteEndpoint::Inline(handler)) = &self.endpoint else {
+            return false;
+        };
+        handler.dispatch(dispatch);
+        true
+    }
+
+    pub(crate) fn is_dropped(&self) -> bool {
+        matches!(self.endpoint, Some(RouteEndpoint::Dropped))
+    }
+
+    pub(crate) fn is_unknown(&self) -> bool {
+        self.endpoint.is_none()
+    }
+
+    pub(crate) fn kind_name(&self) -> &str {
+        &self.kind_name
+    }
+
+    pub(crate) fn seize_handle(&self) -> Option<&SeizeHandle> {
+        match &self.endpoint {
+            Some(RouteEndpoint::Inbox { seize, .. }) => seize.get(),
+            Some(RouteEndpoint::Inline(_) | RouteEndpoint::Dropped) | None => None,
+        }
+    }
+
+    /// Returns the route publication generation used for this lookup.
+    #[must_use]
+    #[allow(dead_code, reason = "carried now so later route coordinates do not change the lookup contract")]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// One kind's bookkeeping, keyed in the registry on the hashed id.
+#[derive(Clone)]
 struct KindSlot {
     name: String,
     descriptor: KindDescriptor,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
+struct KindTable {
+    kinds: FxHashMap<KindId, KindSlot>,
+    name_index: HashMap<String, KindId>,
+}
+
 struct Inner {
     /// Sparse, keyed on the deterministic `MailboxId` (ADR-0029).
     /// Registration inserts; `drop_mailbox` transitions the entry to
     /// `Dropped` so the id stays addressable until re-registered.
-    mailboxes: FxHashMap<MailboxId, Mailbox>,
+    mailboxes: FxHashMap<MailboxId, RouteRecord>,
     /// Sparse, keyed on the `kind_id_from_parts(name, schema)` hash
     /// (ADR-0030 Phase 2). Every descriptor registered with a given
     /// (name, schema) maps to the same id everywhere it's ever
@@ -168,13 +244,54 @@ struct Inner {
     /// Every insert into `kinds` mirrors into `name_index`; every slot
     /// has exactly one entry here.
     name_index: HashMap<String, KindId>,
+    route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
+    kind_publisher: ViewPublisher<KindTable>,
+}
+
+impl Inner {
+    fn publish_route(&mut self, id: MailboxId, route: RouteRecord) {
+        if self.route_publisher.publish([Update::Insert(id, route)]).is_err() {
+            tracing::error!("route publication generation exhausted; registry cannot remain coherent");
+            abort();
+        }
+    }
+
+    fn publish_route_removal(&mut self, id: MailboxId) {
+        if self.route_publisher.publish([Update::Remove(id)]).is_err() {
+            tracing::error!("route publication generation exhausted; registry cannot remain coherent");
+            abort();
+        }
+    }
+
+    fn publish_kinds(&mut self) {
+        if self
+            .kind_publisher
+            .publish(KindTable { kinds: self.kinds.clone(), name_index: self.name_index.clone() })
+            .is_err()
+        {
+            tracing::error!("kind publication generation exhausted; registry cannot remain coherent");
+            abort();
+        }
+    }
 }
 
 impl Registry {
     #[must_use]
     pub fn new() -> Self {
+        let route_publisher = DoubleBuffer::default();
+        let routes = route_publisher.view();
+        let kind_publisher = ViewPublisher::new(KindTable::default());
+        let kinds = kind_publisher.view();
         Self {
-            inner: RwLock::new(Inner::default()),
+            inner: RwLock::new(Inner {
+                mailboxes: FxHashMap::default(),
+                kinds: FxHashMap::default(),
+                name_index: HashMap::default(),
+                route_publisher,
+                kind_publisher,
+            }),
+            routes,
+            kinds,
             addresses: AddressIndex::from_inventory(),
             on_mailbox_change: RwLock::new(None),
         }
@@ -196,12 +313,10 @@ impl Registry {
         *self.on_mailbox_change.write().expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063") = Some(hook);
     }
 
-    /// Snapshot the inventory and invoke the hook (if installed).
+    /// Snapshot the published inventory and invoke the hook (if installed).
     /// Called from every successful `register_inbox` /
-    /// `try_register_inbox`. Snapshot is taken with the inner read
-    /// lock — separate from the write lock the registration just
-    /// released — so a concurrent registration sees a consistent
-    /// (post-this-insert) view rather than a torn one.
+    /// `try_register_inbox`. Successful registration publishes before
+    /// this method runs, so the hook sees at least that registration.
     fn notify_mailbox_change(&self) {
         let hook =
             self.on_mailbox_change.read().expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063").clone();
@@ -241,17 +356,22 @@ impl Registry {
             return Err(NameConflict { name });
         }
         let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
-        match inner.mailboxes.get_mut(&id) {
-            Some(slot) if matches!(slot.entry, MailboxEntry::Dropped) && slot.name == name => {
-                slot.entry = entry;
+        let route = RouteRecord { canonical_name: name.clone(), endpoint: RouteEndpoint::from_entry(entry) };
+        let result = match inner.mailboxes.get(&id) {
+            Some(slot) if matches!(slot.endpoint, RouteEndpoint::Dropped) && slot.canonical_name == name => {
+                inner.mailboxes.insert(id, route.clone());
+                inner.publish_route(id, route);
                 Ok(id)
             }
             Some(_) => Err(NameConflict { name }),
             None => {
-                inner.mailboxes.insert(id, Mailbox { name, entry });
+                inner.mailboxes.insert(id, route.clone());
+                inner.publish_route(id, route);
                 Ok(id)
             }
-        }
+        };
+        drop(inner);
+        result
     }
 
     /// Invalidate a live mailbox (ADR-0010). Transitions the entry
@@ -276,12 +396,16 @@ impl Registry {
         let Some(slot) = inner.mailboxes.get_mut(&id) else {
             return Err(DropError::UnknownId(id));
         };
-        match slot.entry {
-            MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_) => {}
-            MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
+        match slot.endpoint {
+            RouteEndpoint::Inbox { .. } | RouteEndpoint::Inline(_) => {}
+            RouteEndpoint::Dropped => return Err(DropError::AlreadyDropped(id)),
         }
-        slot.entry = MailboxEntry::Dropped;
-        Ok(slot.name.clone())
+        slot.endpoint = RouteEndpoint::Dropped;
+        let name = slot.canonical_name.clone();
+        let route = slot.clone();
+        inner.publish_route(id, route);
+        drop(inner);
+        Ok(name)
     }
 
     /// Register a mailbox whose handler body forwards the envelope
@@ -448,8 +572,9 @@ impl Registry {
     pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
         let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get(&id) {
-            Some(slot) if matches!(slot.entry, MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => {
+            Some(slot) if matches!(slot.endpoint, RouteEndpoint::Inbox { .. } | RouteEndpoint::Inline(_)) => {
                 inner.mailboxes.remove(&id);
+                inner.publish_route_removal(id);
                 true
             }
             _ => false,
@@ -507,29 +632,19 @@ impl Registry {
         #[allow(clippy::disallowed_methods)]
         // the runtime-name resolution path itself — the registry is the one owner of the parse → fold
         let id = mailbox_id_from_path(name);
-        let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
-        Ok(match inner.mailboxes.get(&id) {
-            Some(slot) if slot.name == name && !matches!(slot.entry, MailboxEntry::Dropped) => Some(id),
+        let routes = self.routes.load();
+        Ok(match routes.entry_for(&id) {
+            Some(route) if route.canonical_name == name && !matches!(route.endpoint, RouteEndpoint::Dropped) => {
+                Some(id)
+            }
             _ => None,
         })
     }
 
-    /// Fetch the entry for a mailbox id. Returns an owned clone so the
-    /// caller can drop the internal lock before invoking the handler
-    /// (whether `Inbox` or `Inline`) — avoids holding the registry
-    /// lock across arbitrary user code.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
+    /// Fetch the entry for a mailbox id from a point-in-time view.
+    /// Returns an owned compatibility projection of the private route.
     pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .mailboxes
-            .get(&id)
-            .map(|m| m.entry.clone())
+        self.routes.load().entry_for(&id).map(|route| route.endpoint.as_entry())
     }
 
     /// Install a `Pooled` actor's [`SeizeHandle`]
@@ -546,56 +661,48 @@ impl Registry {
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn install_seize_handle(&self, id: MailboxId, handle: SeizeHandle) -> bool {
-        let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
-        let Some(MailboxEntry::Inbox { seize, .. }) = inner.mailboxes.get(&id).map(|m| &m.entry) else {
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let Some(route) = inner.mailboxes.get(&id) else {
             return false;
         };
-        seize.set(handle).is_ok()
+        let RouteEndpoint::Inbox { handler, seize } = &route.endpoint else {
+            return false;
+        };
+        if seize.get().is_some() {
+            return false;
+        }
+
+        let replacement = SeizeCell::default();
+        assert!(replacement.set(handle).is_ok(), "fresh seize cell must accept its first handle");
+        let route = RouteRecord {
+            canonical_name: route.canonical_name.clone(),
+            endpoint: RouteEndpoint::Inbox { handler: Arc::clone(handler), seize: replacement },
+        };
+        inner.mailboxes.insert(id, route.clone());
+        inner.publish_route(id, route);
+        true
     }
 
-    /// Hot-path combined lookup for the mailer's route step: resolves
-    /// the recipient's [`MailboxEntry`] and the kind's name under a
-    /// single read guard, where `route_mail` previously took separate
-    /// reads (`entry` + `kind_name`).
+    /// Hot-path combined lookup for the mailer's route step.
     ///
-    /// Like [`entry`](Self::entry), everything is cloned out so the
-    /// caller drops the lock before touching a handler. The common case
-    /// clones only the (cheap) kind name + entry.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063.
+    /// Route and kind snapshots are loaded independently. This is coherent
+    /// because kind definitions are immutable after their first successful
+    /// registration: a later kind publication cannot change an existing id.
     pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
-        let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
-        let kind_slot = inner.kinds.get(&kind);
-        let kind_name = kind_slot.map(|s| s.name.clone()).unwrap_or_default();
-        let entry = inner.mailboxes.get(&recipient).map(|m| m.entry.clone());
-        // iamacoffeepot/aether#1135: hand the demuxer the recipient's
-        // seize handle under the same guard. Cloned out of the deferred
-        // cell — `Some` only when the recipient is a `Pooled` actor whose
-        // slot was wired in.
-        let seize = entry.as_ref().and_then(|e| match e {
-            MailboxEntry::Inbox { seize, .. } => seize.get().cloned(),
-            MailboxEntry::Inline(_) | MailboxEntry::Dropped => None,
-        });
-        RouteLookup { entry, kind_name, seize }
+        let routes = self.routes.load();
+        let kinds = self.kinds.load();
+        RouteLookup {
+            endpoint: routes.entry_for(&recipient).map(|route| route.endpoint.clone()),
+            kind_name: kinds.table().kinds.get(&kind).map(|slot| slot.name.clone()).unwrap_or_default(),
+            generation: routes.generation(),
+        }
     }
 
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
     /// the id is unknown. Used by the closure dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn mailbox_name(&self, id: MailboxId) -> Option<String> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .mailboxes
-            .get(&id)
-            .map(|m| m.name.clone())
+        self.routes.load().entry_for(&id).map(|route| route.canonical_name.clone())
     }
 
     /// Register a mail kind by name, defaulting the schema to `Bytes`
@@ -674,6 +781,8 @@ impl Registry {
         }
         inner.name_index.insert(descriptor.name.clone(), id);
         inner.kinds.insert(id, KindSlot { name: descriptor.name.clone(), descriptor });
+        inner.publish_kinds();
+        drop(inner);
         Ok(id)
     }
 
@@ -683,48 +792,22 @@ impl Registry {
     /// exact descriptor the caller is thinking of. Primarily used by
     /// the hub-inbound dispatch path, which needs to convert an
     /// incoming `kind_name` back to the registered id.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn kind_id(&self, name: &str) -> Option<KindId> {
-        self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063").name_index.get(name).copied()
+        self.kinds.load().table().name_index.get(name).copied()
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
     /// isn't registered. Used by the dispatch path to hand mailbox
     /// closure handlers a kind name without them keeping their own
     /// map.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn kind_name(&self, kind: KindId) -> Option<String> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .kinds
-            .get(&kind)
-            .map(|s| s.name.clone())
+        self.kinds.load().table().kinds.get(&kind).map(|slot| slot.name.clone())
     }
 
     /// The descriptor stored for a given kind id, or `None` if the id
-    /// isn't registered. Returned as an owned clone so callers don't
-    /// hold the read lock while inspecting the encoding.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
+    /// isn't registered. Returned as an owned clone from a published view.
     pub fn kind_descriptor(&self, kind: KindId) -> Option<KindDescriptor> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .kinds
-            .get(&kind)
-            .map(|s| s.descriptor.clone())
+        self.kinds.load().table().kinds.get(&kind).map(|slot| slot.descriptor.clone())
     }
 
     /// Snapshot of every kind descriptor currently registered. Sorted
@@ -733,20 +816,9 @@ impl Registry {
     /// unrelated kinds; name order preserves a human-readable grouping).
     /// Used by the control plane to ship an authoritative view to the
     /// hub after a runtime load or replace (ADR-0010 §4).
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn list_kind_descriptors(&self) -> Vec<KindDescriptor> {
-        let mut out: Vec<KindDescriptor> = self
-            .inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .kinds
-            .values()
-            .map(|s| s.descriptor.clone())
-            .collect();
+        let kinds = self.kinds.load();
+        let mut out: Vec<KindDescriptor> = kinds.table().kinds.values().map(|slot| slot.descriptor.clone()).collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
@@ -764,22 +836,14 @@ impl Registry {
     /// trace was captured. Categorisation is a pure function of the
     /// mailbox name (`categorise_name`); the registry stores no
     /// per-mailbox category state.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn list_mailbox_descriptors(&self) -> Vec<MailboxDescriptor> {
-        let mut out: Vec<MailboxDescriptor> = self
-            .inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .mailboxes
-            .iter()
-            .map(|(id, m)| MailboxDescriptor {
+        let routes = self.routes.load();
+        let mut out: Vec<MailboxDescriptor> = routes
+            .entries()
+            .map(|(id, route)| MailboxDescriptor {
                 id: *id,
-                name: m.name.clone(),
-                category: categorise_mailbox_name(&m.name),
+                name: route.canonical_name.clone(),
+                category: categorise_mailbox_name(&route.canonical_name),
             })
             .collect();
         out.push(MailboxDescriptor {
@@ -792,23 +856,18 @@ impl Registry {
     }
 
     /// Number of registered mailbox entries (live + `Dropped`).
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn len(&self) -> usize {
-        self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063").mailboxes.len()
+        self.routes.load().len()
     }
 
     /// `true` when no mailbox has ever been registered.
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
     pub fn is_empty(&self) -> bool {
-        self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063").mailboxes.is_empty()
+        self.routes.load().is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn kind_generation(&self) -> u64 {
+        self.kinds.load().generation()
     }
 }
 

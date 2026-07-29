@@ -290,12 +290,16 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
 
     // Closure-backed inbox: no slot, so no seize handle ever resolves.
     let closure_id = r.register_inbox("closure", noop_handler());
-    assert!(r.route_lookup(kind, closure_id).seize.is_none(), "a closure-backed inbox exposes no seize handle");
+    assert!(
+        r.route_lookup(kind, closure_id).seize_handle().is_none(),
+        "a closure-backed inbox exposes no seize handle"
+    );
 
     // A `Pooled`-shaped inbox: empty before the slot is wired, then a
     // live handle after `install_seize_handle`.
     let pooled_id = r.register_inbox("pooled", noop_handler());
-    assert!(r.route_lookup(kind, pooled_id).seize.is_none(), "the seize cell is empty until the Pooled slot is wired");
+    let before_install = r.route_lookup(kind, pooled_id);
+    assert!(before_install.seize_handle().is_none(), "the seize cell is empty until the Pooled slot is wired");
 
     let slot = Arc::new(StatefulSlot { state: Arc::new(SlotState::new()) });
     let slot_dyn: Arc<dyn Drainable> = slot.clone();
@@ -303,11 +307,59 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
         r.install_seize_handle(pooled_id, SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn)));
     assert!(installed, "install lands on a live Inbox entry");
 
-    let resolved = r.route_lookup(kind, pooled_id).seize.expect("Pooled inbox now exposes a seize handle");
+    assert!(
+        before_install.seize_handle().is_none(),
+        "installing a handle must not mutate an endpoint reachable from an older lookup"
+    );
+    let after_install = r.route_lookup(kind, pooled_id);
+    let resolved = after_install.seize_handle().expect("Pooled inbox now exposes a seize handle");
     // The handle is live: it wins the `Idle → Running` seize CAS and
     // upgrades to the same slot.
     assert!(resolved.try_seize().is_some(), "the resolved handle seizes a live slot");
+
+    r.register_inbox("reuse-one", noop_handler());
+    r.register_inbox("reuse-two", noop_handler());
+    assert!(
+        r.route_lookup(kind, pooled_id).seize_handle().is_some(),
+        "the installed handle survives both alternating buffers being reused"
+    );
     let _ = slot_dyn;
+}
+
+#[test]
+fn route_generations_advance_only_for_successful_mutations() {
+    let r = Registry::new();
+    let kind = KindId(0);
+    let initial = r.route_lookup(kind, MailboxId::NONE).generation();
+
+    assert!(r.try_register_inbox("aether.chassis", noop_handler()).is_err());
+    assert_eq!(r.route_lookup(kind, MailboxId::NONE).generation(), initial);
+
+    let id = r.try_register_inbox("generation", noop_handler()).expect("fresh route");
+    let inserted = r.route_lookup(kind, id).generation();
+    assert!(inserted > initial);
+
+    assert!(r.try_register_inbox("generation", noop_handler()).is_err());
+    assert_eq!(r.route_lookup(kind, id).generation(), inserted);
+
+    r.drop_mailbox(id).expect("live route drops");
+    let dropped = r.route_lookup(kind, id).generation();
+    assert!(dropped > inserted);
+
+    assert!(r.drop_mailbox(id).is_err());
+    assert_eq!(r.route_lookup(kind, id).generation(), dropped);
+
+    r.try_register_inbox("generation", noop_handler()).expect("dropped route re-registers");
+    let reregistered = r.route_lookup(kind, id).generation();
+    assert!(reregistered > dropped);
+
+    assert!(r.remove_closure(id));
+    let removed = r.route_lookup(kind, id).generation();
+    assert!(removed > reregistered);
+    assert!(r.entry(id).is_none());
+
+    assert!(!r.remove_closure(id));
+    assert_eq!(r.route_lookup(kind, id).generation(), removed);
 }
 
 #[test]
@@ -452,6 +504,24 @@ fn kind_registration_is_idempotent() {
     // Different name produces a different id — the id is a pure
     // function of the input, not an allocation order.
     assert_ne!(r.register_kind("aether.key"), first);
+}
+
+#[test]
+fn kind_publication_advances_only_for_new_definitions() {
+    let r = Registry::new();
+    assert_eq!(r.kind_generation(), 0);
+
+    let first = r.register_kind("aether.tick");
+    assert_eq!(r.kind_generation(), 1);
+    assert_eq!(r.kind_id("aether.tick"), Some(first));
+
+    assert_eq!(r.register_kind("aether.tick"), first);
+    assert_eq!(r.kind_generation(), 1, "idempotent registration must not fabricate a generation");
+
+    let second = r.register_kind("aether.key");
+    assert_eq!(r.kind_generation(), 2);
+    assert_eq!(r.kind_name(second).as_deref(), Some("aether.key"));
+    assert_eq!(r.list_kind_descriptors().len(), 2);
 }
 
 #[test]
@@ -715,6 +785,7 @@ fn mailbox_change_hook_fires_on_register_inbox() {
     assert!(captured[0].contains(&"aether.input".to_owned()));
     assert!(captured[1].contains(&"aether.input".to_owned()));
     assert!(captured[1].contains(&"aether.render".to_owned()));
+    drop(captured);
 }
 
 /// Issue 742: `try_register_inbox` fires the hook on the Ok
@@ -826,6 +897,7 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
     assert_eq!(collected.len(), 2);
     assert_eq!(collected[0], vec![1, 2, 3]);
     assert_eq!(collected[1], vec![4, 5, 6, 7]);
+    drop(collected);
 }
 
 /// Issue iamacoffeepot/aether#848 Phase 1: hand-rolled
