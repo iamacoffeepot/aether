@@ -480,16 +480,22 @@ impl Registry {
     }
 
     fn notify_inventory_changed(&self) {
-        let subscribers = {
-            let mut retained =
-                self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
-            let subscribers = retained.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
-            retained.retain(|subscriber| subscriber.strong_count() != 0);
-            subscribers
-        };
-        for subscriber in subscribers {
+        for subscriber in self.inventory_subscribers() {
             subscriber.notify();
         }
+    }
+
+    fn relay_inventory_changed(&self) {
+        for subscriber in self.inventory_subscribers() {
+            subscriber.notify_via_relay();
+        }
+    }
+
+    fn inventory_subscribers(&self) -> Vec<Arc<ChangeSubscriber>> {
+        let mut retained = self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
+        let subscribers = retained.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        retained.retain(|subscriber| subscriber.strong_count() != 0);
+        subscribers
     }
 
     pub(super) fn apply_owner_commands(&self, commands: Vec<OwnerCommand>, mailer: &Mailer) {
@@ -527,7 +533,7 @@ impl Registry {
         let inventory_changed = inner.publish(publication);
         drop(inner);
         if inventory_changed {
-            self.notify_inventory_changed();
+            self.relay_inventory_changed();
         }
         for continuation in after_lock {
             match continuation {
@@ -570,7 +576,7 @@ impl Registry {
         let inventory_changed = inner.publish(publication);
         drop(inner);
         if inventory_changed {
-            self.notify_inventory_changed();
+            self.relay_inventory_changed();
         }
         for completion in completions {
             let _ = completion.send(Err(RegistryEffectError::OwnerClosed));

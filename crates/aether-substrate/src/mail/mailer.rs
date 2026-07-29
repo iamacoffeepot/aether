@@ -348,14 +348,16 @@ impl Mailer {
     }
 
     pub(super) fn relay_captured(&self, continuation: RouteContinuation) {
-        match self.route_relay.get() {
-            Some(relay) => {
-                if let Some(continuation) = relay.submit(continuation) {
-                    self.route_captured(continuation);
-                }
-            }
-            None => self.route_captured(continuation),
-        }
+        let relay = self.route_relay.get().expect("registry-owner routing requires an attached route relay");
+        assert!(
+            relay.submit(continuation).is_none(),
+            "registry owner remained active after its route relay stopped accepting"
+        );
+    }
+
+    pub(super) fn relay_mail(&self, mail: Mail) {
+        let disposition = self.registry.route_lookup(mail.kind, mail.recipient).into_captured();
+        self.relay_captured(RouteContinuation { mail, disposition });
     }
 
     pub(super) fn route_captured(&self, continuation: RouteContinuation) {

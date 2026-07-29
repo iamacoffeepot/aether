@@ -20,7 +20,7 @@ use crate::mail::registry::{
     Registry, noop_handler, test_dispatch, test_owned_dispatch,
 };
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
-use crate::scheduler::{SeizeHandle, WakeSink};
+use crate::scheduler::{BatchBudget, SeizeHandle, WakeSink};
 
 /// ADR-0094: a fresh armed [`OwnedDispatch`] panics on drop if it was
 /// neither discharged nor transferred — the headline regression gate
@@ -1059,6 +1059,88 @@ fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
         [vec![7]],
         "relay uses the owner's captured Live endpoint even though the published route is now Dropped"
     );
+}
+
+#[test]
+fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let wakes = Arc::new(AtomicU32::new(0));
+    let wakes_for_handler = Arc::clone(&wakes);
+    let target = registry.register_inline(
+        "inline-inventory-subscriber",
+        Arc::new(move |_dispatch: MailDispatch<'_>| {
+            wakes_for_handler.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, Arc::clone(&mailer));
+
+    assert_eq!(wakes.load(Ordering::SeqCst), 1, "initial subscription notification remains synchronous");
+    let initial = registry.inventory();
+    subscription.acknowledge(initial.mailbox_generation, initial.kind_generation);
+    let changed = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
+            "owner-published-inventory".to_owned(),
+            MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() },
+        )]))
+        .expect("owner accepts inventory-changing effect");
+
+    owner.run_once();
+    assert!(changed.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert_eq!(wakes.load(Ordering::SeqCst), 1, "registry-owner turn cannot invoke the Inline subscriber");
+
+    relay.run_once();
+    assert_eq!(wakes.load(Ordering::SeqCst), 2, "relay turn delivers the coalesced inventory notification");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, reason = "the test deliberately races a scheduler drain with lease teardown")]
+fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
+    use std::sync::Barrier;
+
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
+    let drainable = relay.drainable_for_test();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let order_for_handler = Arc::clone(&order);
+    let (entered_sender, entered_receiver) = crossbeam_channel::bounded(1);
+    let (release_sender, release_receiver) = crossbeam_channel::bounded(1);
+    let target = registry.register_inline(
+        "relay-close-order",
+        Arc::new(move |dispatch: MailDispatch<'_>| {
+            let value = dispatch.payload[0];
+            if value == 1 {
+                entered_sender.send(()).expect("ordering test waits for the first continuation");
+                release_receiver.recv().expect("ordering test releases the running prefix");
+            }
+            order_for_handler.lock().unwrap().push(value);
+        }),
+    );
+    mailer.relay_mail(Mail::new(target, KindId(1), vec![1], 1));
+    let running = thread::spawn(move || drainable.run_cycle(BatchBudget::standard()));
+    entered_receiver.recv_timeout(Duration::from_millis(100)).expect("first continuation starts routing");
+    assert!(
+        relay.route_serialization_held_for_test(),
+        "a running drained prefix retains route serialization through handler dispatch"
+    );
+
+    mailer.relay_mail(Mail::new(target, KindId(1), vec![2], 1));
+    drop(mailer);
+    let close_barrier = Arc::new(Barrier::new(2));
+    let close_barrier_for_thread = Arc::clone(&close_barrier);
+    let closing = thread::spawn(move || {
+        close_barrier_for_thread.wait();
+        drop(relay);
+    });
+    close_barrier.wait();
+    release_sender.send(()).unwrap();
+    running.join().unwrap();
+    closing.join().unwrap();
+
+    assert_eq!(order.lock().unwrap().as_slice(), [1, 2], "lease close cannot overtake the running drained prefix");
 }
 
 fn traced_unknown_mail(

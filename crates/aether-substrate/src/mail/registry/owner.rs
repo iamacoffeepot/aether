@@ -90,12 +90,12 @@ impl RegistryOwnerLease {
 
 impl Drop for RegistryOwnerLease {
     fn drop(&mut self) {
+        let _apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
         let queued = {
             let mut state = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
             state.accepting = false;
             state.commands.drain(..).collect::<Vec<_>>()
         };
-        let _apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
         if let Some(registry) = self.slot.registry.upgrade() {
             registry.close_owner_commands(queued, &self.slot.mailer);
         } else {
@@ -122,28 +122,25 @@ impl Drainable for RegistryOwnerSlot {
             return CycleResult::Idle;
         }
 
-        let commands = self
-            .queue
-            .lock()
-            .expect("registry owner queue lock poisoned; fail-fast per ADR-0063")
-            .commands
-            .drain(..)
-            .collect::<Vec<_>>();
-
-        if !commands.is_empty() {
+        {
             let _apply = self.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
-            if let Some(registry) = self.registry.upgrade() {
-                let accepting =
-                    self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063").accepting;
-                if accepting {
-                    registry.apply_owner_commands(commands, &self.mailer);
+            let (commands, accepting) = {
+                let mut queue = self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+                (queue.commands.drain(..).collect::<Vec<_>>(), queue.accepting)
+            };
+
+            if !commands.is_empty() {
+                if let Some(registry) = self.registry.upgrade() {
+                    if accepting {
+                        registry.apply_owner_commands(commands, &self.mailer);
+                    } else {
+                        registry.close_owner_commands(commands, &self.mailer);
+                    }
                 } else {
-                    registry.close_owner_commands(commands, &self.mailer);
-                }
-            } else {
-                for command in commands {
-                    if let OwnerCommand::Batch(envelope) = command {
-                        let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+                    for command in commands {
+                        if let OwnerCommand::Batch(envelope) = command {
+                            let _ = envelope.completion.send(Err(RegistryEffectError::OwnerClosed));
+                        }
                     }
                 }
             }

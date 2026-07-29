@@ -180,9 +180,20 @@ pub(super) struct ChangeSubscriber {
 }
 
 impl ChangeSubscriber {
+    fn notification(&self) -> Option<Mail> {
+        (!self.pending.swap(true, Ordering::AcqRel))
+            .then(|| Mail::new(self.target, RegistryChanged::ID, RegistryChanged.encode_into_bytes(), 1))
+    }
+
     pub(super) fn notify(&self) {
-        if !self.pending.swap(true, Ordering::AcqRel) {
-            self.mailer.push(Mail::new(self.target, RegistryChanged::ID, RegistryChanged.encode_into_bytes(), 1));
+        if let Some(mail) = self.notification() {
+            self.mailer.push(mail);
+        }
+    }
+
+    pub(super) fn notify_via_relay(&self) {
+        if let Some(mail) = self.notification() {
+            self.mailer.relay_mail(mail);
         }
     }
 }
