@@ -180,6 +180,38 @@ impl<C: Chassis> PassiveChassis<C> {
         }
     }
 
+    /// Place an instanced `A` at the chassis root **for a test**, without
+    /// asking for the ADR-0166 [`Root`] permission [`Self::spawn_actor`]
+    /// requires.
+    ///
+    /// A placement permission is a link-time global fact — `#[actor(root)]`
+    /// emits a `RootEntry` every binary that links the crate collects — so an
+    /// actor that only ever ships as somebody's child must not declare `root`
+    /// to satisfy a unit test. This is the authority that lets the test
+    /// compose it anyway: test-scoped (the method is gated on the
+    /// `test-support` feature, so no production chassis can reach it) and
+    /// asserted nowhere in the inventory. `aether.fleet.proxy` is the
+    /// motivating caller — production spawns it through
+    /// [`NativeCtx::spawn_child`](crate::NativeCtx::spawn_child) under
+    /// `aether.fleet`, while its own unit tests drive it against a fake RPC
+    /// server with no engines cap in the picture.
+    ///
+    /// The placement is the same parentless depth-1 one `spawn_actor`
+    /// produces — a flat `{NAMESPACE}:{subname}` id — so a test reaches the
+    /// spawned actor through the ordinary [`Self::resolve_actor`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spawn_actor_for_test<'a, A>(
+        &'a self,
+        subname: crate::Subname<'a>,
+        config: A::Config,
+        params: A::Params,
+    ) -> crate::SpawnBuilder<'a, A>
+    where
+        A: aether_actor::Instanced + NativeActor,
+    {
+        spawn_actor(&self.booted, subname, config, params)
+    }
+
     chassis_accessors!();
 }
 
@@ -199,6 +231,10 @@ fn resolve_actors<A: aether_actor::Instanced + NativeActor>(booted: &BootedPassi
     booted.actor_registry.live_subnames_of_type::<A>()
 }
 
+// The `Root` bound lives on the callers, not here: `spawn_actor` is the
+// permission-checked chassis surface, `spawn_actor_for_test` the
+// test-support one, and both reach the same parentless placement through
+// this shared body.
 fn spawn_actor<'a, A>(
     booted: &'a BootedPassives,
     subname: crate::Subname<'a>,
@@ -206,7 +242,7 @@ fn spawn_actor<'a, A>(
     params: A::Params,
 ) -> crate::SpawnBuilder<'a, A>
 where
-    A: Root + aether_actor::Instanced + NativeActor,
+    A: aether_actor::Instanced + NativeActor,
 {
     crate::SpawnBuilder::new(
         Arc::clone(&booted.spawner),

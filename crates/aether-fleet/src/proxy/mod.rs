@@ -91,7 +91,7 @@ pub use connect::is_reforkable_spawn_failure;
 /// holds the `aether_substrate`-typed RPC connection + the forked child +
 /// heartbeat handle) lives in `runtime.rs`, so the identity file never names
 /// `FleetProxyState`.
-#[actor(instanced, root, child_of(FleetServer))]
+#[actor(instanced, child_of(FleetServer))]
 pub struct FleetProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
@@ -174,9 +174,13 @@ mod tests {
 
         // Spawn the proxy, dialing this chassis's own RPC server over
         // loopback. A successful `finish()` means `init` connected +
-        // handshook.
+        // handshook. Production places the proxy under `aether.fleet`
+        // (`spawn_child::<FleetServer, FleetProxy>`); this test drives the
+        // bridge with no engines cap in the picture, so it borrows the
+        // test-support parentless placement rather than widening the proxy's
+        // shipped ADR-0166 permissions to `root`.
         chassis
-            .spawn_actor::<FleetProxy>(
+            .spawn_actor_for_test::<FleetProxy>(
                 Subname::Named("e1"),
                 FleetProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(1)),
@@ -240,7 +244,7 @@ mod tests {
         drop(listener);
 
         let result = chassis
-            .spawn_actor::<FleetProxy>(
+            .spawn_actor_for_test::<FleetProxy>(
                 Subname::Named("dead"),
                 FleetProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(2)),
@@ -321,7 +325,7 @@ mod tests {
             .expect("caps boot");
         let engine_id = EngineId(Uuid::from_u128(seed));
         chassis
-            .spawn_actor::<FleetProxy>(
+            .spawn_actor_for_test::<FleetProxy>(
                 Subname::Named("e"),
                 FleetProxyConfig {
                     engine_id,
