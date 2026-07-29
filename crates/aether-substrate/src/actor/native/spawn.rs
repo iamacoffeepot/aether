@@ -1201,7 +1201,7 @@ mod tests {
     use crate::mail::registry::effect::{
         ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
     };
-    use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease, noop_handler};
+    use crate::mail::registry::{MailDispatch, Registry, RegistryOwnerLease, RouteRelayLease, noop_handler};
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, PoolHandle, SlotState};
     use std::any::Any;
@@ -1223,6 +1223,25 @@ mod tests {
 
     struct ActivationProbe {
         events: crossbeam_channel::Sender<ActivationEvent>,
+        lifecycle_target: Option<MailboxId>,
+    }
+
+    struct ActivationConfig {
+        events: crossbeam_channel::Sender<ActivationEvent>,
+        lifecycle_target: Option<MailboxId>,
+    }
+
+    impl ActivationConfig {
+        fn new(events: crossbeam_channel::Sender<ActivationEvent>) -> Self {
+            Self { events, lifecycle_target: None }
+        }
+
+        fn with_lifecycle_target(
+            events: crossbeam_channel::Sender<ActivationEvent>,
+            lifecycle_target: MailboxId,
+        ) -> Self {
+            Self { events, lifecycle_target: Some(lifecycle_target) }
+        }
     }
 
     impl Drop for ActivationProbe {
@@ -1234,13 +1253,16 @@ mod tests {
     #[aether_actor::actor(instanced, root)]
     impl NativeActor for ActivationProbe {
         const NAMESPACE: &'static str = "test.activation.probe";
-        type Config = crossbeam_channel::Sender<ActivationEvent>;
+        type Config = ActivationConfig;
 
         fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { events: config })
+            Ok(Self { events: config.events, lifecycle_target: config.lifecycle_target })
         }
 
-        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+        fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+            if let Some(target) = state.lifecycle_target {
+                let _ = ctx.send_envelope_detached(target, ActivationPoke::ID, &ActivationPoke.encode_into_bytes());
+            }
             let _ = state.events.send(ActivationEvent::Wire(thread::current().id()));
         }
 
@@ -1249,7 +1271,10 @@ mod tests {
             let _ = self.events.send(ActivationEvent::Dispatch(thread::current().id()));
         }
 
-        fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+        fn unwire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+            if let Some(target) = state.lifecycle_target {
+                let _ = ctx.send_envelope_detached(target, ActivationPoke::ID, &ActivationPoke.encode_into_bytes());
+            }
             let _ = state.events.send(ActivationEvent::Unwire(thread::current().id()));
         }
     }
@@ -1276,8 +1301,37 @@ mod tests {
         events: crossbeam_channel::Sender<ActivationEvent>,
     ) -> PreparedSpawnCommit {
         let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
-        let staged = spawner.build::<ActivationProbe>(identity, events, (), Vec::new()).unwrap();
+        let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
         spawner.prepare_commit(staged)
+    }
+
+    fn prepared_probe_with_lifecycle_target(
+        spawner: &Arc<Spawner>,
+        name: &str,
+        events: crossbeam_channel::Sender<ActivationEvent>,
+        lifecycle_target: MailboxId,
+    ) -> PreparedSpawnCommit {
+        let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
+        let staged = spawner
+            .build::<ActivationProbe>(
+                identity,
+                ActivationConfig::with_lifecycle_target(events, lifecycle_target),
+                (),
+                Vec::new(),
+            )
+            .unwrap();
+        spawner.prepare_commit(staged)
+    }
+
+    fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, crossbeam_channel::Receiver<KindId>) {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let id = registry.register_inline(
+            name,
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                let _ = sender.send(dispatch.kind);
+            }),
+        );
+        (id, receiver)
     }
 
     fn finalized_probe(
@@ -1293,7 +1347,7 @@ mod tests {
         );
         let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
         let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
-        let staged = spawner.build::<ActivationProbe>(identity, events, (), Vec::new()).unwrap();
+        let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
         let applied = SpawnApplied {
             mailbox_id: staged.identity.id,
             canonical_name: Arc::clone(&staged.identity.canonical_name),
@@ -1343,7 +1397,7 @@ mod tests {
         let builder = SpawnBuilder::<ActivationProbe>::new(
             Arc::clone(&spawner),
             Subname::Named("shared-bootstrap-name"),
-            events_tx,
+            ActivationConfig::new(events_tx),
             (),
             Source::NONE,
             None,
@@ -1402,7 +1456,8 @@ mod tests {
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
         let identity =
             spawner.prepare_identity::<ActivationProbe>(Subname::Named("owner-close-before-apply"), None).unwrap();
-        let staged = spawner.build::<ActivationProbe>(identity, events_tx, (), Vec::new()).unwrap();
+        let staged =
+            spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
         let applied = SpawnApplied {
             mailbox_id: staged.identity.id,
             canonical_name: Arc::clone(&staged.identity.canonical_name),
@@ -1506,23 +1561,27 @@ mod tests {
     #[test]
     fn successful_prepared_activation_enters_ordinary_dispatch_once() {
         let (spawner, registry, mailer, pool) = activation_fixture();
+        let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.live-effects");
         let owner =
-            RegistryOwnerLease::attach(&registry, &mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
-        let commit = prepared_probe(&spawner, "live", events_tx);
+        let commit = prepared_probe_with_lifecycle_target(&spawner, "live", events_tx, lifecycle_target);
         let id = commit.route.id;
         let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+        owner.apply_once_then_observe_before_next_apply_for_test(|| {
+            assert!(lifecycle_mail.try_recv().is_err(), "wire effects remain quarantined while the route is Starting");
+            assert!(registry.entry(id).is_none(), "the owner has not yet promoted the Starting route");
+        });
         let _ = completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
         let ActivationEvent::Wire(home) = events_rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
             panic!("wire runs before live dispatch")
         };
-        for _ in 0..100 {
-            if registry.entry(id).is_some() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
         assert!(registry.entry(id).is_some(), "barrier promotes the actor to Live");
+        assert_eq!(
+            lifecycle_mail.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ActivationPoke::ID,
+            "the owner's post-publication suffix releases wire effects"
+        );
 
         mailer.push(Mail::new(id, ActivationPoke::ID, ActivationPoke.encode_into_bytes(), 1));
         assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Dispatch(home));
@@ -1537,10 +1596,11 @@ mod tests {
     fn owner_close_after_wire_cleans_starting_activation_at_home() {
         let (spawner, registry, mailer, pool) = activation_fixture();
         let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+        let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.cancelled-effects");
         let owner =
             RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
-        let commit = prepared_probe(&spawner, "owner-close", events_tx);
+        let commit = prepared_probe_with_lifecycle_target(&spawner, "owner-close", events_tx, lifecycle_target);
         let id = commit.route.id;
         let canonical_name = commit.route.canonical_name.clone();
         let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
@@ -1558,6 +1618,10 @@ mod tests {
         assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Unwire(home));
         assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Drop(home));
         assert!(events_rx.try_recv().is_err(), "owner closure unwires exactly once");
+        assert!(
+            lifecycle_mail.try_recv().is_err(),
+            "neither wire nor rejection-time unwire effects escape a never-Live actor"
+        );
         assert!(registry.lookup(&canonical_name).is_none(), "Starting route is rolled back without Live publication");
         assert!(registry.entry(id).is_none());
         assert!(mailer.cost_table().cells_for(id).is_empty(), "token-owned cost rows are rolled back");

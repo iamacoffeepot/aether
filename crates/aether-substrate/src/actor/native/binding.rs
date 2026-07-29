@@ -115,6 +115,11 @@ struct PendingOwnerBatchWork {
 /// lazily created on the first buffered send, so actors that never buffer
 /// (wasm trampolines, inline-only caps) pay no ring allocation.
 struct OutboundBuffer {
+    /// A staged activation keeps buffered lifecycle effects local until the
+    /// registry owner has promoted its route to `Live`. The private activation
+    /// barrier bypasses this buffer; ordinary `NativeCtx` drops remain harmless
+    /// while the hold is set.
+    activation_held: bool,
     /// Lazily created on the first buffered send. `Arc` so each minted
     /// [`MailRef::InRing`] carries the ring's lifetime by refcount.
     ring: Option<Arc<MailRing>>,
@@ -142,6 +147,7 @@ struct OutboundBuffer {
 impl OutboundBuffer {
     fn new() -> Self {
         Self {
+            activation_held: false,
             ring: None,
             blob_open: false,
             construct_start: None,
@@ -856,6 +862,67 @@ impl NativeBinding {
         self.flush_outbound_inner();
     }
 
+    /// Quarantine lifecycle-authored buffered work while a prepared actor is
+    /// wired but not yet authoritatively `Live`.
+    pub(super) fn hold_outbound_for_activation(&self) {
+        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        assert!(!buffer.activation_held, "one staged activation owns the outbound hold");
+        assert!(
+            !buffer.blob_open && buffer.mails.is_empty() && buffer.births.is_empty() && buffer.owner_batches.is_empty(),
+            "a prepared actor enters wire with an empty outbound window"
+        );
+        buffer.activation_held = true;
+    }
+
+    /// Publish the quarantined lifecycle suffix after the registry owner has
+    /// installed the `Live` route. The actor remains unwakeable while this
+    /// runs, preserving one logical producer for the ring.
+    pub(super) fn release_outbound_after_activation(&self) {
+        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        assert!(buffer.activation_held, "only a staged activation can release the outbound hold");
+        buffer.activation_held = false;
+        drop(buffer);
+        self.flush_outbound_inner();
+    }
+
+    /// Reject every buffered effect accumulated by `wire` and `unwire` when a
+    /// staged activation never reaches `Live`. Mail settlement bumps are
+    /// balanced locally, prepared births reject at their execution homes, and
+    /// deferred owner completions abandon their held actor work.
+    pub(super) fn discard_outbound_after_activation(&self) {
+        let (ring, mails, births, owner_batches) = {
+            let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            assert!(buffer.activation_held, "only a staged activation can discard the outbound hold");
+            buffer.activation_held = false;
+            if buffer.blob_open {
+                if let Some(ring) = buffer.ring.as_ref() {
+                    ring.seal();
+                }
+                buffer.blob_open = false;
+            }
+            buffer.construct_start = None;
+            (
+                buffer.ring.as_ref().map(Arc::clone),
+                buffer.mails.drain(..).collect::<Vec<_>>(),
+                buffer.births.drain(..).collect::<Vec<_>>(),
+                buffer.owner_batches.drain(..).collect::<Vec<_>>(),
+            )
+        };
+
+        for pending in mails {
+            let PendingMail { payload, mail_id, root, .. } = pending;
+            if let PendingPayload::InRing(location) = payload {
+                drop(MailRef::in_ring(
+                    Arc::clone(ring.as_ref().expect("ring exists once an InRing mail was minted")),
+                    location,
+                ));
+            }
+            self.mailer.record_finished(mail_id, root);
+        }
+        drop(births);
+        drop(owner_batches);
+    }
+
     /// Seal the open blob, mint a [`MailRef`] per buffered mail, and
     /// route. Folds the blob into this actor's cursor-shared
     /// [`BlobWork`] when a pool [`Spawner`](crate::Spawner) is wired,
@@ -881,6 +948,9 @@ impl NativeBinding {
         let construct_start;
         let (routed, births, owner_batches): (Vec<Mail>, Vec<PendingBirthWork>, Vec<PendingOwnerBatchWork>) = {
             let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            if buf.activation_held {
+                return;
+            }
             // Seal the open blob first (publishes the in-ring locks), so a
             // `MailRef::InRing` minted below reads a finalized header.
             if buf.blob_open {

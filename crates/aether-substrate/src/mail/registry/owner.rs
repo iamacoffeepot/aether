@@ -238,6 +238,36 @@ impl RegistryOwnerLease {
         self.slot.run_cycle(BatchBudget::standard())
     }
 
+    /// Apply the queued prefix, wait for scheduler-home activation to enqueue
+    /// its barrier, expose the exact pre-barrier state to `observe`, and then
+    /// apply that suffix. Holding the serialization lock keeps the ordinary
+    /// owner drainable from racing this test-only two-step proof.
+    #[cfg(test)]
+    pub(crate) fn apply_once_then_observe_before_next_apply_for_test(&self, observe: impl FnOnce()) {
+        let _apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
+        let registry = self.slot.registry.upgrade().expect("test registry remains live");
+        self.apply_queued_for_test(&registry);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if !self
+                .slot
+                .queue
+                .lock()
+                .expect("registry owner queue lock poisoned; fail-fast per ADR-0063")
+                .commands
+                .is_empty()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "runtime activation barrier reached the owner queue");
+            thread::yield_now();
+        }
+
+        observe();
+        self.apply_queued_for_test(&registry);
+    }
+
     #[cfg(test)]
     pub(crate) fn apply_once_then_close_after_next_command(&self) {
         let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
@@ -266,6 +296,18 @@ impl RegistryOwnerLease {
         };
         drop(apply);
         registry.close_owner_commands(commands, &self.slot.mailer);
+    }
+
+    #[cfg(test)]
+    fn apply_queued_for_test(&self, registry: &Registry) {
+        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+        let commands = queue.commands.drain(..).collect::<Vec<_>>();
+        assert!(!commands.is_empty(), "test owner step requires one queued prefix");
+        self.slot.meter.drained_to_empty();
+        drop(queue);
+        let route_generation = registry.apply_owner_commands(commands, &self.slot.mailer);
+        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+        queue.route_generation = queue.route_generation.max(route_generation);
     }
 }
 
