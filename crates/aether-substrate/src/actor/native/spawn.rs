@@ -794,16 +794,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         self
     }
 
-    /// Consume the builder and run the spawn lifecycle. Returns the
-    /// new actor's [`MailboxId`] on success, or a typed [`SpawnError`]
-    /// describing which lifecycle step failed.
-    ///
-    /// # Panics
-    /// Panics if `finish` is called more than once on the same builder
-    /// (the `Config` slot is taken on first call) — fail-fast per
-    /// ADR-0063: `SpawnBuilder` is a single-use type, the typestate is
-    /// enforced by the move into `finish`, and a double-finish would
-    /// require an unsafe API misuse.
+    /// Consume the builder through the one shared terminal path.
     fn finish_internal(self) -> Result<SpawnCommit, SpawnError> {
         let SpawnBuilder {
             spawner,
@@ -836,6 +827,9 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         spawner.commit(staged)
     }
 
+    /// Consume the builder and run the spawn lifecycle. Returns the
+    /// new actor's [`MailboxId`] on success, or a typed [`SpawnError`]
+    /// describing which lifecycle step failed.
     pub fn finish(self) -> Result<MailboxId, SpawnError> {
         self.finish_internal().map(|commit| commit.mailbox_id)
     }

@@ -1028,7 +1028,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
                 return Some(());
             }
             let error = ctx
-                .spawn_child::<DeclaredParent, Child>(Subname::Named("never-built"), (), Arc::clone(&state.init_count))
+                .spawn_child::<DeclaredParent, Child>(Subname::Counter, (), Arc::clone(&state.init_count))
                 .finish()
                 .expect_err("the executing binding is not DeclaredParent");
             if let SpawnError::ParentTypeMismatch { declared_namespace, actual_logical, actual_canonical_name } = error
@@ -1068,8 +1068,13 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     }
     assert!(mismatch_observed.load(AtomicOrdering::SeqCst), "mismatch facts should name both parent identities");
     assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "a false parent must not construct or init the child");
+    assert_eq!(chassis.booted.spawner.next_counter(), 0, "a false parent must be rejected before allocating a counter");
     assert!(
-        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:never-built").is_none(),
+        chassis.actor_registry().namespace_owner(Child::NAMESPACE).is_none(),
+        "a false parent must be rejected before claiming the child namespace",
+    );
+    assert!(
+        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:0").is_none(),
         "a false parent must not mutate the mailbox registry",
     );
 
@@ -2226,7 +2231,10 @@ fn instanced_can_spawn_grandchild() {
     // the recursive spawn happened AND the after_init plumbing
     // works through it).
     let deadline = Instant::now() + Duration::from_millis(500);
-    while grandchild_received.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+    while (grandchild_received.load(AtomicOrdering::SeqCst) == 0
+        || spawned_name.lock().expect("spawned-name mutex poisoned").is_none())
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
