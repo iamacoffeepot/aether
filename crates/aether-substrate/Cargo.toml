@@ -46,6 +46,7 @@ aether-data = { path = "../aether-data" }
 # re-exports `aether-data-derive`'s `#[derive(Kind, Schema)]`.
 aether-derive = { path = "../aether-derive" }
 aether-kinds = { path = "../aether-kinds" }
+arc-swap = { workspace = true }
 bytemuck = { workspace = true }
 # ADR-0090: typed, layered config resolution. Backs the env-shaped
 # `*Layer` structs that resolve each chassis-resolved config's `from_env`.

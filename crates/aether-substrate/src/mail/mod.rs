@@ -15,6 +15,7 @@ pub mod mailer;
 pub mod outbound;
 pub mod registry;
 pub mod ring;
+pub mod view;
 
 pub use capability::{CapabilityRegistry, MailboxCaps};
 pub use cost::{CostCell, CostCells, CostTable};

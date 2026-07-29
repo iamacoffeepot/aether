@@ -80,6 +80,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+arc-swap = "1"
 # Chassis-binary argv parsing (ADR-0090 unit d, issue 1258). One
 # consumer today (`aether-chassis`); workspaced so future CLI
 # surfaces reach for the same major.

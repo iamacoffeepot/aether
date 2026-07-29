@@ -883,6 +883,7 @@ dependencies = [
  "aether-kit-commons",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
+ "arc-swap",
  "bytemuck",
  "confique",
  "crossbeam-channel",
@@ -1218,6 +1219,15 @@ dependencies = [
  "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
+]
+
+[[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
