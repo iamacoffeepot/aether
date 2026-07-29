@@ -25,7 +25,9 @@ use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{MailDispatch, OwnedDispatch, Registry};
+use crate::mail::registry::{
+    CapturedDisposition, MailDispatch, OwnedDispatch, Registry, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+};
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
@@ -84,6 +86,7 @@ pub struct Mailer {
     /// on this `Mailer`. Always present (allocated by [`Self::new`]);
     /// tests can swap in a pre-seeded handle via [`Self::with_trace_handle`].
     trace_handle: TraceHandle,
+    route_relay: OnceLock<RouteRelayHandle>,
     /// iamacoffeepot/aether#1037 queryable capability registry. A
     /// sibling of [`Self::registry`] — the routing registry resolves
     /// recipients on the hot path; this one answers the DAG
@@ -119,6 +122,7 @@ impl Mailer {
             chassis_router: OnceLock::new(),
             settlement_registry: OnceLock::new(),
             trace_handle: TraceHandle::new(),
+            route_relay: OnceLock::new(),
             capability_registry: Arc::new(CapabilityRegistry::new()),
             cost_table: Arc::new(CostTable::new()),
         }
@@ -336,13 +340,28 @@ impl Mailer {
     /// unknown recipients warn-and-discard (or bubble up to the
     /// hub-substrate when a `HubOutbound` is connected, per ADR-0037).
     pub fn push(&self, mail: Mail) {
-        route_mail(
-            mail,
-            &self.registry,
-            self.outbound.as_ref(),
-            self.chassis_router.get().map(|b| &**b),
-            &self.trace_handle,
+        route_mail(mail, self, true);
+    }
+
+    pub(super) fn install_route_relay(&self, relay: RouteRelayHandle) {
+        assert!(self.route_relay.set(relay).is_ok(), "a mailer can attach only one registry route relay");
+    }
+
+    pub(super) fn relay_captured(&self, continuation: RouteContinuation) {
+        let relay = self.route_relay.get().expect("registry-owner routing requires an attached route relay");
+        assert!(
+            relay.submit(continuation).is_none(),
+            "registry owner remained active after its route relay stopped accepting"
         );
+    }
+
+    pub(super) fn relay_mail(&self, mail: Mail) {
+        let disposition = self.registry.route_lookup(mail.kind, mail.recipient).into_captured();
+        self.relay_captured(RouteContinuation { mail, disposition });
+    }
+
+    pub(super) fn route_captured(&self, continuation: RouteContinuation) {
+        route_tail(continuation.mail, continuation.disposition, self);
     }
 
     /// Route a `*Result` reply to `sender` with a single encode and **no
@@ -452,13 +471,11 @@ impl Mailer {
 // the per-mail buffer handling and lose the linear "where does this
 // envelope go?" read.
 #[allow(clippy::too_many_lines)]
-fn route_mail(
-    mail: Mail,
-    registry: &Registry,
-    outbound: Option<&Arc<HubOutbound>>,
-    chassis_router: Option<&(dyn Fn(Mail) + Send + Sync)>,
-    trace_handle: &TraceHandle,
-) {
+fn route_mail(mut mail: Mail, mailer: &Mailer, resubmit: bool) {
+    let registry = &mailer.registry;
+    let outbound = mailer.outbound.as_ref();
+    let chassis_router = mailer.chassis_router.get().map(|router| &**router);
+    let trace_handle = &mailer.trace_handle;
     // ADR-0080 §5 chassis-mail switch — routed ahead of the registry
     // lookup so mail to `CHASSIS_MAILBOX_ID` reaches the chassis-
     // installed router without bubbling up as `UnresolvedMail`. Today
@@ -505,10 +522,8 @@ fn route_mail(
                     let reply_to = Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
                     route_mail(
                         Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to),
-                        registry,
-                        outbound,
-                        chassis_router,
-                        trace_handle,
+                        mailer,
+                        false,
                     );
                 }
                 SourceAddr::None => {}
@@ -526,187 +541,201 @@ fn route_mail(
         return;
     }
 
+    // Route and immutable kind metadata come from wait-free point-in-time
+    // publications. The lookup owns the endpoint facade used below.
+    let lookup = registry.route_lookup(mail.kind, mail.recipient);
+    if resubmit && (lookup.is_starting() || lookup.is_unknown()) {
+        match registry.park_or_drop(mail) {
+            None => return,
+            Some(returned) => mail = returned,
+        }
+    }
+    route_tail(mail, lookup.into_captured(), mailer);
+}
+
+#[allow(clippy::too_many_lines)]
+fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
     let recipient = mail.recipient;
     let inbound_mail_id = mail.mail_id;
     let inbound_root = mail.root;
 
-    // Route and immutable kind metadata come from wait-free point-in-time
-    // publications. The lookup owns the endpoint facade used below.
-    let lookup = registry.route_lookup(mail.kind, recipient);
-
-    if lookup.accepts_owned_dispatch() {
-        // Mail reaching a closure-bound mailbox through `push`
-        // came from substrate core or a chassis (e.g. the frame
-        // loop's FrameStats push, platform input fan-out). Per
-        // ADR-0011 origin is `None`. Components reach
-        // closure-bound mailboxes via `ComponentCtx::send` inline
-        // and never enter `push`.
-        //
-        // ADR-0080 §2 producer-hook note (issue 838): no
-        // `Received`/`Finished` bracket fires here. `Inbox`
-        // is the actor-enqueue variant — the handler body
-        // pushes the envelope onto an mpsc inbox, and the
-        // actor's dispatch loop at `actor/native/dispatch.rs`
-        // records the bracket downstream when its worker picks
-        // the envelope up. Adding a bracket here would
-        // double-count `Finished` and fire settlement
-        // prematurely (surfaced by
-        // the rpc engine-routing suite as
-        // ReplyEnd before ReplyEvent). Synchronous endpoints take
-        // the inline facade path below and get the bracket because
-        // nothing downstream owns it.
-        //
-        // iamacoffeepot/aether#848: payload + kind_name move
-        // into [`OwnedDispatch`] rather than being borrowed.
-        // The handler is `Arc<dyn InboxHandler>` whose `enqueue`
-        // takes owned bytes — cap closures move directly into
-        // their downstream envelope (via
-        // `Envelope::from(OwnedDispatch)`) with zero payload
-        // copies.
-        // ADR-0094: the first of two production mint sites. The
-        // dispatch is armed here; the downstream actor dispatcher
-        // (`dispatcher_slot::dispatch_one`) discharges it beside its
-        // `record_finished`. The relay closure that forwards it onto
-        // the actor's mpsc (`spawn.rs` / `chassis/ctx.rs`) is a
-        // transfer — the obligation rides the moved value.
-        lookup.enqueue_owned(OwnedDispatch::armed(
-            mail.kind,
-            lookup.kind_name().to_owned(),
-            None,
-            mail.reply_to,
-            mail.payload,
-            mail.count,
-            mail.mail_id,
-            mail.root,
-            mail.parent_mail,
-            // iamacoffeepot/aether#1134: stamp the deposit instant +
-            // scheduler backlog here — the single Inbox chokepoint
-            // every mail-to-an-actor funnels through. Read back at the
-            // recipient's `Received` hook to split the hop into
-            // send→enqueue vs queue residence. One clock read on the
-            // already-traced path; depth is `0` off a pool worker.
-            trace_handle.now_nanos(),
-            pending_depth(),
-            recipient,
-        ));
-    } else if lookup.dispatch_inline(MailDispatch {
-        kind: mail.kind,
-        kind_name: lookup.kind_name(),
-        origin: None,
-        sender: mail.reply_to,
-        payload: mail.payload.bytes(),
-        count: mail.count,
-        mail_id: mail.mail_id,
-        root: mail.root,
-        parent_mail: mail.parent_mail,
-    }) {
-        // ADR-0080 §2: synchronous handler. Records `Finished`
-        // (settlement) after the inline call so the chain's
-        // `in_flight` balances and settlement subscribers wake
-        // (issue 838). Distinct from `Inbox` above — see that arm's
-        // doc for the double-count-prematurely-settle hazard the
-        // split avoids. (Post-ADR-0086 Phase 3c there is no
-        // `Received` trace event here — inline mailboxes have no
-        // per-actor ring; only settlement is recorded.)
-        trace_handle.record_finished(inbound_mail_id, inbound_root);
-    } else if lookup.is_dropped() {
-        tracing::warn!(
-            target: "aether_substrate::queue",
-            mailbox = %recipient,
-            "mail to dropped mailbox — discarded",
-        );
-        // ADR-0080 §2: balance the `Sent` so settlement chains
-        // drain (issue 838). No `Received` — no handler ran.
-        trace_handle.record_finished(inbound_mail_id, inbound_root);
-    } else {
-        debug_assert!(lookup.is_unknown());
-        // ADR-0037 Phase 1: unknown-locally mailboxes bubble up
-        // to the hub-substrate when a live outbound is wired.
-        // The hub resolves the id against its own registry and
-        // dispatches; if it doesn't know the id either, it
-        // warns on its side (end-of-line). Fall back to the
-        // local warn-drop when no hub is attached (single-host
-        // dev, or the hub chassis itself).
-        if let Some(outbound) = outbound
-            && outbound.is_connected()
-        {
-            // ADR-0037 Phase 2: carry the local sending
-            // component's mailbox id so the hub can build a
-            // `Source::EngineMailbox { engine_id, mailbox_id }`
-            // for the receiving component. `None` for mail
-            // with no local component origin (substrate-generated).
-            // Recovered from
-            // `reply_to.addr = Component(_)` set by
-            // `ComponentCtx::send` / `NativeBinding::send_mail`
-            // (issue #644).
-            let source_mailbox_id = match mail.reply_to.addr {
-                SourceAddr::Component(id) => Some(id),
-                _ => None,
-            };
-            // ADR-0042: carry the correlation through the bubble-
-            // up frame so a reply coming back via Phase-2 reply
-            // routing carries the id the originating handler matches on.
-            let correlation_id = mail.reply_to.correlation_id;
-            outbound.egress_unresolved_mail(
-                recipient,
+    match disposition {
+        CapturedDisposition::Live { endpoint: RouteEndpoint::Inbox { handler, .. }, kind_name } => {
+            // Mail reaching a closure-bound mailbox through `push`
+            // came from substrate core or a chassis (e.g. the frame
+            // loop's FrameStats push, platform input fan-out). Per
+            // ADR-0011 origin is `None`. Components reach
+            // closure-bound mailboxes via `ComponentCtx::send` inline
+            // and never enter `push`.
+            //
+            // ADR-0080 §2 producer-hook note (issue 838): no
+            // `Received`/`Finished` bracket fires here. `Inbox`
+            // is the actor-enqueue variant — the handler body
+            // pushes the envelope onto an mpsc inbox, and the
+            // actor's dispatch loop at `actor/native/dispatch.rs`
+            // records the bracket downstream when its worker picks
+            // the envelope up. Adding a bracket here would
+            // double-count `Finished` and fire settlement
+            // prematurely (surfaced by
+            // the rpc engine-routing suite as
+            // ReplyEnd before ReplyEvent). Synchronous endpoints take
+            // the inline facade path below and get the bracket because
+            // nothing downstream owns it.
+            //
+            // iamacoffeepot/aether#848: payload + kind_name move
+            // into [`OwnedDispatch`] rather than being borrowed.
+            // The handler is `Arc<dyn InboxHandler>` whose `enqueue`
+            // takes owned bytes — cap closures move directly into
+            // their downstream envelope (via
+            // `Envelope::from(OwnedDispatch)`) with zero payload
+            // copies.
+            // ADR-0094: the first of two production mint sites. The
+            // dispatch is armed here; the downstream actor dispatcher
+            // (`dispatcher_slot::dispatch_one`) discharges it beside its
+            // `record_finished`. The relay closure that forwards it onto
+            // the actor's mpsc (`spawn.rs` / `chassis/ctx.rs`) is a
+            // transfer — the obligation rides the moved value.
+            handler.enqueue(OwnedDispatch::armed(
                 mail.kind,
-                mail.payload.into_vec(),
+                kind_name,
+                None,
+                mail.reply_to,
+                mail.payload,
                 mail.count,
-                source_mailbox_id,
-                correlation_id,
+                mail.mail_id,
+                mail.root,
+                mail.parent_mail,
+                // iamacoffeepot/aether#1134: stamp the deposit instant +
+                // scheduler backlog here — the single Inbox chokepoint
+                // every mail-to-an-actor funnels through. Read back at the
+                // recipient's `Received` hook to split the hop into
+                // send→enqueue vs queue residence. One clock read on the
+                // already-traced path; depth is `0` off a pool worker.
+                mailer.trace_handle.now_nanos(),
+                pending_depth(),
+                recipient,
+            ));
+        }
+        CapturedDisposition::Live { endpoint: RouteEndpoint::Inline(handler), kind_name } => {
+            handler.dispatch(MailDispatch {
+                kind: mail.kind,
+                kind_name: &kind_name,
+                origin: None,
+                sender: mail.reply_to,
+                payload: mail.payload.bytes(),
+                count: mail.count,
+                mail_id: mail.mail_id,
+                root: mail.root,
+                parent_mail: mail.parent_mail,
+            });
+            // ADR-0080 §2: synchronous handler. Records `Finished`
+            // (settlement) after the inline call so the chain's
+            // `in_flight` balances and settlement subscribers wake
+            // (issue 838). Distinct from `Inbox` above — see that arm's
+            // doc for the double-count-prematurely-settle hazard the
+            // split avoids. (Post-ADR-0086 Phase 3c there is no
+            // `Received` trace event here — inline mailboxes have no
+            // per-actor ring; only settlement is recorded.)
+            mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
+        }
+        CapturedDisposition::Dropped => {
+            tracing::warn!(
+                target: "aether_substrate::queue",
+                mailbox = %recipient,
+                "mail to dropped mailbox — discarded",
             );
-            // ADR-0080 §2: per-engine settlement (issue 838) —
-            // the local engine treats egress-to-hub as "Finished
-            // from our perspective." The hub processes the
-            // bubbled-up mail on its own settlement domain; no
-            // wire signal exists today for federated cross-engine
-            // settlement (and the issue body parks that design).
-            trace_handle.record_finished(inbound_mail_id, inbound_root);
-            return;
+            // ADR-0080 §2: balance the `Sent` so settlement chains
+            // drain (issue 838). No `Received` — no handler ran.
+            mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
-        // Issue 963: `aether.log.tail` (`actor_logs`) to an
-        // unresolved mailbox synthesizes a `LogTailResult::Err`
-        // reply instead of silently warn-dropping, so the MCP
-        // caller's `call_one` sees one `ReplyEvent` (a clean "that
-        // mailbox doesn't exist" signal) rather than `got 0
-        // replies`. Narrow per-kind treatment (Option B) — the
-        // general `aether.mail.unresolved` reply for every
-        // reply-expecting kind is parked (Option C, lib.rs:86).
-        // Only the `Component` reply target (the path the MCP Call
-        // takes via `RpcServerCapability::handle_call`) is routed;
-        // `Session`/`EngineMailbox` targets fall through to the
-        // warn-drop, keeping the blast radius minimal.
-        if mail.kind.0 == <aether_kinds::LogTail as Kind>::ID.0 {
-            let err =
-                aether_kinds::LogTailResult::Err { error: format!("mailbox {recipient} not registered on engine") };
-            // ADR-0100: encode through the kind's declared codec.
-            let payload = err.encode_into_bytes();
-            if let SourceAddr::Component(target) = mail.reply_to.addr {
-                let reply_to = Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
-                route_mail(
-                    Mail::new(target, <aether_kinds::LogTailResult as Kind>::ID, payload, 1).with_reply_to(reply_to),
-                    registry,
-                    outbound,
-                    chassis_router,
-                    trace_handle,
+        CapturedDisposition::Unknown => {
+            // ADR-0037 Phase 1: unknown-locally mailboxes bubble up
+            // to the hub-substrate when a live outbound is wired.
+            // The hub resolves the id against its own registry and
+            // dispatches; if it doesn't know the id either, it
+            // warns on its side (end-of-line). Fall back to the
+            // local warn-drop when no hub is attached (single-host
+            // dev, or the hub chassis itself).
+            if let Some(outbound) = mailer.outbound.as_ref()
+                && outbound.is_connected()
+            {
+                // ADR-0037 Phase 2: carry the local sending
+                // component's mailbox id so the hub can build a
+                // `Source::EngineMailbox { engine_id, mailbox_id }`
+                // for the receiving component. `None` for mail
+                // with no local component origin (substrate-generated).
+                // Recovered from
+                // `reply_to.addr = Component(_)` set by
+                // `ComponentCtx::send` / `NativeBinding::send_mail`
+                // (issue #644).
+                let source_mailbox_id = match mail.reply_to.addr {
+                    SourceAddr::Component(id) => Some(id),
+                    _ => None,
+                };
+                // ADR-0042: carry the correlation through the bubble-
+                // up frame so a reply coming back via Phase-2 reply
+                // routing carries the id the originating handler matches on.
+                let correlation_id = mail.reply_to.correlation_id;
+                outbound.egress_unresolved_mail(
+                    recipient,
+                    mail.kind,
+                    mail.payload.into_vec(),
+                    mail.count,
+                    source_mailbox_id,
+                    correlation_id,
                 );
+                // ADR-0080 §2: per-engine settlement (issue 838) —
+                // the local engine treats egress-to-hub as "Finished
+                // from our perspective." The hub processes the
+                // bubbled-up mail on its own settlement domain; no
+                // wire signal exists today for federated cross-engine
+                // settlement (and the issue body parks that design).
+                mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
+                return;
             }
-            // The synthesized reply is a fresh un-lineaged mail
-            // (`MailId::NONE`); the inbound still records `Finished`
-            // so its settlement chain balances (issue 838).
-            trace_handle.record_finished(inbound_mail_id, inbound_root);
-            return;
+            // Issue 963: `aether.log.tail` (`actor_logs`) to an
+            // unresolved mailbox synthesizes a `LogTailResult::Err`
+            // reply instead of silently warn-dropping, so the MCP
+            // caller's `call_one` sees one `ReplyEvent` (a clean "that
+            // mailbox doesn't exist" signal) rather than `got 0
+            // replies`. Narrow per-kind treatment (Option B) — the
+            // general `aether.mail.unresolved` reply for every
+            // reply-expecting kind is parked (Option C, lib.rs:86).
+            // Only the `Component` reply target (the path the MCP Call
+            // takes via `RpcServerCapability::handle_call`) is routed;
+            // `Session`/`EngineMailbox` targets fall through to the
+            // warn-drop, keeping the blast radius minimal.
+            if mail.kind.0 == <aether_kinds::LogTail as Kind>::ID.0 {
+                let err =
+                    aether_kinds::LogTailResult::Err { error: format!("mailbox {recipient} not registered on engine") };
+                // ADR-0100: encode through the kind's declared codec.
+                let payload = err.encode_into_bytes();
+                if let SourceAddr::Component(target) = mail.reply_to.addr {
+                    let reply_to = Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
+                    route_mail(
+                        Mail::new(target, <aether_kinds::LogTailResult as Kind>::ID, payload, 1)
+                            .with_reply_to(reply_to),
+                        mailer,
+                        false,
+                    );
+                }
+                // The synthesized reply is a fresh un-lineaged mail
+                // (`MailId::NONE`); the inbound still records `Finished`
+                // so its settlement chain balances (issue 838).
+                mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
+                return;
+            }
+            tracing::warn!(
+                target: "aether_substrate::queue",
+                mailbox = %recipient,
+                "mail to unknown mailbox — dropped",
+            );
+            // ADR-0080 §2: balance the `Sent` so settlement chains
+            // drain (issue 838). Without this, a component that sends
+            // to an unloaded mailbox every tick would leave every Tick
+            // chain with an orphaned `Sent` that never settles.
+            mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
-        tracing::warn!(
-            target: "aether_substrate::queue",
-            mailbox = %recipient,
-            "mail to unknown mailbox — dropped",
-        );
-        // ADR-0080 §2: balance the `Sent` so settlement chains
-        // drain (issue 838). Without this, a component that sends
-        // to an unloaded mailbox every tick would leave every Tick
-        // chain with an orphaned `Sent` that never settles.
-        trace_handle.record_finished(inbound_mail_id, inbound_root);
     }
 }
 

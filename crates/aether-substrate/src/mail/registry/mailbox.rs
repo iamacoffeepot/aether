@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::abort;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
@@ -12,19 +12,18 @@ use aether_data::{
 
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
-    ChangeSubscriber, EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffect, RegistryEffectError,
-    RegistryInventory, RegistrySubscription, bytes_kind, subscriber,
+    ActivationToken, ChangeSubscriber, EffectBatch, RegistryApplied, RegistryCompletion, RegistryEffect,
+    RegistryEffectError, RegistryInventory, RegistrySubscription, StartingCancellation, bytes_kind, subscriber,
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::names::categorise_mailbox_name;
-use crate::mail::registry::owner::{BatchEnvelope, RegistryOwnerHandle};
+use crate::mail::registry::owner::{BatchEnvelope, OwnerCommand, RegistryOwnerHandle};
 use crate::mail::registry::{
-    ActorAddressInventoryError, AddressResolutionError, MailDispatch, OwnedDispatch, ResolvedAddress,
-    address::AddressIndex,
+    ActorAddressInventoryError, AddressResolutionError, ResolvedAddress, address::AddressIndex,
 };
 use crate::mail::view::{DoubleBuffer, Update, View, ViewPublisher};
-use crate::mail::{KindId, MailboxId};
+use crate::mail::{KindId, Mail, MailboxId};
 use crate::scheduler::SeizeHandle;
 
 /// Deferred cell holding a `Pooled` actor's
@@ -123,14 +122,20 @@ pub struct Registry {
 #[derive(Clone)]
 struct RouteRecord {
     canonical_name: String,
-    endpoint: RouteEndpoint,
+    lifecycle: RouteLifecycle,
 }
 
 #[derive(Clone)]
-enum RouteEndpoint {
+enum RouteLifecycle {
+    Starting { token: ActivationToken },
+    Live { endpoint: RouteEndpoint },
+    Dropped,
+}
+
+#[derive(Clone)]
+pub enum RouteEndpoint {
     Inbox { handler: Arc<dyn InboxHandler>, seize: SeizeCell },
     Inline(Arc<dyn InlineHandler>),
-    Dropped,
 }
 
 impl RouteEndpoint {
@@ -138,7 +143,7 @@ impl RouteEndpoint {
         match entry {
             MailboxEntry::Inbox { handler, seize } => Self::Inbox { handler, seize },
             MailboxEntry::Inline(handler) => Self::Inline(handler),
-            MailboxEntry::Dropped => Self::Dropped,
+            MailboxEntry::Dropped => unreachable!("Dropped is a lifecycle, not a live route endpoint"),
         }
     }
 
@@ -148,44 +153,42 @@ impl RouteEndpoint {
                 MailboxEntry::Inbox { handler: Arc::clone(handler), seize: Arc::clone(seize) }
             }
             Self::Inline(handler) => MailboxEntry::Inline(Arc::clone(handler)),
-            Self::Dropped => MailboxEntry::Dropped,
         }
     }
+}
+
+struct PendingBirth {
+    token: ActivationToken,
+    parked: VecDeque<Mail>,
+}
+
+pub enum CapturedDisposition {
+    Live { endpoint: RouteEndpoint, kind_name: String },
+    Dropped,
+    Unknown,
+}
+
+pub struct RouteContinuation {
+    pub(crate) mail: Mail,
+    pub(crate) disposition: CapturedDisposition,
 }
 
 /// One point-in-time route and kind-name lookup.
 pub struct RouteLookup {
     endpoint: Option<RouteEndpoint>,
+    starting: bool,
+    dropped: bool,
     kind_name: String,
     generation: u64,
 }
 
 impl RouteLookup {
-    pub(crate) fn accepts_owned_dispatch(&self) -> bool {
-        matches!(self.endpoint, Some(RouteEndpoint::Inbox { .. }))
-    }
-
-    pub(crate) fn enqueue_owned(&self, dispatch: OwnedDispatch) {
-        let Some(RouteEndpoint::Inbox { handler, .. }) = &self.endpoint else {
-            panic!("enqueue_owned called for a route that does not accept owned dispatch")
-        };
-        handler.enqueue(dispatch);
-    }
-
-    pub(crate) fn dispatch_inline(&self, dispatch: MailDispatch<'_>) -> bool {
-        let Some(RouteEndpoint::Inline(handler)) = &self.endpoint else {
-            return false;
-        };
-        handler.dispatch(dispatch);
-        true
-    }
-
-    pub(crate) fn is_dropped(&self) -> bool {
-        matches!(self.endpoint, Some(RouteEndpoint::Dropped))
+    pub(crate) fn is_starting(&self) -> bool {
+        self.starting
     }
 
     pub(crate) fn is_unknown(&self) -> bool {
-        self.endpoint.is_none()
+        self.endpoint.is_none() && !self.starting && !self.dropped
     }
 
     pub(crate) fn kind_name(&self) -> &str {
@@ -195,7 +198,15 @@ impl RouteLookup {
     pub(crate) fn seize_handle(&self) -> Option<&SeizeHandle> {
         match &self.endpoint {
             Some(RouteEndpoint::Inbox { seize, .. }) => seize.get(),
-            Some(RouteEndpoint::Inline(_) | RouteEndpoint::Dropped) | None => None,
+            Some(RouteEndpoint::Inline(_)) | None => None,
+        }
+    }
+
+    pub(crate) fn into_captured(self) -> CapturedDisposition {
+        match self.endpoint {
+            Some(endpoint) => CapturedDisposition::Live { endpoint, kind_name: self.kind_name },
+            None if self.dropped => CapturedDisposition::Dropped,
+            None => CapturedDisposition::Unknown,
         }
     }
 
@@ -225,6 +236,8 @@ struct Inner {
     /// Registration inserts; `drop_mailbox` transitions the entry to
     /// `Dropped` so the id stays addressable until re-registered.
     mailboxes: FxHashMap<MailboxId, RouteRecord>,
+    pending_births: FxHashMap<MailboxId, PendingBirth>,
+    next_activation_token: u64,
     /// Sparse, keyed on the `kind_id_from_parts(name, schema)` hash
     /// (ADR-0030 Phase 2). Every descriptor registered with a given
     /// (name, schema) maps to the same id everywhere it's ever
@@ -312,7 +325,7 @@ impl Publication {
 fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> Vec<MailboxDescriptor> {
     let mut inventory = mailboxes
         .iter()
-        .filter(|(_, route)| !matches!(route.endpoint, RouteEndpoint::Dropped))
+        .filter(|(_, route)| matches!(route.lifecycle, RouteLifecycle::Live { .. }))
         .map(|(id, route)| MailboxDescriptor {
             id: *id,
             name: route.canonical_name.clone(),
@@ -350,7 +363,9 @@ fn commit_staged(
     inner: &mut Inner,
     routes: FxHashMap<MailboxId, Option<RouteRecord>>,
     kinds: FxHashMap<KindId, KindSlot>,
-) {
+    pending: FxHashMap<MailboxId, Option<ActivationToken>>,
+) -> Vec<RouteContinuation> {
+    let mut continuations = Vec::new();
     for (id, route) in routes {
         if let Some(route) = route {
             inner.mailboxes.insert(id, route);
@@ -362,6 +377,33 @@ fn commit_staged(
         inner.name_index.insert(slot.name.clone(), id);
         inner.kinds.insert(id, slot);
     }
+    for (id, token) in pending {
+        let unchanged =
+            token.is_some_and(|token| inner.pending_births.get(&id).is_some_and(|birth| birth.token == token));
+        if unchanged {
+            continue;
+        }
+        if let Some(mut birth) = inner.pending_births.remove(&id) {
+            continuations.extend(
+                birth
+                    .parked
+                    .drain(..)
+                    .map(|mail| RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
+            );
+        }
+        if let Some(token) = token {
+            inner.pending_births.insert(id, PendingBirth { token, parked: VecDeque::new() });
+        }
+    }
+    continuations
+}
+
+fn staged_pending_token(
+    staged: &FxHashMap<MailboxId, Option<ActivationToken>>,
+    inner: &Inner,
+    id: MailboxId,
+) -> Option<ActivationToken> {
+    staged.get(&id).copied().unwrap_or_else(|| inner.pending_births.get(&id).map(|birth| birth.token))
 }
 
 impl Registry {
@@ -381,6 +423,8 @@ impl Registry {
         Self {
             inner: RwLock::new(Inner {
                 mailboxes: FxHashMap::default(),
+                pending_births: FxHashMap::default(),
+                next_activation_token: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
                 route_publisher,
@@ -407,6 +451,13 @@ impl Registry {
         self.owner.get()?.submit(batch)
     }
 
+    pub(crate) fn park_or_drop(&self, mail: Mail) -> Option<Mail> {
+        match self.owner.get() {
+            Some(owner) => owner.park_or_drop(mail),
+            None => Some(mail),
+        }
+    }
+
     #[doc(hidden)]
     pub fn subscribe_inventory<A>(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription
     where
@@ -429,24 +480,109 @@ impl Registry {
     }
 
     fn notify_inventory_changed(&self) {
-        let subscribers = {
-            let mut retained =
-                self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
-            let subscribers = retained.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
-            retained.retain(|subscriber| subscriber.strong_count() != 0);
-            subscribers
-        };
-        for subscriber in subscribers {
+        for subscriber in self.inventory_subscribers() {
             subscriber.notify();
         }
     }
 
-    pub(super) fn apply_owner_envelopes(&self, envelopes: Vec<BatchEnvelope>) {
-        let (batches, completions): (Vec<_>, Vec<_>) =
-            envelopes.into_iter().map(|envelope| (envelope.batch, envelope.completion)).unzip();
-        let results = self.apply_batches(batches);
-        for (completion, result) in completions.into_iter().zip(results) {
-            let _ = completion.send(result);
+    fn relay_inventory_changed(&self) {
+        for subscriber in self.inventory_subscribers() {
+            subscriber.notify_via_relay();
+        }
+    }
+
+    fn inventory_subscribers(&self) -> Vec<Arc<ChangeSubscriber>> {
+        let mut retained = self.subscribers.lock().expect("registry subscriber lock poisoned; fail-fast per ADR-0063");
+        let subscribers = retained.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        retained.retain(|subscriber| subscriber.strong_count() != 0);
+        subscribers
+    }
+
+    pub(super) fn apply_owner_commands(&self, commands: Vec<OwnerCommand>, mailer: &Mailer) {
+        enum AfterLock {
+            Batch(
+                crossbeam_channel::Sender<Result<Vec<RegistryApplied>, RegistryEffectError>>,
+                Result<Vec<RegistryApplied>, RegistryEffectError>,
+            ),
+            Route(RouteContinuation),
+        }
+
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut publication = Publication::default();
+        let mut after_lock = Vec::new();
+        for command in commands {
+            match command {
+                OwnerCommand::Batch(BatchEnvelope { batch, completion }) => {
+                    let result = match Self::apply_batch_locked(&mut inner, batch) {
+                        Ok((applied, batch_publication, continuations)) => {
+                            publication.append(batch_publication);
+                            after_lock.extend(continuations.into_iter().map(AfterLock::Route));
+                            Ok(applied)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    after_lock.push(AfterLock::Batch(completion, result));
+                }
+                OwnerCommand::ParkOrDrop(mail) => {
+                    if let Some(continuation) = Self::capture_mail_locked(&mut inner, mail) {
+                        after_lock.push(AfterLock::Route(continuation));
+                    }
+                }
+            }
+        }
+        let inventory_changed = inner.publish(publication);
+        drop(inner);
+        if inventory_changed {
+            self.relay_inventory_changed();
+        }
+        for continuation in after_lock {
+            match continuation {
+                AfterLock::Batch(completion, result) => {
+                    let _ = completion.send(result);
+                }
+                AfterLock::Route(continuation) => mailer.relay_captured(continuation),
+            }
+        }
+    }
+
+    pub(super) fn close_owner_commands(&self, commands: Vec<OwnerCommand>, mailer: &Mailer) {
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut publication = Publication::default();
+        let mut completions = Vec::new();
+        let mut continuations = Vec::new();
+        for command in commands {
+            match command {
+                OwnerCommand::Batch(envelope) => completions.push(envelope.completion),
+                OwnerCommand::ParkOrDrop(mail) => {
+                    if let Some(continuation) = Self::capture_mail_locked(&mut inner, mail) {
+                        continuations.push(continuation);
+                    }
+                }
+            }
+        }
+        let pending_births = inner.pending_births.drain().collect::<Vec<_>>();
+        for (id, mut birth) in pending_births {
+            continuations.extend(
+                birth
+                    .parked
+                    .drain(..)
+                    .map(|mail| RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
+            );
+            if matches!(inner.mailboxes.get(&id).map(|route| &route.lifecycle), Some(RouteLifecycle::Starting { .. })) {
+                inner.mailboxes.remove(&id);
+                publication.route_updates.push(Update::Remove(id));
+            }
+        }
+        let inventory_changed = inner.publish(publication);
+        drop(inner);
+        if inventory_changed {
+            self.relay_inventory_changed();
+        }
+        for completion in completions {
+            let _ = completion.send(Err(RegistryEffectError::OwnerClosed));
+        }
+        for continuation in continuations {
+            mailer.relay_captured(continuation);
         }
     }
 
@@ -456,7 +592,8 @@ impl Registry {
         let results = batches
             .into_iter()
             .map(|batch| match Self::apply_batch_locked(&mut inner, batch) {
-                Ok((applied, batch_publication)) => {
+                Ok((applied, batch_publication, continuations)) => {
+                    debug_assert!(continuations.is_empty(), "direct legacy effects cannot cancel a pending birth");
                     publication.append(batch_publication);
                     Ok(applied)
                 }
@@ -471,28 +608,73 @@ impl Registry {
         results
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_batch_locked(
         inner: &mut Inner,
         batch: EffectBatch,
-    ) -> Result<(Vec<RegistryApplied>, Publication), RegistryEffectError> {
+    ) -> Result<(Vec<RegistryApplied>, Publication, Vec<RouteContinuation>), RegistryEffectError> {
         let mut staged_routes = FxHashMap::<MailboxId, Option<RouteRecord>>::default();
         let mut staged_kinds = FxHashMap::<KindId, KindSlot>::default();
+        let mut staged_pending = FxHashMap::<MailboxId, Option<ActivationToken>>::default();
+        let mut next_activation_token = inner.next_activation_token;
         let mut publication = Publication::default();
         let mut applied = Vec::with_capacity(batch.effects.len());
 
         for effect in batch.effects {
             match effect {
+                RegistryEffect::ReserveStarting { route } => {
+                    if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
+                        return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                    }
+                    match staged_route(&staged_routes, inner, route.id) {
+                        Some(existing)
+                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
+                                && existing.canonical_name == route.canonical_name => {}
+                        Some(_) => {
+                            return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                        }
+                        None => {}
+                    }
+                    let token = ActivationToken::next(&mut next_activation_token);
+                    let record = RouteRecord {
+                        canonical_name: route.canonical_name,
+                        lifecycle: RouteLifecycle::Starting { token },
+                    };
+                    staged_routes.insert(route.id, Some(record.clone()));
+                    staged_pending.insert(route.id, Some(token));
+                    publication.route_updates.push(Update::Insert(route.id, record));
+                    applied.push(RegistryApplied::Starting { id: route.id, token });
+                }
+                RegistryEffect::CancelStarting { id, token } => {
+                    let cancellation = match staged_route(&staged_routes, inner, id) {
+                        Some(RouteRecord { lifecycle: RouteLifecycle::Starting { token: current }, .. })
+                            if *current == token && staged_pending_token(&staged_pending, inner, id) == Some(token) =>
+                        {
+                            staged_routes.insert(id, None);
+                            staged_pending.insert(id, None);
+                            publication.route_updates.push(Update::Remove(id));
+                            StartingCancellation::Cancelled(id)
+                        }
+                        Some(RouteRecord { lifecycle: RouteLifecycle::Starting { .. }, .. }) => {
+                            StartingCancellation::TokenMismatch(id)
+                        }
+                        _ => StartingCancellation::NotStarting(id),
+                    };
+                    applied.push(RegistryApplied::StartingCancellation(cancellation));
+                }
                 RegistryEffect::PublishLive { route, activation } => {
                     if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
                     let record = RouteRecord {
                         canonical_name: route.canonical_name.clone(),
-                        endpoint: RouteEndpoint::from_entry(activation.into_legacy()),
+                        lifecycle: RouteLifecycle::Live {
+                            endpoint: RouteEndpoint::from_entry(activation.into_legacy()),
+                        },
                     };
                     match staged_route(&staged_routes, inner, route.id) {
                         Some(existing)
-                            if matches!(existing.endpoint, RouteEndpoint::Dropped)
+                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
                                 && existing.canonical_name == route.canonical_name => {}
                         Some(_) => {
                             return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
@@ -508,10 +690,16 @@ impl Registry {
                     let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
                         return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
                     };
-                    if matches!(record.endpoint, RouteEndpoint::Dropped) {
-                        return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
+                    match record.lifecycle {
+                        RouteLifecycle::Starting { .. } => {
+                            return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
+                        }
+                        RouteLifecycle::Dropped => {
+                            return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
+                        }
+                        RouteLifecycle::Live { .. } => {}
                     }
-                    record.endpoint = RouteEndpoint::Dropped;
+                    record.lifecycle = RouteLifecycle::Dropped;
                     let name = record.canonical_name.clone();
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record.clone()));
@@ -520,7 +708,7 @@ impl Registry {
                 }
                 RegistryEffect::RemoveMailbox(id) => {
                     let removable = staged_route(&staged_routes, inner, id)
-                        .is_some_and(|record| !matches!(record.endpoint, RouteEndpoint::Dropped));
+                        .is_some_and(|record| matches!(record.lifecycle, RouteLifecycle::Live { .. }));
                     if removable {
                         staged_routes.insert(id, None);
                         publication.route_updates.push(Update::Remove(id));
@@ -533,7 +721,8 @@ impl Registry {
                         applied.push(RegistryApplied::SeizeInstalled(false));
                         continue;
                     };
-                    let RouteEndpoint::Inbox { handler, seize } = &record.endpoint else {
+                    let RouteLifecycle::Live { endpoint: RouteEndpoint::Inbox { handler, seize } } = &record.lifecycle
+                    else {
                         applied.push(RegistryApplied::SeizeInstalled(false));
                         continue;
                     };
@@ -543,7 +732,9 @@ impl Registry {
                     }
                     let replacement = SeizeCell::default();
                     assert!(replacement.set(handle).is_ok(), "fresh seize cell must accept its first handle");
-                    record.endpoint = RouteEndpoint::Inbox { handler: Arc::clone(handler), seize: replacement };
+                    record.lifecycle = RouteLifecycle::Live {
+                        endpoint: RouteEndpoint::Inbox { handler: Arc::clone(handler), seize: replacement },
+                    };
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record.clone()));
                     applied.push(RegistryApplied::SeizeInstalled(true));
@@ -570,8 +761,34 @@ impl Registry {
             }
         }
 
-        commit_staged(inner, staged_routes, staged_kinds);
-        Ok((applied, publication))
+        inner.next_activation_token = next_activation_token;
+        let continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
+        Ok((applied, publication, continuations))
+    }
+
+    fn capture_mail_locked(inner: &mut Inner, mail: Mail) -> Option<RouteContinuation> {
+        match inner.mailboxes.get(&mail.recipient).map(|route| route.lifecycle.clone()) {
+            Some(RouteLifecycle::Starting { token }) => {
+                let pending = inner
+                    .pending_births
+                    .get_mut(&mail.recipient)
+                    .unwrap_or_else(|| panic!("published Starting route missing its owner-private pending birth"));
+                assert_eq!(pending.token, token, "published Starting token disagrees with pending birth");
+                pending.parked.push_back(mail);
+                None
+            }
+            Some(RouteLifecycle::Live { endpoint }) => Some(RouteContinuation {
+                disposition: CapturedDisposition::Live {
+                    endpoint,
+                    kind_name: inner.kinds.get(&mail.kind).map(|slot| slot.name.clone()).unwrap_or_default(),
+                },
+                mail,
+            }),
+            Some(RouteLifecycle::Dropped) => {
+                Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped })
+            }
+            None => Some(RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
+        }
     }
 
     fn apply_one(&self, effect: RegistryEffect) -> Result<RegistryApplied, RegistryEffectError> {
@@ -835,7 +1052,7 @@ impl Registry {
         let id = mailbox_id_from_path(name);
         let routes = self.routes.load();
         Ok(match routes.entry_for(&id) {
-            Some(route) if route.canonical_name == name && !matches!(route.endpoint, RouteEndpoint::Dropped) => {
+            Some(route) if route.canonical_name == name && !matches!(route.lifecycle, RouteLifecycle::Dropped) => {
                 Some(id)
             }
             _ => None,
@@ -845,7 +1062,11 @@ impl Registry {
     /// Fetch the entry for a mailbox id from a point-in-time view.
     /// Returns an owned compatibility projection of the private route.
     pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
-        self.routes.load().entry_for(&id).map(|route| route.endpoint.as_entry())
+        self.routes.load().entry_for(&id).and_then(|route| match &route.lifecycle {
+            RouteLifecycle::Live { endpoint } => Some(endpoint.as_entry()),
+            RouteLifecycle::Dropped => Some(MailboxEntry::Dropped),
+            RouteLifecycle::Starting { .. } => None,
+        })
     }
 
     /// Install a `Pooled` actor's [`SeizeHandle`]
@@ -876,8 +1097,16 @@ impl Registry {
     pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
         let routes = self.routes.load();
         let kinds = self.kinds.load();
+        let (endpoint, starting, dropped) =
+            routes.entry_for(&recipient).map_or((None, false, false), |route| match &route.lifecycle {
+                RouteLifecycle::Starting { .. } => (None, true, false),
+                RouteLifecycle::Live { endpoint } => (Some(endpoint.clone()), false, false),
+                RouteLifecycle::Dropped => (None, false, true),
+            });
         RouteLookup {
-            endpoint: routes.entry_for(&recipient).map(|route| route.endpoint.clone()),
+            endpoint,
+            starting,
+            dropped,
             kind_name: kinds.table().kinds.get(&kind).map(|slot| slot.name.clone()).unwrap_or_default(),
             generation: routes.generation(),
         }

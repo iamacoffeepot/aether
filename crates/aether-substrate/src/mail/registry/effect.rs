@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::process::abort;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -14,6 +15,22 @@ use crate::mail::mailer::Mailer;
 use crate::mail::view::View;
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::SeizeHandle;
+
+/// Opaque identity for one accepted `Starting` reservation. Tokens are
+/// registry-local and monotonically allocated; callers may compare and return
+/// them but cannot manufacture one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActivationToken(u64);
+
+impl ActivationToken {
+    pub(super) fn next(counter: &mut u64) -> Self {
+        *counter = counter.checked_add(1).unwrap_or_else(|| {
+            tracing::error!("activation token sequence exhausted; registry cannot remain coherent");
+            abort();
+        });
+        Self(*counter)
+    }
+}
 
 /// Route identity prepared away from the registry writer. It deliberately
 /// names no storage representation.
@@ -52,6 +69,8 @@ impl PreparedActivation {
 }
 
 pub enum RegistryEffect {
+    ReserveStarting { route: PreparedRoute },
+    CancelStarting { id: MailboxId, token: ActivationToken },
     PublishLive { route: PreparedRoute, activation: PreparedActivation },
     DropMailbox(MailboxId),
     RemoveMailbox(MailboxId),
@@ -60,6 +79,14 @@ pub enum RegistryEffect {
 }
 
 impl RegistryEffect {
+    pub(super) fn reserve_named(canonical_name: String) -> Self {
+        Self::ReserveStarting { route: PreparedRoute::named(canonical_name) }
+    }
+
+    pub(super) fn reserve_with_id(id: MailboxId, canonical_name: String) -> Self {
+        Self::ReserveStarting { route: PreparedRoute::with_id(id, canonical_name) }
+    }
+
     pub(super) fn publish_named(canonical_name: String, entry: MailboxEntry) -> Self {
         Self::PublishLive { route: PreparedRoute::named(canonical_name), activation: PreparedActivation::legacy(entry) }
     }
@@ -72,8 +99,17 @@ impl RegistryEffect {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartingCancellation {
+    Cancelled(MailboxId),
+    TokenMismatch(MailboxId),
+    NotStarting(MailboxId),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistryApplied {
+    Starting { id: MailboxId, token: ActivationToken },
+    StartingCancellation(StartingCancellation),
     Mailbox(MailboxId),
     Dropped(String),
     Removed(bool),
@@ -144,9 +180,20 @@ pub(super) struct ChangeSubscriber {
 }
 
 impl ChangeSubscriber {
+    fn notification(&self) -> Option<Mail> {
+        (!self.pending.swap(true, Ordering::AcqRel))
+            .then(|| Mail::new(self.target, RegistryChanged::ID, RegistryChanged.encode_into_bytes(), 1))
+    }
+
     pub(super) fn notify(&self) {
-        if !self.pending.swap(true, Ordering::AcqRel) {
-            self.mailer.push(Mail::new(self.target, RegistryChanged::ID, RegistryChanged.encode_into_bytes(), 1));
+        if let Some(mail) = self.notification() {
+            self.mailer.push(mail);
+        }
+    }
+
+    pub(super) fn notify_via_relay(&self) {
+        if let Some(mail) = self.notification() {
+            self.mailer.relay_mail(mail);
         }
     }
 }
