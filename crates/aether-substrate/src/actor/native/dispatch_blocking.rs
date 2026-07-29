@@ -43,13 +43,14 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::Mutex;
+use std::sync::{Mutex, Weak};
 
 use aether_data::{Kind, KindId, MailId};
 
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
 
+use super::binding::NativeBinding;
 use super::ctx::NativeCtx;
 
 /// A `Copy` correlation token minted monotonically per
@@ -116,6 +117,54 @@ impl<R: Kind> Pending<R> {
 pub struct TaskCompletionWake {
     /// The [`DispatchId`] of the dispatch whose worker just finished.
     pub dispatch_id: u64,
+}
+
+/// Move-only typed capability for filling one armed dispatch completion.
+///
+/// The capability deliberately retains only a weak reference to the parent
+/// binding plus the ledger id. Completing after the parent has gone away is
+/// therefore a no-op: dropping the binding already dropped the ledger entry
+/// and its settlement hold, and no stale wake is emitted.
+#[must_use = "complete the deferred output; dropping it abandons the ledger entry and releases its hold without waking"]
+pub(crate) struct DeferredCompletion<O> {
+    binding: Weak<NativeBinding>,
+    dispatch_id: DispatchId,
+    armed: bool,
+    _output: PhantomData<fn(O)>,
+}
+
+impl<O> DeferredCompletion<O> {
+    pub(crate) fn new(binding: Weak<NativeBinding>, dispatch_id: DispatchId) -> Self {
+        Self { binding, dispatch_id, armed: true, _output: PhantomData }
+    }
+
+    pub(crate) fn dispatch_id(&self) -> DispatchId {
+        self.dispatch_id
+    }
+
+    /// Consume this capability and offer its output to the parent ledger.
+    /// Only the first fill wins and wakes the actor.
+    pub(crate) fn complete(mut self, output: O)
+    where
+        O: Send + 'static,
+    {
+        self.armed = false;
+        if let Some(binding) = self.binding.upgrade() {
+            binding.dispatch_complete(self.dispatch_id, output);
+        }
+    }
+}
+
+impl<O> Drop for DeferredCompletion<O> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(binding) = self.binding.upgrade() {
+            drop(binding.dispatch_abandon(self.dispatch_id));
+        }
+    }
 }
 
 impl Kind for TaskCompletionWake {
@@ -188,6 +237,13 @@ impl InflightTable {
         self.next_id += 1;
         DispatchId(self.next_id)
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FillOutcome {
+    Filled,
+    AlreadyFilled,
+    Missing,
 }
 
 /// A move-only dispatch completion (ADR-0093 §3-§4). Carries the
@@ -349,10 +405,15 @@ impl InflightTable {
     /// Called once, on the worker thread, under the table lock. A no-op
     /// for an unknown id (the dispatch was cancelled out of the table
     /// before the worker finished).
-    fn fill_output(&mut self, id: DispatchId, output: Box<dyn Any + Send>) {
-        if let Some(entry) = self.entries.get_mut(&id) {
-            entry.output = Some(output);
+    fn fill_output(&mut self, id: DispatchId, output: Box<dyn Any + Send>) -> FillOutcome {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return FillOutcome::Missing;
+        };
+        if entry.output.is_some() {
+            return FillOutcome::AlreadyFilled;
         }
+        entry.output = Some(output);
+        FillOutcome::Filled
     }
 
     /// Remove the named entry and hand back its parked `(hold, reply_to)`
@@ -443,8 +504,8 @@ impl InflightTable {
         self.insert(hold, reply_to, context)
     }
 
-    pub(crate) fn dispatch_fill_output(&mut self, id: DispatchId, output: Box<dyn Any + Send>) {
-        self.fill_output(id, output);
+    pub(crate) fn dispatch_fill_output(&mut self, id: DispatchId, output: Box<dyn Any + Send>) -> FillOutcome {
+        self.fill_output(id, output)
     }
 
     pub(crate) fn dispatch_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
@@ -813,5 +874,149 @@ mod tests {
         #[cfg(not(debug_assertions))]
         assert!(matches!(outcome, Ok(None)), "a type mismatch returns None in release");
         assert!(table.entries.contains_key(&id), "a mismatched entry is retained, never bare-dropped");
+    }
+
+    #[test]
+    fn fill_output_retains_the_first_value() {
+        let (_registry, mailer) = bare_substrate();
+        let mut table = InflightTable::new();
+        let id = table.dispatch_insert(
+            mailer.acquire_settlement_hold(root_id(13)),
+            Source::NONE,
+            Box::new(String::from("typed context")),
+        );
+
+        assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 1 })), FillOutcome::Filled);
+        assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 2 })), FillOutcome::AlreadyFilled);
+
+        let done =
+            table.dispatch_take::<Answer, String>(id).expect("the first typed output and context remain takeable");
+        assert_eq!(*done.output(), Answer { value: 1 });
+        assert_eq!(done.context(), "typed context");
+        done.release_no_reply();
+    }
+
+    #[test]
+    fn fill_output_reports_a_missing_entry() {
+        let mut table = InflightTable::new();
+        let id = DispatchId(404);
+
+        assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 1 })), FillOutcome::Missing);
+        assert!(table.dispatch_take::<Answer, ()>(id).is_none());
+    }
+
+    #[test]
+    fn typed_take_rebuilds_the_original_output_and_context() {
+        let (_registry, mailer) = bare_substrate();
+        let mut table = InflightTable::new();
+        let id = table.dispatch_insert(mailer.acquire_settlement_hold(root_id(14)), Source::NONE, Box::new(23_u16));
+        assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 55 })), FillOutcome::Filled);
+
+        let done = table.dispatch_take::<Answer, u16>(id).expect("matching typed take succeeds");
+        assert_eq!(*done.output(), Answer { value: 55 });
+        assert_eq!(*done.context(), 23);
+        done.release_no_reply();
+    }
+
+    #[test]
+    fn duplicate_deferred_completion_keeps_first_output_and_emits_one_wake() {
+        let (registry, mailer) = bare_substrate();
+        let actor_mailbox = mailbox_id_from_name("test.deferred_completion.duplicate");
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        registry.register_inbox("test.deferred_completion.duplicate", forward_to(wake_tx));
+
+        let completion =
+            binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root_id(15)), Source::NONE, ());
+        let id = completion.dispatch_id();
+        let duplicate = DeferredCompletion::new(Arc::downgrade(&binding), id);
+
+        completion.complete(Answer { value: 1 });
+        duplicate.complete(Answer { value: 2 });
+
+        assert_eq!(await_wake(&wake_rx), id);
+        assert!(wake_rx.recv_timeout(Duration::from_millis(50)).is_err(), "a duplicate fill emits no second wake");
+        let done = binding.dispatch_take::<Answer, ()>(id).expect("the first completion remains parked");
+        assert_eq!(*done.output(), Answer { value: 1 });
+        done.release_no_reply();
+    }
+
+    #[test]
+    fn deferred_completion_after_parent_loss_emits_no_wake() {
+        let (registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(16);
+        let actor_mailbox = mailbox_id_from_name("test.deferred_completion.parent_loss");
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        registry.register_inbox("test.deferred_completion.parent_loss", forward_to(wake_tx));
+
+        let completion = binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root), Source::NONE, ());
+        assert_eq!(counter.held_open(root), 1, "arming parks the hold in the parent ledger");
+
+        drop(binding);
+        assert_eq!(counter.held_open(root), 0, "dropping the parent drops its ledger and hold");
+        completion.complete(Answer { value: 1 });
+        assert!(wake_rx.recv_timeout(Duration::from_millis(50)).is_err(), "parent loss emits no stale wake");
+    }
+
+    #[test]
+    fn ctx_armer_captures_current_hold_reply_target_and_context() {
+        let (registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(17);
+
+        let (caller_sink_tx, caller_sink_rx) = mpsc::channel::<OwnedDispatch>();
+        let caller = registry.register_inbox("test.deferred_completion.ctx_caller", forward_to(caller_sink_tx));
+        let reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
+
+        let actor_mailbox = mailbox_id_from_name("test.deferred_completion.ctx_actor");
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        registry.register_inbox("test.deferred_completion.ctx_actor", forward_to(wake_tx));
+
+        let completion = {
+            let ctx = NativeCtx::new(&binding, reply_to, MailId::NONE, root);
+            ctx.arm_deferred_completion::<Answer, _>(22_u64)
+        };
+        let id = completion.dispatch_id();
+        assert_eq!(counter.held_open(root), 1, "ctx arming holds the current root");
+
+        completion.complete(Answer { value: 20 });
+        assert_eq!(await_wake(&wake_rx), id);
+        assert_eq!(counter.held_open(root), 1, "completion fill retains the hold through TaskDone routing");
+
+        {
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let done = ctx.take_task_done::<Answer, u64>(id).expect("typed output and context remain parked");
+            assert_eq!(*done.context(), 22);
+            done.resolve_with(&mut ctx, |output, context| Answer { value: output.value + context });
+        }
+
+        let reply = caller_sink_rx.recv_timeout(Duration::from_secs(2)).expect("reply reaches the ctx-captured target");
+        assert_eq!(reply.sender.correlation_id, 77);
+        assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes"), Answer { value: 42 });
+        assert_eq!(counter.held_open(root), 0, "TaskDone release closes the ctx-captured hold");
+    }
+
+    #[test]
+    fn dropping_armed_deferred_completion_abandons_hold_without_wake() {
+        let (registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(18);
+        let actor_mailbox = mailbox_id_from_name("test.deferred_completion.drop");
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        registry.register_inbox("test.deferred_completion.drop", forward_to(wake_tx));
+
+        let completion = binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root), Source::NONE, ());
+        let id = completion.dispatch_id();
+        assert_eq!(counter.held_open(root), 1, "arming parks the hold");
+
+        drop(completion);
+
+        assert_eq!(counter.held_open(root), 0, "dropping the token abandons its ledger entry and hold");
+        assert!(wake_rx.recv_timeout(Duration::from_millis(50)).is_err(), "abandonment emits no wake");
+        assert!(binding.dispatch_take::<Answer, ()>(id).is_none(), "the abandoned entry was removed");
     }
 }

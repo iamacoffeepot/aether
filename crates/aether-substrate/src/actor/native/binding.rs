@@ -51,6 +51,8 @@ use crate::runtime::trace::SettlementHold;
 use aether_actor::RequestContextTable;
 use aether_data::{Kind, RequestId};
 
+use super::reservation::{ChildReservationKey, ChildReservationTable, ParentReservation};
+
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
 /// large payload, or a very wide fan-out that fills the ring) degrades to
@@ -252,6 +254,12 @@ pub struct NativeBinding {
     /// mutability — the same single-logical-writer discipline as
     /// `outbound` / `blob_producer`.
     inflight: super::dispatch_blocking::InflightLedger,
+    /// ADR-0165: parent-local uniqueness reservations for staged and live
+    /// children. This table is actor-local bookkeeping only; reserving or
+    /// releasing a key never writes a global registry and does not imply a
+    /// child-lifetime cascade.
+    #[allow(dead_code, reason = "ADR-0165 reservation storage lands before production staged spawn wiring")]
+    child_reservations: Mutex<ChildReservationTable>,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
     request_contexts: Mutex<RequestContextTable>,
 }
@@ -292,6 +300,7 @@ impl NativeBinding {
             outbound: Mutex::new(OutboundBuffer::new()),
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
+            child_reservations: Mutex::new(ChildReservationTable::new()),
             request_contexts: Mutex::new(RequestContextTable::new()),
         }
     }
@@ -338,6 +347,7 @@ impl NativeBinding {
             outbound: Mutex::new(OutboundBuffer::new()),
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
+            child_reservations: Mutex::new(ChildReservationTable::new()),
             request_contexts: Mutex::new(RequestContextTable::new()),
         }
     }
@@ -896,6 +906,40 @@ impl NativeBinding {
     }
 }
 
+/// ADR-0165 parent-local child reservations. Every operation holds only this
+/// binding's table mutex and never reaches a global registry.
+#[allow(dead_code, reason = "ADR-0165 reservation operations land before production staged spawn wiring")]
+impl NativeBinding {
+    /// Reserve one distinct child prototype + instanced-node key in this
+    /// parent's local table. Staged and live entries both reject duplicates.
+    pub(crate) fn reserve_child(self: &Arc<Self>, key: ChildReservationKey) -> Option<ParentReservation> {
+        if !self
+            .child_reservations
+            .lock()
+            .expect("child reservation table poisoned; fail-fast per ADR-0063")
+            .reserve(key)
+        {
+            return None;
+        }
+        Some(ParentReservation::new(self, key))
+    }
+
+    pub(crate) fn reject_child_reservation(&self, key: ChildReservationKey) {
+        self.child_reservations.lock().expect("child reservation table poisoned; fail-fast per ADR-0063").reject(key);
+    }
+
+    pub(crate) fn promote_child_reservation(&self, key: ChildReservationKey) {
+        self.child_reservations.lock().expect("child reservation table poisoned; fail-fast per ADR-0063").promote(key);
+    }
+
+    pub(crate) fn release_live_child_reservation(&self, key: ChildReservationKey) {
+        self.child_reservations
+            .lock()
+            .expect("child reservation table poisoned; fail-fast per ADR-0063")
+            .release_live(key);
+    }
+}
+
 /// ADR-0093 hold-until-resolve dispatch: the `&self`-interior-mutability
 /// bridge between [`super::ctx::NativeCtx`]'s dispatch primitive and the
 /// per-actor [`super::dispatch_blocking::InflightTable`]. Each method
@@ -924,18 +968,47 @@ impl NativeBinding {
             .dispatch_insert(hold, reply_to, context)
     }
 
-    /// Fill the worker's output into the named dispatch's completion
-    /// slot. Called once, on the worker thread, before it pushes the
-    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake).
+    /// Arm a typed deferred completion in the ordinary ADR-0093 ledger.
+    /// The returned move-only capability retains this binding only weakly.
+    pub(crate) fn dispatch_arm<O, C>(
+        self: &Arc<Self>,
+        hold: SettlementHold,
+        reply_to: Source,
+        context: C,
+    ) -> super::dispatch_blocking::DeferredCompletion<O>
+    where
+        C: Send + 'static,
+    {
+        let dispatch_id = self.dispatch_insert(hold, reply_to, Box::new(context));
+        super::dispatch_blocking::DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
+    }
+
+    /// Shared deferred-completion tail. Fill the named dispatch's output
+    /// slot under the ledger mutex, drop the lock, then push exactly one
+    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake)
+    /// for the winning fill.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_fill_output(&self, id: super::dispatch_blocking::DispatchId, output: Box<dyn Any + Send>) {
-        self.inflight
+    pub(crate) fn dispatch_complete<O>(&self, id: super::dispatch_blocking::DispatchId, output: O)
+    where
+        O: Send + 'static,
+    {
+        if self
+            .inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_fill_output(id, output);
+            .dispatch_fill_output(id, Box::new(output))
+            == super::dispatch_blocking::FillOutcome::Filled
+        {
+            self.mailer.push(Mail::new(
+                self.self_mailbox(),
+                super::dispatch_blocking::TaskCompletionWake::ID,
+                super::dispatch_blocking::TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes(),
+                1,
+            ));
+        }
     }
 
     /// Remove the named dispatch entry and rebuild its

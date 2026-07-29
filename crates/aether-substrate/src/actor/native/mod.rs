@@ -74,6 +74,7 @@ mod identity;
 pub mod local;
 pub mod mailbox;
 pub mod pumped_slot;
+mod reservation;
 pub mod spawn;
 pub mod spawn_thread;
 pub mod task_queue;
