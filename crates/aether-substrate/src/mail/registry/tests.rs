@@ -300,11 +300,12 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     let pooled_id = r.register_inbox("pooled", noop_handler());
     let before_install = r.route_lookup(kind, pooled_id);
     assert!(before_install.seize_handle().is_none(), "the seize cell is empty until the Pooled slot is wired");
+    let before_install_generation = before_install.generation();
 
     let slot = Arc::new(StatefulSlot { state: Arc::new(SlotState::new()) });
     let slot_dyn: Arc<dyn Drainable> = slot.clone();
-    let installed =
-        r.install_seize_handle(pooled_id, SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn)));
+    let handle = SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn));
+    let installed = r.install_seize_handle(pooled_id, handle.clone());
     assert!(installed, "install lands on a live Inbox entry");
 
     assert!(
@@ -312,10 +313,22 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
         "installing a handle must not mutate an endpoint reachable from an older lookup"
     );
     let after_install = r.route_lookup(kind, pooled_id);
+    assert!(
+        after_install.generation() > before_install_generation,
+        "successful seize installation publishes a new route generation"
+    );
     let resolved = after_install.seize_handle().expect("Pooled inbox now exposes a seize handle");
     // The handle is live: it wins the `Idle → Running` seize CAS and
     // upgrades to the same slot.
     assert!(resolved.try_seize().is_some(), "the resolved handle seizes a live slot");
+
+    let installed_generation = after_install.generation();
+    assert!(!r.install_seize_handle(pooled_id, handle), "a duplicate seize installation is rejected");
+    assert_eq!(
+        r.route_lookup(kind, pooled_id).generation(),
+        installed_generation,
+        "a rejected seize installation must not publish a route generation"
+    );
 
     r.register_inbox("reuse-one", noop_handler());
     r.register_inbox("reuse-two", noop_handler());
