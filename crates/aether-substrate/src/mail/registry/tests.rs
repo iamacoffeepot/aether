@@ -1,16 +1,21 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use aether_data::canonical::kind_id_from_parts;
-use aether_data::{KindDescriptor, MailboxCategory, SchemaType};
+use aether_data::{Kind, KindDescriptor, MailboxCategory, SchemaType};
 use aether_kinds::trace::Nanos;
 
+use crate::mail::mailer::Mailer;
+use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError};
+use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::{
     AddressResolutionError, DropError, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch,
     Registry, noop_handler, test_dispatch, test_owned_dispatch,
 };
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
-use crate::scheduler::SeizeHandle;
+use crate::scheduler::{SeizeHandle, WakeSink};
 
 /// ADR-0094: a fresh armed [`OwnedDispatch`] panics on drop if it was
 /// neither discharged nor transferred — the headline regression gate
@@ -285,7 +290,11 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
         }
     }
 
-    let r = Registry::new();
+    let (r, mailer, wakes, target) = inventory_subscription_fixture();
+    let subscription = r.subscribe_inventory::<InventorySubscriber>(target, mailer);
+    wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
+    let initial_inventory = r.inventory();
+    subscription.acknowledge(initial_inventory.mailbox_generation, initial_inventory.kind_generation);
     let kind = r.register_kind("test.seize.kind");
 
     // Closure-backed inbox: no slot, so no seize handle ever resolves.
@@ -298,6 +307,10 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     // A `Pooled`-shaped inbox: empty before the slot is wired, then a
     // live handle after `install_seize_handle`.
     let pooled_id = r.register_inbox("pooled", noop_handler());
+    let inventory_generation = r.mailbox_generation();
+    wakes.recv_timeout(Duration::from_millis(100)).expect("live and kind publications coalesce");
+    let published = r.inventory();
+    subscription.acknowledge(published.mailbox_generation, published.kind_generation);
     let before_install = r.route_lookup(kind, pooled_id);
     assert!(before_install.seize_handle().is_none(), "the seize cell is empty until the Pooled slot is wired");
     let before_install_generation = before_install.generation();
@@ -307,6 +320,8 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     let handle = SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn));
     let installed = r.install_seize_handle(pooled_id, handle.clone());
     assert!(installed, "install lands on a live Inbox entry");
+    assert_eq!(r.mailbox_generation(), inventory_generation, "seize-only publication is not inventory");
+    assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "seize-only publication emits no inventory wake");
 
     assert!(
         before_install.seize_handle().is_none(),
@@ -696,6 +711,10 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     assert_eq!(name, "loaded");
     assert!(r.lookup("loaded").is_none(), "name should be reusable");
     assert!(matches!(r.entry(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
+    assert!(
+        r.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id),
+        "a retained Dropped route is absent from public live inventory"
+    );
     // Under ADR-0029 the id is a function of the name, so a
     // re-register produces the *same* id and flips the entry back
     // to `Component`.
@@ -703,6 +722,10 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     assert_eq!(reloaded, id);
     assert_eq!(r.lookup("loaded"), Some(reloaded));
     assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox { .. })));
+    assert!(
+        r.list_mailbox_descriptors().iter().any(|descriptor| descriptor.id == id),
+        "re-registration restores the route to public live inventory"
+    );
 }
 
 #[test]
@@ -769,56 +792,201 @@ fn list_mailbox_descriptors_ids_match_name_hashes() {
     assert_eq!(entry.id, MailboxId::from_name("aether.audio"));
 }
 
-/// Issue iamacoffeepot/aether#742: every successful
-/// `register_inbox` fires the installed change hook with the
-/// post-registration inventory snapshot. The chassis wires this
-/// hook to push to the hub via `egress_mailboxes_changed` so any
-/// chassis-builder cap that registers post-Hello shows up in the
-/// hub's inventory cache without an explicit publish.
-#[test]
-fn mailbox_change_hook_fires_on_register_inbox() {
-    use std::sync::Mutex;
+struct InventorySubscriber;
 
-    let r = Arc::new(Registry::new());
-    let snapshots: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
-    let snapshots_for_hook = Arc::clone(&snapshots);
-    r.set_on_mailbox_change(Arc::new(move |descriptors| {
-        let names: Vec<String> = descriptors.into_iter().map(|d| d.name).collect();
-        snapshots_for_hook.lock().unwrap().push(names);
-    }));
-
-    r.register_inbox("aether.input", noop_handler());
-    r.register_inbox("aether.render", noop_handler());
-
-    let captured = snapshots.lock().unwrap();
-    assert_eq!(captured.len(), 2, "hook should fire once per successful register_inbox");
-    // Each snapshot is the FULL inventory at that moment (matches
-    // the wire `MailboxesChanged` semantics — full replace, not
-    // delta), so the second snapshot strictly contains the first.
-    assert!(captured[0].contains(&"aether.input".to_owned()));
-    assert!(captured[1].contains(&"aether.input".to_owned()));
-    assert!(captured[1].contains(&"aether.render".to_owned()));
-    drop(captured);
+impl aether_actor::Addressable for InventorySubscriber {
+    const NAMESPACE: &'static str = "test.inventory-subscriber";
+    type Resolver = aether_actor::One;
 }
 
-/// Issue 742: `try_register_inbox` fires the hook on the Ok
-/// branch and stays silent on `NameConflict`.
+impl aether_actor::HandlesKind<aether_actor::RegistryChanged> for InventorySubscriber {}
+
+fn inventory_subscription_fixture() -> (Arc<Registry>, Arc<Mailer>, crossbeam_channel::Receiver<KindId>, MailboxId) {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let (sender, receiver) = crossbeam_channel::unbounded();
+    let target = registry.register_inbox(
+        "inventory-subscriber",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            sender.send(dispatch.kind).expect("inventory test receiver stays connected");
+            dispatch.discharge();
+        }),
+    );
+    (registry, mailer, receiver, target)
+}
+
 #[test]
-fn mailbox_change_hook_fires_on_try_register_inbox_ok_only() {
-    use std::sync::Mutex;
+fn inventory_wake_follows_coherent_publication_and_coalesces() {
+    let (registry, mailer, wakes, target) = inventory_subscription_fixture();
+    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, mailer);
+    assert_eq!(
+        wakes.recv_timeout(Duration::from_millis(100)).expect("subscription emits an initial local wake"),
+        aether_actor::RegistryChanged::ID
+    );
+    let initial = registry.inventory();
+    subscription.acknowledge(initial.mailbox_generation, initial.kind_generation);
 
-    let r = Arc::new(Registry::new());
-    let count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
-    let count_for_hook = Arc::clone(&count);
-    r.set_on_mailbox_change(Arc::new(move |_| {
-        *count_for_hook.lock().unwrap() += 1;
-    }));
+    registry.register_inbox("aether.input", noop_handler());
+    registry.register_kind("aether.inventory.test");
 
-    let _ = r.try_register_inbox("aether.input", noop_handler()).expect("first register OK");
-    // Second registration with the same name conflicts.
-    let _ = r.try_register_inbox("aether.input", noop_handler()).expect_err("second register should NameConflict");
+    assert_eq!(
+        wakes.recv_timeout(Duration::from_millis(100)).expect("published inventory emits one wake"),
+        aether_actor::RegistryChanged::ID
+    );
+    let inventory = registry.inventory();
+    assert_eq!(inventory.mailbox_generation, initial.mailbox_generation + 1);
+    assert_eq!(inventory.kind_generation, initial.kind_generation + 1);
+    assert!(inventory.mailboxes.iter().any(|descriptor| descriptor.name == "aether.input"));
+    assert!(inventory.kinds.iter().any(|descriptor| descriptor.name == "aether.inventory.test"));
+    subscription.acknowledge(inventory.mailbox_generation, inventory.kind_generation);
+    assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "unacknowledged publications coalesce");
+}
 
-    assert_eq!(*count.lock().unwrap(), 1, "hook fires once on Ok only");
+#[test]
+fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
+    let (registry, mailer, wakes, target) = inventory_subscription_fixture();
+    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, mailer);
+    wakes.recv_timeout(Duration::from_millis(100)).expect("initial wake");
+    let observed = registry.inventory();
+
+    registry.register_inbox("aether.input", noop_handler());
+    let kind = registry.register_kind("aether.inventory.race");
+    subscription.acknowledge(observed.mailbox_generation, observed.kind_generation);
+
+    wakes.recv_timeout(Duration::from_millis(100)).expect("stale pair re-arms a wake");
+    let latest = registry.inventory();
+    assert_eq!(latest.mailbox_generation, observed.mailbox_generation + 1);
+    assert_eq!(latest.kind_generation, observed.kind_generation + 1);
+    subscription.acknowledge(latest.mailbox_generation, latest.kind_generation);
+
+    registry.try_register_inbox("aether.input", noop_handler()).expect_err("conflict is observable");
+    assert_eq!(registry.register_kind("aether.inventory.race"), kind, "matching kind registration is idempotent");
+    assert_eq!(
+        (registry.inventory().mailbox_generation, registry.inventory().kind_generation),
+        (latest.mailbox_generation, latest.kind_generation),
+        "rejection and idempotent kind match publish no inventory generation"
+    );
+    assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "rejection and idempotent kind match emit no wake");
+}
+
+#[test]
+fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
+    let registry = Arc::new(Registry::new());
+    let owner = RegistryOwnerLease::attach(&registry, WakeSink::detached());
+    let id = MailboxId::from_name("ordered");
+    let endpoint = || MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() };
+    let first = registry
+        .submit(EffectBatch::new(vec![
+            RegistryEffect::publish_named("ordered".to_owned(), endpoint()),
+            RegistryEffect::DropMailbox(id),
+            RegistryEffect::publish_named("ordered".to_owned(), endpoint()),
+        ]))
+        .expect("attached owner accepts effects");
+    let rejected = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::publish_named("ordered".to_owned(), endpoint())]))
+        .expect("attached owner accepts the conflicting batch");
+    let rolled_back = registry
+        .submit(EffectBatch::new(vec![
+            RegistryEffect::publish_named("must-rollback".to_owned(), endpoint()),
+            RegistryEffect::publish_named("ordered".to_owned(), endpoint()),
+        ]))
+        .expect("attached owner accepts the transactional batch");
+
+    assert_eq!(registry.route_generation(), 0);
+    assert_eq!(registry.mailbox_generation(), 0);
+    owner.run_once();
+
+    assert_eq!(
+        first.wait_timeout(Duration::from_millis(100)).expect("completion arrives").expect("batch applies"),
+        [RegistryApplied::Mailbox(id), RegistryApplied::Dropped("ordered".to_owned()), RegistryApplied::Mailbox(id),]
+    );
+    assert!(matches!(
+        rejected.wait_timeout(Duration::from_millis(100)).expect("rejection arrives"),
+        Err(RegistryEffectError::Name(_))
+    ));
+    assert!(matches!(
+        rolled_back.wait_timeout(Duration::from_millis(100)).expect("rollback rejection arrives"),
+        Err(RegistryEffectError::Name(_))
+    ));
+    assert!(registry.lookup("must-rollback").is_none(), "a rejected batch commits none of its staged keys");
+    assert_eq!(registry.route_generation(), 1, "one self-sized drain publishes the keyed view once");
+    assert_eq!(registry.mailbox_generation(), 1, "one self-sized drain publishes inventory once");
+    assert_eq!(registry.lookup("ordered"), Some(id));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, reason = "the test deliberately races the two writer entry points")]
+fn direct_and_owner_paths_share_the_transitional_writer() {
+    use std::sync::Barrier;
+
+    let registry = Arc::new(Registry::new());
+    let owner = RegistryOwnerLease::attach(&registry, WakeSink::detached());
+    let completion = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
+            "shared-writer".to_owned(),
+            MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() },
+        )]))
+        .expect("owner accepts effect");
+    let barrier = Arc::new(Barrier::new(2));
+    let direct_registry = Arc::clone(&registry);
+    let direct_barrier = Arc::clone(&barrier);
+    let direct = thread::spawn(move || {
+        direct_barrier.wait();
+        direct_registry.try_register_inbox("shared-writer", noop_handler())
+    });
+    barrier.wait();
+    owner.run_once();
+
+    let owner_result = completion.wait_timeout(Duration::from_millis(100)).expect("owner completes");
+    let direct_result = direct.join().expect("direct writer does not panic");
+    assert_ne!(owner_result.is_ok(), direct_result.is_ok(), "exactly one serialized writer claims the route");
+    assert_eq!(registry.list_mailbox_descriptors().iter().filter(|entry| entry.name == "shared-writer").count(), 1);
+}
+
+#[test]
+fn owner_close_rejects_queued_and_future_submissions_without_stranding_completion() {
+    let registry = Arc::new(Registry::new());
+    let owner = RegistryOwnerLease::attach(&registry, WakeSink::detached());
+    let completion = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
+            "queued-at-close".to_owned(),
+            MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() },
+        )]))
+        .expect("owner accepts before close");
+
+    drop(owner);
+
+    assert!(matches!(
+        completion.wait_timeout(Duration::from_millis(100)).expect("close resolves queued completion"),
+        Err(RegistryEffectError::OwnerClosed)
+    ));
+    assert!(registry.submit(EffectBatch::new(Vec::new())).is_none(), "closed owner rejects future submissions");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, reason = "the test deliberately races owner submit against owner close")]
+fn owner_submit_racing_close_is_rejected_or_completed() {
+    use std::sync::Barrier;
+
+    let registry = Arc::new(Registry::new());
+    let owner = RegistryOwnerLease::attach(&registry, WakeSink::detached());
+    let barrier = Arc::new(Barrier::new(2));
+    let submitting_registry = Arc::clone(&registry);
+    let submitting_barrier = Arc::clone(&barrier);
+    let submit = thread::spawn(move || {
+        submitting_barrier.wait();
+        submitting_registry.submit(EffectBatch::new(Vec::new()))
+    });
+
+    barrier.wait();
+    drop(owner);
+
+    if let Some(completion) = submit.join().expect("submitter does not panic") {
+        assert!(matches!(
+            completion.wait_timeout(Duration::from_millis(100)).expect("accepted race resolves on close"),
+            Err(RegistryEffectError::OwnerClosed)
+        ));
+    }
 }
 
 #[test]
