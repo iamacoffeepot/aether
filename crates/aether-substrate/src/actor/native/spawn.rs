@@ -4,7 +4,7 @@
 //! [`SpawnBuilder::finish`] bridge. Handler callers use
 //! [`HandlerSpawnBuilder::stage`] or [`HandlerSpawnBuilder::stage_with`]:
 //! validate and initialize on the handler thread, append an ordered
-//! [`PreparedSpawnCommit`] to that turn's outbound work, and return a local
+//! `PreparedSpawnCommit` to that turn's outbound work, and return a local
 //! reservation receipt without publishing global state. The registry owner
 //! then authoritatively reserves `Starting`; the scheduler home wires the
 //! initialized actor; an activation barrier promotes it to `Live`; and the
