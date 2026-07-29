@@ -995,18 +995,17 @@ impl NativeBinding {
     where
         O: Send + 'static,
     {
-        let outcome = self
+        if self
             .inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_fill_output(id, Box::new(output));
-
-        if outcome == super::dispatch_blocking::FillOutcome::Filled {
-            let wake = super::dispatch_blocking::TaskCompletionWake { dispatch_id: id.0 };
+            .dispatch_fill_output(id, Box::new(output))
+            == super::dispatch_blocking::FillOutcome::Filled
+        {
             self.mailer.push(Mail::new(
                 self.self_mailbox(),
                 super::dispatch_blocking::TaskCompletionWake::ID,
-                wake.encode_into_bytes(),
+                super::dispatch_blocking::TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes(),
                 1,
             ));
         }

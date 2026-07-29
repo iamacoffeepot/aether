@@ -445,7 +445,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         C: Send + 'static,
         F: FnOnce() -> O + Send + 'static,
     {
-        let completion = self.arm_deferred_completion(hold, reply_to, cx);
+        let completion = self.binding.dispatch_arm(hold, reply_to, cx);
         let id = completion.dispatch_id();
 
         // The worker captures the binding + dispatch id, runs the
@@ -470,14 +470,10 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
                 error = %e,
                 "failed to spawn dispatch_blocking worker thread",
             );
-            // No worker will ever fill the output or push the completion
-            // wake, so the parked entry (hold + reply_to) would sit in the
-            // ledger forever and wedge the caller's chain to its timeout.
-            // Release the eagerly-acquired hold so the chain settles — the
-            // `TaskDone::Drop` "released hold, owed a reply that never went
-            // out" outcome. A thread-spawn failure is environmental (OS
-            // resource exhaustion), not a programmer bug, so it does not
-            // `debug_assert`.
+            // Dropping the rejected worker closure abandons its armed
+            // completion and releases the hold. Keep this explicit abandon
+            // as a defensive miss: it is harmless after the token's Drop and
+            // protects this path if thread-spawn ownership semantics change.
             drop(self.binding.dispatch_abandon(id));
         }
         id
@@ -487,21 +483,17 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// tying completion to a blocking worker. Future staged effects can move
     /// this capability to their authoritative owner and retain no parent
     /// lifetime beyond a weak binding reference.
-    pub(crate) fn arm_deferred_completion<O, C>(
-        &self,
-        hold: SettlementHold,
-        reply_to: Source,
-        context: C,
-    ) -> DeferredCompletion<O>
+    #[allow(dead_code, reason = "ADR-0165 ctx arming seam lands before production staged spawn wiring")]
+    pub(crate) fn arm_deferred_completion<O, C>(&self, context: C) -> DeferredCompletion<O>
     where
         C: Send + 'static,
     {
-        self.binding.dispatch_arm(hold, reply_to, context)
+        self.binding.dispatch_arm(self.acquire_settlement_hold(), self.reply_target(), context)
     }
 
     /// ADR-0093 completion-routing entry point: remove the in-flight
     /// ledger entry named by `id` (decoded from a landed
-    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake)) and rebuild its [`TaskDone<O, C>`]. The
+    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake) and rebuild its [`TaskDone<O, C>`]. The
     /// (future) `#[handler(task)]` macro — and, for now, a hand-wired
     /// completion handler — calls this and then `resolve`s the result.
     ///
