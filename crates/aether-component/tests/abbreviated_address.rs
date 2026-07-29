@@ -31,8 +31,9 @@ const CANONICAL: &str = "aether.component/aether.embedded:camera";
 #[test]
 fn the_component_host_abbreviation_expands_through_the_linked_inventory() {
     // Reference the cap so aether-component's inventory submissions link into
-    // this test binary.
-    assert_eq!(ComponentHostCapability::NAMESPACE, "aether.component");
+    // this test binary — the linker drops unreferenced statics out of an rlib,
+    // and without this the host's facts never reach `AddressIndex`.
+    let _link_inventory = ComponentHostCapability::NAMESPACE;
     let registry = Registry::new();
     let id = mailbox_id_from_path(CANONICAL);
     registry.try_register_inbox_with_id(id, CANONICAL, noop_handler()).expect("canonical name is free");
