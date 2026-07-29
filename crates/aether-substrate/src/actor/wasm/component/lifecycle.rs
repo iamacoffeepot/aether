@@ -4,6 +4,7 @@ use wasmtime::Store;
 
 use super::instantiate::Placement;
 use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES, StateBundle};
+use crate::mail::registry::PreparedAliasRoute;
 
 impl Component {
     /// Loudly log an init config rejected by [`Component::instantiate`] (ADR-0095)
@@ -66,6 +67,13 @@ impl Component {
     /// once drained, and empty when the guest didn't spawn.
     pub fn drain_pending_spawns(&mut self) -> Vec<PendingSpawn> {
         mem::take(&mut self.store.data_mut().pending_spawns)
+    }
+
+    /// Drain logical inline-child aliases staged during the just-returned
+    /// guest call. The trampoline publishes them through the registry owner
+    /// before its handler-end buffered mail is routed.
+    pub fn drain_pending_aliases(&mut self) -> Vec<PreparedAliasRoute> {
+        self.store.data_mut().take_pending_aliases()
     }
 
     /// Extract a failure recorded by `save_state` (size cap, OOB).

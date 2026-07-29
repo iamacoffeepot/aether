@@ -132,8 +132,18 @@ struct RouteRecord {
 
 #[derive(Clone)]
 enum RouteLifecycle {
-    Starting { token: ActivationToken },
-    Live { endpoint: RouteEndpoint },
+    Starting {
+        token: ActivationToken,
+    },
+    Live {
+        endpoint: RouteEndpoint,
+    },
+    /// Logical Wasm inline-child route. Dispatch follows the target's
+    /// current lifecycle and endpoint while preserving the alias as the
+    /// routed recipient for guest membrane demux.
+    Alias {
+        target_parent: MailboxId,
+    },
     Dropped,
 }
 
@@ -217,6 +227,33 @@ pub enum CapturedDisposition {
 pub struct RouteContinuation {
     pub(crate) mail: Mail,
     pub(crate) disposition: CapturedDisposition,
+}
+
+enum ResolvedRoute<'a> {
+    Starting { target: MailboxId },
+    Live { endpoint: &'a RouteEndpoint },
+    Dropped,
+    Unknown,
+}
+
+fn resolve_route<'a, F>(recipient: MailboxId, route_for: F) -> ResolvedRoute<'a>
+where
+    F: Fn(MailboxId) -> Option<&'a RouteRecord>,
+{
+    let Some(route) = route_for(recipient) else {
+        return ResolvedRoute::Unknown;
+    };
+    match &route.lifecycle {
+        RouteLifecycle::Starting { .. } => ResolvedRoute::Starting { target: recipient },
+        RouteLifecycle::Live { endpoint } => ResolvedRoute::Live { endpoint },
+        RouteLifecycle::Alias { target_parent } => match route_for(*target_parent).map(|route| &route.lifecycle) {
+            Some(RouteLifecycle::Starting { .. }) => ResolvedRoute::Starting { target: *target_parent },
+            Some(RouteLifecycle::Live { endpoint }) => ResolvedRoute::Live { endpoint },
+            Some(RouteLifecycle::Dropped) => ResolvedRoute::Dropped,
+            Some(RouteLifecycle::Alias { .. }) | None => ResolvedRoute::Unknown,
+        },
+        RouteLifecycle::Dropped => ResolvedRoute::Dropped,
+    }
 }
 
 /// One point-in-time route and kind-name lookup.
@@ -372,7 +409,13 @@ impl Publication {
 fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> Vec<MailboxDescriptor> {
     let mut inventory = mailboxes
         .iter()
-        .filter(|(_, route)| matches!(route.lifecycle, RouteLifecycle::Live { .. }))
+        .filter(|(_, route)| match &route.lifecycle {
+            RouteLifecycle::Live { .. } => true,
+            RouteLifecycle::Alias { target_parent } => mailboxes
+                .get(target_parent)
+                .is_some_and(|target| matches!(&target.lifecycle, RouteLifecycle::Live { .. })),
+            RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped => false,
+        })
         .map(|(id, route)| MailboxDescriptor {
             id: *id,
             name: route.canonical_name.clone(),
@@ -814,6 +857,45 @@ impl Registry {
                     );
                     applied.push(RegistryApplied::Starting { id: route.id, token });
                 }
+                RegistryEffect::PublishAlias(alias) => {
+                    let name = alias.rendered_name.to_string();
+                    if alias.alias == MailboxId::NONE || alias.alias == MailboxId::CHASSIS_MAILBOX_ID {
+                        return Err(RegistryEffectError::Name(NameConflict { name }));
+                    }
+                    let target_live =
+                        match staged_route(&staged_routes, inner, alias.target_parent).map(|route| &route.lifecycle) {
+                            Some(RouteLifecycle::Starting { .. }) => false,
+                            Some(RouteLifecycle::Live { endpoint: RouteEndpoint::Inbox { .. } }) => true,
+                            _ => {
+                                return Err(RegistryEffectError::AliasTargetUnavailable {
+                                    alias: alias.alias,
+                                    target_parent: alias.target_parent,
+                                });
+                            }
+                        };
+                    match staged_route(&staged_routes, inner, alias.alias) {
+                        Some(RouteRecord { canonical_name, lifecycle: RouteLifecycle::Alias { target_parent } })
+                            if canonical_name == alias.rendered_name.as_ref()
+                                && *target_parent == alias.target_parent =>
+                        {
+                            applied.push(RegistryApplied::Mailbox(alias.alias));
+                            continue;
+                        }
+                        Some(existing)
+                            if matches!(existing.lifecycle, RouteLifecycle::Dropped)
+                                && existing.canonical_name == alias.rendered_name.as_ref() => {}
+                        Some(_) => return Err(RegistryEffectError::Name(NameConflict { name })),
+                        None => {}
+                    }
+                    let record = RouteRecord {
+                        canonical_name: name,
+                        lifecycle: RouteLifecycle::Alias { target_parent: alias.target_parent },
+                    };
+                    staged_routes.insert(alias.alias, Some(record.clone()));
+                    publication.route_updates.push(Update::Insert(alias.alias, record));
+                    publication.inventory_dirty |= target_live;
+                    applied.push(RegistryApplied::Mailbox(alias.alias));
+                }
                 RegistryEffect::ReserveStarting { route } => {
                     if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
@@ -892,29 +974,41 @@ impl Registry {
                     let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
                         return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
                     };
-                    match record.lifecycle {
+                    let inventory_live = match &record.lifecycle {
                         RouteLifecycle::Starting { .. } => {
                             return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
                         }
                         RouteLifecycle::Dropped => {
                             return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
                         }
-                        RouteLifecycle::Live { .. } => {}
-                    }
+                        RouteLifecycle::Live { .. } => true,
+                        RouteLifecycle::Alias { target_parent } => staged_route(&staged_routes, inner, *target_parent)
+                            .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. })),
+                    };
                     record.lifecycle = RouteLifecycle::Dropped;
                     let name = record.canonical_name.clone();
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record.clone()));
-                    publication.inventory_dirty = true;
+                    publication.inventory_dirty |= inventory_live;
                     applied.push(RegistryApplied::Dropped(name));
                 }
                 RegistryEffect::RemoveMailbox(id) => {
-                    let removable = staged_route(&staged_routes, inner, id)
-                        .is_some_and(|record| matches!(record.lifecycle, RouteLifecycle::Live { .. }));
+                    let (removable, inventory_live) =
+                        staged_route(&staged_routes, inner, id).map_or((false, false), |record| {
+                            match &record.lifecycle {
+                                RouteLifecycle::Live { .. } => (true, true),
+                                RouteLifecycle::Alias { target_parent } => (
+                                    true,
+                                    staged_route(&staged_routes, inner, *target_parent)
+                                        .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. })),
+                                ),
+                                RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped => (false, false),
+                            }
+                        });
                     if removable {
                         staged_routes.insert(id, None);
                         publication.route_updates.push(Update::Remove(id));
-                        publication.inventory_dirty = true;
+                        publication.inventory_dirty |= inventory_live;
                     }
                     applied.push(RegistryApplied::Removed(removable));
                 }
@@ -1071,19 +1165,23 @@ impl Registry {
     }
 
     fn capture_mail_locked(inner: &mut Inner, mail: Mail) -> Option<RouteContinuation> {
-        match inner.mailboxes.get(&mail.recipient).map(|route| route.lifecycle.clone()) {
-            Some(RouteLifecycle::Starting { token }) => {
+        match resolve_route(mail.recipient, |id| inner.mailboxes.get(&id)) {
+            ResolvedRoute::Starting { target } => {
+                let token = match inner.mailboxes.get(&target).map(|route| &route.lifecycle) {
+                    Some(RouteLifecycle::Starting { token }) => *token,
+                    _ => unreachable!("resolved Starting target remains Starting under the owner lock"),
+                };
                 let pending = inner
                     .pending_births
-                    .get_mut(&mail.recipient)
+                    .get_mut(&target)
                     .unwrap_or_else(|| panic!("published Starting route missing its owner-private pending birth"));
                 assert_eq!(pending.token, token, "published Starting token disagrees with pending birth");
                 pending.parked.push_back(mail);
                 None
             }
-            Some(RouteLifecycle::Live { endpoint }) => Some(RouteContinuation {
+            ResolvedRoute::Live { endpoint } => Some(RouteContinuation {
                 disposition: CapturedDisposition::Live {
-                    endpoint,
+                    endpoint: endpoint.clone(),
                     kind_name: inner
                         .kinds
                         .get(&mail.kind)
@@ -1091,10 +1189,8 @@ impl Registry {
                 },
                 mail,
             }),
-            Some(RouteLifecycle::Dropped) => {
-                Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped })
-            }
-            None => Some(RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
+            ResolvedRoute::Dropped => Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped }),
+            ResolvedRoute::Unknown => Some(RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
         }
     }
 
@@ -1359,7 +1455,13 @@ impl Registry {
         let id = mailbox_id_from_path(name);
         let routes = self.routes.load();
         Ok(match routes.entry_for(&id) {
-            Some(route) if route.canonical_name == name && !matches!(route.lifecycle, RouteLifecycle::Dropped) => {
+            Some(route)
+                if route.canonical_name == name
+                    && matches!(
+                        resolve_route(id, |candidate| routes.entry_for(&candidate)),
+                        ResolvedRoute::Starting { .. } | ResolvedRoute::Live { .. }
+                    ) =>
+            {
                 Some(id)
             }
             _ => None,
@@ -1369,11 +1471,21 @@ impl Registry {
     /// Fetch the entry for a mailbox id from a point-in-time view.
     /// Returns an owned compatibility projection of the private route.
     pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
-        self.routes.load().entry_for(&id).and_then(|route| match &route.lifecycle {
-            RouteLifecycle::Live { endpoint } => Some(endpoint.as_entry()),
-            RouteLifecycle::Dropped => Some(MailboxEntry::Dropped),
-            RouteLifecycle::Starting { .. } => None,
-        })
+        let routes = self.routes.load();
+        match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
+            ResolvedRoute::Live { endpoint } => Some(endpoint.as_entry()),
+            ResolvedRoute::Dropped => Some(MailboxEntry::Dropped),
+            ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => None,
+        }
+    }
+
+    /// Test whether `alias` is the logical inline-child route owned by
+    /// `target_parent`. This checks route identity, not endpoint identity.
+    pub(crate) fn is_alias_to(&self, alias: MailboxId, target_parent: MailboxId) -> bool {
+        matches!(
+            self.routes.load().entry_for(&alias).map(|route| &route.lifecycle),
+            Some(RouteLifecycle::Alias { target_parent: target }) if *target == target_parent
+        )
     }
 
     /// Install a `Pooled` actor's [`SeizeHandle`]
@@ -1404,12 +1516,12 @@ impl Registry {
     pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
         let routes = self.routes.load();
         let kinds = self.kinds.load();
-        let (endpoint, starting, dropped) =
-            routes.entry_for(&recipient).map_or((None, false, false), |route| match &route.lifecycle {
-                RouteLifecycle::Starting { .. } => (None, true, false),
-                RouteLifecycle::Live { endpoint } => (Some(endpoint.clone()), false, false),
-                RouteLifecycle::Dropped => (None, false, true),
-            });
+        let (endpoint, starting, dropped) = match resolve_route(recipient, |id| routes.entry_for(&id)) {
+            ResolvedRoute::Starting { .. } => (None, true, false),
+            ResolvedRoute::Live { endpoint } => (Some(endpoint.clone()), false, false),
+            ResolvedRoute::Dropped => (None, false, true),
+            ResolvedRoute::Unknown => (None, false, false),
+        };
         RouteLookup {
             endpoint,
             starting,

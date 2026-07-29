@@ -33,7 +33,9 @@ pub use aether_actor::Local;
 use aether_actor::runtime;
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
+pub use aether_substrate::actor::native::{
+    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnApplied, SpawnError, TaskDone,
+};
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -136,8 +138,8 @@ impl NativeActor for WasmTrampoline {
     /// `Component::instantiate` (step 4, before registration) and
     /// races the input cap's `validate_subscriber_mailbox`,
     /// silently dropping subscribes.
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        if let Some(component) = state.component.as_mut() {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        let aliases = state.component.as_mut().map_or_else(Vec::new, |component| {
             if let Err(e) = component.wire() {
                 tracing::error!(
                     target: "aether_component",
@@ -151,7 +153,9 @@ impl NativeActor for WasmTrampoline {
             // metadata for the instance's life. Runs whether or not `wire`
             // errored; the window's job (init + wire) is done either way.
             component.close_load_window();
-        }
+            component.drain_pending_aliases()
+        });
+        state.stage_inline_aliases(ctx, aliases);
     }
 
     /// Drop the **wasm component**. Runs the guest's `unwire`
@@ -207,10 +211,10 @@ impl NativeActor for WasmTrampoline {
     #[handler::single]
     fn on_replace_component(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         payload: ReplaceComponent,
     ) -> ReplaceResult {
-        state.handle_replace(payload)
+        state.handle_replace(ctx, payload)
     }
 
     #[handler(task)]
@@ -220,6 +224,15 @@ impl NativeActor for WasmTrampoline {
         done: TaskDone<Result<SpawnApplied, SpawnError>, replace::SiblingSpawnContinuation>,
     ) {
         state.finish_sibling_spawn(done);
+    }
+
+    #[handler(task)]
+    fn on_inline_alias_done(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        done: TaskDone<RegistryBatchResult, replace::InlineAliasContinuation>,
+    ) {
+        WasmTrampolineState::finish_inline_aliases(done);
     }
 
     /// Forward un-handled mail to the wasm guest.
@@ -236,7 +249,7 @@ impl NativeActor for WasmTrampoline {
         // the guest staged during `deliver`. The block scopes the
         // `&mut component` borrow so `spawn_sibling` can read the
         // trampoline's other fields afterward.
-        let pendings = {
+        let (aliases, pendings) = {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
                     target: "aether_component",
@@ -276,8 +289,9 @@ impl NativeActor for WasmTrampoline {
                 // today.
                 ctx.fatal_abort(format!("component {} (kind {}) trapped: {e}", state.mailbox, env.kind_name));
             }
-            component.drain_pending_spawns()
+            (component.drain_pending_aliases(), component.drain_pending_spawns())
         };
+        state.stage_inline_aliases(ctx, aliases);
         for pending in pendings {
             state.spawn_sibling(ctx, pending);
         }

@@ -244,7 +244,11 @@ impl RegistryOwnerLease {
         let registry = self.slot.registry.upgrade().expect("test registry remains live");
         let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
         let commands = queue.commands.drain(..).collect::<Vec<_>>();
-        queue.route_generation = registry.apply_owner_commands(commands, &self.slot.mailer);
+        self.slot.meter.drained_to_empty();
+        drop(queue);
+        let route_generation = registry.apply_owner_commands(commands, &self.slot.mailer);
+        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+        queue.route_generation = queue.route_generation.max(route_generation);
         drop(queue);
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -252,7 +256,9 @@ impl RegistryOwnerLease {
             let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
             if !queue.commands.is_empty() {
                 queue.accepting = false;
-                break queue.commands.drain(..).collect::<Vec<_>>();
+                let commands = queue.commands.drain(..).collect::<Vec<_>>();
+                self.slot.meter.drained_to_empty();
+                break commands;
             }
             drop(queue);
             assert!(Instant::now() < deadline, "runtime activation barrier reached the owner queue");
@@ -270,7 +276,10 @@ impl Drop for RegistryOwnerLease {
         let queued = {
             let mut state = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
             state.accepting = false;
-            state.commands.drain(..).collect::<Vec<_>>()
+            let queued = state.commands.drain(..).collect::<Vec<_>>();
+            self.slot.meter.drained_to_empty();
+            drop(state);
+            queued
         };
         self.slot.meter.drain(queued.len(), started.elapsed());
         drop(apply);
@@ -321,27 +330,42 @@ impl Drainable for RegistryOwnerSlot {
             // divides by.
             let started = Instant::now();
             let _apply = self.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
-            let mut queue = self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
-            // Draining to empty ends any saturation episode, so the next one
-            // warns again rather than staying silent behind a stale latch.
-            queue.saturated = false;
-            let commands = queue.commands.drain(..).collect::<Vec<_>>();
+            // Completion may synchronously route a task wake back to a
+            // Starting actor, which re-enters `park_or_drop`. Drain under the
+            // admission lock, then release it before apply/completion; the
+            // owner remains serialized by `apply_lock`.
+            let (commands, accepting) = {
+                let mut queue = self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+                // Draining to empty ends any saturation episode, so the next
+                // one warns again rather than staying silent behind a stale
+                // latch.
+                queue.saturated = false;
+                let commands = queue.commands.drain(..).collect::<Vec<_>>();
+                self.meter.drained_to_empty();
+                (commands, queue.accepting)
+            };
             let drained = commands.len();
-            let accepting = queue.accepting;
             let mut orphaned = None;
+            let mut route_generation = None;
 
             if !commands.is_empty() {
                 if let Some(registry) = self.registry.upgrade() {
-                    if accepting {
-                        queue.route_generation = registry.apply_owner_commands(commands, &self.mailer);
+                    route_generation = Some(if accepting {
+                        registry.apply_owner_commands(commands, &self.mailer)
                     } else {
-                        queue.route_generation = registry.close_owner_commands(commands, &self.mailer);
-                    }
+                        registry.close_owner_commands(commands, &self.mailer)
+                    });
                 } else {
                     orphaned = Some(commands);
                 }
             }
-            drop(queue);
+            if let Some(route_generation) = route_generation {
+                let mut queue = self.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+                // A submitter may already have observed a newer published
+                // generation while apply completed; never move its retry
+                // watermark backwards.
+                queue.route_generation = queue.route_generation.max(route_generation);
+            }
             if let Some(commands) = orphaned {
                 close_orphaned_commands(commands);
             }

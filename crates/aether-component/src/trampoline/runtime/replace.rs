@@ -5,11 +5,14 @@ use std::sync::Arc;
 use aether_actor::Local as _;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{NativeCtx, SpawnApplied, SpawnError, TaskDone};
+use aether_substrate::actor::native::{
+    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnApplied, SpawnError, TaskDone,
+};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
+use aether_substrate::mail::registry::PreparedAliasRoute;
 use aether_substrate::mail::{CostCells, KindId, MailboxId};
 use wasmtime::Module;
 
@@ -19,6 +22,31 @@ use super::config::WasmTrampolineConfig;
 use super::state::WasmTrampolineState;
 
 impl WasmTrampolineState {
+    /// Publish the logical inline-child routes a guest call staged. The
+    /// owner batch is reserved admission; completion is a later no-reply
+    /// actor turn so rejection cannot silently lose the originating chain.
+    pub fn stage_inline_aliases(&self, ctx: &mut NativeCtx<'_>, aliases: Vec<PreparedAliasRoute>) {
+        for alias in aliases {
+            let alias_id = alias.alias;
+            let _ = ctx.stage_registry_batch(
+                RegistryBatch::publish_alias(alias),
+                InlineAliasContinuation { parent: self.mailbox, alias: alias_id },
+            );
+        }
+    }
+
+    pub(super) fn finish_inline_aliases(done: TaskDone<RegistryBatchResult, InlineAliasContinuation>) {
+        if let Err(error) = done.output() {
+            tracing::warn!(
+                target: "aether_component",
+                parent = %done.context().parent,
+                alias = %done.context().alias,
+                "inline-child alias publication failed after owner staging: {error}",
+            );
+        }
+        done.release_no_reply();
+    }
+
     /// ADR-0097: perform the sibling spawn the guest staged via the
     /// `spawn_sibling` host fn during `Component::deliver`. The
     /// trampoline runs the typed `spawn_child::<WasmTrampoline>` (the
@@ -144,7 +172,7 @@ impl WasmTrampolineState {
             })
     }
 
-    pub fn handle_replace(&mut self, payload: ReplaceComponent) -> ReplaceResult {
+    pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
         // `payload.wasm` is the new module bytes; `mailbox_id` is
         // the trampoline's own id (the agent already addressed
         // this mail to us, so the field is informational).
@@ -224,6 +252,7 @@ impl WasmTrampolineState {
             Arc::clone(&self.mailer),
             Arc::clone(&self.outbound),
         );
+        substrate_ctx.install_binding(ctx.transport_arc());
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).
@@ -272,11 +301,15 @@ impl WasmTrampolineState {
         if let Some(bundle) = saved
             && let Err(e) = new_component.call_on_rehydrate(&bundle)
         {
+            let aliases = new_component.drain_pending_aliases();
             self.component = Some(new_component);
+            self.stage_inline_aliases(ctx, aliases);
             return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
         }
 
+        let aliases = new_component.drain_pending_aliases();
         self.component = Some(new_component);
+        self.stage_inline_aliases(ctx, aliases);
 
         // iamacoffeepot/aether#1037: re-register the trampoline's
         // capabilities against the post-replace handler set. The
@@ -309,4 +342,10 @@ pub(super) struct SiblingSpawnContinuation {
     parent: MailboxId,
     subname: String,
     capabilities: ComponentCapabilities,
+}
+
+#[derive(Clone)]
+pub(super) struct InlineAliasContinuation {
+    parent: MailboxId,
+    alias: MailboxId,
 }

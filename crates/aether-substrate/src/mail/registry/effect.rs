@@ -68,6 +68,22 @@ pub struct PreparedRoute {
     pub canonical_name: String,
 }
 
+/// Logical inline-child route prepared by a Wasm host call. The owner stores
+/// only the target mailbox identity; it never clones or retains the parent's
+/// endpoint, dispatcher slot, or component Store.
+pub struct PreparedAliasRoute {
+    pub alias: MailboxId,
+    pub rendered_name: Arc<str>,
+    pub target_parent: MailboxId,
+}
+
+impl PreparedAliasRoute {
+    #[must_use]
+    pub fn new(alias: MailboxId, rendered_name: impl Into<Arc<str>>, target_parent: MailboxId) -> Self {
+        Self { alias, rendered_name: rendered_name.into(), target_parent }
+    }
+}
+
 /// Exact actor-local cost cells carried into the fused owner commit.
 pub struct PreparedCostCells {
     table: Arc<CostTable>,
@@ -259,6 +275,7 @@ impl PreparedActivation {
 
 pub enum RegistryEffect {
     PreparedSpawn(PreparedSpawnCommit),
+    PublishAlias(PreparedAliasRoute),
     ReserveStarting { route: PreparedRoute },
     CancelStarting { id: MailboxId, token: ActivationToken },
     PublishLive { route: PreparedRoute, activation: PreparedActivation },
@@ -312,6 +329,7 @@ pub enum RegistryEffectError {
     Name(super::NameConflict),
     Drop(super::DropError),
     Kind(super::KindConflict),
+    AliasTargetUnavailable { alias: MailboxId, target_parent: MailboxId },
     ActivationRejected,
     OwnerClosed,
 }
@@ -322,6 +340,9 @@ impl fmt::Display for RegistryEffectError {
             Self::Name(error) => error.fmt(formatter),
             Self::Drop(error) => error.fmt(formatter),
             Self::Kind(error) => error.fmt(formatter),
+            Self::AliasTargetUnavailable { alias, target_parent } => {
+                write!(formatter, "inline alias {alias} targets unavailable parent {target_parent}")
+            }
             Self::ActivationRejected => {
                 formatter.write_str("prepared actor activation could not reserve its lifecycle")
             }
@@ -356,6 +377,13 @@ impl RegistryBatch {
                     .collect(),
             ),
         }
+    }
+
+    /// Publish one logical inline-child alias through the owner. The route
+    /// follows its target parent's current lifecycle and endpoint.
+    #[must_use]
+    pub fn publish_alias(alias: PreparedAliasRoute) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::PublishAlias(alias)]) }
     }
 
     pub(crate) fn into_effects(self) -> EffectBatch {

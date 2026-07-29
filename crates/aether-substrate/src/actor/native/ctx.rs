@@ -284,6 +284,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         self.binding.mailer()
     }
 
+    /// Clone this actor's transport. Runtime adapters that rebuild an
+    /// embedded execution context during a handler (the Wasm trampoline's
+    /// replacement path) use the same binding as the actor they remain behind.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn transport_arc(&self) -> Arc<NativeBinding> {
+        Arc::clone(self.binding)
+    }
+
     /// The actor's own [`MailboxId`] — the handler-ctx mirror of
     /// [`NativeInitCtx::self_id`]. A cap that subscribes settlement or
     /// keys a per-instance table from inside a handler needs its own

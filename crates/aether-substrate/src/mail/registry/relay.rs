@@ -125,7 +125,10 @@ impl Drop for RouteRelayLease {
         let continuations = {
             let mut state = self.slot.queue.lock().expect("route relay queue lock poisoned; fail-fast per ADR-0063");
             state.accepting = false;
-            state.continuations.drain(..).collect::<Vec<_>>()
+            let continuations = state.continuations.drain(..).collect::<Vec<_>>();
+            self.slot.meter.drained_to_empty();
+            drop(state);
+            continuations
         };
         self.slot.meter.drain(continuations.len(), started.elapsed());
         for continuation in continuations {
@@ -154,7 +157,10 @@ impl Drainable for RouteRelaySlot {
             let continuations = {
                 let mut queue = self.queue.lock().expect("route relay queue lock poisoned; fail-fast per ADR-0063");
                 queue.saturated = false;
-                queue.continuations.drain(..).collect::<Vec<_>>()
+                let continuations = queue.continuations.drain(..).collect::<Vec<_>>();
+                self.meter.drained_to_empty();
+                drop(queue);
+                continuations
             };
             let drained = continuations.len();
             if !continuations.is_empty() {
