@@ -115,31 +115,46 @@ pub struct ComponentHostCapabilityState {
     /// replacement wasm are parked here across the hop. Empty except while a
     /// replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
+    /// Last replace/drop operation sequence allocated for each actor mailbox.
+    /// A replace reserves its sequence when forwarded; a drop reserves the
+    /// next sequence and immediately makes it dominant. Entries survive the
+    /// deterministic mailbox id's drop/reload boundary so an older incarnation
+    /// can never become current again.
+    pub boot_operation_sequence_by_actor: HashMap<MailboxId, u64>,
+    /// Latest successful replacement or drop operation that is allowed to
+    /// mutate each actor's boot mapping. Failed replacements never enter this
+    /// table, so they cannot suppress an earlier successful replacement.
+    pub dominant_boot_operation_by_actor: HashMap<MailboxId, u64>,
 }
 
 /// ADR-0147: a parked `aether.component.replace` forward. `source` is the
 /// original caller's reply target (the trampoline's `ReplaceResult` is routed
 /// to the cap instead, then re-replied here); `actor_mailbox` and `new_wasm`
-/// are what `rebind_boot_ref` needs to commit the boot-refcount transfer once
-/// the swap is confirmed successful.
+/// are what `commit_replacement_boot` needs to commit the boot-refcount
+/// transfer once the swap is confirmed successful. `boot_operation` is
+/// reserved when the request is forwarded; it becomes dominant only if that
+/// request succeeds, so a later failed request cannot suppress this one.
 #[derive(Clone)]
 pub struct PendingReplace {
     pub source: Source,
     pub actor_mailbox: MailboxId,
     pub new_wasm: Arc<[u8]>,
+    pub boot_operation: u64,
 }
 
 /// ADR-0147: one module's boot singleton. `mailbox_id` addresses the boot
 /// trampoline (spawned through the same `WasmTrampoline` path as any export);
 /// `refcount` counts the module's live **non-boot** actors — boot never counts
 /// itself, so its own drop could never be the one that zeroes the count. The
-/// boot is torn down when `refcount` reaches zero (the last non-boot actor from
-/// the module unloads or is rebound onto a different content hash).
+/// `pending_requests` counts requested actors whose trampoline birth has been
+/// accepted but has not yet promoted or rejected. The boot is torn down only
+/// when both counters are zero: a pending birth keeps a temporarily
+/// zero-refcount boot alive, and its later rejection performs the final
+/// orphan check.
 pub struct BootEntry {
     pub mailbox_id: MailboxId,
     pub refcount: u32,
     pub pending_requests: u32,
-    pub orphanable: bool,
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the
@@ -197,6 +212,8 @@ impl NativeActor for ComponentHostCapability {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            boot_operation_sequence_by_actor: HashMap::new(),
+            dominant_boot_operation_by_actor: HashMap::new(),
         })
     }
 
@@ -289,6 +306,7 @@ impl NativeActor for ComponentHostCapability {
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
         // own `DropComponent` handler vacates its registrations).
+        state.invalidate_replacement_boot_operation(payload.mailbox_id);
         state.release_boot_ref(ctx, payload.mailbox_id);
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }
@@ -445,6 +463,8 @@ mod tests {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            boot_operation_sequence_by_actor: HashMap::new(),
+            dominant_boot_operation_by_actor: HashMap::new(),
         };
 
         // Initial wake refreshes both complete inventories in the prescribed

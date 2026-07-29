@@ -363,20 +363,51 @@ impl RegistryBatch {
     }
 }
 
-pub type RegistryBatchResult = Result<Vec<RegistryApplied>, RegistryEffectError>;
+/// Public failure vocabulary for a deferred native-actor registry batch.
+/// Success is intentionally opaque: owner apply details remain private to the
+/// legacy registry channel API, while actor handlers need only know whether
+/// their atomic batch committed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegistryBatchError {
+    Rejected(String),
+    OwnerClosed,
+}
+
+impl fmt::Display for RegistryBatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(error) => error.fmt(formatter),
+            Self::OwnerClosed => formatter.write_str("registry owner closed before applying the effect batch"),
+        }
+    }
+}
+
+impl Error for RegistryBatchError {}
+
+impl From<RegistryEffectError> for RegistryBatchError {
+    fn from(error: RegistryEffectError) -> Self {
+        match error {
+            RegistryEffectError::OwnerClosed => Self::OwnerClosed,
+            error => Self::Rejected(error.to_string()),
+        }
+    }
+}
+
+pub type RegistryBatchResult = Result<(), RegistryBatchError>;
+type RegistryOwnerBatchResult = Result<Vec<RegistryApplied>, RegistryEffectError>;
 
 pub(super) enum RegistryBatchCompletionSink {
-    Channel(crossbeam_channel::Sender<RegistryBatchResult>),
+    Channel(crossbeam_channel::Sender<RegistryOwnerBatchResult>),
     Deferred(DeferredCompletion<RegistryBatchResult>),
 }
 
 impl RegistryBatchCompletionSink {
-    pub(super) fn complete(self, result: RegistryBatchResult) {
+    pub(super) fn complete(self, result: RegistryOwnerBatchResult) {
         match self {
             Self::Channel(sender) => {
                 let _ = sender.send(result);
             }
-            Self::Deferred(completion) => completion.complete(result),
+            Self::Deferred(completion) => completion.complete(result.map(|_| ()).map_err(RegistryBatchError::from)),
         }
     }
 }

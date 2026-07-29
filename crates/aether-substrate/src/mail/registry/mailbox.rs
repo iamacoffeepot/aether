@@ -15,9 +15,9 @@ use crate::actor::native::dispatch_blocking::DeferredCompletion;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, ChangeSubscriber, EffectBatch, PreparedCostCells,
-    PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryBatchCompletionSink, RegistryBatchResult,
-    RegistryCompletion, RegistryEffect, RegistryEffectError, RegistryInventory, RegistrySubscription,
-    StartingCancellation, barrier_token, bytes_kind, subscriber,
+    PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryBatchCompletionSink, RegistryBatchError,
+    RegistryBatchResult, RegistryCompletion, RegistryEffect, RegistryEffectError, RegistryInventory,
+    RegistrySubscription, StartingCancellation, barrier_token, bytes_kind, subscriber,
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
@@ -511,7 +511,7 @@ impl Registry {
     ) -> bool {
         let Some(owner) = self.owner.get() else {
             drop(batch.discard_prepared());
-            completion.complete(Err(RegistryEffectError::OwnerClosed));
+            completion.complete(Err(RegistryBatchError::OwnerClosed));
             return false;
         };
         owner.submit_deferred(batch, completion)
@@ -581,7 +581,7 @@ impl Registry {
 
     pub(super) fn apply_owner_commands(&self, commands: Vec<OwnerCommand>, mailer: &Mailer) -> u64 {
         enum AfterLock {
-            Batch(RegistryBatchCompletionSink, RegistryBatchResult),
+            Batch(RegistryBatchCompletionSink, Result<Vec<RegistryApplied>, RegistryEffectError>),
             Route(RouteContinuation),
             Schedule(Arc<dyn ActivationReservation>),
             CatchUp(Box<dyn FnOnce() + Send>),

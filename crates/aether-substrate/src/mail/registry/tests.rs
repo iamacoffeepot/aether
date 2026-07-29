@@ -8,6 +8,7 @@ use aether_data::canonical::kind_id_from_parts;
 use aether_data::{Kind, KindDescriptor, MailboxCategory, SchemaType};
 use aether_kinds::trace::Nanos;
 
+use crate::actor::native::{DispatchId, NativeBinding, TaskCompletionWake};
 use crate::chassis::settlement::SettlementRegistry;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::cost::CostCell;
@@ -16,7 +17,8 @@ use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, EffectBatch, InstalledActivation, LiveActivation,
     PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
-    RegistryApplied, RegistryBatch, RegistryEffect, RegistryEffectError, StartingCancellation,
+    RegistryApplied, RegistryBatch, RegistryBatchError, RegistryBatchResult, RegistryEffect, RegistryEffectError,
+    StartingCancellation,
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
@@ -1995,6 +1997,40 @@ fn owner_close_rejects_queued_and_future_submissions_without_stranding_completio
         Err(RegistryEffectError::OwnerClosed)
     ));
     assert!(registry.submit(EffectBatch::new(Vec::new())).is_none(), "closed owner rejects future submissions");
+}
+
+#[test]
+fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+    let actor_mailbox = registry.register_inbox(
+        "test.registry.deferred-owner-close",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            wake_tx.send(dispatch).expect("test wake receiver remains live");
+        }),
+    );
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+    let completion =
+        binding.dispatch_arm::<RegistryBatchResult, _>(mailer.acquire_settlement_hold(MailId::NONE), Source::NONE, ());
+    let dispatch_id = completion.dispatch_id();
+    assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
+
+    drop(owner);
+
+    let wake = wake_rx.recv_timeout(Duration::from_millis(100)).expect("owner close emits deferred completion wake");
+    assert_eq!(wake.kind, TaskCompletionWake::ID);
+    let wake = TaskCompletionWake::decode_from_bytes(wake.payload.bytes()).expect("completion wake decodes");
+    assert_eq!(DispatchId(wake.dispatch_id), dispatch_id);
+    let done = binding
+        .dispatch_take::<RegistryBatchResult, ()>(dispatch_id)
+        .expect("public deferred result is retained in the actor ledger");
+    assert!(matches!(done.output(), Err(RegistryBatchError::OwnerClosed)));
+    done.release_no_reply();
+    assert!(wake_rx.try_recv().is_err(), "owner close emits exactly one completion wake");
 }
 
 #[test]
