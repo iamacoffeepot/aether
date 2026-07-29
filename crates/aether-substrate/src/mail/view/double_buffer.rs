@@ -1,7 +1,8 @@
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::take;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use super::{GenerationExhausted, Published, View, ViewPublisher};
 
@@ -31,7 +32,7 @@ impl<K, V> Replay<K, V>
 where
     K: Eq + Hash,
 {
-    fn apply(self, table: &mut HashMap<K, V>) {
+    fn apply(self, table: &mut FxHashMap<K, V>) {
         match self {
             Self::Insert(key, value) => {
                 table.insert(key, value);
@@ -50,8 +51,8 @@ where
 /// that pins the standby map past its next turn causes `Arc::make_mut` to clone
 /// that map before reuse.
 pub struct DoubleBuffer<K, V> {
-    publisher: ViewPublisher<HashMap<K, V>>,
-    standby: Arc<Published<HashMap<K, V>>>,
+    publisher: ViewPublisher<FxHashMap<K, V>>,
+    standby: Arc<Published<FxHashMap<K, V>>>,
     replay_lag: Vec<Replay<K, V>>,
 }
 
@@ -62,7 +63,7 @@ where
 {
     /// Creates two identical generation-zero buffers from an initial map.
     #[must_use]
-    pub fn new(initial: HashMap<K, V>) -> Self {
+    pub fn new(initial: FxHashMap<K, V>) -> Self {
         Self {
             publisher: ViewPublisher::new(initial.clone()),
             standby: Arc::new(Published::new(initial, 0)),
@@ -72,7 +73,7 @@ where
 
     /// Creates another read handle for the published map.
     #[must_use]
-    pub fn view(&self) -> View<HashMap<K, V>> {
+    pub fn view(&self) -> View<FxHashMap<K, V>> {
         self.publisher.view()
     }
 
@@ -117,7 +118,7 @@ where
     V: Clone,
 {
     fn default() -> Self {
-        Self::new(HashMap::new())
+        Self::new(FxHashMap::default())
     }
 }
 
@@ -128,7 +129,7 @@ mod tests {
 
     use super::*;
 
-    fn entries(view: &View<HashMap<&'static str, i32>>) -> Vec<(&'static str, i32)> {
+    fn entries(view: &View<FxHashMap<&'static str, i32>>) -> Vec<(&'static str, i32)> {
         let snapshot = view.load();
         let mut entries: Vec<_> = snapshot.entries().map(|(key, value)| (*key, *value)).collect();
         entries.sort_unstable();
@@ -170,7 +171,7 @@ mod tests {
     fn generations_advance_and_exhaustion_preserves_the_published_map() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_update = Arc::clone(&calls);
-        let mut buffers = DoubleBuffer::new(HashMap::from([("actor", 1)]));
+        let mut buffers = DoubleBuffer::new(FxHashMap::from_iter([("actor", 1)]));
         let view = buffers.view();
 
         assert_eq!(buffers.publish([Update::Insert("other", 2)]), Ok(1));
@@ -192,7 +193,7 @@ mod tests {
     fn mutation_runs_once_and_replays_its_canonical_value() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_update = Arc::clone(&calls);
-        let mut buffers = DoubleBuffer::new(HashMap::from([("actor", 1)]));
+        let mut buffers = DoubleBuffer::new(FxHashMap::from_iter([("actor", 1)]));
         let view = buffers.view();
 
         buffers

@@ -174,6 +174,8 @@ impl<T> ViewPublisher<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[test]
@@ -183,10 +185,11 @@ mod tests {
 
         assert_eq!(view.load().generation(), 0);
         assert_eq!(publisher.publish(String::from("one")), Ok(1));
+        assert_eq!(publisher.publish(String::from("two")), Ok(2));
 
         let snapshot = view.load();
-        assert_eq!(snapshot.generation(), 1);
-        assert_eq!(snapshot.table(), "one");
+        assert_eq!(snapshot.generation(), 2);
+        assert_eq!(snapshot.table(), "two");
     }
 
     #[test]
@@ -210,5 +213,27 @@ mod tests {
         assert_eq!(old.table(), "old");
         assert_eq!(old.generation(), 0);
         assert_eq!(view.load().table(), "new");
+    }
+
+    #[test]
+    fn superseded_value_drops_with_its_last_snapshot() {
+        struct DropProbe(Arc<AtomicUsize>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut publisher = ViewPublisher::new(DropProbe(Arc::clone(&drops)));
+        let view = publisher.view();
+        let old = view.load();
+
+        publisher.publish(DropProbe(Arc::clone(&drops))).expect("the second generation should be available");
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        drop(old);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 }
