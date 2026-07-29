@@ -13,13 +13,13 @@ use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
 use crate::mail::view::View;
-use crate::mail::{KindId, MailboxId};
+use crate::mail::{CostCell, CostTable, KindId, MailId, MailboxId, SourceAddr};
 use crate::scheduler::SeizeHandle;
 
 /// Opaque identity for one accepted `Starting` reservation. Tokens are
 /// registry-local and monotonically allocated; callers may compare and return
 /// them but cannot manufacture one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ActivationToken(u64);
 
 impl ActivationToken {
@@ -30,6 +30,32 @@ impl ActivationToken {
         });
         Self(*counter)
     }
+
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn from_value(value: u64) -> Option<Self> {
+        (value != 0).then_some(Self(value))
+    }
+}
+
+/// Runtime-private control kind ordering activation-home egress before
+/// owner-side promotion. Ordinary kind ids are tagged hashes, leaving this
+/// sentinel outside actor vocabulary.
+pub const ACTIVATION_BARRIER_KIND: KindId = KindId(u64::MAX);
+
+pub fn barrier_token(mail: &Mail) -> Option<ActivationToken> {
+    if mail.kind != ACTIVATION_BARRIER_KIND
+        || mail.payload.bytes().len() != size_of::<u64>()
+        || mail.mail_id.sender != mail.recipient
+        || !matches!(mail.reply_to.addr, SourceAddr::Component(sender) if sender == mail.recipient)
+    {
+        return None;
+    }
+    let mut bytes = [0; size_of::<u64>()];
+    bytes.copy_from_slice(mail.payload.bytes());
+    ActivationToken::from_value(u64::from_le_bytes(bytes))
 }
 
 /// Route identity prepared away from the registry writer. It deliberately
@@ -37,6 +63,131 @@ impl ActivationToken {
 pub struct PreparedRoute {
     pub id: MailboxId,
     pub canonical_name: String,
+}
+
+/// Exact actor-local cost cells carried into the fused owner commit.
+pub struct PreparedCostCells {
+    table: Arc<CostTable>,
+    cells: Vec<(KindId, Arc<CostCell>)>,
+}
+
+impl PreparedCostCells {
+    pub(crate) fn new(table: Arc<CostTable>, cells: Vec<(KindId, Arc<CostCell>)>) -> Self {
+        Self { table, cells }
+    }
+
+    pub(super) fn prepare(&self, mailbox: MailboxId, token: ActivationToken) -> bool {
+        self.table.prepare(mailbox, token, &self.cells)
+    }
+
+    pub(super) fn promote(&self, mailbox: MailboxId, token: ActivationToken) {
+        self.table.promote(mailbox, token, &self.cells);
+    }
+
+    pub(super) fn rollback(&self, mailbox: MailboxId, token: ActivationToken) {
+        self.table.rollback(mailbox, token, &self.cells);
+    }
+}
+
+/// Storage-erased initialized actor awaiting an owner-assigned token.
+pub trait PreparedSpawnActivation: Send {
+    fn reserve(
+        self: Box<Self>,
+        token: ActivationToken,
+    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>>;
+
+    /// Schedule destruction of initialized actor state at its execution
+    /// home. Dropping the returned receiver is the nonblocking rejection
+    /// path; shutdown retains it until the home-side drop completes.
+    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()>;
+}
+
+/// Owner-retained handle for one activation running at its execution home.
+pub trait ActivationReservation: Send + Sync {
+    fn schedule(&self);
+    fn take_live(&self) -> Option<Box<dyn LiveActivation>>;
+    fn cancel(&self);
+    fn join(&self);
+    fn barrier_matches(&self, mail_id: MailId) -> bool;
+
+    fn cancel_and_join(&self) {
+        self.cancel();
+        self.join();
+    }
+}
+
+/// Wired actor lease. Installing it invokes no actor-authored lifecycle code.
+pub trait LiveActivation: Send {
+    fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation;
+    fn cancel_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()>;
+}
+
+pub struct InstalledActivation {
+    pub(crate) entry: MailboxEntry,
+    pub(crate) catch_up: Box<dyn FnOnce() + Send>,
+}
+
+pub struct PreparedMail {
+    pub(crate) mail: Mail,
+    pub(crate) kind_name: String,
+    pub(crate) bootstrap: bool,
+}
+
+impl PreparedMail {
+    pub(crate) fn bootstrap(mail: Mail, kind_name: String) -> Self {
+        Self { mail, kind_name, bootstrap: true }
+    }
+
+    pub(super) fn parked(mail: Mail, kind_name: String) -> Self {
+        Self { mail, kind_name, bootstrap: false }
+    }
+}
+
+/// Private move-only birth committed by the registry owner.
+pub struct PreparedSpawnCommit {
+    pub(crate) route: PreparedRoute,
+    activation: PreparedActivationGuard,
+    pub(crate) costs: PreparedCostCells,
+    pub(crate) after_init: Vec<PreparedMail>,
+}
+
+struct PreparedActivationGuard(Option<Box<dyn PreparedSpawnActivation>>);
+
+impl PreparedActivationGuard {
+    fn take(&mut self) -> Box<dyn PreparedSpawnActivation> {
+        self.0.take().expect("prepared spawn activation consumed once")
+    }
+
+    fn discard(mut self) -> crossbeam_channel::Receiver<()> {
+        self.take().discard_at_home()
+    }
+}
+
+impl Drop for PreparedActivationGuard {
+    fn drop(&mut self) {
+        if let Some(activation) = self.0.take() {
+            drop(activation.discard_at_home());
+        }
+    }
+}
+
+impl PreparedSpawnCommit {
+    pub(crate) fn new(
+        route: PreparedRoute,
+        activation: Box<dyn PreparedSpawnActivation>,
+        costs: PreparedCostCells,
+        after_init: Vec<PreparedMail>,
+    ) -> Self {
+        Self { route, activation: PreparedActivationGuard(Some(activation)), costs, after_init }
+    }
+
+    pub fn take_activation(&mut self) -> Box<dyn PreparedSpawnActivation> {
+        self.activation.take()
+    }
+
+    pub fn discard_at_home(self) -> crossbeam_channel::Receiver<()> {
+        self.activation.discard()
+    }
 }
 
 impl PreparedRoute {
@@ -69,6 +220,7 @@ impl PreparedActivation {
 }
 
 pub enum RegistryEffect {
+    PreparedSpawn(PreparedSpawnCommit),
     ReserveStarting { route: PreparedRoute },
     CancelStarting { id: MailboxId, token: ActivationToken },
     PublishLive { route: PreparedRoute, activation: PreparedActivation },
@@ -122,6 +274,7 @@ pub enum RegistryEffectError {
     Name(super::NameConflict),
     Drop(super::DropError),
     Kind(super::KindConflict),
+    ActivationRejected,
     OwnerClosed,
 }
 
@@ -131,6 +284,9 @@ impl fmt::Display for RegistryEffectError {
             Self::Name(error) => error.fmt(formatter),
             Self::Drop(error) => error.fmt(formatter),
             Self::Kind(error) => error.fmt(formatter),
+            Self::ActivationRejected => {
+                formatter.write_str("prepared actor activation could not reserve its lifecycle")
+            }
             Self::OwnerClosed => formatter.write_str("registry owner closed before applying the effect batch"),
         }
     }
@@ -145,6 +301,16 @@ pub struct EffectBatch {
 impl EffectBatch {
     pub fn new(effects: Vec<RegistryEffect>) -> Self {
         Self { effects }
+    }
+
+    pub(super) fn discard_prepared(self) -> Vec<crossbeam_channel::Receiver<()>> {
+        self.effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                RegistryEffect::PreparedSpawn(commit) => Some(commit.discard_at_home()),
+                _ => None,
+            })
+            .collect()
     }
 }
 

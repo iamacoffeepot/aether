@@ -29,6 +29,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::actor::native::envelope::Envelope;
 use crate::mail::MailboxId;
+use crate::mail::registry::effect::ActivationToken;
 use std::any::Any;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
@@ -58,6 +59,7 @@ use std::any::Any;
 /// future Phase 7 alignment may revisit).
 #[derive(Clone)]
 pub enum ActorEntry {
+    Starting { token: ActivationToken },
     Live { sender: Arc<Sender<Envelope>>, type_id: TypeId, subname: String },
     Dead,
 }
@@ -274,7 +276,7 @@ impl ActorRegistry {
         subname: String,
     ) -> Result<(), ()> {
         let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
-        if let Some(ActorEntry::Live { .. }) = actors.get(&id) {
+        if matches!(actors.get(&id), Some(ActorEntry::Starting { .. } | ActorEntry::Live { .. })) {
             Err(())
         } else {
             // `Dead` slot or empty: install the live entry. Phase 4
@@ -282,6 +284,44 @@ impl ActorRegistry {
             // empty slots.
             actors.insert(id, ActorEntry::Live { sender, type_id, subname });
             Ok(())
+        }
+    }
+
+    /// Reserve lifecycle occupancy before a Starting route is published.
+    pub(crate) fn reserve_starting(&self, id: MailboxId, token: ActivationToken) -> bool {
+        if self.is_tombstoned(id) {
+            return false;
+        }
+        let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
+        if actors.contains_key(&id) {
+            return false;
+        }
+        actors.insert(id, ActorEntry::Starting { token });
+        true
+    }
+
+    /// Promote the exact token-owned reservation to its live entry.
+    pub(crate) fn promote_starting(
+        &self,
+        id: MailboxId,
+        token: ActivationToken,
+        sender: Arc<Sender<Envelope>>,
+        type_id: TypeId,
+        subname: String,
+    ) {
+        let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
+        assert!(
+            matches!(actors.get(&id), Some(ActorEntry::Starting { token: current }) if *current == token),
+            "valid activation token must own its actor lifecycle reservation"
+        );
+        actors.insert(id, ActorEntry::Live { sender, type_id, subname });
+    }
+
+    /// Remove only the lifecycle reservation owned by `token`.
+    pub(crate) fn rollback_starting(&self, id: MailboxId, token: ActivationToken) {
+        let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
+        if matches!(actors.get(&id), Some(ActorEntry::Starting { token: current }) if *current == token) {
+            actors.remove(&id);
         }
     }
 

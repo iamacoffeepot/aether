@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::any::Any;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -8,10 +9,13 @@ use aether_data::{Kind, KindDescriptor, MailboxCategory, SchemaType};
 use aether_kinds::trace::Nanos;
 
 use crate::chassis::settlement::SettlementRegistry;
+use crate::mail::cost::CostCell;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::effect::{
-    ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError, StartingCancellation,
+    ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, EffectBatch, InstalledActivation, LiveActivation,
+    PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnActivation, PreparedSpawnCommit, RegistryApplied,
+    RegistryEffect, RegistryEffectError, StartingCancellation,
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
@@ -20,7 +24,8 @@ use crate::mail::registry::{
     Registry, noop_handler, test_dispatch, test_owned_dispatch,
 };
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
-use crate::scheduler::{BatchBudget, SeizeHandle, WakeSink};
+use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, SeizeHandle, WakeSink};
 
 /// ADR-0094: a fresh armed [`OwnedDispatch`] panics on drop if it was
 /// neither discharged nor transferred — the headline regression gate
@@ -881,6 +886,478 @@ fn starting_token(result: &[RegistryApplied]) -> ActivationToken {
     *token
 }
 
+struct FakePreparedActivation {
+    deliveries: Arc<Mutex<Vec<u8>>>,
+    scheduled: Arc<AtomicUsize>,
+    registry: Arc<Registry>,
+    expected_starting: Vec<MailboxId>,
+    barrier_mail_id: MailId,
+    cancelled: Arc<AtomicUsize>,
+}
+
+impl PreparedSpawnActivation for FakePreparedActivation {
+    fn reserve(
+        self: Box<Self>,
+        _token: ActivationToken,
+    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
+        Ok(Arc::new(FakeActivationReservation {
+            live: Mutex::new(Some(Box::new(FakeLiveActivation { deliveries: self.deliveries }))),
+            scheduled: self.scheduled,
+            registry: self.registry,
+            expected_starting: self.expected_starting,
+            barrier_mail_id: self.barrier_mail_id,
+            cancelled: self.cancelled,
+        }))
+    }
+
+    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(self);
+        let _ = tx.send(());
+        rx
+    }
+}
+
+struct FakeActivationReservation {
+    live: Mutex<Option<Box<dyn LiveActivation>>>,
+    scheduled: Arc<AtomicUsize>,
+    registry: Arc<Registry>,
+    expected_starting: Vec<MailboxId>,
+    barrier_mail_id: MailId,
+    cancelled: Arc<AtomicUsize>,
+}
+
+impl ActivationReservation for FakeActivationReservation {
+    fn schedule(&self) {
+        assert!(
+            self.expected_starting.iter().all(|id| self.registry.route_lookup(KindId(0), *id).is_starting()),
+            "every accepted Starting route is published before the first activation schedule"
+        );
+        self.scheduled.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn take_live(&self) -> Option<Box<dyn LiveActivation>> {
+        self.live.lock().unwrap().take()
+    }
+
+    fn cancel(&self) {
+        self.cancelled.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn join(&self) {}
+
+    fn barrier_matches(&self, mail_id: MailId) -> bool {
+        self.barrier_mail_id == mail_id
+    }
+}
+
+struct FakeLiveActivation {
+    deliveries: Arc<Mutex<Vec<u8>>>,
+}
+
+impl LiveActivation for FakeLiveActivation {
+    fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
+        for prepared in bootstrap.into_iter().chain(parked) {
+            self.deliveries.lock().unwrap().push(prepared.mail.payload.bytes()[0]);
+        }
+        let deliveries = Arc::clone(&self.deliveries);
+        InstalledActivation {
+            entry: MailboxEntry::Inbox {
+                handler: Arc::new(move |dispatch: OwnedDispatch| {
+                    dispatch.discharge();
+                    deliveries.lock().unwrap().push(dispatch.payload.bytes()[0]);
+                }),
+                seize: Arc::default(),
+            },
+            catch_up: Box::new(|| {}),
+        }
+    }
+
+    fn cancel_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let _ = tx.send(());
+        rx
+    }
+}
+
+struct DiscardProbeActivation {
+    dropped: crossbeam_channel::Sender<thread::ThreadId>,
+}
+
+struct HomeCancelPrepared {
+    sink: WakeSink,
+    cancel_started: crossbeam_channel::Sender<()>,
+}
+
+impl PreparedSpawnActivation for HomeCancelPrepared {
+    fn reserve(
+        self: Box<Self>,
+        _token: ActivationToken,
+    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
+        Ok(Arc::new(HomeCancelReservation {
+            sink: self.sink,
+            cancel_started: self.cancel_started,
+            cancelled: AtomicBool::new(false),
+            done: Mutex::new(None),
+        }))
+    }
+
+    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let _ = tx.send(());
+        rx
+    }
+}
+
+struct HomeCancelReservation {
+    sink: WakeSink,
+    cancel_started: crossbeam_channel::Sender<()>,
+    cancelled: AtomicBool,
+    done: Mutex<Option<crossbeam_channel::Receiver<()>>>,
+}
+
+impl ActivationReservation for HomeCancelReservation {
+    fn schedule(&self) {}
+
+    fn take_live(&self) -> Option<Box<dyn LiveActivation>> {
+        None
+    }
+
+    fn cancel(&self) {
+        if self.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        self.done.lock().unwrap().replace(done_rx);
+        let _ = self.cancel_started.send(());
+        self.sink.schedule(Arc::new(HomeCancelJob { done: Mutex::new(Some(done_tx)) }));
+    }
+
+    fn join(&self) {
+        let done = self.done.lock().unwrap().take();
+        if let Some(done) = done {
+            let _ = done.recv();
+        }
+    }
+
+    fn barrier_matches(&self, _mail_id: MailId) -> bool {
+        false
+    }
+}
+
+struct HomeCancelJob {
+    done: Mutex<Option<crossbeam_channel::Sender<()>>>,
+}
+
+impl Drainable for HomeCancelJob {
+    fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+        let done = self.done.lock().unwrap().take();
+        if let Some(done) = done {
+            let _ = done.send(());
+        }
+        CycleResult::Closed
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct WorkerBlocker {
+    started: crossbeam_channel::Sender<()>,
+    release: crossbeam_channel::Receiver<()>,
+}
+
+impl Drainable for WorkerBlocker {
+    fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+        let _ = self.started.send(());
+        let _ = self.release.recv();
+        CycleResult::Closed
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Drop for DiscardProbeActivation {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(thread::current().id());
+    }
+}
+
+impl PreparedSpawnActivation for DiscardProbeActivation {
+    fn reserve(
+        self: Box<Self>,
+        _token: ActivationToken,
+    ) -> Result<Arc<dyn ActivationReservation>, Box<dyn PreparedSpawnActivation>> {
+        Err(self)
+    }
+
+    fn discard_at_home(self: Box<Self>) -> crossbeam_channel::Receiver<()> {
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        #[allow(clippy::disallowed_methods, reason = "test probe models an execution-home discard thread")]
+        thread::Builder::new()
+            .name("activation-discard-probe".to_owned())
+            .spawn(move || {
+                drop(self);
+                let _ = done_tx.send(());
+            })
+            .unwrap();
+        done_rx
+    }
+}
+
+fn prepared_test_spawn(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    name: &str,
+    deliveries: Arc<Mutex<Vec<u8>>>,
+    scheduled: Arc<AtomicUsize>,
+    expected_starting: Vec<MailboxId>,
+    bootstrap: u8,
+) -> (MailboxId, Arc<CostCell>, Arc<AtomicUsize>, RegistryEffect) {
+    let id = MailboxId::from_name(name);
+    let cell = Arc::new(CostCell::new());
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let effect = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
+        PreparedRoute::with_id(id, name.to_owned()),
+        Box::new(FakePreparedActivation {
+            deliveries,
+            scheduled,
+            registry: Arc::clone(registry),
+            expected_starting,
+            barrier_mail_id: MailId::new(id, 1),
+            cancelled: Arc::clone(&cancelled),
+        }),
+        PreparedCostCells::new(Arc::clone(mailer.cost_table()), vec![(KindId(7), Arc::clone(&cell))]),
+        vec![PreparedMail::bootstrap(Mail::new(id, KindId(7), vec![bootstrap], 1), "test.activation".into())],
+    ));
+    (id, cell, cancelled, effect)
+}
+
+fn activation_barrier(id: MailboxId, token: ActivationToken, sequence: u64) -> Mail {
+    let mail_id = MailId::new(id, sequence);
+    Mail::new(id, ACTIVATION_BARRIER_KIND, token.value().to_le_bytes().to_vec(), 1)
+        .with_reply_to(Source::with_correlation(aether_data::SourceAddr::Component(id), sequence))
+        .with_lineage(mail_id, mail_id, None)
+}
+
+#[test]
+fn prepared_births_publish_together_then_promote_independently_with_exact_cost_cells() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let scheduled = Arc::new(AtomicUsize::new(0));
+    let first_id = MailboxId::from_name("prepared-first");
+    let second_id = MailboxId::from_name("prepared-second");
+    let expected = vec![first_id, second_id];
+    let (first_id, first_cell, _, first) = prepared_test_spawn(
+        &registry,
+        &mailer,
+        "prepared-first",
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::clone(&scheduled),
+        expected.clone(),
+        1,
+    );
+    let (second_id, second_cell, _, second) = prepared_test_spawn(
+        &registry,
+        &mailer,
+        "prepared-second",
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::clone(&scheduled),
+        expected,
+        2,
+    );
+    let completion = registry.submit(EffectBatch::new(vec![first, second])).unwrap();
+    owner.run_once();
+    let applied = completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap();
+    let [RegistryApplied::Starting { token: first_token, .. }, RegistryApplied::Starting { token: second_token, .. }] =
+        applied.as_slice()
+    else {
+        panic!("expected two Starting results: {applied:?}")
+    };
+    assert_eq!(scheduled.load(Ordering::SeqCst), 2);
+    for (id, expected_cell) in [(first_id, &first_cell), (second_id, &second_cell)] {
+        let cells = mailer.cost_table().cells_for(id);
+        assert_eq!(cells.len(), 1);
+        assert!(Arc::ptr_eq(&cells[0].1, expected_cell));
+    }
+
+    mailer.push(activation_barrier(second_id, *second_token, 1));
+    owner.run_once();
+    assert!(registry.entry(second_id).is_some(), "fast activation promotes independently");
+    assert!(registry.entry(first_id).is_none(), "slow activation remains Starting");
+    mailer.push(activation_barrier(first_id, *first_token, 1));
+    owner.run_once();
+    assert!(registry.entry(first_id).is_some());
+}
+
+#[test]
+fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let scheduled = Arc::new(AtomicUsize::new(0));
+    let id = MailboxId::from_name("prepared-cancel-rollback");
+    let (_, _, cancelled, effect) = prepared_test_spawn(
+        &registry,
+        &mailer,
+        "prepared-cancel-rollback",
+        Arc::new(Mutex::new(Vec::new())),
+        scheduled,
+        vec![id],
+        1,
+    );
+    let completion = registry.submit(EffectBatch::new(vec![effect])).unwrap();
+    owner.run_once();
+    let token = starting_token(&completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    registry.register_inbox("prepared-cancel-conflict", noop_handler());
+    let rejected = registry
+        .submit(EffectBatch::new(vec![
+            RegistryEffect::CancelStarting { id, token },
+            RegistryEffect::publish_named(
+                "prepared-cancel-conflict".to_owned(),
+                MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() },
+            ),
+        ]))
+        .unwrap();
+    owner.run_once();
+
+    assert!(matches!(rejected.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
+    assert_eq!(cancelled.load(Ordering::SeqCst), 0, "rejected transaction invokes no cancellation side effect");
+    mailer.push(activation_barrier(id, token, 1));
+    owner.run_once();
+    assert!(registry.entry(id).is_some(), "the original prepared birth can still promote");
+}
+
+#[test]
+fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_consumed() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let deliveries = Arc::new(Mutex::new(Vec::new()));
+    let scheduled = Arc::new(AtomicUsize::new(0));
+    let id = MailboxId::from_name("prepared-fifo");
+    let (_, _, _, effect) =
+        prepared_test_spawn(&registry, &mailer, "prepared-fifo", Arc::clone(&deliveries), scheduled, vec![id], 1);
+    let completion = registry.submit(EffectBatch::new(vec![effect])).unwrap();
+    owner.run_once();
+    let token = starting_token(&completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+
+    mailer.push(Mail::new(id, KindId(7), vec![2], 1));
+    owner.run_once();
+    let counter = mailer.trace_handle().settlement_counter();
+    let forged = activation_barrier(id, token, 2);
+    mailer.record_sent(forged.mail_id, forged.root, None, id, id, forged.kind);
+    mailer.push(forged);
+    owner.run_once();
+    assert!(registry.entry(id).is_none(), "forged same-token barrier cannot promote");
+    assert_eq!(counter.live_roots(), 0, "forged barrier is consumed and balanced");
+    // A later Starting mail in the same owner drain must join the prefix
+    // even when readiness appeared first.
+    mailer.push(activation_barrier(id, token, 1));
+    mailer.push(Mail::new(id, KindId(7), vec![4], 1));
+    owner.run_once();
+    mailer.push(Mail::new(id, KindId(7), vec![3], 1));
+    assert_eq!(*deliveries.lock().unwrap(), [1, 2, 4, 3]);
+
+    let forged = activation_barrier(id, token, 5);
+    mailer.record_sent(forged.mail_id, forged.root, None, id, id, forged.kind);
+    assert_eq!(counter.live_roots(), 1, "synthetic control obligation is live before owner consumption");
+    mailer.push(forged);
+    owner.run_once();
+    assert_eq!(counter.live_roots(), 0, "consuming a forged barrier balances its obligation exactly");
+    assert_eq!(*deliveries.lock().unwrap(), [1, 2, 4, 3], "stale live barrier never reaches actor dispatch");
+
+    let mut malformed = activation_barrier(id, token, 3);
+    malformed.payload = MailRef::from(vec![0xFF]);
+    mailer.record_sent(malformed.mail_id, malformed.root, None, id, id, malformed.kind);
+    mailer.push(malformed);
+    owner.run_once();
+    assert_eq!(counter.live_roots(), 0, "malformed private control mail is consumed and balanced");
+    assert_eq!(*deliveries.lock().unwrap(), [1, 2, 4, 3]);
+
+    let unknown_id = MailboxId::from_name("unknown-activation-control");
+    let unknown = activation_barrier(unknown_id, token, 1);
+    mailer.record_sent(unknown.mail_id, unknown.root, None, unknown_id, unknown_id, unknown.kind);
+    mailer.push(unknown);
+    owner.run_once();
+    assert_eq!(counter.live_roots(), 0, "unknown private control mail is consumed and balanced");
+}
+
+#[test]
+fn owner_shutdown_discards_unapplied_prepared_state_at_home_and_joins() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    let (dropped_tx, dropped_rx) = crossbeam_channel::bounded(1);
+    let id = MailboxId::from_name("queued-discard");
+    let completion = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
+            PreparedRoute::with_id(id, "queued-discard".to_owned()),
+            Box::new(DiscardProbeActivation { dropped: dropped_tx }),
+            PreparedCostCells::new(Arc::clone(mailer.cost_table()), Vec::new()),
+            Vec::new(),
+        ))]))
+        .unwrap();
+    let owner_thread = thread::current().id();
+
+    drop(owner);
+
+    let dropped_thread = dropped_rx.try_recv().expect("owner shutdown joins the home-side prepared-state drop");
+    assert_ne!(dropped_thread, owner_thread, "initialized state never drops on the registry owner");
+    assert!(matches!(
+        completion.wait_timeout(Duration::from_millis(100)).unwrap(),
+        Err(RegistryEffectError::OwnerClosed)
+    ));
+}
+
+#[test]
+fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+    let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, aborter);
+    let sink = pool.wake_sink();
+    let (block_started_tx, block_started_rx) = crossbeam_channel::bounded(1);
+    let (block_release_tx, block_release_rx) = crossbeam_channel::bounded(1);
+    sink.schedule(Arc::new(WorkerBlocker { started: block_started_tx, release: block_release_rx }));
+    block_started_rx.recv_timeout(Duration::from_secs(1)).expect("single worker enters blocker");
+
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, sink.clone());
+    let (cancel_started_tx, cancel_started_rx) = crossbeam_channel::bounded(1);
+    let id = MailboxId::from_name("owner-drop-home-cancel");
+    let birth = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
+        PreparedRoute::with_id(id, "owner-drop-home-cancel".to_owned()),
+        Box::new(HomeCancelPrepared { sink, cancel_started: cancel_started_tx }),
+        PreparedCostCells::new(Arc::clone(mailer.cost_table()), Vec::new()),
+        Vec::new(),
+    ));
+    let started = registry.submit(EffectBatch::new(vec![birth])).unwrap();
+    owner.run_once();
+    let _ = started.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+    let queued_owner = registry.submit(EffectBatch::new(Vec::new())).unwrap();
+    let (drop_done_tx, drop_done_rx) = crossbeam_channel::bounded(1);
+    #[allow(clippy::disallowed_methods, reason = "regression needs lease drop concurrent with the occupied worker")]
+    let dropping = thread::spawn(move || {
+        drop(owner);
+        let _ = drop_done_tx.send(());
+    });
+    cancel_started_rx.recv_timeout(Duration::from_secs(1)).expect("lease close begins home cancellation");
+
+    let _ = block_release_tx.send(());
+    drop_done_rx.recv_timeout(Duration::from_secs(1)).expect("lease drop cannot deadlock behind its queued owner slot");
+    dropping.join().unwrap();
+    assert!(matches!(
+        queued_owner.wait_timeout(Duration::from_secs(1)).unwrap(),
+        Err(RegistryEffectError::OwnerClosed)
+    ));
+    assert!(registry.lookup("owner-drop-home-cancel").is_none());
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
+
 #[test]
 fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     use std::any::Any;
@@ -1025,6 +1502,27 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
     assert_eq!(registry.route_generation(), 1, "one self-sized drain publishes the keyed view once");
     assert_eq!(registry.mailbox_generation(), 1, "one self-sized drain publishes inventory once");
     assert_eq!(registry.lookup("ordered"), Some(id));
+}
+
+#[test]
+fn owner_admission_catches_up_after_transitional_direct_publication() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached());
+    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+    registry.register_inbox("direct-generation-advance", noop_handler());
+    let unknown = MailboxId::from_name("unknown-after-direct-generation-advance");
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let pushing = Arc::clone(&mailer);
+    #[allow(clippy::disallowed_methods, reason = "bounded-progress regression needs a joinable caller thread")]
+    let thread = thread::spawn(move || {
+        pushing.push(Mail::new(unknown, KindId(7), vec![1], 1));
+        let _ = done_tx.send(());
+    });
+
+    done_rx.recv_timeout(Duration::from_millis(100)).expect("generation catch-up retries once instead of spinning");
+    thread.join().unwrap();
+    owner.run_once();
 }
 
 #[test]

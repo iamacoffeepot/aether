@@ -55,7 +55,7 @@ pub(super) struct BootedPassives {
     /// ADR-0165 additive owner foundation. Retains the scheduler slot and
     /// keeps effect submission accepting until chassis teardown. Declared
     /// before `_pool` so the owner detaches before workers join.
-    _registry_owner: RegistryOwnerLease,
+    registry_owner: Option<RegistryOwnerLease>,
     /// ADR-0165 private continuation home. Declared after the owner so
     /// owner shutdown can hand every accepted route continuation to a live
     /// relay before the pool joins.
@@ -91,6 +91,10 @@ impl BootedPassives {
     }
 
     fn shutdown_in_place(&mut self) {
+        // Stop new prepared births and synchronously cancel/join every
+        // Starting activation while the relay and worker pool are live.
+        // Only then may the instanced-slot snapshot be final.
+        drop(self.registry_owner.take());
         // Issue 685: spawned-instanced actors close BEFORE the
         // singleton shutdowns walk. Two reasons: (1) their close
         // path's `MonitorNotice` fan-out targets singleton watchers
@@ -444,7 +448,7 @@ pub(super) fn boot_passives(
         reserved_driver_mailboxes,
         actor_registry,
         spawner,
-        _registry_owner: registry_owner,
+        registry_owner: Some(registry_owner),
         _route_relay: route_relay,
         _pool: pool,
         settlement_registry,

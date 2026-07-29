@@ -189,6 +189,30 @@ where
         })
     }
 
+    /// Run the post-init wire hook while the activation job owns this slot.
+    /// The slot is not routable or drainable yet.
+    pub(super) fn wire_activation(&self) {
+        let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
+        let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
+        local::with_stamped(&self.slots, || {
+            let mut ctx =
+                NativeCtx::new(&self.binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+            A::wire(actor.as_mut(), &mut ctx);
+        });
+        drop(actor_guard);
+    }
+
+    /// Cancel a wired-but-not-live activation at the same execution home.
+    pub(super) fn cancel_activation(&self) {
+        let mut actor = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(actor) = actor.as_mut() {
+            self.run_close_hook(actor);
+        }
+        actor.take();
+        drop(actor);
+        self.state.mark_idle();
+    }
+
     /// Issue 714: fire the installed one-shot completion sender if any.
     /// Called once from the `Closed` branch of [`Self::run_cycle`] after
     /// `unwire` + registry close + `actor_guard.take()` have run. Take +

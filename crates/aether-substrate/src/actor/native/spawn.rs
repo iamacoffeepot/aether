@@ -36,11 +36,12 @@ use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::config::RingCapacities;
-use crate::mail::cost::CostCells;
+use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
+use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnCommit};
 use crate::mail::registry::{NameConflict, Registry};
-use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
+use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
@@ -141,7 +142,7 @@ struct InstancedSlotEntry {
 
 /// Identity resolved before construction starts. The canonical name is a
 /// display/reverse-map value; `id` remains the lineage-folded route key.
-struct SpawnIdentity {
+pub(super) struct SpawnIdentity {
     id: MailboxId,
     carry: u64,
     canonical_name: Arc<str>,
@@ -150,7 +151,7 @@ struct SpawnIdentity {
 
 /// Private prepared birth. It deliberately owns the initialized state rather
 /// than committing a storage representation to the builder API.
-struct StagedActor<A: NativeActor> {
+pub(super) struct StagedActor<A: NativeActor> {
     identity: SpawnIdentity,
     sender: mpsc::Sender<Envelope>,
     transport: Arc<NativeBinding>,
@@ -199,6 +200,13 @@ impl Spawner {
     /// truth for both slot sites.
     pub(crate) fn ring_capacities(&self) -> RingCapacities {
         self.ring_capacities
+    }
+
+    pub(super) fn retain_activated_slot(&self, id: MailboxId, slot: Arc<dyn Drainable>, wake: WakeHandle) {
+        self.instanced_slots
+            .lock()
+            .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
+            .insert(id, InstancedSlotEntry { slot, wake });
     }
 
     /// ADR-0097: allocate the next monotonic discriminator from the same
@@ -335,6 +343,10 @@ impl Spawner {
         &self.mailer
     }
 
+    pub(super) fn registry(&self) -> &Arc<Registry> {
+        &self.registry
+    }
+
     /// The chassis fatal-abort handle, cloned into each booted
     /// [`NativeBinding`]. Reached by the passive pumped-actor boot (ADR-0161
     /// slice R4) the same way as [`Self::mailer`].
@@ -468,6 +480,54 @@ impl Spawner {
         })
     }
 
+    /// Convert an initialized legacy actor into the private storage-erased
+    /// owner commit. Production handler egress starts consuming this seam in
+    /// the next slice; the eager terminal remains available meanwhile.
+    #[allow(dead_code, reason = "private staged seam is wired to handler egress by issue #4113")]
+    fn prepare_commit<A>(self: &Arc<Self>, staged: StagedActor<A>) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
+        let StagedActor { identity, sender, transport, slots, state, after_init } = staged;
+        let SpawnIdentity { id, canonical_name, subname, .. } = identity;
+        let mut costs = local::with_stamped(&slots, || {
+            use aether_actor::Local as _;
+            CostCells::with(|cells| cells.entries().to_vec())
+        });
+        if costs.is_empty() {
+            costs = A::capabilities().handlers.iter().map(|handler| (handler.id, Arc::new(CostCell::new()))).collect();
+            local::with_stamped(&slots, || {
+                use aether_actor::Local as _;
+                CostCells::with_mut(|cells| cells.seed(costs.clone()));
+            });
+        }
+        let after_init = after_init
+            .into_iter()
+            .map(|envelope| {
+                PreparedMail::bootstrap(
+                    Mail::new(id, envelope.kind, envelope.payload, envelope.count)
+                        .with_reply_to(envelope.sender)
+                        .with_lineage(envelope.mail_id, envelope.root, envelope.parent_mail),
+                    envelope.kind_name,
+                )
+            })
+            .collect();
+        PreparedSpawnCommit::new(
+            PreparedRoute::with_id(id, canonical_name.to_string()),
+            Box::new(super::activation::LegacyPreparedActivation::<A>::new(
+                Arc::clone(self),
+                id,
+                subname,
+                sender,
+                transport,
+                slots,
+                state,
+            )),
+            PreparedCostCells::new(Arc::clone(self.mailer.cost_table()), costs),
+            after_init,
+        )
+    }
+
     /// Consume the prepared birth and perform every shared-write and
     /// lifecycle action in the established order.
     #[allow(clippy::too_many_lines)]
@@ -567,17 +627,22 @@ impl Spawner {
         // a dynamic handler set (notably WasmTrampoline's guest manifest)
         // keeps that more specific cache instead of being overwritten by the
         // wrapper actor's static capabilities.
-        let cost_cells_seeded = local::with_stamped(&slots, || {
+        let actor_local_costs = local::with_stamped(&slots, || {
             use aether_actor::Local as _;
-            CostCells::with(|cells| !cells.entries().is_empty())
+            CostCells::with(|cells| cells.entries().to_vec())
         });
-        if !cost_cells_seeded {
+        if actor_local_costs.is_empty() {
             let handler_kinds: Vec<KindId> = A::capabilities().handlers.iter().map(|handler| handler.id).collect();
             let seeded = self.mailer.cost_table().seed(id, &handler_kinds);
             local::with_stamped(&slots, || {
                 use aether_actor::Local as _;
                 CostCells::with_mut(|cells| cells.seed(seeded));
             });
+        } else {
+            assert!(
+                self.mailer.cost_table().install_live(id, &actor_local_costs),
+                "new eager actor must own vacant cost rows"
+            );
         }
 
         // Issue 584 Phase 2a (ADR-0079 amended): post-init mail-allowed
@@ -843,13 +908,178 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, reason = "activation lifecycle tests use bounded channels and fixture-only setup")]
+
     use super::*;
     use crate::mail::mailer::Mailer;
-    use crate::mail::registry::Registry;
+    use crate::mail::registry::effect::{ActivationToken, EffectBatch, RegistryApplied, RegistryEffect};
+    use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease};
     use crate::runtime::lifecycle::PanicAborter;
-    use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, SlotState};
+    use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, PoolHandle, SlotState};
     use std::any::Any;
     use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema)]
+    #[kind(name = "test.activation.poke")]
+    struct ActivationPoke;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ActivationEvent {
+        Wire(thread::ThreadId),
+        Dispatch(thread::ThreadId),
+        Unwire(thread::ThreadId),
+        Drop(thread::ThreadId),
+    }
+
+    struct ActivationProbe {
+        events: crossbeam_channel::Sender<ActivationEvent>,
+    }
+
+    impl Drop for ActivationProbe {
+        fn drop(&mut self) {
+            let _ = self.events.send(ActivationEvent::Drop(thread::current().id()));
+        }
+    }
+
+    #[aether_actor::actor(instanced, root)]
+    impl NativeActor for ActivationProbe {
+        const NAMESPACE: &'static str = "test.activation.probe";
+        type Config = crossbeam_channel::Sender<ActivationEvent>;
+
+        fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { events: config })
+        }
+
+        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+            let _ = state.events.send(ActivationEvent::Wire(thread::current().id()));
+        }
+
+        #[handler::single]
+        fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {
+            let _ = self.events.send(ActivationEvent::Dispatch(thread::current().id()));
+        }
+
+        fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+            let _ = state.events.send(ActivationEvent::Unwire(thread::current().id()));
+        }
+    }
+
+    fn activation_fixture() -> (Arc<Spawner>, Arc<Registry>, Arc<Mailer>, PoolHandle) {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+        let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, Arc::clone(&aborter));
+        let spawner = Arc::new(Spawner::new(
+            Arc::clone(&registry),
+            Arc::new(ActorRegistry::new()),
+            Arc::clone(&mailer),
+            aborter,
+            pool.wake_sink(),
+            RingCapacities::default(),
+        ));
+        (spawner, registry, mailer, pool)
+    }
+
+    fn prepared_probe(
+        spawner: &Arc<Spawner>,
+        name: &str,
+        events: crossbeam_channel::Sender<ActivationEvent>,
+    ) -> PreparedSpawnCommit {
+        let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
+        let staged = spawner.build::<ActivationProbe>(identity, events, (), Vec::new()).unwrap();
+        spawner.prepare_commit(staged)
+    }
+
+    #[test]
+    fn prepared_activation_lifecycle_stays_on_scheduler_home() {
+        let (spawner, _registry, _mailer, pool) = activation_fixture();
+        let caller = thread::current().id();
+
+        let (discard_tx, discard_rx) = crossbeam_channel::unbounded();
+        prepared_probe(&spawner, "discard", discard_tx).discard_at_home().recv_timeout(Duration::from_secs(1)).unwrap();
+        let discarded = discard_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(discarded, ActivationEvent::Drop(home) if home != caller));
+        assert!(discard_rx.try_recv().is_err(), "unwired lifecycle never ran for an unwired discard");
+
+        let (cancel_tx, cancel_rx) = crossbeam_channel::unbounded();
+        let mut commit = prepared_probe(&spawner, "cancel", cancel_tx);
+        let token = ActivationToken::from_value(1).unwrap();
+        let activation = commit.take_activation().reserve(token).unwrap_or_else(|_| panic!("reservation accepted"));
+        activation.schedule();
+        let ActivationEvent::Wire(home) = cancel_rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
+            panic!("wire runs first")
+        };
+        activation.cancel_and_join();
+        assert_eq!(cancel_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Unwire(home));
+        assert_eq!(cancel_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Drop(home));
+        assert!(cancel_rx.try_recv().is_err(), "post-wire cancellation unwires exactly once");
+
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn successful_prepared_activation_enters_ordinary_dispatch_once() {
+        let (spawner, registry, mailer, pool) = activation_fixture();
+        let owner = RegistryOwnerLease::attach(&registry, &mailer, pool.wake_sink());
+        let (events_tx, events_rx) = crossbeam_channel::unbounded();
+        let commit = prepared_probe(&spawner, "live", events_tx);
+        let id = commit.route.id;
+        let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+        let _ = completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        let ActivationEvent::Wire(home) = events_rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
+            panic!("wire runs before live dispatch")
+        };
+        for _ in 0..100 {
+            if registry.entry(id).is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(registry.entry(id).is_some(), "barrier promotes the actor to Live");
+
+        mailer.push(Mail::new(id, ActivationPoke::ID, ActivationPoke.encode_into_bytes(), 1));
+        assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Dispatch(home));
+        assert!(events_rx.try_recv().is_err(), "one live mail performs one ordinary dispatcher drain");
+
+        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1));
+        drop(owner);
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn owner_close_after_wire_cleans_starting_activation_at_home() {
+        let (spawner, registry, mailer, pool) = activation_fixture();
+        let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink());
+        let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached());
+        let (events_tx, events_rx) = crossbeam_channel::unbounded();
+        let commit = prepared_probe(&spawner, "owner-close", events_tx);
+        let id = commit.route.id;
+        let canonical_name = commit.route.canonical_name.clone();
+        let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+        owner.apply_once_then_close_after_next_command();
+        let applied = completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        let [RegistryApplied::Starting { token, .. }] = applied.as_slice() else {
+            panic!("prepared birth publishes Starting")
+        };
+        let token = *token;
+        let ActivationEvent::Wire(home) = events_rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
+            panic!("activation wires before owner closure")
+        };
+        drop(owner);
+
+        assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Unwire(home));
+        assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Drop(home));
+        assert!(events_rx.try_recv().is_err(), "owner closure unwires exactly once");
+        assert!(registry.lookup(&canonical_name).is_none(), "Starting route is rolled back without Live publication");
+        assert!(registry.entry(id).is_none());
+        assert!(mailer.cost_table().cells_for(id).is_empty(), "token-owned cost rows are rolled back");
+        let fresh = ActivationToken::from_value(token.value() + 1).unwrap();
+        assert!(spawner.actor_registry().reserve_starting(id, fresh), "actor lifecycle reservation was removed");
+        spawner.actor_registry().rollback_starting(id, fresh);
+
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
 
     /// A `Drainable` that never runs its close cycle: it stashes the
     /// close-done sender the teardown gate installs and holds it alive
