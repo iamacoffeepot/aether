@@ -139,6 +139,31 @@ struct InstancedSlotEntry {
     wake: WakeHandle,
 }
 
+/// Identity resolved before construction starts. The canonical name is a
+/// display/reverse-map value; `id` remains the lineage-folded route key.
+struct SpawnIdentity {
+    id: MailboxId,
+    carry: u64,
+    canonical_name: Arc<str>,
+    subname: String,
+}
+
+/// Private prepared birth. It deliberately owns the initialized state rather
+/// than committing a storage representation to the builder API.
+struct StagedActor<A: NativeActor> {
+    identity: SpawnIdentity,
+    sender: mpsc::Sender<Envelope>,
+    transport: Arc<NativeBinding>,
+    slots: Box<ActorSlots>,
+    state: A::State,
+    after_init: Vec<Envelope>,
+}
+
+struct SpawnCommit {
+    mailbox_id: MailboxId,
+    canonical_name: String,
+}
+
 impl Spawner {
     pub fn new(
         registry: Arc<Registry>,
@@ -317,44 +342,23 @@ impl Spawner {
         &self.aborter
     }
 
-    /// Spawn an instanced actor. Caller threads the bootstrap mail
-    /// envelopes through `after_init_mail` (in delivery order); pass
-    /// an empty Vec for plain spawn. The `sender_for_after_init`
-    /// stamps the originator on each envelope so the spawned actor's
-    /// `ctx.reply_target()` resolves to the spawner.
-    ///
-    /// Per the issue 607 Phase 3 lifecycle:
-    /// 1. Resolve / validate subname.
-    /// 2. Claim or verify name-owner ownership of `A::NAMESPACE`.
-    /// 3. Tombstone check.
-    /// 4. Construct + init the actor on the caller's thread.
-    /// 5. Register the mailbox sink (atomic with steps 6-7).
-    /// 6. Insert `Live` entry into the actor registry.
-    /// 7. Pre-load `after_init_mail` into the inbox.
-    /// 8. Spawn dispatcher thread, move actor in.
-    // Spawn pipeline runs as one linear function so the eight-step
-    // sequence above maps 1:1 to the code. Splitting steps into
-    // helpers would scatter the rollback bookkeeping each step relies
-    // on across multiple sites.
-    #[allow(clippy::too_many_lines)]
-    fn spawn_actor<A>(
-        self: Arc<Self>,
+    /// Resolve identity and perform the current namespace and tombstone
+    /// preflight before actor construction. Named-subname and typed-parent
+    /// gates run in `SpawnBuilder` before this can allocate a counter.
+    fn preflight<A>(
+        &self,
         subname: Subname<'_>,
-        config: A::Config,
-        params: A::Params,
-        after_init_mail: Vec<Envelope>,
-        sender_for_init: Source,
         parent: Option<&ActorRuntimeIdentity>,
-    ) -> Result<MailboxId, SpawnError>
+    ) -> Result<SpawnIdentity, SpawnError>
     where
         A: Instanced + NativeActor,
     {
         // 1. Resolve subname → string.
-        let subname_str = match subname {
+        let subname = match subname {
             Subname::Counter => self.counter.fetch_add(1, Ordering::Relaxed).to_string(),
             Subname::Named(s) => s.to_owned(),
         };
-        validate_namespace_segment(&subname_str).map_err(SpawnError::SubnameInvalid)?;
+        validate_namespace_segment(&subname).map_err(SpawnError::SubnameInvalid)?;
 
         // 2. Claim namespace ownership (or verify).
         if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
@@ -370,12 +374,12 @@ impl Spawner {
         //    parent's registered name. Top-level (no parent) is the
         //    depth-1 fixed point: the node is the root of its own
         //    lineage, so it keeps the flat `{NAMESPACE}:{subname}` id.
-        let child_actor = ActorId::instanced(A::NAMESPACE, &subname_str);
+        let child_actor = ActorId::instanced(A::NAMESPACE, &subname);
         let (carry, full_name) = parent.map_or_else(
-            || (child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname_str))),
+            || (child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname))),
             |parent| {
                 let carry = fold_lineage(parent.carry(), child_actor);
-                let name: Arc<str> = Arc::from(format!("{}/{}:{}", parent.canonical_name(), A::NAMESPACE, subname_str));
+                let name: Arc<str> = Arc::from(format!("{}/{}:{}", parent.canonical_name(), A::NAMESPACE, subname));
                 (carry, name)
             },
         );
@@ -384,7 +388,23 @@ impl Spawner {
             return Err(SpawnError::SubnameRetired { full_name: full_name.to_string() });
         }
 
-        // 4. Construct + init on caller's thread. Build the inbox pair
+        Ok(SpawnIdentity { id, carry, canonical_name: full_name, subname })
+    }
+
+    /// Construct all actor-local state with no builder or context borrow.
+    fn build<A>(
+        self: &Arc<Self>,
+        identity: SpawnIdentity,
+        config: A::Config,
+        params: A::Params,
+        after_init: Vec<Envelope>,
+    ) -> Result<StagedActor<A>, SpawnError>
+    where
+        A: Instanced + NativeActor,
+    {
+        let SpawnIdentity { id, carry, canonical_name, subname } = identity;
+
+        // Construct + init on caller's thread. Build the inbox pair
         // up-front so init may publish its self-id (`NativeInitCtx::self_id`
         // reads the binding's `self_mailbox`, which is this folded `id`);
         // the spawn thread doesn't exist yet.
@@ -395,12 +415,12 @@ impl Spawner {
             id,
             // The child's lineage carry — its descendants fold onto it.
             carry,
-            Arc::clone(&full_name),
+            Arc::clone(&canonical_name),
             Arc::clone(&self.aborter),
             // Pass the chassis's `Spawner` through so the spawned
             // actor can in turn `ctx.spawn_child` from its own
             // handlers.
-            Some(Arc::clone(&self)),
+            Some(Arc::clone(self)),
         ));
         transport.install_inbox(rx);
 
@@ -419,7 +439,7 @@ impl Spawner {
         slots.seed(ActorLogRing::with_capacity(self.ring_capacities.log));
         slots.seed(ActorTraceRing::with_growth(self.ring_capacities.trace, self.ring_capacities.trace_max));
 
-        let actor = {
+        let state = {
             // Instanced actors don't publish driver-facing sub-handles
             // today — Phase 4+ may revisit. Pass a throwaway
             // ExportedHandles to keep the init-ctx shape uniform with
@@ -438,7 +458,27 @@ impl Spawner {
             }
         };
 
-        // 5-7. Register sink + Live entry + pre-load mail. The actor
+        Ok(StagedActor {
+            identity: SpawnIdentity { id, carry, canonical_name, subname },
+            sender: tx,
+            transport,
+            slots,
+            state,
+            after_init,
+        })
+    }
+
+    /// Consume the prepared birth and perform every shared-write and
+    /// lifecycle action in the established order.
+    #[allow(clippy::too_many_lines)]
+    fn commit<A>(self: Arc<Self>, staged: StagedActor<A>) -> Result<SpawnCommit, SpawnError>
+    where
+        A: Instanced + NativeActor,
+    {
+        let StagedActor { identity, sender: tx, transport, slots, state, after_init } = staged;
+        let SpawnIdentity { id, canonical_name: full_name, subname, .. } = identity;
+
+        // Register sink + Live entry + pre-load mail. The actor
         // registry's `insert_live` and the mailbox registry's
         // `try_register_inbox` each take their own write lock; a
         // collision on either step rolls back. Sequence chosen so the
@@ -488,7 +528,6 @@ impl Spawner {
                 }
             }),
         );
-        let _ = sender_for_init; // Phase 3 doesn't stamp pre-load mail with the spawner; envelopes are pre-built by SpawnBuilder.
         match registered {
             Ok(returned_id) => debug_assert_eq!(returned_id, id),
             Err(NameConflict { name }) => return Err(SpawnError::SubnameInUse { full_name: name }),
@@ -498,14 +537,14 @@ impl Spawner {
         // The chassis-side actor_registry no longer holds a clone of
         // the actor — only the sender + type_id + subname for routing
         // and resolve_actor.
-        let mut actor: Box<A::State> = Box::new(actor);
+        let mut actor = Box::new(state);
 
         // Insert before pre-loading mail: the actor_registry holding
         // the sender is the canonical record that the slot is live.
         // The Arc<Sender> here is the same one the sink handler's
         // Weak references — when `mark_dead` drops this entry, the
         // weak upgrade fails for any further external mail.
-        if self.actor_registry.insert_live(id, Arc::clone(&strong_sender), TypeId::of::<A>(), subname_str).is_err() {
+        if self.actor_registry.insert_live(id, Arc::clone(&strong_sender), TypeId::of::<A>(), subname).is_err() {
             // Hash collision against an existing Live entry on the
             // same id but a slot the mailbox registry didn't reject —
             // possible if a singleton + instanced collide on the same
@@ -558,7 +597,7 @@ impl Spawner {
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
         // succeed.
-        for env in after_init_mail {
+        for env in after_init {
             // mpsc::Sender::send only fails when the receiver
             // disconnects; rx is alive here. Discard on the
             // theoretical impossibility.
@@ -621,7 +660,7 @@ impl Spawner {
         // closure was installed (see comment above).
         let _ = manual_wake.wake();
 
-        Ok(id)
+        Ok(SpawnCommit { mailbox_id: id, canonical_name: full_name.to_string() })
     }
 }
 
@@ -765,7 +804,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// ADR-0063: `SpawnBuilder` is a single-use type, the typestate is
     /// enforced by the move into `finish`, and a double-finish would
     /// require an unsafe API misuse.
-    pub fn finish(self) -> Result<MailboxId, SpawnError> {
+    fn finish_internal(self) -> Result<SpawnCommit, SpawnError> {
         let SpawnBuilder {
             spawner,
             subname,
@@ -791,7 +830,20 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
                 actual_canonical_name: Arc::clone(parent.canonical_name()),
             });
         }
-        Spawner::spawn_actor::<A>(spawner, subname, config, params, after_init, sender, parent.as_ref())
+        let _ = sender;
+        let identity = spawner.preflight::<A>(subname, parent.as_ref())?;
+        let staged = spawner.build::<A>(identity, config, params, after_init)?;
+        spawner.commit(staged)
+    }
+
+    pub fn finish(self) -> Result<MailboxId, SpawnError> {
+        self.finish_internal().map(|commit| commit.mailbox_id)
+    }
+
+    /// Consume the builder and return both the mailbox id and the exact
+    /// canonical name registered for the new actor.
+    pub fn finish_with_name(self) -> Result<(MailboxId, String), SpawnError> {
+        self.finish_internal().map(|commit| (commit.mailbox_id, commit.canonical_name))
     }
 }
 
