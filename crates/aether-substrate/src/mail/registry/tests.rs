@@ -711,6 +711,10 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     assert_eq!(name, "loaded");
     assert!(r.lookup("loaded").is_none(), "name should be reusable");
     assert!(matches!(r.entry(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
+    assert!(
+        r.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id),
+        "a retained Dropped route is absent from public live inventory"
+    );
     // Under ADR-0029 the id is a function of the name, so a
     // re-register produces the *same* id and flips the entry back
     // to `Component`.
@@ -718,6 +722,10 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     assert_eq!(reloaded, id);
     assert_eq!(r.lookup("loaded"), Some(reloaded));
     assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox { .. })));
+    assert!(
+        r.list_mailbox_descriptors().iter().any(|descriptor| descriptor.id == id),
+        "re-registration restores the route to public live inventory"
+    );
 }
 
 #[test]
@@ -842,7 +850,7 @@ fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
     let observed = registry.inventory();
 
     registry.register_inbox("aether.input", noop_handler());
-    registry.register_kind("aether.inventory.race");
+    let kind = registry.register_kind("aether.inventory.race");
     subscription.acknowledge(observed.mailbox_generation, observed.kind_generation);
 
     wakes.recv_timeout(Duration::from_millis(100)).expect("stale pair re-arms a wake");
@@ -852,7 +860,13 @@ fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
     subscription.acknowledge(latest.mailbox_generation, latest.kind_generation);
 
     registry.try_register_inbox("aether.input", noop_handler()).expect_err("conflict is observable");
-    assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "rejection emits no wake");
+    assert_eq!(registry.register_kind("aether.inventory.race"), kind, "matching kind registration is idempotent");
+    assert_eq!(
+        (registry.inventory().mailbox_generation, registry.inventory().kind_generation),
+        (latest.mailbox_generation, latest.kind_generation),
+        "rejection and idempotent kind match publish no inventory generation"
+    );
+    assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "rejection and idempotent kind match emit no wake");
 }
 
 #[test]

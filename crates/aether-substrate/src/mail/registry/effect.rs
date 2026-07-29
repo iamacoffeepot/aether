@@ -17,17 +17,17 @@ use crate::scheduler::SeizeHandle;
 
 /// Route identity prepared away from the registry writer. It deliberately
 /// names no storage representation.
-pub(super) struct PreparedRoute {
-    pub(super) id: MailboxId,
-    pub(super) canonical_name: String,
+pub struct PreparedRoute {
+    pub id: MailboxId,
+    pub canonical_name: String,
 }
 
 impl PreparedRoute {
-    pub(super) fn named(canonical_name: String) -> Self {
+    pub fn named(canonical_name: String) -> Self {
         Self { id: MailboxId::from_name(&canonical_name), canonical_name }
     }
 
-    pub(super) fn with_id(id: MailboxId, canonical_name: String) -> Self {
+    pub fn with_id(id: MailboxId, canonical_name: String) -> Self {
         Self { id, canonical_name }
     }
 }
@@ -35,7 +35,7 @@ impl PreparedRoute {
 /// Opaque activation prepared beside a route. The temporary legacy adapter
 /// carries only an endpoint; actor state and scheduler/storage coordinates do
 /// not enter the owner effect contract.
-pub(super) struct PreparedActivation {
+pub struct PreparedActivation {
     legacy: LegacyEndpoint,
 }
 
@@ -51,7 +51,7 @@ impl PreparedActivation {
     }
 }
 
-pub(super) enum RegistryEffect {
+pub enum RegistryEffect {
     PublishLive { route: PreparedRoute, activation: PreparedActivation },
     DropMailbox(MailboxId),
     RemoveMailbox(MailboxId),
@@ -73,7 +73,7 @@ impl RegistryEffect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum RegistryApplied {
+pub enum RegistryApplied {
     Mailbox(MailboxId),
     Dropped(String),
     Removed(bool),
@@ -82,7 +82,7 @@ pub(super) enum RegistryApplied {
 }
 
 #[derive(Debug)]
-pub(super) enum RegistryEffectError {
+pub enum RegistryEffectError {
     Name(super::NameConflict),
     Drop(super::DropError),
     Kind(super::KindConflict),
@@ -102,17 +102,17 @@ impl fmt::Display for RegistryEffectError {
 
 impl Error for RegistryEffectError {}
 
-pub(super) struct EffectBatch {
+pub struct EffectBatch {
     pub(super) effects: Vec<RegistryEffect>,
 }
 
 impl EffectBatch {
-    pub(super) fn new(effects: Vec<RegistryEffect>) -> Self {
+    pub fn new(effects: Vec<RegistryEffect>) -> Self {
         Self { effects }
     }
 }
 
-pub(super) struct RegistryCompletion<T> {
+pub struct RegistryCompletion<T> {
     receiver: crossbeam_channel::Receiver<Result<T, RegistryEffectError>>,
 }
 
@@ -121,7 +121,7 @@ impl<T> RegistryCompletion<T> {
         Self { receiver }
     }
 
-    pub(super) fn wait_timeout(
+    pub fn wait_timeout(
         self,
         timeout: Duration,
     ) -> Result<Result<T, RegistryEffectError>, crossbeam_channel::RecvTimeoutError> {

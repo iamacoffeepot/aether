@@ -28,10 +28,10 @@ use aether_data::{
     wire,
 };
 
-/// Framework wake emitted after the registry publishes a new live-mailbox
-/// inventory generation. The inventory rides a pinned registry view, so the
-/// wake is intentionally empty and coalescible. This is hand-written rather
-/// than derived so it is never submitted to application kind inventory.
+/// Framework wake emitted after the registry publishes a new live-mailbox or
+/// kind inventory generation. The inventory rides a pinned registry view, so
+/// the wake is intentionally empty and coalescible. This is hand-written
+/// rather than derived so it is never submitted to application kind inventory.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RegistryChanged;
@@ -379,6 +379,13 @@ mod tests {
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
         const ID: DataKindId = DataKindId(0xDEAD_BEEF_0001_0001);
+    }
+
+    #[test]
+    fn registry_changed_has_an_empty_round_trip_payload() {
+        let bytes = RegistryChanged.encode_into_bytes();
+        assert!(bytes.is_empty());
+        assert!(RegistryChanged::decode_from_bytes(&bytes).is_some());
     }
 
     /// Structured-shape kind for the schema-driven `decode_kind` path.

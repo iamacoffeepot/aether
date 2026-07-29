@@ -403,7 +403,7 @@ impl Registry {
     }
 
     #[allow(dead_code, reason = "staged registry writers begin using the owner seam in the next migration issues")]
-    pub(super) fn submit(&self, batch: EffectBatch) -> Option<RegistryCompletion<Vec<RegistryApplied>>> {
+    pub(crate) fn submit(&self, batch: EffectBatch) -> Option<RegistryCompletion<Vec<RegistryApplied>>> {
         self.owner.get()?.submit(batch)
     }
 

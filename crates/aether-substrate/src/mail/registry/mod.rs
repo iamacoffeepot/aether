@@ -14,7 +14,7 @@
 mod address;
 mod dispatch;
 #[allow(dead_code, reason = "owner effects and inventory subscriptions are foundations consumed by arc follow-ups")]
-mod effect;
+pub(crate) mod effect;
 mod errors;
 mod handlers;
 mod mailbox;

@@ -517,6 +517,41 @@ fn registry_owner_is_retained_for_the_chassis_lifetime() {
     assert!(!registry.owner_accepting(), "chassis teardown closes owner submission before pool teardown");
 }
 
+#[test]
+fn registry_owner_applies_after_direct_boot_claims() {
+    use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryEffect};
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
+        .with_actor::<StubLog>(())
+        .build_passive()
+        .expect("passive chassis boots with a direct claim");
+
+    let boot_id = registry.lookup(StubLog::NAMESPACE).expect("direct boot claim is published before return");
+    let completion = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::RegisterKind {
+            descriptor: aether_data::KindDescriptor {
+                name: "test.registry-owner.queued".to_owned(),
+                schema: aether_data::SchemaType::Bytes,
+            },
+            reject_conflict: true,
+        }]))
+        .expect("retained owner accepts the queued mutation");
+    let queued_kind = match completion
+        .wait_timeout(Duration::from_secs(1))
+        .expect("scheduler-backed owner completes without blocking teardown")
+        .expect("queued mutation applies after the direct boot table")
+        .as_slice()
+    {
+        [RegistryApplied::Kind(id)] => *id,
+        applied => panic!("unexpected registry apply result: {applied:?}"),
+    };
+
+    assert_eq!(registry.lookup(StubLog::NAMESPACE), Some(boot_id));
+    assert_eq!(registry.kind_id("test.registry-owner.queued"), Some(queued_kind));
+    drop(chassis);
+}
+
 /// Issue 607 Phase 7: a singleton whose `init` returns `Err`
 /// releases its slot before `with_actor` propagates the error.
 /// After the failed build, the chassis's `Registry` has no sink
