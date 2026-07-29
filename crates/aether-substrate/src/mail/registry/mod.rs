@@ -3,18 +3,13 @@
 // kind id → name + descriptor, ids derived from (name, schema) via
 // ADR-0030 Phase 2's `kind_id_from_parts`). Both id spaces are a pure
 // function of declaration-time data — no sequential allocation, no
-// registration order dependence. The registry uses interior mutability
-// (`RwLock`) so mailboxes and kinds can be added at runtime —
+// registration order dependence. The registry uses an `RwLock` only to
+// serialize writers so mailboxes and kinds can be added at runtime —
 // ADR-0010's runtime component loading mutates both tables after an
 // `Arc<Registry>` has already been shared with the scheduler and hub
-// client. Reads take a shared lock and are cheap; writes are rare
-// (boot + load/replace/drop).
-
-// Registry RwLock guards are intentionally held across read-then-update
-// sequences — releasing the guard mid-sequence would open a TOCTOU
-// window where a concurrent writer could mutate the map between the
-// `get` and the dependent action. Writes are rare, contention is low.
-#![allow(clippy::significant_drop_tightening)]
+// client. Successful writes synchronously publish point-in-time route and
+// kind views while holding that guard. Every table read loads those views
+// without acquiring the writer lock (ADR-0165).
 
 mod address;
 mod dispatch;
