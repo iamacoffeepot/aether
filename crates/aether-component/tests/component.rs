@@ -14,6 +14,8 @@
 use std::fs;
 use std::path::Path;
 
+use aether_actor::Addressable;
+use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::MailboxId;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -40,7 +42,7 @@ const PROBE_NAME: &str = "probe";
 /// `PROBE_NAME` (which isn't a registered mailbox).
 fn probe_address() -> String {
     use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
+    format!("aether.component/{}:{PROBE_NAME}", WasmTrampoline::NAMESPACE)
 }
 
 /// The kind the probe broadcasts to the harness observer once per tick.
@@ -80,16 +82,35 @@ fn list_components_reports_loaded_probe_lineage() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    load_probe(&mut harness, &wasm_path);
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await(
+                "aether.component",
+                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+            ),
+        )])
+        .expect("load sequence");
+    let (mailbox_id, name) = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { mailbox_id, name, .. } => (mailbox_id, name),
+        LoadResult::Err { error } => panic!("load_component: {error}"),
+    };
+    assert_eq!(name, probe_address(), "LoadResult must return the registered nested trampoline route");
+    assert_eq!(
+        mailbox_id,
+        WasmTrampoline::resolve(ComponentHostCapability::resolve(0, ()).0, PROBE_NAME),
+        "LoadResult id must be the returned nested route's typed resolution",
+    );
+    assert_ne!(name, format!("aether.embedded:{PROBE_NAME}"));
 
     let listed = harness
         .execute(vec![("list", HarnessOp::send_and_await("aether.component", &ListComponents {}))])
         .expect("list sequence");
     let result = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult");
     assert!(
-        result.names.contains(&probe_address()),
-        "the loaded probe should be listed at its lineage address {}, got {:?}",
-        probe_address(),
+        result.names.contains(&name),
+        "the loaded probe should be listed at the exact LoadResult route {name}, got {:?}",
         result.names,
     );
 }
@@ -546,7 +567,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -634,7 +655,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -718,7 +739,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let Some(reshaped_path) = require_wasm("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
-    let addr = format!("aether.component/{}:{TYPED_NAME}", aether_component::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{TYPED_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
@@ -807,7 +828,7 @@ fn childless_component_hot_reloads_unchanged() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Addressable, Manual, OutboundReply, ReplyMode};
+use aether_actor::{Manual, OutboundReply, ReplyMode};
 use aether_data::Kind;
 use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use wasmtime::Module;
@@ -250,9 +250,9 @@ impl ComponentHostCapabilityState {
             // `wire`) and later sibling spawns index their own.
             wasm_bytes: Arc::clone(&wasm_bytes),
         };
-        let mailbox_id = match ctx
+        let (mailbox_id, full_name) = match ctx
             .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&name), trampoline_config, ())
-            .finish()
+            .finish_with_name()
         {
             Ok(id) => id,
             Err(e) => {
@@ -324,16 +324,10 @@ impl ComponentHostCapabilityState {
 
         LoadResult::Ok {
             mailbox_id,
-            // ADR-0099 §3/§4: report the name the spawn machinery
-            // actually registered — the `/`-rendered lineage
-            // (`aether.component/aether.embedded:NAME`) —
-            // read back from the registry so `LoadResult.name` can
-            // never disagree with the live entry. The id is the
-            // lineage fold, not `hash(name)`.
-            name: self
-                .registry
-                .mailbox_name(mailbox_id)
-                .unwrap_or_else(|| format!("{}:{}", WasmTrampoline::NAMESPACE, name)),
+            // ADR-0099 §3/§4: report the exact `/`-rendered lineage
+            // the spawn machinery registered. The id is the lineage
+            // fold, not `hash(name)`.
+            name: full_name,
             capabilities,
         }
     }
