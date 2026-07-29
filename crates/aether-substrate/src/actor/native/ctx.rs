@@ -39,7 +39,7 @@ use crate::runtime::trace::SettlementHold;
 use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
-use crate::actor::native::dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
+use crate::actor::native::dispatch_blocking::{DeferredCompletion, DispatchId, Pending, TaskDone};
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn_thread;
 use crate::chassis::inbox::InboundMail;
@@ -354,7 +354,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// hold cleanly (no chain to hold), matching `spawn_inherit`.
     ///
     /// When `f` returns, the worker stores the output in the ledger's
-    /// completion slot and pushes a [`TaskCompletionWake`] to this
+    /// completion slot and pushes a
+    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake) to this
     /// actor's own mailbox (the loopback-wake mechanism). The actor's
     /// completion handler decodes that wake's [`DispatchId`] and calls
     /// [`Self::take_task_done`] to rebuild the [`TaskDone`], then
@@ -444,7 +445,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         C: Send + 'static,
         F: FnOnce() -> O + Send + 'static,
     {
-        let id = self.binding.dispatch_insert(hold, reply_to, Box::new(cx));
+        let completion = self.arm_deferred_completion(hold, reply_to, cx);
+        let id = completion.dispatch_id();
 
         // The worker captures the binding + dispatch id, runs the
         // blocking closure, parks its output in the ledger, then pushes
@@ -456,16 +458,11 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         // until the resolve. The per-request spawn is a placeholder; the
         // scalable form is a reused work-stealing blocking pool isolated
         // from the cooperative scheduler (#1322).
-        let binding = Arc::clone(self.binding);
         // This IS the ADR-0093 dispatch_blocking primitive — the hold lives in the
         // ledger (not on this worker), so the chain stays open until the resolve.
         #[allow(clippy::disallowed_methods)]
         let spawned = ThreadBuilder::new().name(String::from("aether-dispatch-blocking")).spawn(move || {
-            let output = f();
-            binding.dispatch_fill_output(id, Box::new(output));
-            let wake = TaskCompletionWake { dispatch_id: id.0 };
-            let self_id = binding.self_mailbox();
-            binding.mailer().push(Mail::new(self_id, TaskCompletionWake::ID, wake.encode_into_bytes(), 1));
+            completion.complete(f());
         });
         if let Err(e) = spawned {
             tracing::error!(
@@ -486,9 +483,25 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         id
     }
 
+    /// Arm the shared ADR-0093 ledger for a typed deferred producer without
+    /// tying completion to a blocking worker. Future staged effects can move
+    /// this capability to their authoritative owner and retain no parent
+    /// lifetime beyond a weak binding reference.
+    pub(crate) fn arm_deferred_completion<O, C>(
+        &self,
+        hold: SettlementHold,
+        reply_to: Source,
+        context: C,
+    ) -> DeferredCompletion<O>
+    where
+        C: Send + 'static,
+    {
+        self.binding.dispatch_arm(hold, reply_to, context)
+    }
+
     /// ADR-0093 completion-routing entry point: remove the in-flight
     /// ledger entry named by `id` (decoded from a landed
-    /// [`TaskCompletionWake`]) and rebuild its [`TaskDone<O, C>`]. The
+    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake)) and rebuild its [`TaskDone<O, C>`]. The
     /// (future) `#[handler(task)]` macro — and, for now, a hand-wired
     /// completion handler — calls this and then `resolve`s the result.
     ///
@@ -506,7 +519,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// This is the routing primitive behind `#[handler(task)]`. Multiple
     /// task handlers on one actor are discriminated by their `TaskDone<O>`
     /// output type, not a kind id — all completions arrive as the single
-    /// [`TaskCompletionWake`] kind. The generated dispatch arm tries each
+    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake) kind. The generated dispatch arm tries each
     /// task handler's `(O, C)` in
     /// turn; a wrong-type probe must *not* consume the entry, or the first
     /// handler tried would swallow a completion destined for a later one.
