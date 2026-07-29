@@ -30,17 +30,19 @@ const CANONICAL: &str = "aether.component/aether.embedded:camera";
 /// none of which the substrate's synthetic-fact tests can see.
 #[test]
 fn the_component_host_abbreviation_expands_through_the_linked_inventory() {
-    // Reference the cap so aether-component's inventory submissions link into
-    // this test binary — the linker drops unreferenced statics out of an rlib,
-    // and without this the host's facts never reach `AddressIndex`.
-    let _link_inventory = ComponentHostCapability::NAMESPACE;
+    // The prefix is read off the cap rather than spelled out, which both keeps
+    // the namespace single-owner and references the cap so aether-component's
+    // inventory submissions link into this test binary — the linker drops
+    // unreferenced statics out of an rlib, and without that reference the
+    // host's facts never reach `AddressIndex`.
+    let short = format!("{}://camera", ComponentHostCapability::NAMESPACE);
     let registry = Registry::new();
     let id = mailbox_id_from_path(CANONICAL);
     registry.try_register_inbox_with_id(id, CANONICAL, noop_handler()).expect("canonical name is free");
 
     // The bare discriminator elides the child namespace: exactly one instanced
     // child namespace is declared beneath the host.
-    let elided = registry.resolve_address("aether.component://camera").expect("abbreviation resolves");
+    let elided = registry.resolve_address(&short).expect("abbreviation resolves");
     assert_eq!(elided.mailbox_id, id);
     assert_eq!(elided.canonical_path, CANONICAL);
 
