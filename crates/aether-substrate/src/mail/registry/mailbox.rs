@@ -1514,24 +1514,28 @@ impl Registry {
     /// because kind definitions are immutable after their first successful
     /// registration: a later kind publication cannot change an existing id.
     pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
-        let routes = self.routes.load();
-        let kinds = self.kinds.load();
-        let (endpoint, starting, dropped) = match resolve_route(recipient, |id| routes.entry_for(&id)) {
-            ResolvedRoute::Starting { .. } => (None, true, false),
-            ResolvedRoute::Live { endpoint } => (Some(endpoint.clone()), false, false),
-            ResolvedRoute::Dropped => (None, false, true),
-            ResolvedRoute::Unknown => (None, false, false),
+        let (endpoint, starting, dropped, generation) = {
+            let routes = self.routes.load();
+            let (endpoint, starting, dropped) = match resolve_route(recipient, |id| routes.entry_for(&id)) {
+                ResolvedRoute::Starting { .. } => (None, true, false),
+                ResolvedRoute::Live { endpoint } => (Some(endpoint.clone()), false, false),
+                ResolvedRoute::Dropped => (None, false, true),
+                ResolvedRoute::Unknown => (None, false, false),
+            };
+            (endpoint, starting, dropped, routes.generation())
         };
         RouteLookup {
             endpoint,
             starting,
             dropped,
-            kind_name: kinds
+            kind_name: self
+                .kinds
+                .load()
                 .table()
                 .kinds
                 .get(&kind)
                 .map_or_else(|| Arc::clone(&self.empty_kind_name), |slot| Arc::clone(&slot.name)),
-            generation: routes.generation(),
+            generation,
         }
     }
 
