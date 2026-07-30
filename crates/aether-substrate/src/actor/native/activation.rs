@@ -366,15 +366,20 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
             // leave this execution home. This substrate-owned control mail is
             // intentionally eager; buffered wire work stays behind the
             // binding's activation hold until the owner's post-Live suffix.
-            let barrier_mail_id = binding.push_envelope_returning_root(
+            binding.push_envelope_returning_root_before_push(
                 id.0,
                 ACTIVATION_BARRIER_KIND.0,
                 &self.token.value().to_le_bytes(),
                 1,
                 None,
                 None,
+                |barrier_mail_id| {
+                    self.barrier_mail_id
+                        .lock()
+                        .expect("activation barrier identity lock poisoned")
+                        .replace(barrier_mail_id);
+                },
             );
-            self.barrier_mail_id.lock().expect("activation barrier identity lock poisoned").replace(barrier_mail_id);
             if self.cancelled.load(Ordering::Acquire)
                 && let Some(live) = self.live.lock().expect("activation live lock poisoned").take()
             {

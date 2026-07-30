@@ -672,11 +672,40 @@ impl NativeBinding {
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
     ) -> MailId {
+        self.push_envelope_returning_root_before_push(
+            recipient,
+            kind,
+            bytes,
+            count,
+            parent_mail,
+            inherited_root,
+            |_| {},
+        )
+    }
+
+    /// Mint an eager envelope's identity, expose it to `before_push`, then
+    /// publish the mail. The activation barrier uses this narrow hook to make
+    /// its exact identity visible before another owner worker can consume it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the hook preserves the established eager-envelope dimensions and adds one ordering callback"
+    )]
+    pub(super) fn push_envelope_returning_root_before_push(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        parent_mail: Option<MailId>,
+        inherited_root: Option<MailId>,
+        before_push: impl FnOnce(MailId),
+    ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation);
         let mail_id = MailId::new(self.self_mailbox(), correlation);
         let root = inherited_root.unwrap_or(mail_id);
+        before_push(mail_id);
         // ADR-0080 §2 producer hook: emit `Sent` before pushing the
         // mail. Every `Mailer` carries a trace handle by default
         // (per-chassis post iamacoffeepot/aether#953), so producer
@@ -1284,6 +1313,30 @@ mod tests {
         assert_eq!(transport.prev_correlation(), 1);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
         assert_eq!(transport.prev_correlation(), 2);
+    }
+
+    #[test]
+    fn eager_identity_hook_runs_before_inline_publication() {
+        use crate::mail::registry::MailDispatch;
+
+        let (registry, mailer) = bare_substrate();
+        let published = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&published);
+        let (tx, rx) = mpsc::channel();
+        let recipient = registry.register_inline(
+            "test.binding.before-push",
+            Arc::new(move |_dispatch: MailDispatch<'_>| {
+                tx.send(*observed.lock().unwrap()).unwrap();
+            }),
+        );
+        let binding = NativeBinding::new_for_test(mailer, MailboxId(0xB4_221E));
+
+        let mail_id =
+            binding.push_envelope_returning_root_before_push(recipient.0, KindId(1).0, &[], 1, None, None, |mail_id| {
+                published.lock().unwrap().replace(mail_id);
+            });
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Some(mail_id));
     }
 
     /// #1695 / ADR-0080 §5/§6: a synchronous `ctx.reply` from a handler
