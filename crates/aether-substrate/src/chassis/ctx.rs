@@ -17,6 +17,7 @@ use crate::chassis::inbox::SettlingInbox;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::BootAuthority;
+use crate::mail::registry::InboxHandler;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::FatalAborter;
@@ -283,6 +284,29 @@ pub(crate) fn register_relay_inbox(
     registry: &Arc<Registry>,
     name: &str,
 ) -> Result<(MailboxId, mpsc::Receiver<Envelope>, Arc<MailboxWakeSlot>), BootError> {
+    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
+    let id = registry.try_register_inbox(authority, name.to_owned(), handler)?;
+    Ok((id, receiver, wake_slot))
+}
+
+/// The receiver, wake slot, and inbox handler of a relay mailbox, built but
+/// not yet bound to a route.
+///
+/// Splitting construction from registration is what lets the post-seal pumped
+/// boot (ADR-0165, [`crate::chassis::builder::PassiveChassis::boot_pumped_actor`])
+/// reserve its route as `Starting` through the registry owner, run `init` /
+/// `wire` at its caller-thread execution home, and only then hand this
+/// `handler` back to the owner as the endpoint to publish.
+pub(crate) struct RelayInbox {
+    pub(crate) receiver: mpsc::Receiver<Envelope>,
+    pub(crate) wake_slot: Arc<MailboxWakeSlot>,
+    pub(crate) handler: Arc<dyn InboxHandler>,
+}
+
+/// Build a relay mailbox's channel, wake slot, and inbox handler without
+/// touching the registry. See [`register_relay_inbox`] for the semantics of
+/// the handler body.
+pub(crate) fn prepare_relay_inbox() -> RelayInbox {
     let (tx, rx) = mpsc::channel::<Envelope>();
     let tx = Arc::new(tx);
     // iamacoffeepot/aether#1318: optional wake hook fired after each accepted
@@ -291,33 +315,29 @@ pub(crate) fn register_relay_inbox(
     // `aether.window` mail nudges the winit loop under `ControlFlow::Wait`.
     let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
     let wake_for_handler = Arc::clone(&wake_slot);
-    let id = registry.try_register_inbox(
-        authority,
-        name.to_owned(),
-        Arc::new(move |dispatch: OwnedDispatch| {
-            // The strong `tx` is captured for liveness; this keeps the
-            // move-closure holding it and documents that the derived `Weak`
-            // below always upgrades.
-            debug_assert!(Arc::strong_count(&tx) >= 1);
-            match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler) {
-                RelayOutcome::Delivered => {}
-                RelayOutcome::ReceiverGone { kind_name } => {
-                    tracing::warn!(
-                        target: "aether_substrate::capability",
-                        kind = %kind_name,
-                        "capability mailbox receiver dropped — mail discarded"
-                    );
-                }
-                RelayOutcome::SenderGone { .. } => {
-                    // Unreachable: the closure holds the strong `tx`, so the
-                    // derived `Weak` always upgrades. Handled for match
-                    // exhaustiveness.
-                    debug_assert!(false, "register_relay_inbox sender cannot be gone");
-                }
+    let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+        // The strong `tx` is captured for liveness; this keeps the
+        // move-closure holding it and documents that the derived `Weak`
+        // below always upgrades.
+        debug_assert!(Arc::strong_count(&tx) >= 1);
+        match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler) {
+            RelayOutcome::Delivered => {}
+            RelayOutcome::ReceiverGone { kind_name } => {
+                tracing::warn!(
+                    target: "aether_substrate::capability",
+                    kind = %kind_name,
+                    "capability mailbox receiver dropped — mail discarded"
+                );
             }
-        }),
-    )?;
-    Ok((id, rx, wake_slot))
+            RelayOutcome::SenderGone { .. } => {
+                // Unreachable: the closure holds the strong `tx`, so the
+                // derived `Weak` always upgrades. Handled for match
+                // exhaustiveness.
+                debug_assert!(false, "register_relay_inbox sender cannot be gone");
+            }
+        }
+    });
+    RelayInbox { receiver: rx, wake_slot, handler }
 }
 
 /// Strong handle to the inbound `Sender<Envelope>` for a mailbox

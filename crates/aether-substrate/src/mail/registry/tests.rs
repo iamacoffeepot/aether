@@ -2467,3 +2467,56 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
     assert_eq!(received.payload.into_vec(), vec![0xAB, 0xCD]);
     assert!(rx.try_recv().is_err(), "exactly one enqueue should send exactly one envelope");
 }
+
+/// ADR-0165 pumped activation, second ack: promoting a reservation publishes
+/// the endpoint the caller thread wired and releases the mail that parked
+/// behind the reservation, in the order the owner observed it.
+///
+/// Tripwire: the promote arm has to drain `pending_births[id].parked` itself.
+/// Clearing the reservation and letting the generic staged-pending path
+/// reclaim it would route those envelopes as unknown-recipient instead —
+/// silently losing every mail addressed during the caller's `init` / `wire`
+/// window, which is the whole reason the reservation exists.
+#[test]
+fn promoting_a_reservation_publishes_the_endpoint_and_releases_parked_mail() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+    let pool = Pool::start(PoolConfig { workers: 2, ..PoolConfig::default() }, aborter);
+    let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+    let _owner =
+        RegistryOwnerLease::attach(auth(), &registry, &mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+
+    let kind = registry.register_kind(&auth(), "test.registry.promote_starting");
+    let name = "test.registry.promote_starting.actor";
+    let (id, token) = registry.reserve_starting_through_owner(name).expect("owner accepts the reservation");
+    assert!(registry.entry(id).is_none(), "the reservation is not live while its caller wires");
+
+    // Two envelopes arrive while the caller thread is still wiring.
+    for value in [1_u32, 2] {
+        mailer.push(Mail::new(id, kind, value.to_le_bytes().to_vec(), 1));
+    }
+
+    let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_for_handler = Arc::clone(&seen);
+    let (delivered_tx, delivered_rx) = crossbeam_channel::bounded::<()>(2);
+    let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(dispatch.payload.bytes());
+        seen_for_handler.lock().expect("test capture mutex").push(u32::from_le_bytes(bytes));
+        dispatch.discharge();
+        let _ = delivered_tx.try_send(());
+    });
+
+    registry.promote_starting_through_owner(id, token, handler).expect("owner accepts the second ack");
+    assert!(registry.entry(id).is_some(), "the second ack published the caller's endpoint as Live");
+    for _ in 0..2 {
+        delivered_rx.recv_timeout(Duration::from_secs(5)).expect("parked mail reaches the promoted endpoint");
+    }
+
+    assert_eq!(
+        seen.lock().expect("test capture mutex").as_slice(),
+        &[1, 2],
+        "parked mail continues to the promoted endpoint in owner-observed order"
+    );
+}

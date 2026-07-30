@@ -308,13 +308,37 @@ impl PreparedActivation {
 pub enum RegistryEffect {
     PreparedSpawn(PreparedSpawnCommit),
     PublishAlias(PreparedAliasRoute),
-    ReserveStarting { route: PreparedRoute },
-    CancelStarting { id: MailboxId, token: ActivationToken },
-    PublishLive { route: PreparedRoute, activation: PreparedActivation },
+    ReserveStarting {
+        route: PreparedRoute,
+    },
+    /// Second ack of the pumped activation handshake (ADR-0165): the caller
+    /// thread that reserved `id` as `Starting` has finished running the
+    /// actor's `init` and `wire` at its own execution home, and hands the
+    /// owner the endpoint to publish. Parked mail drains to it in
+    /// owner-observed order as part of the same apply.
+    PromoteStarting {
+        id: MailboxId,
+        token: ActivationToken,
+        activation: PreparedActivation,
+    },
+    CancelStarting {
+        id: MailboxId,
+        token: ActivationToken,
+    },
+    PublishLive {
+        route: PreparedRoute,
+        activation: PreparedActivation,
+    },
     DropMailbox(MailboxId),
     RemoveMailbox(MailboxId),
-    InstallSeize { id: MailboxId, handle: SeizeHandle },
-    RegisterKind { descriptor: KindDescriptor, reject_conflict: bool },
+    InstallSeize {
+        id: MailboxId,
+        handle: SeizeHandle,
+    },
+    RegisterKind {
+        descriptor: KindDescriptor,
+        reject_conflict: bool,
+    },
 }
 
 impl RegistryEffect {
@@ -502,6 +526,19 @@ impl<T> RegistryCompletion<T> {
         timeout: Duration,
     ) -> Result<Result<T, RegistryEffectError>, crossbeam_channel::RecvTimeoutError> {
         self.receiver.recv_timeout(timeout)
+    }
+
+    /// Block until the owner retires the batch.
+    ///
+    /// The post-seal external-spawn path (ADR-0165) waits here: its caller is
+    /// an embedder thread, never a pool worker, so the wait cannot starve the
+    /// owner that is going to complete it. Every owner exit completes its
+    /// queued batches — `close_owner_commands`, `close_orphaned_commands`, and
+    /// the closed-queue arm of `submit_with` each send a result — so a
+    /// disconnected channel means the completion was dropped without ever
+    /// reaching a drain, which is the same outcome as an owner that closed.
+    pub fn wait(self) -> Result<T, RegistryEffectError> {
+        self.receiver.recv().unwrap_or(Err(RegistryEffectError::OwnerClosed))
     }
 }
 

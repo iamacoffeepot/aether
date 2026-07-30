@@ -40,8 +40,11 @@ use crate::config::RingCapacities;
 use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
-use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnCommit};
-use crate::mail::registry::{BootAuthority, NameConflict, Registry};
+use crate::mail::registry::effect::{
+    EffectBatch, PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnCommit, RegistryEffect,
+    RegistryEffectError,
+};
+use crate::mail::registry::{BirthProgress, BootAuthority, NameConflict, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
@@ -54,7 +57,8 @@ use aether_actor::log::ActorLogRing;
 use crate::actor::native::local;
 use aether_actor::trace::ActorTraceRing;
 use std::sync::Weak;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// The spawn-subname vocabulary, re-exported from `aether-actor`
 /// (ADR-0097). It's shared between native `spawn_child` and the FFI
@@ -172,12 +176,21 @@ pub struct Spawner {
     /// funnel) without per-spawn plumbing.
     ring_capacities: RingCapacities,
     /// iamacoffeepot/aether#4156: proof that the eager commit half may write
-    /// the registry directly. The `Spawner` is built once in `boot_passives`
-    /// and the eager path it serves is the documented boot / embedder
-    /// carve-out (`SpawnBuilder::finish`); the handler route through it was
-    /// severed by iamacoffeepot/aether#4070, and a staged child birth reaches
-    /// the registry through the ADR-0165 owner instead.
-    authority: BootAuthority,
+    /// the registry directly, and — since iamacoffeepot/aether#4167 — the last
+    /// such proof still in circulation once boot ends. The `Spawner` is built
+    /// once in `boot_passives` and outlives boot behind an `Arc`, so it is the
+    /// one holder whose token would otherwise let a post-seal caller name the
+    /// direct writer. [`Spawner::seal`] takes it; after that
+    /// [`Spawner::commit`] cannot produce a `&BootAuthority` and therefore
+    /// cannot name `Registry::apply_one` at all, and every birth it runs goes
+    /// through the ADR-0165 owner like a staged child birth.
+    ///
+    /// `Mutex<Option<_>>` rather than a `OnceLock`-shaped take because the
+    /// seal runs against a shared `&Spawner` and `OnceLock` can only be
+    /// emptied through `&mut self`. Taking under the lock also makes the
+    /// sealed state the *absence* of a token rather than a flag sitting
+    /// beside a live one.
+    authority: Mutex<Option<BootAuthority>>,
 }
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
@@ -232,17 +245,25 @@ impl Spawner {
             wake_sink,
             instanced_slots: Mutex::new(HashMap::new()),
             ring_capacities,
-            authority: BootAuthority::new(),
+            authority: Mutex::new(Some(BootAuthority::new())),
         }
     }
 
-    /// Borrow the `Spawner`'s [`BootAuthority`] — the proof the eager
-    /// commit half already holds, lent to the sibling embedder-boot path
-    /// that claims a relay mailbox outside a live `ChassisCtx`
-    /// (`PassiveChassis::boot_pumped_actor`, ADR-0161 slice R4). Crate-private,
-    /// so lending it never widens who can mint one.
-    pub(crate) fn boot_authority(&self) -> &BootAuthority {
-        &self.authority
+    /// Install the ADR-0165 runtime seal: take the boot authority out of
+    /// circulation so nothing can reach the registry's direct write path
+    /// again.
+    ///
+    /// Returns the token so the caller owns the moment it dies; dropping the
+    /// return value is the whole effect. Idempotent — a second call finds
+    /// `None`, which is what makes a re-entered teardown or a double-sealed
+    /// test harmless.
+    ///
+    /// The chassis builder calls this after a successful driver `Start` and
+    /// immediately before returning a `PassiveChassis`. A failed `Start` never
+    /// reaches it, so a chassis that never came up leaves boot's own writer
+    /// intact for the unwind.
+    pub(crate) fn seal(&self) -> Option<BootAuthority> {
+        self.authority.lock().expect("spawner boot authority lock poisoned; fail-fast per ADR-0063").take()
     }
 
     /// Borrow the chassis worker pool's wake sink (ready-queue sender +
@@ -552,9 +573,9 @@ impl Spawner {
     }
 
     /// Convert an initialized actor into an unfinalized storage-erased owner
-    /// commit. Retained for focused activation lifecycle tests; production
-    /// handler staging uses [`Self::prepare_commit_with_finalizer`].
-    #[allow(dead_code, reason = "unfinalized adapter helper is retained for focused activation lifecycle tests")]
+    /// commit. The post-seal root birth ([`Self::commit_through_owner`]) uses
+    /// this form: nothing is waiting on a `TaskDone`, so there is no finalizer
+    /// to arm. Handler staging uses [`Self::prepare_commit_with_finalizer`].
     fn prepare_commit<A>(self: &Arc<Self>, staged: StagedActor<A>) -> PreparedSpawnCommit
     where
         A: Instanced + NativeActor,
@@ -626,10 +647,153 @@ impl Spawner {
         )
     }
 
-    /// Consume the prepared birth and perform every shared-write and
-    /// lifecycle action in the established order.
-    #[allow(clippy::too_many_lines)]
+    /// Consume the prepared birth, taking whichever of the two commit routes
+    /// the ADR-0165 seal leaves open.
+    ///
+    /// Before the seal the boot path still holds this `Spawner`'s
+    /// [`BootAuthority`], so the birth lands through the direct writer with
+    /// read-your-writes and a typed error (#4035's carve-out). After it, no
+    /// token exists and the only reachable route is the registry owner, which
+    /// gives a root birth the same `Starting` / `wire`-at-home / `Live`
+    /// protocol every other birth already runs.
+    ///
+    /// The authority guard is held across the direct branch rather than
+    /// re-locked per mutator: nothing the branch runs re-enters `commit` (a
+    /// handler's `spawn_child` stages, it never commits), and the only other
+    /// contender for this lock is [`Self::seal`], which runs once boot is
+    /// over.
     fn commit<A>(self: Arc<Self>, staged: StagedActor<A>) -> Result<SpawnCommit, SpawnError>
+    where
+        A: Instanced + NativeActor,
+    {
+        let authority = self.authority.lock().expect("spawner boot authority lock poisoned; fail-fast per ADR-0063");
+        if let Some(authority) = authority.as_ref() {
+            return Self::commit_directly(&self, staged, authority);
+        }
+        drop(authority);
+        self.commit_through_owner(staged)
+    }
+
+    /// Submit the prepared birth to the ADR-0165 registry owner and block on
+    /// its decision.
+    ///
+    /// Blocking is safe precisely where this runs: the caller is an external
+    /// embedder thread reaching in through `BuiltChassis::spawn_actor` /
+    /// `PassiveChassis::spawn_actor`, never a pool worker, so it cannot be the
+    /// worker the owner needs to make progress. ADR-0165's one-worker-deadlock
+    /// warning is about a *handler* waiting on the owner; a handler reaches
+    /// `HandlerSpawnBuilder::stage` instead, which never waits.
+    ///
+    /// The owner accepting the birth is what the caller is told about: the
+    /// route is reserved `Starting` under a token and its activation is
+    /// scheduled at its execution home, where `wire` runs and the barrier that
+    /// promotes it to `Live` originates. This then waits out that second leg
+    /// too, so `finish()` keeps the read-your-writes contract its callers have
+    /// always had: when it returns `Ok`, the mailbox is addressable.
+    fn commit_through_owner<A>(self: Arc<Self>, staged: StagedActor<A>) -> Result<SpawnCommit, SpawnError>
+    where
+        A: Instanced + NativeActor,
+    {
+        let mailbox_id = staged.identity.id;
+        let canonical_name = staged.identity.canonical_name.to_string();
+        let commit = self.prepare_commit(staged);
+        let Some(completion) = self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)]))
+        else {
+            return Err(SpawnError::OwnerClosed);
+        };
+        match completion.wait() {
+            Ok(_) => {}
+            Err(RegistryEffectError::Name(NameConflict { name })) => {
+                return Err(SpawnError::SubnameInUse { full_name: name });
+            }
+            Err(RegistryEffectError::OwnerClosed) => return Err(SpawnError::OwnerClosed),
+            Err(_) => return Err(SpawnError::ActivationRejected),
+        }
+        self.await_birth(mailbox_id).map(|()| SpawnCommit { mailbox_id, canonical_name })
+    }
+
+    /// Wait for an accepted birth to leave `Starting`.
+    ///
+    /// The activation runs at its execution home on the worker pool and the
+    /// owner promotes it on the barrier that follows, so the two legs need two
+    /// pool turns; this thread is an embedder thread, never one of those
+    /// workers, so parking here cannot be what stops them.
+    ///
+    /// Patience escalates the way every other internal gate's does
+    /// (`shutdown_instanced`, the settlement gates): a slow box gets a warn
+    /// and more time, and only a genuinely wedged pool exhausts the cap. That
+    /// is unrecoverable rather than reportable — the birth was already
+    /// accepted, so there is no consistent state to hand a caller — hence the
+    /// same disposition split the teardown gate uses: panic under
+    /// `debug_assertions` so a test fails at the gate, abort in release
+    /// through the chassis aborter.
+    /// Terminal disposition for a birth the owner accepted but that never
+    /// reached `Live`: panic under `debug_assertions` so a test fails
+    /// attributably at the gate, abort in release through the chassis aborter.
+    /// The same split `shutdown_instanced` uses, for the same reason — there is
+    /// no consistent state left to report.
+    #[allow(
+        clippy::unused_self,
+        clippy::needless_pass_by_value,
+        reason = "the release arm consumes both through the chassis `FatalAborter`; only the debug arm ignores them"
+    )]
+    fn birth_wedged(&self, reason: String) -> ! {
+        #[cfg(debug_assertions)]
+        {
+            panic!("{reason}");
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.aborter.abort(reason)
+        }
+    }
+
+    fn await_birth(&self, id: MailboxId) -> Result<(), SpawnError> {
+        let round = Duration::from_millis(2);
+        let cap = Duration::from_secs(30);
+        let started = Instant::now();
+        let mut warned = false;
+        loop {
+            match self.registry.birth_progress(id) {
+                BirthProgress::Live => return Ok(()),
+                BirthProgress::Gone => return Err(SpawnError::ActivationRejected),
+                BirthProgress::Starting => {}
+            }
+            let waited = started.elapsed();
+            if waited >= cap {
+                self.birth_wedged(format!(
+                    "gate spawn_actor.owner_birth[{id}] wedged after {waited:?}: the owner accepted the birth but \
+                     it never reached Live"
+                ));
+            }
+            if !warned && waited >= round {
+                warned = true;
+                tracing::warn!(
+                    target: "aether_substrate::spawn",
+                    mailbox = %id,
+                    cap_millis = cap.as_millis(),
+                    "post-seal spawn slow: the owner accepted the birth but it is still Starting",
+                );
+            }
+            // A healthy birth resolves in the two pool turns it takes to run
+            // the activation and drain the barrier, so spin off the fast path
+            // first and only then start sleeping the round budget.
+            if waited < round {
+                thread::yield_now();
+            } else {
+                thread::sleep(round);
+            }
+        }
+    }
+
+    /// The pre-seal direct commit: every shared write and lifecycle action in
+    /// the established order, on the calling thread.
+    #[allow(clippy::too_many_lines)]
+    fn commit_directly<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        authority: &BootAuthority,
+    ) -> Result<SpawnCommit, SpawnError>
     where
         A: Instanced + NativeActor,
     {
@@ -664,7 +828,7 @@ impl Spawner {
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
         let registered = self.registry.try_register_inbox_with_id(
-            &self.authority,
+            authority,
             id,
             full_name.to_string(),
             Arc::new(move |dispatch: OwnedDispatch| {
@@ -716,7 +880,7 @@ impl Spawner {
             // a dangling sink that warn-drops mail. The actor itself
             // (init succeeded) drops naturally as `actor` falls out
             // of scope.
-            self.registry.remove_closure(&self.authority, id);
+            self.registry.remove_closure(authority, id);
             return Err(SpawnError::SubnameInUse { full_name: full_name.to_string() });
         }
 
@@ -794,7 +958,7 @@ impl Spawner {
         // strong slot ref via `instanced_slots` below; the demuxer's
         // `Weak` upgrade fails cleanly once the actor is torn down.
         self.registry.install_seize_handle(
-            &self.authority,
+            authority,
             id,
             SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
         );

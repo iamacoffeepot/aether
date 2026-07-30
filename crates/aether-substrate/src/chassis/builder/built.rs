@@ -11,11 +11,12 @@ use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
 use crate::actor::native::NativeActor;
 use crate::actor::native::pumped_slot::PumpedSlot;
 use crate::chassis::Chassis;
-use crate::chassis::ctx::{MailboxWakeSlot, register_relay_inbox};
+use crate::chassis::ctx::{MailboxWakeSlot, RelayInbox, prepare_relay_inbox};
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
+use crate::mail::registry::effect::RegistryEffectError;
 
 macro_rules! chassis_accessors {
     () => {
@@ -139,15 +140,29 @@ impl<C: Chassis> PassiveChassis<C> {
     /// driver's Start-stage `boot`.
     ///
     /// Claims `A::NAMESPACE` fresh (a no-driver chassis reserved no
-    /// Claim-stage driver mailbox), registers a relay inbox under it, and
-    /// runs the shared `assemble_pumped_slot` boot (binding + inbox
-    /// install + seed + `init` / `wire`), returning the slot plus its
-    /// [`MailboxWakeSlot`] so the embedder installs whatever wake nudges its
-    /// pump cadence (or none — the harness busy-polls its drain).
+    /// Claim-stage driver mailbox), then runs the two-ack activation
+    /// handshake against the ADR-0165 registry owner, returning the slot plus
+    /// its [`MailboxWakeSlot`] so the embedder installs whatever wake nudges
+    /// its pump cadence (or none — the harness busy-polls its drain).
     ///
-    /// Errors if `A::NAMESPACE` is already owned by a different actor type,
-    /// if the relay-inbox registration fails, or if `A::init` returns `Err`;
-    /// in each failure the namespace claim is released before returning.
+    /// This runs post-seal by construction: `build_passive` seals immediately
+    /// before handing back the `PassiveChassis` this is called on, so the
+    /// route cannot be written directly and both acks go through the owner:
+    ///
+    /// 1. reserve `A::NAMESPACE` as a `Starting` route and take its token —
+    ///    from here mail addressed to the actor parks in the owner instead of
+    ///    warn-dropping against a name that does not exist yet;
+    /// 2. run the shared `assemble_pumped_slot` boot — binding, inbox install,
+    ///    seed, `init` and `wire` — **on this thread**, which is the pumped
+    ///    actor's execution home, so actor-authored lifecycle code never runs
+    ///    on the registry owner;
+    /// 3. hand the owner the wired endpoint, which publishes the route `Live`
+    ///    and releases everything parked behind step 1 in the order it arrived.
+    ///
+    /// Errors if `A::NAMESPACE` is already owned by a different actor type, if
+    /// the owner refuses either ack, or if `A::init` returns `Err`; in each
+    /// failure the namespace claim is released and any accepted reservation is
+    /// cancelled before returning.
     pub fn boot_pumped_actor<A>(
         &self,
         config: A::Config,
@@ -166,13 +181,22 @@ impl<C: Chassis> PassiveChassis<C> {
         }
 
         let mailer = spawner.mailer();
-        let boot = register_relay_inbox(spawner.boot_authority(), mailer.registry(), A::NAMESPACE).and_then(
-            |(mailbox_id, rx, wake_slot)| {
-                let inbox = SettlingInbox::new(mailbox_id, rx, Arc::clone(mailer));
-                let slot = assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params)?;
-                Ok((slot, wake_slot))
-            },
-        );
+        let registry = mailer.registry();
+        let reserved = registry.reserve_starting_through_owner(A::NAMESPACE).map_err(|error| owner_boot_error(&error));
+        let boot = reserved.and_then(|(mailbox_id, token)| {
+            let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
+            let inbox = SettlingInbox::new(mailbox_id, receiver, Arc::clone(mailer));
+            match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params) {
+                Ok(slot) => registry
+                    .promote_starting_through_owner(mailbox_id, token, handler)
+                    .map(|()| (slot, wake_slot))
+                    .map_err(|error| owner_boot_error(&error)),
+                Err(e) => {
+                    registry.cancel_starting_through_owner(mailbox_id, token);
+                    Err(e)
+                }
+            }
+        });
         match boot {
             Ok(pair) => Ok(pair),
             Err(e) => {
@@ -215,6 +239,12 @@ impl<C: Chassis> PassiveChassis<C> {
     }
 
     chassis_accessors!();
+}
+
+/// Surface an owner refusal as the chassis boot error the pumped boot path
+/// already returns for every other failure.
+fn owner_boot_error(error: &RegistryEffectError) -> BootError {
+    BootError::Other(Box::new(io::Error::other(format!("registry owner refused the pumped activation: {error}"))))
 }
 
 fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
