@@ -1,7 +1,8 @@
 # ADR-0165: Handlers Read Views, Emit Effects
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-23
+- **Accepted:** 2026-07-30
 - **Last amended:** 2026-07-30
 
 ## Context
@@ -72,7 +73,7 @@ Loading the view yields a point-in-time snapshot guard:
 - readers never acquire the writer’s synchronization primitive;
 - consumers must not infer that a loaded snapshot remains current after they act on it.
 
-`ViewPublisher<T>` is the non-`Clone` writer half. Exactly one authoritative owner holds it after the runtime seal.
+`ViewPublisher<T>` is the non-`Clone` writer half. After the runtime seal exactly one authoritative owner may write through it. The publishers stay on the registry behind a private single-writer lock rather than moving onto the owner: boot writes them before an owner exists and again after it attaches, so the seal removes every other route to them instead of relocating them.
 
 View surfaces are separated from the beginning:
 
