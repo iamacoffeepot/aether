@@ -42,9 +42,8 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::effect::{
     EffectBatch, PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnCommit, RegistryEffect,
-    RegistryEffectError,
 };
-use crate::mail::registry::{BirthProgress, BootAuthority, NameConflict, Registry};
+use crate::mail::registry::{BootAuthority, NameConflict, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
@@ -57,8 +56,7 @@ use aether_actor::log::ActorLogRing;
 use crate::actor::native::local;
 use aether_actor::trace::ActorTraceRing;
 use std::sync::Weak;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The spawn-subname vocabulary, re-exported from `aether-actor`
 /// (ADR-0097). It's shared between native `spawn_child` and the FFI
@@ -105,7 +103,21 @@ pub enum SpawnError {
     OwnerClosed,
     /// Storage or cost reservation rejected the prepared activation.
     ActivationRejected,
+    /// A post-seal external birth was accepted by the registry owner and then
+    /// nothing decided it within the spawn path's patience budget (30 s).
+    /// Reachable only from a wedged worker pool — the activation runs at its
+    /// scheduler home, so a pool that never schedules it leaves the caller
+    /// with no answer. Reported rather than fatal: the caller is an external
+    /// thread that can log it, retry, or tear the chassis down.
+    BirthWedged { mailbox_id: MailboxId, waited: Duration },
 }
+
+/// How long a post-seal external spawn waits for the birth it submitted to be
+/// decided. It covers both legs — the owner accepting the batch and the
+/// activation reaching `Live` at its scheduler home — which take two pool
+/// turns on a healthy substrate, so anything approaching this budget is a
+/// wedged pool rather than a slow one.
+const BIRTH_PATIENCE: Duration = Duration::from_secs(30);
 
 /// Deterministic result returned when a handler has locally prepared and
 /// staged a child birth. It names a reservation, not proof that the child is
@@ -572,29 +584,14 @@ impl Spawner {
         })
     }
 
-    /// Convert an initialized actor into an unfinalized storage-erased owner
-    /// commit. The post-seal root birth ([`Self::commit_through_owner`]) uses
-    /// this form: nothing is waiting on a `TaskDone`, so there is no finalizer
-    /// to arm. Handler staging uses [`Self::prepare_commit_with_finalizer`].
-    fn prepare_commit<A>(self: &Arc<Self>, staged: StagedActor<A>) -> PreparedSpawnCommit
-    where
-        A: Instanced + NativeActor,
-    {
-        self.prepare_commit_inner(staged, None)
-    }
-
-    fn prepare_commit_with_finalizer<A>(
-        self: &Arc<Self>,
-        staged: StagedActor<A>,
-        finalizer: Arc<super::activation::NativeSpawnFinalizer>,
-    ) -> PreparedSpawnCommit
-    where
-        A: Instanced + NativeActor,
-    {
-        self.prepare_commit_inner(staged, Some(finalizer))
-    }
-
-    fn prepare_commit_inner<A>(
+    /// Convert an initialized actor into a storage-erased owner commit.
+    ///
+    /// `finalizer` is what decides the birth once the owner has ruled on it —
+    /// every real birth carries one, differing only in where it delivers the
+    /// [`SpawnOutcome`] (a parent actor's `TaskDone`, or the channel a
+    /// post-seal external caller is blocked on). `None` is for fixtures that
+    /// exercise the owner path with nothing waiting on the answer.
+    fn prepare_commit<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,
         finalizer: Option<Arc<super::activation::NativeSpawnFinalizer>>,
@@ -684,105 +681,55 @@ impl Spawner {
     /// warning is about a *handler* waiting on the owner; a handler reaches
     /// `HandlerSpawnBuilder::stage` instead, which never waits.
     ///
-    /// The owner accepting the birth is what the caller is told about: the
-    /// route is reserved `Starting` under a token and its activation is
-    /// scheduled at its execution home, where `wire` runs and the barrier that
-    /// promotes it to `Live` originates. This then waits out that second leg
-    /// too, so `finish()` keeps the read-your-writes contract its callers have
-    /// always had: when it returns `Ok`, the mailbox is addressable.
+    /// Both legs of the birth are what the caller is told about: the owner
+    /// reserves the route `Starting` under a token, then the activation runs at
+    /// its execution home, where `wire` runs and the barrier that promotes it
+    /// to `Live` originates. The birth's finalizer decides it at the end of
+    /// that second leg — after the owner has published the Live route — and
+    /// delivers the [`SpawnOutcome`] down a channel this thread parks on, so
+    /// `finish()` keeps the read-your-writes contract its callers have always
+    /// had: when it returns `Ok`, the mailbox is addressable.
+    ///
+    /// The owner's batch completion is deliberately dropped rather than
+    /// awaited. Every owner-side refusal of a `PreparedSpawn` — the pre-reserve
+    /// route conflict, a rejected `reserve`, a refused cost row, and owner
+    /// closure — routes that same commit through its finalizer, so the birth
+    /// completion is the single answer, and it is the more precise one: it
+    /// distinguishes a retired name from a live occupant where the batch error
+    /// collapses both into a name conflict.
     fn commit_through_owner<A>(self: Arc<Self>, staged: StagedActor<A>) -> Result<SpawnCommit, SpawnError>
     where
         A: Instanced + NativeActor,
     {
         let mailbox_id = staged.identity.id;
-        let canonical_name = staged.identity.canonical_name.to_string();
-        let commit = self.prepare_commit(staged);
-        let Some(completion) = self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)]))
-        else {
+        let (decided, birth) = crossbeam_channel::bounded(1);
+        let finalizer = super::activation::NativeSpawnFinalizer::external(
+            decided,
+            mailbox_id,
+            Arc::clone(&staged.identity.canonical_name),
+            Arc::clone(&self.mailer),
+        );
+        let commit = self.prepare_commit(staged, Some(finalizer));
+        if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
-        };
-        match completion.wait() {
-            Ok(_) => {}
-            Err(RegistryEffectError::Name(NameConflict { name })) => {
-                return Err(SpawnError::SubnameInUse { full_name: name });
-            }
-            Err(RegistryEffectError::OwnerClosed) => return Err(SpawnError::OwnerClosed),
-            Err(_) => return Err(SpawnError::ActivationRejected),
         }
-        self.await_birth(mailbox_id).map(|()| SpawnCommit { mailbox_id, canonical_name })
-    }
-
-    /// Wait for an accepted birth to leave `Starting`.
-    ///
-    /// The activation runs at its execution home on the worker pool and the
-    /// owner promotes it on the barrier that follows, so the two legs need two
-    /// pool turns; this thread is an embedder thread, never one of those
-    /// workers, so parking here cannot be what stops them.
-    ///
-    /// Patience escalates the way every other internal gate's does
-    /// (`shutdown_instanced`, the settlement gates): a slow box gets a warn
-    /// and more time, and only a genuinely wedged pool exhausts the cap. That
-    /// is unrecoverable rather than reportable — the birth was already
-    /// accepted, so there is no consistent state to hand a caller — hence the
-    /// same disposition split the teardown gate uses: panic under
-    /// `debug_assertions` so a test fails at the gate, abort in release
-    /// through the chassis aborter.
-    /// Terminal disposition for a birth the owner accepted but that never
-    /// reached `Live`: panic under `debug_assertions` so a test fails
-    /// attributably at the gate, abort in release through the chassis aborter.
-    /// The same split `shutdown_instanced` uses, for the same reason — there is
-    /// no consistent state left to report.
-    #[allow(
-        clippy::unused_self,
-        clippy::needless_pass_by_value,
-        reason = "the release arm consumes both through the chassis `FatalAborter`; only the debug arm ignores them"
-    )]
-    fn birth_wedged(&self, reason: String) -> ! {
-        #[cfg(debug_assertions)]
-        {
-            panic!("{reason}");
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            self.aborter.abort(reason)
-        }
-    }
-
-    fn await_birth(&self, id: MailboxId) -> Result<(), SpawnError> {
-        let round = Duration::from_millis(2);
-        let cap = Duration::from_secs(30);
-        let started = Instant::now();
-        let mut warned = false;
-        loop {
-            match self.registry.birth_progress(id) {
-                BirthProgress::Live => return Ok(()),
-                BirthProgress::Gone => return Err(SpawnError::ActivationRejected),
-                BirthProgress::Starting => {}
+        match birth.recv_timeout(BIRTH_PATIENCE) {
+            Ok(SpawnOutcome { mailbox_id, canonical_name, result }) => {
+                result.map(|()| SpawnCommit { mailbox_id, canonical_name: canonical_name.to_string() })
             }
-            let waited = started.elapsed();
-            if waited >= cap {
-                self.birth_wedged(format!(
-                    "gate spawn_actor.owner_birth[{id}] wedged after {waited:?}: the owner accepted the birth but \
-                     it never reached Live"
-                ));
-            }
-            if !warned && waited >= round {
-                warned = true;
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 tracing::warn!(
                     target: "aether_substrate::spawn",
-                    mailbox = %id,
-                    cap_millis = cap.as_millis(),
-                    "post-seal spawn slow: the owner accepted the birth but it is still Starting",
+                    mailbox = %mailbox_id,
+                    cap_millis = BIRTH_PATIENCE.as_millis(),
+                    "post-seal spawn wedged: the owner accepted the birth but nothing decided it",
                 );
+                Err(SpawnError::BirthWedged { mailbox_id, waited: BIRTH_PATIENCE })
             }
-            // A healthy birth resolves in the two pool turns it takes to run
-            // the activation and drain the barrier, so spin off the fast path
-            // first and only then start sleeping the round budget.
-            if waited < round {
-                thread::yield_now();
-            } else {
-                thread::sleep(round);
-            }
+            // The finalizer dropped without deciding, so no answer is coming.
+            // A birth abandoned before anything promoted it leaves the caller
+            // exactly where a refused activation does.
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(SpawnError::ActivationRejected),
         }
     }
 
@@ -1143,7 +1090,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             canonical_name: Arc::clone(&staged.identity.canonical_name),
             completion: completion.dispatch_id(),
         };
-        let finalizer = super::activation::NativeSpawnFinalizer::new(
+        let finalizer = super::activation::NativeSpawnFinalizer::parented(
             parent_reservation,
             completion,
             staged.identity.id,
@@ -1151,7 +1098,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        let commit = spawner.prepare_commit_with_finalizer(staged, finalizer);
+        let commit = spawner.prepare_commit(staged, Some(finalizer));
         parent_binding.stage_child_birth(commit);
         let _ = sender;
         Ok(receipt)
@@ -1233,7 +1180,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             canonical_name: Arc::clone(&staged.identity.canonical_name),
             completion: completion.dispatch_id(),
         };
-        let finalizer = super::activation::NativeSpawnFinalizer::new(
+        let finalizer = super::activation::NativeSpawnFinalizer::parented(
             parent_reservation,
             completion,
             staged.identity.id,
@@ -1241,7 +1188,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        parent_binding.stage_child_birth(spawner.prepare_commit_with_finalizer(staged, finalizer));
+        parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer)));
         let _ = sender;
         Ok(receipt)
     }
@@ -1567,7 +1514,7 @@ mod tests {
     ) -> PreparedSpawnCommit {
         let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
         let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
-        spawner.prepare_commit(staged)
+        spawner.prepare_commit(staged, None)
     }
 
     fn prepared_probe_with_lifecycle_target(
@@ -1585,7 +1532,7 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
-        spawner.prepare_commit(staged)
+        spawner.prepare_commit(staged, None)
     }
 
     fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, crossbeam_channel::Receiver<KindId>) {
@@ -1620,7 +1567,7 @@ mod tests {
             (),
         );
         let dispatch_id = deferred.dispatch_id();
-        let finalizer = super::super::activation::NativeSpawnFinalizer::new(
+        let finalizer = super::super::activation::NativeSpawnFinalizer::parented(
             parent_reservation,
             deferred,
             staged.identity.id,
@@ -1629,7 +1576,7 @@ mod tests {
             Arc::clone(spawner.mailer()),
         );
 
-        (spawner.prepare_commit_with_finalizer(staged, finalizer), dispatch_id, key)
+        (spawner.prepare_commit(staged, Some(finalizer)), dispatch_id, key)
     }
 
     fn await_spawn_done(parent: &NativeBinding, dispatch_id: DispatchId) -> TaskDone<SpawnOutcome, ()> {
@@ -1732,7 +1679,7 @@ mod tests {
             (),
         );
         let dispatch_id = deferred.dispatch_id();
-        let finalizer = super::super::activation::NativeSpawnFinalizer::new(
+        let finalizer = super::super::activation::NativeSpawnFinalizer::parented(
             parent_reservation,
             deferred,
             staged.identity.id,
@@ -1740,7 +1687,7 @@ mod tests {
             Arc::downgrade(&staged.transport),
             Arc::clone(&mailer),
         );
-        let commit = spawner.prepare_commit_with_finalizer(staged, finalizer);
+        let commit = spawner.prepare_commit(staged, Some(finalizer));
         let child_id = commit.route.id;
         let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
 

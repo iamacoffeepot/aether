@@ -44,18 +44,50 @@ pub(super) struct NativeSpawnFinalizer {
     mailer: Arc<Mailer>,
 }
 
+/// Where one birth's authoritative fate is delivered.
+///
+/// A handler-staged child completes into its parent actor's mailbox as the
+/// ADR-0093 `TaskDone<SpawnOutcome, _>`. A post-seal external birth has no
+/// parent actor — its caller is an embedder thread reaching in through
+/// `PassiveChassis::spawn_actor` — so it has no mailbox to receive that, and
+/// completes into a channel that thread is blocked on instead. The same
+/// two-audience split `RegistryBatchCompletionSink` draws for owner batches
+/// one layer up: actors get mail, external threads get a channel.
+pub(super) enum SpawnCompletionSink {
+    Deferred(DeferredCompletion<SpawnOutcome>),
+    Channel(crossbeam_channel::Sender<SpawnOutcome>),
+}
+
+impl SpawnCompletionSink {
+    fn complete(self, outcome: SpawnOutcome) {
+        match self {
+            Self::Deferred(completion) => completion.complete(outcome),
+            Self::Channel(sender) => drop(sender.send(outcome)),
+        }
+    }
+}
+
+/// The parent-local staged key one birth holds, paired with the child binding
+/// that takes ownership of it once the birth is Live. Absent for a post-seal
+/// external birth, which has no parent actor to hold a key for it.
+struct ParentLink {
+    reservation: ParentReservation,
+    child: Weak<NativeBinding>,
+}
+
 struct NativeSpawnFinalizerState {
-    parent_reservation: ParentReservation,
-    completion: DeferredCompletion<SpawnOutcome>,
+    parent: Option<ParentLink>,
+    completion: SpawnCompletionSink,
     /// The staged child's identity, carried onto **both** arms of the
     /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
     mailbox_id: MailboxId,
     canonical_name: Arc<str>,
-    child: Weak<NativeBinding>,
 }
 
 impl NativeSpawnFinalizer {
-    pub(super) fn new(
+    /// A handler-staged child birth: the parent holds a local reservation key
+    /// for it and receives the outcome as an ADR-0093 `TaskDone`.
+    pub(super) fn parented(
         parent_reservation: ParentReservation,
         completion: DeferredCompletion<SpawnOutcome>,
         mailbox_id: MailboxId,
@@ -63,14 +95,36 @@ impl NativeSpawnFinalizer {
         child: Weak<NativeBinding>,
         mailer: Arc<Mailer>,
     ) -> Arc<Self> {
+        Self::new(
+            Some(ParentLink { reservation: parent_reservation, child }),
+            SpawnCompletionSink::Deferred(completion),
+            mailbox_id,
+            canonical_name,
+            mailer,
+        )
+    }
+
+    /// A post-seal external birth (ADR-0165): no parent actor holds a key for
+    /// it, and the embedder thread that submitted it is blocked on `outcome`
+    /// until this finalizer decides.
+    pub(super) fn external(
+        outcome: crossbeam_channel::Sender<SpawnOutcome>,
+        mailbox_id: MailboxId,
+        canonical_name: Arc<str>,
+        mailer: Arc<Mailer>,
+    ) -> Arc<Self> {
+        Self::new(None, SpawnCompletionSink::Channel(outcome), mailbox_id, canonical_name, mailer)
+    }
+
+    fn new(
+        parent: Option<ParentLink>,
+        completion: SpawnCompletionSink,
+        mailbox_id: MailboxId,
+        canonical_name: Arc<str>,
+        mailer: Arc<Mailer>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(Some(NativeSpawnFinalizerState {
-                parent_reservation,
-                completion,
-                mailbox_id,
-                canonical_name,
-                child,
-            })),
+            state: Mutex::new(Some(NativeSpawnFinalizerState { parent, completion, mailbox_id, canonical_name })),
             retained: Mutex::new(Vec::new()),
             mailer,
         })
@@ -89,7 +143,9 @@ impl NativeSpawnFinalizer {
         for (mail_id, root) in self.retained.lock().expect("native spawn retained-mail lock poisoned").drain(..) {
             self.mailer.record_finished(mail_id, root);
         }
-        state.parent_reservation.reject();
+        if let Some(parent) = state.parent {
+            parent.reservation.reject();
+        }
         let error = match failure {
             PreparedSpawnFailure::NamespaceOwnedByOtherType { namespace, owning_type } => {
                 SpawnError::NamespaceOwnedByOtherType { namespace, owning_type }
@@ -110,9 +166,11 @@ impl NativeSpawnFinalizer {
         let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
             return;
         };
-        let live = state.parent_reservation.promote();
-        if let Some(child) = state.child.upgrade() {
-            child.retain_parent_child_reservation(live);
+        if let Some(parent) = state.parent {
+            let live = parent.reservation.promote();
+            if let Some(child) = parent.child.upgrade() {
+                child.retain_parent_child_reservation(live);
+            }
         }
         state.completion.complete(SpawnOutcome {
             mailbox_id: state.mailbox_id,

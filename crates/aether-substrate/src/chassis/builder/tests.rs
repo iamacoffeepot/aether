@@ -315,6 +315,40 @@ mod seal {
         PROBED_SPAWNER.with(|slot| slot.borrow_mut().take()).expect("the driver Claim hook stashed the spawner")
     }
 
+    /// The actor the post-seal external spawn tests below bring up. Inert by
+    /// design: what is under test is the birth protocol around it, not
+    /// anything it does once live.
+    struct Spawned;
+
+    impl Addressable for Spawned {
+        const NAMESPACE: &'static str = "test.chassis_builder.seal.post_seal_spawn";
+        type Resolver = aether_actor::Many;
+    }
+    impl aether_actor::Root for Spawned {}
+    impl aether_actor::Lifecycle<Self> for Spawned {
+        type Config = ();
+        type Params = ();
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+        fn init((): Self::Config, (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+    }
+    impl NativeActor for Spawned {
+        type State = Self;
+    }
+    impl Dispatch<Self> for Spawned {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
     /// A passive chassis seals immediately before it is handed to the
     /// embedder, and everything the embedder spawns afterwards still lands —
     /// through the owner, because the token that reaches the direct writer no
@@ -322,39 +356,12 @@ mod seal {
     ///
     /// Tripwire: the seal must be *installed* (the token is gone) and must not
     /// cost the embedder its spawn surface. Dropping either half — a seal that
-    /// never runs, or one that strands `spawn_actor` — fails here.
+    /// never runs, or one that strands `spawn_actor` — fails here. The
+    /// `registry.entry` assertion is the read-your-writes half: the birth
+    /// completion the caller blocks on has to fire after the owner published
+    /// the Live route, because `entry` answers `None` for a `Starting` one.
     #[test]
     fn passive_chassis_seals_before_it_is_returned_and_still_spawns() {
-        struct Spawned;
-        impl Addressable for Spawned {
-            const NAMESPACE: &'static str = "test.chassis_builder.seal.post_seal_spawn";
-            type Resolver = aether_actor::Many;
-        }
-        impl aether_actor::Root for Spawned {}
-        impl aether_actor::Lifecycle<Self> for Spawned {
-            type Config = ();
-            type Params = ();
-            type InitError = BootError;
-            type InitCtx<'a> = NativeInitCtx<'a>;
-            type Ctx<'a> = NativeCtx<'a>;
-            fn init((): Self::Config, (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self)
-            }
-        }
-        impl NativeActor for Spawned {
-            type State = Self;
-        }
-        impl Dispatch<Self> for Spawned {
-            fn dispatch(
-                _state: &mut Self,
-                _ctx: &mut NativeCtx<'_, crate::Manual>,
-                _kind: KindId,
-                _payload: &[u8],
-            ) -> Option<()> {
-                None
-            }
-        }
-
         let (registry, mailer) = bare_substrate();
         let chassis =
             Builder::<TestChassis>::new(Arc::clone(&registry), mailer).build_passive().expect("empty chassis boots");
@@ -369,6 +376,35 @@ mod seal {
             .finish()
             .expect("a post-seal root birth still lands");
         assert!(registry.entry(id).is_some(), "the owner-routed root birth reached Live before finish() returned");
+    }
+
+    /// A post-seal external birth the owner refuses comes back as a typed
+    /// [`crate::SpawnError`] on the calling thread.
+    ///
+    /// Tripwire: the birth completion has two arms and only the promotion one
+    /// is obvious. Wire the external channel to `promote` alone and a refused
+    /// birth has nobody left to answer it — this call then sits out its whole
+    /// patience budget and reports `BirthWedged` instead of the name that is
+    /// actually in the way, which is what the assertion below reads.
+    #[test]
+    fn post_seal_spawn_of_a_live_subname_returns_a_typed_error() {
+        let (registry, mailer) = bare_substrate();
+        let chassis = Builder::<TestChassis>::new(registry, mailer).build_passive().expect("empty chassis boots");
+
+        chassis
+            .spawn_actor::<Spawned>(crate::Subname::Named("taken"), (), ())
+            .finish()
+            .expect("the first post-seal birth lands");
+
+        let refused = chassis
+            .spawn_actor::<Spawned>(crate::Subname::Named("taken"), (), ())
+            .finish()
+            .expect_err("a second birth on a live name is refused");
+
+        assert!(
+            matches!(&refused, crate::SpawnError::SubnameInUse { full_name } if full_name.contains("taken")),
+            "the owner's refusal reaches the caller's thread intact: {refused:?}",
+        );
     }
 
     pod_kind!(Poke { value: u32 }, "test.chassis_builder.seal.poke", 0x5ea1_0001);
