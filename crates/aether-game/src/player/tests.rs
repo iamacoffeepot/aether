@@ -25,7 +25,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::EgressEvent;
 use aether_substrate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use aether_substrate::mail::{MailId, MailRef};
-use aether_substrate::testing::{TestChassis, fresh_substrate_and_rx};
+use aether_substrate::testing::{TestChassis, boot_authority, fresh_substrate_and_rx};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -336,6 +336,7 @@ fn register_player_route_collision(registry: &Registry, session_name: &str, deli
         format!("{}/{}:{}", GameGatewayCapability::NAMESPACE, PlayerSessionActor::NAMESPACE, session_name);
     registry
         .try_register_inbox_with_id(
+            &boot_authority(),
             mailbox,
             &canonical_name,
             Arc::new(move |dispatch: OwnedDispatch| {

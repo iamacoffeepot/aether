@@ -64,6 +64,10 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # The Probe wasm loaded by stem (`aether_test_fixtures_bundle.wasm`): declared
 # so the runtime artifact coupling is cargo-visible.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
+# `test-support` exposes `aether_substrate::testing::boot_authority`, the
+# test-only mint for the `BootAuthority` the registry's direct mutators now
+# require (ADR-0165 / iamacoffeepot/aether#4156).
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 
 # The Probe wasm coupling above is load-by-stem only — no source import — so
 # the source-scanning unused-deps gate cannot see it.

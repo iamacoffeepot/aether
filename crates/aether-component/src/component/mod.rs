@@ -112,6 +112,7 @@ mod tests {
     use aether_actor::{Addressable, Embedded, WasmActorMailbox};
     use aether_data::mailbox_id_from_name;
     use aether_substrate::mail::registry::{Registry, noop_handler};
+    use aether_substrate::testing::boot_authority;
 
     use super::{ComponentHostCapability, ComponentHostWasmExt, resolve_embedded};
     use crate::trampoline::WasmTrampoline;
@@ -165,7 +166,7 @@ mod tests {
         let canonical = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
         let registry = Registry::new();
         registry
-            .try_register_inbox_with_id(typed, canonical.clone(), noop_handler())
+            .try_register_inbox_with_id(&boot_authority(), typed, canonical.clone(), noop_handler())
             .expect("register canonical trampoline mailbox");
 
         for address in [canonical.as_str(), "aether.component://camera", "aether.component://aether.embedded:camera"] {

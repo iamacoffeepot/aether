@@ -70,7 +70,7 @@ use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
-use aether_substrate::testing::TestChassis;
+use aether_substrate::testing::{TestChassis, boot_authority};
 use aether_trace::TraceDispatchCapability;
 use serde::Serialize;
 
@@ -994,8 +994,9 @@ pub fn allocate_store_root_for_test() -> PathBuf {
 /// stays disabled (the `Default`).
 fn boot_hub(binary_store_dir: &Path, fleet_store_root: &Path) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
+    let authority = boot_authority();
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&authority, d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));

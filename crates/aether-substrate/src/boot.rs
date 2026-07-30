@@ -42,7 +42,7 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::actor::native::local as actor_local;
-use crate::mail::registry::MailDispatch;
+use crate::mail::registry::{BootAuthority, MailDispatch};
 use crate::runtime::log_install;
 use crate::runtime::panic_hook;
 use crate::{AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns};
@@ -74,6 +74,12 @@ pub struct SubstrateBoot {
     /// log the count, etc. Same `Vec` that was registered with the
     /// `Registry`.
     pub boot_descriptors: Vec<KindDescriptor>,
+    /// iamacoffeepot/aether#4156: the boot path's proof that it may write
+    /// the registry directly, ahead of the ADR-0165 owner. Retained so a
+    /// chassis main that registers its own kinds or claims a mailbox with
+    /// an explicit lineage id after `build()` can name those mutators; a
+    /// handler never receives one.
+    pub authority: BootAuthority,
 }
 
 impl SubstrateBoot {
@@ -112,9 +118,10 @@ impl SubstrateBoot {
         let engine = Arc::new(Engine::default());
         let registry = Arc::new(Registry::new());
 
+        let authority = BootAuthority::new();
         let boot_descriptors = descriptors::all();
         for d in &boot_descriptors {
-            registry.register_kind_with_descriptor(d.clone()).expect("duplicate kind in substrate init");
+            registry.register_kind_with_descriptor(&authority, d.clone()).expect("duplicate kind in substrate init");
         }
 
         // Diagnostic sink for hub → originating-engine typo reports
@@ -163,7 +170,7 @@ impl SubstrateBoot {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors })
+        Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors, authority })
     }
 }
 

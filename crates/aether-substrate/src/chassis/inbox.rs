@@ -364,6 +364,7 @@ const _: fn() = || {
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
+    use crate::testing::boot_authority;
 
     use crate::actor::native::Dispatch;
     use crate::actor::native::binding::NativeBinding;
@@ -381,7 +382,7 @@ mod tests {
     fn test_env() -> (Arc<Registry>, Arc<Mailer>, Arc<SettlementRegistry>) {
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
+            let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
         }
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let settlement = Arc::new(SettlementRegistry::new());
@@ -504,7 +505,7 @@ mod tests {
             let _ = rtx.send(d);
         });
         let reply_target = registry
-            .try_register_inbox_with_id(reply_target, "test.inbox.reply_target", handler)
+            .try_register_inbox_with_id(&boot_authority(), reply_target, "test.inbox.reply_target", handler)
             .expect("register reply target");
 
         let root = MailId::new(id, 1);
@@ -550,7 +551,7 @@ mod tests {
             let _ = rtx.send(d);
         });
         let reply_target = registry
-            .try_register_inbox_with_id(reply_target, "test.inbox.reply_id_target", handler)
+            .try_register_inbox_with_id(&boot_authority(), reply_target, "test.inbox.reply_id_target", handler)
             .expect("register reply target");
 
         let (tx, rx) = mpsc::channel();
@@ -720,7 +721,7 @@ mod tests {
             let _ = rtx.send(d);
         });
         let reply_target = registry
-            .try_register_inbox_with_id(reply_target, "test.inbox.deferred_target", handler)
+            .try_register_inbox_with_id(&boot_authority(), reply_target, "test.inbox.deferred_target", handler)
             .expect("register reply target");
 
         let root = MailId::new(id, 1);

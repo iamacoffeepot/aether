@@ -46,7 +46,7 @@ use crate::chassis::error::BootError;
 use crate::config::ConfigMember;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
-use crate::mail::registry::Registry;
+use crate::mail::registry::{BootAuthority, Registry};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
@@ -60,6 +60,20 @@ impl Chassis for TestChassis {
     fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         unreachable!("TestChassis is driven by Builder::new directly in unit tests")
     }
+}
+
+/// Mint a [`BootAuthority`] for a fixture that drives the registry's direct
+/// write path without a real chassis boot behind it.
+///
+/// The token's production constructor is crate-private so only
+/// `aether-substrate`'s own boot path can authorize a direct registry write
+/// (iamacoffeepot/aether#4156). A test fixture *is* the boot path for the
+/// registry it just constructed, so it gets an explicit door here rather
+/// than the production one being widened: this module compiles only under
+/// `cfg(test)` or the `test-support` feature, so no shipping binary can
+/// reach it.
+pub fn boot_authority() -> BootAuthority {
+    BootAuthority::new()
 }
 
 /// Build the `(Arc<Registry>, Arc<Mailer>)` seed substrate-internal tests
@@ -85,8 +99,9 @@ pub fn bare_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 /// they need.
 pub fn fresh_substrate_and_rx() -> (Arc<Registry>, Arc<Mailer>, Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
+    let authority = boot_authority();
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&authority, d);
     }
     let (outbound, rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));

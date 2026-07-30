@@ -11,7 +11,7 @@ use crate::chassis::settlement::SettlementRegistry;
 use crate::config::{ConfigSources, RegistryQueueCapacities, RingCapacities, SchedulerTuning};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::{Registry, RegistryOwnerLease, RouteRelayLease};
+use crate::mail::registry::{BootAuthority, Registry, RegistryOwnerLease, RouteRelayLease};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Pool, PoolConfig, PoolHandle, install_tuning, log_handoff_calibration};
 
@@ -192,7 +192,13 @@ pub(super) fn boot_passives(
     install_tuning(scheduler_tuning);
     let pool = Pool::start(pool_config, Arc::clone(aborter));
     let route_relay = RouteRelayLease::attach(mailer, pool.wake_sink(), registry_queues);
-    let registry_owner = RegistryOwnerLease::attach(registry, mailer, pool.wake_sink(), registry_queues);
+    // iamacoffeepot/aether#4156: `attach` consumes the proof, so this mint
+    // cannot be reused as a second writer once the owner is installed. The
+    // eager registrations the boot passes below still need one — #4035's
+    // carve-out keeps boot on the synchronous direct apply — so the ctx and
+    // the spawner each carry their own, scoped to the boot they serve.
+    let registry_owner =
+        RegistryOwnerLease::attach(BootAuthority::new(), registry, mailer, pool.wake_sink(), registry_queues);
 
     // iamacoffeepot/aether#1182: calibrate this box's cross-worker handoff
     // cost once at boot and log the keep-local budget the adaptive valve

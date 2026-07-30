@@ -179,6 +179,7 @@ where
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::testing::boot_authority;
 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -323,7 +324,7 @@ mod tests {
     fn fixtures() -> Fixtures {
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
+            let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
         }
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         // Wire one settlement registry into both seams — the chassis builder
@@ -391,7 +392,7 @@ mod tests {
             }
         });
         fx.registry
-            .try_register_inbox_with_id(self_id, "test.pumped.probe", handler)
+            .try_register_inbox_with_id(&boot_authority(), self_id, "test.pumped.probe", handler)
             .expect("register the pumped mailbox");
 
         let binding = Arc::new(NativeBinding::new::<PumpProbe>(
@@ -627,6 +628,7 @@ mod tests {
         let (poke_tx, poke_rx) = mpsc::channel::<Envelope>();
         fx.registry
             .try_register_inbox_with_id(
+                &boot_authority(),
                 peer_id,
                 "test.pumped.peer",
                 Arc::new(move |d: Envelope| {
@@ -666,6 +668,7 @@ mod tests {
         let (poke_tx, poke_rx) = mpsc::channel::<(Envelope, thread::ThreadId)>();
         fx.registry
             .try_register_inbox_with_id(
+                &boot_authority(),
                 peer_id,
                 "test.pumped.peer",
                 Arc::new(move |d: Envelope| {

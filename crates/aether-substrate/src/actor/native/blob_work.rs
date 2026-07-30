@@ -961,6 +961,7 @@ mod tests {
     use crate::mail::{KindId, MailRef};
     use crate::scheduler::{SeizeSeed, SlotState, SpinPark};
     use crate::testing::bare_substrate;
+    use crate::testing::boot_authority;
     use aether_data::MailId;
     use crossbeam_deque::{Injector, Steal};
     use std::sync::mpsc;
@@ -1050,8 +1051,11 @@ mod tests {
         let (direct_tx, direct_rx) = mpsc::channel::<u8>();
         let fixture = Arc::new(SeizableSink { state: Arc::new(SlotState::new()), direct: direct_tx });
         let slot_dyn: Arc<dyn Drainable> = fixture.clone();
-        let installed =
-            registry.install_seize_handle(id, SeizeHandle::new(Arc::clone(&fixture.state), Arc::downgrade(&slot_dyn)));
+        let installed = registry.install_seize_handle(
+            &boot_authority(),
+            id,
+            SeizeHandle::new(Arc::clone(&fixture.state), Arc::downgrade(&slot_dyn)),
+        );
         assert!(installed, "seize handle installs on a live Inbox entry");
         (id, fixture, direct_rx, deposit_rx)
     }

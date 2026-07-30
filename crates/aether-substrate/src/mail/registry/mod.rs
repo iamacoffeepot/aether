@@ -12,6 +12,7 @@
 // without acquiring the writer lock (ADR-0165).
 
 mod address;
+mod authority;
 mod dispatch;
 #[allow(dead_code, reason = "owner effects and inventory subscriptions are foundations consumed by arc follow-ups")]
 pub(crate) mod effect;
@@ -32,6 +33,7 @@ mod relay;
 mod tests;
 
 pub use address::{ActorAddressInventoryError, AddressResolutionError, ResolvedAddress};
+pub use authority::BootAuthority;
 pub use dispatch::{MailDispatch, OwnedDispatch};
 #[cfg(test)]
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};

@@ -29,12 +29,12 @@ use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::mail::registry::{MailboxEntry, Registry};
 use aether_substrate::mail::{MailRef, Source, SourceAddr};
-use aether_substrate::testing::TestChassis;
+use aether_substrate::testing::{TestChassis, boot_authority};
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
     }
     let (outbound, rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
@@ -99,6 +99,7 @@ fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<
     let (tx, rx) = mpsc::channel();
     registry
         .try_register_inbox_with_id(
+            &boot_authority(),
             mailbox_id_from_path(name),
             name,
             Arc::new(move |dispatch: OwnedDispatch| {
@@ -139,7 +140,12 @@ fn available_loopback_addr() -> SocketAddr {
 fn register_route_collision(registry: &Registry, canonical_name: &str) -> MailboxId {
     let id = mailbox_id_from_path(canonical_name);
     registry
-        .try_register_inbox_with_id(id, canonical_name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
+        .try_register_inbox_with_id(
+            &boot_authority(),
+            id,
+            canonical_name,
+            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
+        )
         .expect("install the test-only collision authority");
     id
 }

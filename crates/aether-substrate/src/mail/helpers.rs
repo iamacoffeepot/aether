@@ -1,11 +1,9 @@
 //! Mail-side helpers shared by chassis dispatchers and capabilities.
 //!
-//! `register_or_match_all` registers every descriptor from a component's
-//! embedded manifest; `resolve_bundle` resolves a list of envelopes
-//! against the registry into fully-typed `Mail`s. The chassis-side
-//! decode helper lives in `chassis/helpers.rs`.
+//! `resolve_bundle` resolves a list of envelopes against the registry into
+//! fully-typed `Mail`s. The chassis-side decode helper lives in
+//! `chassis/helpers.rs`.
 
-use aether_data::KindDescriptor;
 use aether_kinds::NamedMail;
 
 use crate::mail::Mail;
@@ -26,15 +24,4 @@ pub fn resolve_bundle(registry: &Registry, bundle: &[NamedMail], label: &str) ->
         out.push(Mail::new(mailbox, kind_id, env.payload.clone(), env.count));
     }
     Ok(out)
-}
-
-/// Register every descriptor from a component's embedded manifest.
-/// Idempotent on `(name, schema)` match (ADR-0030 Phase 2's hashed ids
-/// give two distinct registrations for two distinct schemas under the
-/// same name); only fails on a genuine 64-bit hash collision.
-pub fn register_or_match_all(registry: &Registry, descriptors: &[KindDescriptor]) -> Result<(), String> {
-    for kind in descriptors {
-        registry.register_kind_with_descriptor(kind.clone()).map_err(|e| format!("register `{}`: {e}", kind.name))?;
-    }
-    Ok(())
 }

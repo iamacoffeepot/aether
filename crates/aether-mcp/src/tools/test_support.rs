@@ -14,6 +14,7 @@ pub(super) use aether_substrate::mail::mailer::Mailer;
 pub(super) use aether_substrate::mail::outbound::HubOutbound;
 pub(super) use aether_substrate::mail::registry::Registry;
 pub(super) use aether_substrate::testing::TestChassis;
+use aether_substrate::testing::boot_authority;
 pub(super) use aether_trace::TraceDispatchCapability;
 pub(super) use std::path::PathBuf;
 pub(super) use std::process;
@@ -322,7 +323,7 @@ pub(super) fn stage_blob_file(tag: &str, bytes: &[u8]) -> PathBuf {
 pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
@@ -373,16 +374,16 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
 
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
     }
     for d in extras {
         // Component-defined kinds enter the substrate's `Registry`
-        // via `ComponentHostCapability::handle_load` →
-        // `register_or_match_all`; here we shortcut that with a
-        // direct register so the test doesn't need a real wasm
-        // load lifecycle (the ADR-0091 surface under test is the
-        // *projection*, not the loader).
-        let _ = registry.register_kind_with_descriptor(d.clone());
+        // via `ComponentHostCapability::handle_load` staging a
+        // `RegistryBatch::register_kinds` through the ADR-0165 owner;
+        // here we shortcut that with a direct register so the test
+        // doesn't need a real wasm load lifecycle (the ADR-0091 surface
+        // under test is the *projection*, not the loader).
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), d.clone());
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
@@ -427,7 +428,7 @@ pub(super) fn boot_hub_with_route_loopback(
 ) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
@@ -468,7 +469,7 @@ pub(super) fn boot_hub_with_address_route_replies(
 ) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(descriptor);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), descriptor);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
@@ -507,7 +508,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
 ) -> Result<(PassiveChassis<TestChassis>, u16), BootError> {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(descriptor);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), descriptor);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));

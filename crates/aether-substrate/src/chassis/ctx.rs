@@ -16,6 +16,7 @@ use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::BootAuthority;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::FatalAborter;
@@ -397,6 +398,11 @@ pub struct ChassisCtx<'a> {
     /// machinery without separate plumbing. Built once at boot in
     /// `boot_passives`.
     spawner: &'a Arc<crate::Spawner>,
+    /// iamacoffeepot/aether#4156: proof that a cap booting through this ctx
+    /// may write the registry directly, ahead of the ADR-0165 owner. Minted
+    /// per ctx — a ctx exists only inside a boot pass, so the authority
+    /// cannot outlive the boot that created it.
+    authority: BootAuthority,
 }
 
 impl<'a> ChassisCtx<'a> {
@@ -411,7 +417,27 @@ impl<'a> ChassisCtx<'a> {
         spawner: &'a Arc<crate::Spawner>,
         reserved_driver_mailboxes: &'a mut Vec<(String, MailboxClaim)>,
     ) -> Self {
-        Self { registry, mailer, fallback, aborter, claimed_actor_mailboxes, reserved_driver_mailboxes, spawner }
+        Self {
+            registry,
+            mailer,
+            fallback,
+            aborter,
+            claimed_actor_mailboxes,
+            reserved_driver_mailboxes,
+            spawner,
+            authority: BootAuthority::new(),
+        }
+    }
+
+    /// Borrow this boot's [`BootAuthority`] — the proof a cap needs to name
+    /// the registry's direct mutators (`try_register_inbox_with_id`,
+    /// `register_kind_with_descriptor`) while it is still booting. A
+    /// handler has no ctx to take this from, which is the point: at steady
+    /// state the direct path cannot be named at all
+    /// (iamacoffeepot/aether#4156).
+    #[must_use]
+    pub fn boot_authority(&self) -> &BootAuthority {
+        &self.authority
     }
 
     /// Register a `MailboxEntry::Inbox` under `C::NAMESPACE` and
@@ -565,7 +591,7 @@ impl<'a> ChassisCtx<'a> {
     /// the cap mailbox was claimed. Without this, the failed cap leaves
     /// a sink registered against its namespace.
     pub fn unclaim_mailbox(&mut self, id: MailboxId) {
-        self.registry.remove_closure(id);
+        self.registry.remove_closure(&self.authority, id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
 
@@ -647,6 +673,7 @@ impl<'a> ChassisCtx<'a> {
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
+    use crate::testing::boot_authority;
 
     use aether_actor::Local;
 
@@ -723,7 +750,7 @@ mod tests {
     fn test_infra() -> TestInfra {
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
+            let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
         }
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);

@@ -10,6 +10,7 @@ use crate::chassis::ctx::ChassisCtx;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry;
+use crate::testing::boot_authority;
 use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, Chassis, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, ChildOf, HandlesKind};
@@ -981,6 +982,7 @@ fn ctx_spawn_child_routes_through_handler() {
     ));
     registry
         .try_register_inbox_with_id(
+            &boot_authority(),
             conflict_id,
             "test.spawn_child.parent/test.spawn_child.child:conflict".to_owned(),
             registry::noop_handler(),

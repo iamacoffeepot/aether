@@ -17,6 +17,7 @@ use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::mailbox_id_from_path;
 use aether_substrate::mail::registry::noop_handler;
+use aether_substrate::testing::boot_authority;
 use aether_substrate::{AddressResolutionError, Registry};
 
 /// The canonical address a loaded component named `camera` registers under.
@@ -38,7 +39,9 @@ fn the_component_host_abbreviation_expands_through_the_linked_inventory() {
     let short = format!("{}://camera", ComponentHostCapability::NAMESPACE);
     let registry = Registry::new();
     let id = mailbox_id_from_path(CANONICAL);
-    registry.try_register_inbox_with_id(id, CANONICAL, noop_handler()).expect("canonical name is free");
+    registry
+        .try_register_inbox_with_id(&boot_authority(), id, CANONICAL, noop_handler())
+        .expect("canonical name is free");
 
     // The bare discriminator elides the child namespace: exactly one instanced
     // child namespace is declared beneath the host.

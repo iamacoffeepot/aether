@@ -29,6 +29,7 @@ use crate::mail::registry::{
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, SeizeHandle, WakeSink};
+use crate::testing::boot_authority as auth;
 
 /// ADR-0094: a fresh armed [`OwnedDispatch`] panics on drop if it was
 /// neither discharged nor transferred — the headline regression gate
@@ -331,7 +332,7 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     let slot = Arc::new(StatefulSlot { state: Arc::new(SlotState::new()) });
     let slot_dyn: Arc<dyn Drainable> = slot.clone();
     let handle = SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn));
-    let installed = r.install_seize_handle(pooled_id, handle.clone());
+    let installed = r.install_seize_handle(&auth(), pooled_id, handle.clone());
     assert!(installed, "install lands on a live Inbox entry");
     assert_eq!(r.mailbox_generation(), inventory_generation, "seize-only publication is not inventory");
     assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "seize-only publication emits no inventory wake");
@@ -351,7 +352,7 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     assert!(resolved.try_seize().is_some(), "the resolved handle seizes a live slot");
 
     let installed_generation = after_install.generation();
-    assert!(!r.install_seize_handle(pooled_id, handle), "a duplicate seize installation is rejected");
+    assert!(!r.install_seize_handle(&auth(), pooled_id, handle), "a duplicate seize installation is rejected");
     assert_eq!(
         r.route_lookup(kind, pooled_id).generation(),
         installed_generation,
@@ -394,12 +395,12 @@ fn route_generations_advance_only_for_successful_mutations() {
     let reregistered = r.route_lookup(kind, id).generation();
     assert!(reregistered > dropped);
 
-    assert!(r.remove_closure(id));
+    assert!(r.remove_closure(&auth(), id));
     let removed = r.route_lookup(kind, id).generation();
     assert!(removed > reregistered);
     assert!(r.entry(id).is_none());
 
-    assert!(!r.remove_closure(id));
+    assert!(!r.remove_closure(&auth(), id));
     assert_eq!(r.route_lookup(kind, id).generation(), removed);
 }
 
@@ -492,7 +493,7 @@ fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
     let r = Registry::new();
     let canonical = "root/worker:camera";
     let id = aether_data::mailbox_id_from_path(canonical);
-    r.try_register_inbox_with_id(id, canonical, noop_handler()).unwrap();
+    r.try_register_inbox_with_id(&auth(), id, canonical, noop_handler()).unwrap();
 
     let resolved = r.resolve_address(canonical).expect("canonical mailbox is live");
     assert_eq!(resolved.mailbox_id, id);
@@ -645,7 +646,7 @@ fn cast_struct_desc(name: &str) -> KindDescriptor {
 #[test]
 fn register_kind_with_descriptor_stores_schema() {
     let r = Registry::new();
-    let id = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("fresh name");
+    let id = r.register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo")).expect("fresh name");
     let stored = r.kind_descriptor(id).expect("descriptor present");
     assert_eq!(stored.schema, cast_struct_desc("aether.foo").schema);
 }
@@ -653,8 +654,9 @@ fn register_kind_with_descriptor_stores_schema() {
 #[test]
 fn register_kind_with_descriptor_is_idempotent_on_match() {
     let r = Registry::new();
-    let first = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("first");
-    let second = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("same schema should succeed");
+    let first = r.register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo")).expect("first");
+    let second =
+        r.register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo")).expect("same schema should succeed");
     assert_eq!(first, second);
 }
 
@@ -670,7 +672,7 @@ fn register_kind_with_descriptor_is_idempotent_on_match() {
 fn register_kind_with_descriptor_accepts_nominal_only_differences() {
     use aether_data::{NamedField, Primitive};
     let r = Registry::new();
-    let named_id = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("first");
+    let named_id = r.register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo")).expect("first");
 
     let unnamed = KindDescriptor {
         name: "aether.foo".into(),
@@ -679,7 +681,8 @@ fn register_kind_with_descriptor_accepts_nominal_only_differences() {
             fields: vec![NamedField { name: "".into(), ty: SchemaType::Scalar(Primitive::U32) }].into(),
         },
     };
-    let unnamed_id = r.register_kind_with_descriptor(unnamed).expect("same canonical bytes = same id = idempotent");
+    let unnamed_id =
+        r.register_kind_with_descriptor(&auth(), unnamed).expect("same canonical bytes = same id = idempotent");
     assert_eq!(named_id, unnamed_id);
 
     // Named version stays in the stored slot — first writer wins.
@@ -701,9 +704,9 @@ fn register_kind_with_descriptor_distinct_schemas_take_distinct_ids() {
     // and let the conflict path stay exercised via the
     // `_is_idempotent_on_match` test (same-id reentry).
     let r = Registry::new();
-    let unit_id = r.register_kind_with_descriptor(unit_desc("aether.foo")).expect("first");
+    let unit_id = r.register_kind_with_descriptor(&auth(), unit_desc("aether.foo")).expect("first");
     let struct_id = r
-        .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
+        .register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo"))
         .expect("second — different schema, no conflict under hashed ids");
     assert_ne!(unit_id, struct_id);
     assert_eq!(r.kind_descriptor(unit_id).unwrap().schema, SchemaType::Unit);
@@ -729,7 +732,7 @@ fn name_only_and_with_descriptor_resolve_to_distinct_ids() {
     // is a test-only hazard and production callers go through
     // `register_kind_with_descriptor` exclusively.
     let r = Registry::new();
-    let real = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("real schema");
+    let real = r.register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo")).expect("real schema");
     let bytes = r.register_kind("aether.foo");
     assert_ne!(real, bytes);
     assert!(matches!(r.kind_descriptor(real).unwrap().schema, SchemaType::Struct { .. }));
@@ -1194,8 +1197,13 @@ fn activation_barrier(id: MailboxId, token: ActivationToken, sequence: u64) -> M
 fn prepared_births_publish_together_then_promote_independently_with_exact_cost_cells() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let scheduled = Arc::new(AtomicUsize::new(0));
     let first_id = MailboxId::from_name("prepared-first");
     let second_id = MailboxId::from_name("prepared-second");
@@ -1255,8 +1263,13 @@ fn prepared_births_publish_together_then_promote_independently_with_exact_cost_c
 fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let deliveries = Arc::new(Mutex::new(Vec::new()));
     let scheduled = Arc::new(AtomicUsize::new(0));
     let parent_name = "alias-starting-parent";
@@ -1317,8 +1330,13 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
     let first_handler = noop_handler();
     let first_parent = registry.register_inbox("alias-parent-first", Arc::clone(&first_handler));
     let second_parent = registry.register_inbox("alias-parent-second", noop_handler());
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let alias_name = "alias-parent-first/aether.embedded:widget";
     let alias_id = aether_data::mailbox_id_from_path(alias_name);
     let submit = |target_parent| {
@@ -1354,8 +1372,13 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
 fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let scheduled = Arc::new(AtomicUsize::new(0));
     let id = MailboxId::from_name("prepared-cancel-rollback");
     let (_, _, cancelled, effect) = prepared_test_spawn(
@@ -1393,8 +1416,13 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
 fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_consumed() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let deliveries = Arc::new(Mutex::new(Vec::new()));
     let scheduled = Arc::new(AtomicUsize::new(0));
     let id = MailboxId::from_name("prepared-fifo");
@@ -1449,8 +1477,13 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
 fn owner_shutdown_discards_unapplied_prepared_state_at_home_and_joins() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let (dropped_tx, dropped_rx) = crossbeam_channel::bounded(1);
     let id = MailboxId::from_name("queued-discard");
     let completion = registry
@@ -1485,7 +1518,8 @@ fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
     sink.schedule(Arc::new(WorkerBlocker { started: block_started_tx, release: block_release_rx }));
     block_started_rx.recv_timeout(Duration::from_secs(1)).expect("single worker enters blocker");
 
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, sink.clone(), RegistryQueueCapacities::default());
+    let owner =
+        RegistryOwnerLease::attach(auth(), &registry, &mailer, sink.clone(), RegistryQueueCapacities::default());
     let (cancel_started_tx, cancel_started_rx) = crossbeam_channel::bounded(1);
     let id = MailboxId::from_name("owner-drop-home-cancel");
     let birth = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
@@ -1539,8 +1573,13 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
     let acknowledged = registry.inventory();
     subscription.acknowledge(acknowledged.mailbox_generation, acknowledged.kind_generation);
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let initial_route_generation = registry.route_generation();
     let initial_mailbox_generation = registry.mailbox_generation();
     let name = "aether.component/starting-only";
@@ -1563,18 +1602,23 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "Starting emits no public inventory event");
     assert!(registry.route_generation() > initial_route_generation, "Starting advances only the keyed generation");
     assert!(matches!(registry.drop_mailbox(id), Err(DropError::UnknownId(found)) if found == id));
-    assert!(!registry.remove_closure(id), "ordinary removal does not treat Starting as live");
+    assert!(!registry.remove_closure(&auth(), id), "ordinary removal does not treat Starting as live");
     let slot: Arc<dyn Drainable> = Arc::new(TestSlot);
     let handle = SeizeHandle::new(Arc::new(SlotState::new()), Arc::downgrade(&slot));
-    assert!(!registry.install_seize_handle(id, handle), "Starting rejects seize installation");
+    assert!(!registry.install_seize_handle(&auth(), id, handle), "Starting rejects seize installation");
 }
 
 #[test]
 fn starting_tokens_are_unique_stale_safe_and_transactional() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     registry.register_inbox("occupied", noop_handler());
     let before_rollback = registry.route_generation();
     let rolled_back = registry
@@ -1623,8 +1667,13 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
 fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let id = MailboxId::from_name("ordered");
     let endpoint = || MailboxEntry::Inbox { handler: noop_handler(), seize: Arc::default() };
     let first = registry
@@ -1670,8 +1719,13 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
 fn owner_registers_a_kind_batch_atomically_with_one_publication() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let first = KindDescriptor { name: "test.owner.kind.first".to_owned(), schema: SchemaType::Bytes };
     let second = KindDescriptor { name: "test.owner.kind.second".to_owned(), schema: SchemaType::String };
 
@@ -1695,8 +1749,13 @@ fn owner_admission_catches_up_after_transitional_direct_publication() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     registry.register_inbox("direct-generation-advance", noop_handler());
     let unknown = MailboxId::from_name("unknown-after-direct-generation-advance");
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -1717,8 +1776,13 @@ fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let received = Arc::new(Mutex::new(Vec::new()));
     let received_for_handler = Arc::clone(&received);
     let handler: Arc<dyn InlineHandler> = Arc::new(move |dispatch: MailDispatch<'_>| {
@@ -1752,8 +1816,13 @@ fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let wakes = Arc::new(AtomicU32::new(0));
     let wakes_for_handler = Arc::clone(&wakes);
     let target = registry.register_inline(
@@ -1852,7 +1921,7 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
     mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
     let capacities = RegistryQueueCapacities { owner: 2, relay: 64 };
     let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), capacities);
-    let owner = RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), capacities);
+    let owner = RegistryOwnerLease::attach(auth(), &registry, &mailer, WakeSink::detached(), capacities);
     let name = "owner-shed-at-capacity";
     let id = MailboxId::from_name(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
@@ -1903,8 +1972,13 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
 fn owner_drain_metrics_measure_whole_batches_and_busy_time() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let first = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named("drain-metrics-a".to_owned())]));
     let second = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named("drain-metrics-b".to_owned())]));
     owner.run_once();
@@ -1948,8 +2022,13 @@ fn owner_completion_reentry_requeues_and_preserves_depth_metric() {
         }),
     );
     let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let completion =
         binding.dispatch_arm::<RegistryBatchResult, _>(mailer.acquire_settlement_hold(MailId::NONE), Source::NONE, ());
     let dispatch_id = completion.dispatch_id();
@@ -2027,8 +2106,13 @@ fn starting_parks_fifo_and_owner_close_routes_every_accepted_mail_once() {
     let settlement = Arc::new(SettlementRegistry::new());
     mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
     let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let name = "starting-close-fifo";
     let id = MailboxId::from_name(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
@@ -2070,8 +2154,13 @@ fn cancellation_holds_settlement_until_relay_terminal_delivery() {
     let settlement = Arc::new(SettlementRegistry::new());
     mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
     let relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), RegistryQueueCapacities::default());
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let name = "starting-cancel-settlement";
     let id = MailboxId::from_name(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
@@ -2105,8 +2194,13 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
             "shared-writer".to_owned(),
@@ -2133,8 +2227,13 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
 fn owner_close_rejects_queued_and_future_submissions_without_stranding_completion() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::publish_named(
             "queued-at-close".to_owned(),
@@ -2164,8 +2263,13 @@ fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
         }),
     );
     let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let completion =
         binding.dispatch_arm::<RegistryBatchResult, _>(mailer.acquire_settlement_hold(MailId::NONE), Source::NONE, ());
     let dispatch_id = completion.dispatch_id();
@@ -2192,8 +2296,13 @@ fn owner_submit_racing_close_is_rejected_or_completed() {
 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
     let barrier = Arc::new(Barrier::new(2));
     let submitting_registry = Arc::clone(&registry);
     let submitting_barrier = Arc::clone(&barrier);

@@ -28,7 +28,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
 use aether_substrate::mail::{Mail, MailId, MailRef, Source, SourceAddr};
-use aether_substrate::testing::TestChassis;
+use aether_substrate::testing::{TestChassis, boot_authority};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -96,7 +96,7 @@ impl NativeActor for ReplySink {
 fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(d);
+        let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
@@ -190,6 +190,7 @@ fn register_proxy_collision(registry: &Registry, engine_id: Uuid) -> MailboxId {
     let mailbox_id = mailbox_id_from_path(&canonical_name);
     registry
         .try_register_inbox_with_id(
+            &boot_authority(),
             mailbox_id,
             &canonical_name,
             Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),

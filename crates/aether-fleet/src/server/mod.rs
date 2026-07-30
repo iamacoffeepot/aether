@@ -185,7 +185,7 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{Mail, Source, SourceAddr};
-    use aether_substrate::testing::TestChassis;
+    use aether_substrate::testing::{TestChassis, boot_authority};
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -198,7 +198,7 @@ mod tests {
     fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
+            let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
         }
         let (outbound, _rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
