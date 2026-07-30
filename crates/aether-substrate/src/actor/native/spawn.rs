@@ -802,15 +802,25 @@ impl Spawner {
     }
 }
 
-/// Eager builder returned from `BuiltChassis::spawn_actor` and
-/// `PassiveChassis::spawn_actor`, and wrapped by [`HandlerSpawnBuilder`] for
-/// handler-local child staging. Lets the caller chain `after_init` to pre-load
-/// bootstrap mail before its terminal operation.
+/// Eager builder for the boot/embedder boundary, returned from
+/// `BuiltChassis::spawn_actor` and `PassiveChassis::spawn_actor` (and the
+/// `cfg`-gated `spawn_actor_for_test`), and wrapped by
+/// [`HandlerSpawnBuilder`] for handler-local child staging. Lets the caller
+/// chain `after_init` to pre-load bootstrap mail before its terminal
+/// operation.
 ///
 /// Holds the spawner reference borrowed from the calling ctx's
 /// transport, the resolved subname, the consumed config, and the
 /// running list of after-init envelopes. `finish` consumes the
 /// builder and runs the spawn lifecycle.
+///
+/// Its [`finish`](Self::finish) / [`finish_with_name`](Self::finish_with_name)
+/// terminals write the registry, liveness, cost, and slot state synchronously,
+/// which is correct only before the ADR-0165 owner seal. Both constructors are
+/// crate-internal, so the only builders that reach outside the substrate come
+/// from those chassis entry points; handler code holds a
+/// [`HandlerSpawnBuilder`] instead and can reach nothing but the staged
+/// terminals.
 pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     spawner: Arc<Spawner>,
     subname: Subname<'ctx>,
@@ -838,10 +848,16 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     _ctx: PhantomData<&'ctx ()>,
 }
 
-/// Handler-owned child builder. Its staged terminal performs only local
-/// preparation during the actor turn and appends one ordered prepared birth
-/// to the parent binding. The eager terminals are a transitional bridge for
-/// the unmigrated #4065-#4069 consumers and are removed by #4070.
+/// Handler-owned child builder, the only spawn surface
+/// [`NativeCtx::spawn_child`](super::ctx::NativeCtx::spawn_child) hands back.
+/// Every terminal it carries — [`stage`](Self::stage),
+/// [`stage_with`](Self::stage_with), [`continue_with`](Self::continue_with) —
+/// performs only local preparation during the actor turn and appends one
+/// ordered prepared birth to the parent binding, so a handler never takes the
+/// spawn path's shared locks mid-turn (ADR-0165). It deliberately exposes no
+/// eager terminal: the wrapped [`SpawnBuilder`] is private, so reaching
+/// synchronous commit from a handler needs an explicit substrate API change,
+/// not a call-site choice.
 pub struct HandlerSpawnBuilder<'ctx, A: Instanced + NativeActor> {
     inner: SpawnBuilder<'ctx, A>,
     parent_binding: Arc<NativeBinding>,
@@ -1040,16 +1056,6 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         let _ = sender;
         Ok(receipt)
     }
-
-    /// Transitional handler-eager bridge for #4065-#4069.
-    pub fn finish(self) -> Result<MailboxId, SpawnError> {
-        self.inner.finish()
-    }
-
-    /// Transitional handler-eager bridge for #4065-#4069.
-    pub fn finish_with_name(self) -> Result<(MailboxId, String), SpawnError> {
-        self.inner.finish_with_name()
-    }
 }
 
 impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
@@ -1183,12 +1189,18 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// Consume the builder and run the spawn lifecycle. Returns the
     /// new actor's [`MailboxId`] on success, or a typed [`SpawnError`]
     /// describing which lifecycle step failed.
+    ///
+    /// Boot/embedder authority: the commit half writes shared registry and
+    /// scheduler state on the calling thread, which the ADR-0165 owner seal
+    /// permits only before the owner takes over. A handler stages instead —
+    /// see [`HandlerSpawnBuilder::stage`].
     pub fn finish(self) -> Result<MailboxId, SpawnError> {
         self.finish_internal().map(|commit| commit.mailbox_id)
     }
 
     /// Consume the builder and return both the mailbox id and the exact
-    /// canonical name registered for the new actor.
+    /// canonical name registered for the new actor. Carries the same
+    /// boot/embedder authority as [`Self::finish`].
     pub fn finish_with_name(self) -> Result<(MailboxId, String), SpawnError> {
         self.finish_internal().map(|commit| (commit.mailbox_id, commit.canonical_name))
     }
@@ -1212,6 +1224,52 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Instant;
+
+    /// Probe methods whose names collide with the eager terminals. Rust resolves
+    /// an inherent method ahead of a trait one, so these are reachable through
+    /// method-call syntax on a [`HandlerSpawnBuilder`] exactly while that type
+    /// declares no inherent `finish` / `finish_with_name` of its own.
+    trait EagerTerminalProbe {
+        fn finish(self) -> &'static str;
+        fn finish_with_name(self) -> &'static str;
+    }
+
+    impl<A: Instanced + NativeActor> EagerTerminalProbe for HandlerSpawnBuilder<'_, A> {
+        fn finish(self) -> &'static str {
+            "probe"
+        }
+
+        fn finish_with_name(self) -> &'static str {
+            "probe"
+        }
+    }
+
+    /// The shape of a boot/embedder eager terminal, over whatever success value
+    /// it hands back.
+    type EagerTerminal<'ctx, A, R> = fn(SpawnBuilder<'ctx, A>) -> Result<R, SpawnError>;
+
+    /// Tripwire (ADR-0165, iamacoffeepot/aether#4070): a handler builder has no
+    /// eager terminal, and the boot/embedder builder still has one.
+    ///
+    /// Both bindings are compile-time assertions — the bodies never run, and
+    /// the plausible bug is a future edit re-exposing synchronous commit to
+    /// handler code. Re-adding `HandlerSpawnBuilder::finish` (or
+    /// `finish_with_name`) makes the inherent method win method resolution
+    /// above, so the `&'static str` bindings stop type-checking against
+    /// `Result<MailboxId, SpawnError>` and this file fails to compile.
+    /// Deleting the boot terminals breaks the paired coercions below, so the
+    /// asymmetry is pinned from both sides rather than only one.
+    #[allow(dead_code, reason = "the compile is the assertion; there is no handler binding to construct here")]
+    fn spawn_terminals_stay_split<'ctx, A: Instanced + NativeActor>(
+        staged_only: HandlerSpawnBuilder<'ctx, A>,
+        staged_only_named: HandlerSpawnBuilder<'ctx, A>,
+    ) {
+        let _: &'static str = staged_only.finish();
+        let _: &'static str = staged_only_named.finish_with_name();
+
+        let _: EagerTerminal<'ctx, A, MailboxId> = SpawnBuilder::finish;
+        let _: EagerTerminal<'ctx, A, (MailboxId, String)> = SpawnBuilder::finish_with_name;
+    }
 
     #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema)]
     #[kind(name = "test.activation.poke")]
