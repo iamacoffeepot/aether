@@ -21,7 +21,9 @@ pub use aether_actor::Manual;
 pub use aether_actor::OutboundReply;
 pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::spawn::Subname;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{
+    NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskContinuation, TaskDone,
+};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::runtime::trace::SettlementHold;
 pub use aether_substrate::{KindId, Mail, Mailer};
@@ -99,21 +101,20 @@ pub struct PendingUnbind {
 }
 
 pub struct PendingConnect {
-    pub sender: aether_data::Source,
-    pub hold: SettlementHold,
+    pub continuation: TaskContinuation,
     pub addr: String,
     pub name: Option<String>,
     pub consumer: Option<aether_data::MailboxId>,
 }
 
-fn reply_to_pending_connect(
-    ctx: &mut NativeCtx<'_, Manual>,
-    sender: aether_data::Source,
-    hold: SettlementHold,
-    reply: &ConnectResult,
-) {
-    ctx.reply_to_target(sender, reply, hold.root(), None);
-    drop(hold);
+#[derive(Clone)]
+pub enum TcpSpawnContinuation {
+    OutboundSession { addr: String, session_name: String, peer: String },
+    Listener { addr: String, listener_name: String, local_port: u16 },
+}
+
+fn reply_to_pending_connect(ctx: &mut NativeCtx<'_, Manual>, continuation: TaskContinuation, reply: &ConnectResult) {
+    continuation.resolve(ctx, reply);
 }
 
 #[runtime]
@@ -139,6 +140,12 @@ impl NativeActor for TcpCapability {
         })
     }
 
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        for (_, pending) in state.pending_connects.drain() {
+            pending.continuation.abandon_for_actor_close();
+        }
+    }
+
     /// Dial an outbound TCP stream on a one-shot transport thread and
     /// park the caller's reply until `ConnectReady` reports completion.
     ///
@@ -152,8 +159,7 @@ impl NativeActor for TcpCapability {
         state.pending_connects.insert(
             id,
             PendingConnect {
-                sender: ctx.reply_target(),
-                hold: ctx.acquire_settlement_hold(),
+                continuation: ctx.continuation_to(ctx.reply_target()),
                 addr: mail.addr.clone(),
                 name: mail.name,
                 consumer: mail.consumer,
@@ -179,24 +185,23 @@ impl NativeActor for TcpCapability {
         });
 
         if let Err(error) = spawn_result {
-            let PendingConnect { sender, hold, addr, .. } =
+            let PendingConnect { continuation, addr, .. } =
                 state.pending_connects.remove(&id).expect("connect inserted before thread spawn");
             reply_to_pending_connect(
                 ctx,
-                sender,
-                hold,
+                continuation,
                 &ConnectResult::Err { addr, reason: format!("connect thread spawn failed: {error}") },
             );
         }
     }
 
-    /// Drain completed outbound dials, spawn one existing
-    /// `TcpSessionActor` per connected stream, and complete each parked
-    /// `ConnectResult` reply by connect id.
+    /// Drain completed outbound dials and stage one `TcpSessionActor` per
+    /// connected stream. The task completion sends each parked
+    /// `ConnectResult` only after authoritative activation.
     #[handler::manual]
     fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: ConnectReady) {
         while let Ok((id, result)) = state.connect_rx.try_recv() {
-            let Some(PendingConnect { sender, hold, addr, name, consumer }) = state.pending_connects.remove(&id) else {
+            let Some(PendingConnect { continuation, addr, name, consumer }) = state.pending_connects.remove(&id) else {
                 continue;
             };
 
@@ -206,10 +211,10 @@ impl NativeActor for TcpCapability {
                     let peer = match stream.peer_addr() {
                         Ok(peer) => peer.to_string(),
                         Err(error) => {
+                            drop(stream);
                             reply_to_pending_connect(
                                 ctx,
-                                sender,
-                                hold,
+                                continuation,
                                 &ConnectResult::Err { addr, reason: format!("peer_addr failed: {error}") },
                             );
                             continue;
@@ -226,28 +231,26 @@ impl NativeActor for TcpCapability {
                             },
                             (),
                         )
-                        .finish()
-                    {
-                        Ok(session_id) => {
+                        .continue_with(
+                            continuation,
+                            TcpSpawnContinuation::OutboundSession {
+                                addr: addr.clone(),
+                                session_name: session_name.clone(),
+                                peer,
+                            },
+                        ) {
+                        Ok(_) => {}
+                        Err((error, continuation)) => {
                             reply_to_pending_connect(
                                 ctx,
-                                sender,
-                                hold,
-                                &ConnectResult::Ok { session_name, session_id, peer },
-                            );
-                        }
-                        Err(error) => {
-                            reply_to_pending_connect(
-                                ctx,
-                                sender,
-                                hold,
+                                continuation,
                                 &ConnectResult::Err { addr, reason: format!("spawn failed: {error:?}") },
                             );
                         }
                     }
                 }
                 Err(reason) => {
-                    reply_to_pending_connect(ctx, sender, hold, &ConnectResult::Err { addr, reason });
+                    reply_to_pending_connect(ctx, continuation, &ConnectResult::Err { addr, reason });
                 }
             }
         }
@@ -255,32 +258,35 @@ impl NativeActor for TcpCapability {
 
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr`.
     ///
-    /// Binds the socket on the dispatcher thread (so a bind
-    /// failure replies `Err` synchronously), then hands the bound
-    /// listener through `spawn_child`. After spawn the cap
-    /// registers a monitor and inserts the listener into its
-    /// supervisor map.
+    /// Binds the socket on the dispatcher thread (so a bind failure replies
+    /// `Err` synchronously), then stages the bound listener. Its task
+    /// completion registers the monitor, commits the supervisor entry, and
+    /// replies only after authoritative activation.
     ///
     /// # Agent
     /// Reply: `BindListenerResult`. `Ok` on successful bind +
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
-    #[handler::single]
-    fn on_bind(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: BindListener) -> BindListenerResult {
+    #[handler::manual]
+    fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: BindListener) {
         let listener = match TcpListener::bind(&mail.addr) {
             Ok(l) => l,
             Err(e) => {
-                return BindListenerResult::Err { addr: mail.addr, reason: format!("bind failed: {e}") };
+                ctx.reply(&BindListenerResult::Err { addr: mail.addr, reason: format!("bind failed: {e}") });
+                return;
             }
         };
         let local_port = match listener.local_addr() {
             Ok(addr) => addr.port(),
             Err(e) => {
-                return BindListenerResult::Err { addr: mail.addr, reason: format!("local_addr failed: {e}") };
+                drop(listener);
+                ctx.reply(&BindListenerResult::Err { addr: mail.addr, reason: format!("local_addr failed: {e}") });
+                return;
             }
         };
         let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
+        let continuation = ctx.continuation_to(ctx.reply_target());
 
-        let listener_id = match ctx
+        if let Err((error, continuation)) = ctx
             .spawn_child::<TcpCapability, TcpListenerActor>(
                 Subname::Named(&subname_str),
                 TcpListenerConfig {
@@ -291,39 +297,68 @@ impl NativeActor for TcpCapability {
                 },
                 (),
             )
-            .finish()
+            .continue_with(
+                continuation,
+                TcpSpawnContinuation::Listener {
+                    addr: mail.addr.clone(),
+                    listener_name: subname_str.clone(),
+                    local_port,
+                },
+            )
         {
-            Ok(id) => id,
-            Err(e) => {
-                return BindListenerResult::Err { addr: mail.addr, reason: format!("spawn failed: {e:?}") };
+            continuation
+                .resolve(ctx, &BindListenerResult::Err { addr: mail.addr, reason: format!("spawn failed: {error:?}") });
+        }
+    }
+
+    #[handler(task)]
+    fn on_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, TcpSpawnContinuation>,
+    ) {
+        match done.context().clone() {
+            TcpSpawnContinuation::OutboundSession { addr, session_name, peer } => {
+                done.resolve_with(ctx, move |result, _| match result {
+                    Ok(applied) => ConnectResult::Ok { session_name, session_id: applied.mailbox_id, peer },
+                    Err(error) => ConnectResult::Err { addr, reason: format!("spawn failed: {error:?}") },
+                });
             }
-        };
+            TcpSpawnContinuation::Listener { addr, listener_name, local_port } => {
+                let applied = match done.output() {
+                    Ok(applied) => applied.clone(),
+                    Err(error) => {
+                        let reason = format!("spawn failed: {error:?}");
+                        done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, reason });
+                        return;
+                    }
+                };
+                let monitor_handle = match ctx.monitor(applied.mailbox_id) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        ctx.actor_at::<TcpListenerActor>(applied.mailbox_id).send(&Close::default());
+                        let reason = format!("monitor failed: {error:?}");
+                        done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, reason });
+                        return;
+                    }
+                };
 
-        // Register the cap's monitor on the freshly-spawned
-        // listener. The monitor pins until the entry is removed
-        // (in on_monitor_notice).
-        let monitor_handle = match ctx.monitor(listener_id) {
-            Ok(h) => h,
-            Err(e) => {
-                // Listener spawned but monitor failed — extremely
-                // unlikely (listener was just inserted Live). Reply
-                // Err and let the listener live; chassis shutdown
-                // will reap it.
-                return BindListenerResult::Err { addr: mail.addr, reason: format!("monitor failed: {e:?}") };
+                state.listeners.insert(
+                    applied.mailbox_id,
+                    ListenerEntry {
+                        addr,
+                        port: local_port,
+                        name: listener_name.clone(),
+                        _monitor_handle: monitor_handle,
+                    },
+                );
+                done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
+                    listener_name,
+                    listener_id: applied.mailbox_id,
+                    local_port,
+                });
             }
-        };
-
-        state.listeners.insert(
-            listener_id,
-            ListenerEntry {
-                addr: mail.addr,
-                port: local_port,
-                name: subname_str.clone(),
-                _monitor_handle: monitor_handle,
-            },
-        );
-
-        BindListenerResult::Ok { listener_name: subname_str, listener_id, local_port }
+        }
     }
 
     /// Mail `Close` to the named listener and park the
