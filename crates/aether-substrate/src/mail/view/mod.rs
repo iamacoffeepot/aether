@@ -64,12 +64,11 @@ impl<T> Clone for View<T> {
 impl<T> View<T> {
     /// Pins and returns the currently published generation.
     ///
-    /// For views backed by [`DoubleBuffer`], keep the returned snapshot only
-    /// for a short read. Extract or clone the small value needed and drop the
-    /// snapshot before slow or blocking work, an await, actor-authored code, or
-    /// two further publications. Holding it across the reuse boundary is
-    /// diagnosed in debug builds and forces a coherent clone fallback in
-    /// release builds.
+    /// A snapshot stays readable and coherent for as long as it is held, so
+    /// correctness never depends on releasing it promptly. Holding one across
+    /// a [`DoubleBuffer`]'s reuse boundary costs that buffer a clone, so
+    /// extract or clone the small value needed and drop the snapshot before
+    /// slow or blocking work, an await, or actor-authored code.
     #[must_use]
     pub fn load(&self) -> Snapshot<T> {
         Snapshot { published: self.shared.load() }
@@ -78,9 +77,10 @@ impl<T> View<T> {
 
 /// A pinned point-in-time publication.
 ///
-/// A snapshot from a [`DoubleBuffer`]-backed view is a short-lived read guard:
-/// extract or clone what is needed and release it before slow/blocking work,
-/// awaiting, actor-authored code, or two more publication cycles.
+/// A snapshot from a [`DoubleBuffer`]-backed view reads coherently for its
+/// whole lifetime; releasing it promptly is a cost concern, not a correctness
+/// one. Extract or clone what is needed and release it before slow/blocking
+/// work, awaiting, or actor-authored code.
 pub struct Snapshot<T> {
     published: Guard<Arc<Published<T>>>,
 }

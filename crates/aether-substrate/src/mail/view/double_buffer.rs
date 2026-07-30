@@ -47,11 +47,13 @@ where
 /// An ordered double-buffer publisher for map views.
 ///
 /// Each batch updates the standby map with the previous replay lag and then
-/// with the new updates. Publishing swaps the maps in constant time. Readers
-/// must not pin a published snapshot across a complete two-publication cycle;
-/// debug builds diagnose that contract at the reuse boundary. `Arc::make_mut`
-/// remains a release-build safety valve that preserves coherent publication if
-/// a reader violates the short-hold contract.
+/// with the new updates. Publishing swaps the maps in constant time. A reader
+/// that still holds the standby map when it comes up for reuse causes
+/// `Arc::make_mut` to clone that map first, so publication stays coherent and
+/// the reader keeps reading the generation it pinned. The writer cannot
+/// predicate that on a reference count: `swap` itself pays the outstanding
+/// reader debts on the map it is about to recycle, so a count above one is an
+/// ordinary concurrent read, not a contract violation.
 pub struct DoubleBuffer<K, V> {
     publisher: ViewPublisher<FxHashMap<K, V>>,
     standby: Arc<Published<FxHashMap<K, V>>>,
@@ -82,11 +84,6 @@ where
     /// Applies one ordered batch and publishes the resulting map.
     pub fn publish(&mut self, updates: impl IntoIterator<Item = Update<K, V>>) -> Result<u64, GenerationExhausted> {
         let generation = self.publisher.next_generation()?;
-        debug_assert_eq!(
-            Arc::strong_count(&self.standby),
-            1,
-            "DoubleBuffer publication-cycle violation: a reader pinned the standby snapshot across two publishes"
-        );
         let replay_lag = take(&mut self.replay_lag);
         let published = Arc::make_mut(&mut self.standby);
 
@@ -132,9 +129,14 @@ where
 #[cfg(test)]
 mod tests {
     use std::iter::empty;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
 
     use super::*;
+
+    /// The key space the concurrent reader publishes over, small enough that
+    /// the map is reused rather than grown across the run.
+    const KEYS: u32 = 8;
 
     fn entries(view: &View<FxHashMap<&'static str, i32>>) -> Vec<(&'static str, i32)> {
         let snapshot = view.load();
@@ -254,22 +256,44 @@ mod tests {
         assert_eq!(entries(&view), [("b", 2), ("c", 3)]);
     }
 
-    #[cfg(debug_assertions)]
+    /// Tripwire: a concurrent reader must never be able to fault the writer.
+    /// `swap` pays outstanding reader debts on the map it recycles as standby,
+    /// so the writer observes a shared standby for reads it cannot bound. The
+    /// clone valve is what absorbs that; a writer-side reference-count
+    /// assertion would fire here on the shortest possible read.
     #[test]
-    #[should_panic(expected = "DoubleBuffer publication-cycle violation")]
-    fn pinning_a_snapshot_across_its_reuse_cycle_panics() {
-        let mut buffers = DoubleBuffer::default();
+    fn a_concurrent_reader_never_faults_the_writer() {
+        let mut buffers = DoubleBuffer::<u32, u32>::default();
         let view = buffers.view();
+        let stop = Arc::new(AtomicBool::new(false));
 
-        buffers.publish([Update::Insert("a", 1)]).expect("the first generation should be available");
-        let _pinned = view.load();
-        buffers.publish([Update::Insert("b", 2)]).expect("the second generation should be available");
-        let _ = buffers.publish([Update::Insert("c", 3)]);
+        let reader_stop = Arc::clone(&stop);
+        let reader_view = view.clone();
+        // views sit below the actor system, so this reader has to be a raw
+        // thread — the contention under test is what the scheduler is built on
+        #[allow(clippy::disallowed_methods)]
+        let reader = thread::spawn(move || {
+            let mut previous = 0;
+            while !reader_stop.load(Ordering::Relaxed) {
+                let snapshot = reader_view.load();
+                assert!(snapshot.generation() >= previous, "a published generation went backwards");
+                assert!(snapshot.len() <= KEYS as usize, "a snapshot exposed more keys than were ever published");
+                previous = snapshot.generation();
+            }
+            previous
+        });
+
+        for round in 0..20_000 {
+            buffers.publish([Update::Insert(round % KEYS, round)]).expect("the generation should be available");
+        }
+        stop.store(true, Ordering::Relaxed);
+
+        assert!(reader.join().expect("the reader should not fault") > 0, "the reader should observe publications");
+        assert_eq!(view.load().len(), KEYS as usize);
     }
 
-    #[cfg(not(debug_assertions))]
     #[test]
-    fn release_clone_fallback_keeps_a_pinned_snapshot_and_new_view_coherent() {
+    fn a_pinned_snapshot_and_the_new_view_stay_coherent_through_the_clone_valve() {
         let mut buffers = DoubleBuffer::default();
         let view = buffers.view();
 
