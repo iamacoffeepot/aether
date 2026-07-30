@@ -54,6 +54,9 @@ use crate::runtime::trace::SettlementHold;
 use aether_actor::RequestContextTable;
 use aether_data::{Kind, RequestId};
 
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::component::ComponentCtx;
+
 use super::reservation::{ChildReservationKey, ChildReservationTable, LiveChildReservation, ParentReservation};
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
@@ -74,13 +77,31 @@ enum PendingPayload {
     /// The copy-out fallback when the ring could not take the mail
     /// (transiently full, or a payload larger than the ring).
     Owned(Vec<u8>),
+    /// An already-owned component payload admitted while staged activation
+    /// holds guest-authored mail. Unlike native sends, the wasm host function
+    /// has already transferred ownership of its `Vec`, so retaining the
+    /// resulting `MailRef` avoids copying it into the native actor ring.
+    #[cfg(feature = "wasm")]
+    Prebuilt(MailRef),
 }
 
-/// One outbound mail a handler buffered, pending flush. The payload is
-/// already in the ring (`InRing`) or copied out (`Owned`); the rest is
-/// route metadata (correlation-derived `reply_to`/`mail_id`, inherited
-/// lineage) the flush stamps onto the [`Mail`] it builds.
+#[derive(Clone, Copy)]
+enum PendingRoute {
+    /// Ordinary native buffered mail re-enters the shared mailer/blob path.
+    Mailer,
+    /// Component mail preserves the direct component dispatch semantics that
+    /// supply the producer's canonical name to an inbox or inline handler.
+    #[cfg(feature = "wasm")]
+    Component,
+}
+
+/// One outbound mail a handler buffered, pending flush. A native payload is
+/// already in the ring (`InRing`) or copied out (`Owned`); a component payload
+/// is retained as its prebuilt [`MailRef`]. The rest is route metadata
+/// (correlation-derived `reply_to`/`mail_id`, inherited lineage) the flush
+/// stamps onto the [`Mail`] it builds.
 struct PendingMail {
+    sender: MailboxId,
     recipient: u64,
     kind: u64,
     payload: PendingPayload,
@@ -89,6 +110,13 @@ struct PendingMail {
     mail_id: MailId,
     root: MailId,
     parent_mail: Option<MailId>,
+    route: PendingRoute,
+}
+
+struct RoutedPendingMail {
+    mail: Mail,
+    sender: MailboxId,
+    route: PendingRoute,
 }
 
 struct PendingBirthWork {
@@ -126,9 +154,9 @@ struct OutboundBuffer {
     /// Whether a ring blob is currently open — between the first send of
     /// a flush window and the flush's `seal`.
     blob_open: bool,
-    /// iamacoffeepot/aether#1158: the instant this flush window's blob
-    /// **opened** — stamped at the first buffered send (the `blob_open`
-    /// false→true transition), shared by every mail in the window. The
+    /// iamacoffeepot/aether#1158: the instant this outbound window
+    /// **opened** — stamped by its first buffered native or component send,
+    /// shared by every mail in the window. The
     /// flush reads it as each deferred `Sent`'s `t_construct_start`
     /// (falling back to `flush_begin` if somehow unset) so `t_sent −
     /// t_construct_start` is the **construct** span, and resets it to
@@ -819,15 +847,64 @@ impl NativeBinding {
                 // flush window. `t_sent − t_construct_start` (flush-begin −
                 // this) is the **construct** span (the producer building
                 // the blob).
-                *construct_start = Some(self.mailer.now_nanos());
+                if construct_start.is_none() {
+                    *construct_start = Some(self.mailer.now_nanos());
+                }
             }
             match ring.append(recipient, kind, bytes) {
                 Ok(loc) => PendingPayload::InRing(loc),
                 Err(RingFull) => PendingPayload::Owned(bytes.to_vec()),
             }
         };
-        buf.mails.push(PendingMail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail });
+        buf.mails.push(PendingMail {
+            sender: self.self_mailbox(),
+            recipient,
+            kind,
+            payload,
+            count,
+            reply_to,
+            mail_id,
+            root,
+            parent_mail,
+            route: PendingRoute::Mailer,
+        });
         mail_id
+    }
+
+    /// Offer one fully-stamped wasm component mail to the staged activation
+    /// hold. The activation flag and append are observed under the same lock:
+    /// a concurrent release either drains this mail or makes the caller route
+    /// it eagerly against the already-`Live` route.
+    ///
+    /// Settlement is bumped only when the hold accepts the mail. A rejected
+    /// mail remains wholly owned by the caller, which performs the ordinary
+    /// eager `record_sent` + dispatch path. `None` means accepted; `Some(mail)`
+    /// returns a rejected offer unchanged.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn try_hold_component_mail(&self, mail: Mail, sender: MailboxId) -> Option<Mail> {
+        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        if !buffer.activation_held {
+            return Some(mail);
+        }
+
+        self.mailer.record_sent_inflight(mail.root);
+        if buffer.construct_start.is_none() {
+            buffer.construct_start = Some(self.mailer.now_nanos());
+        }
+        let Mail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail } = mail;
+        buffer.mails.push(PendingMail {
+            sender,
+            recipient: recipient.0,
+            kind: kind.0,
+            payload: PendingPayload::Prebuilt(payload),
+            count,
+            reply_to,
+            mail_id,
+            root,
+            parent_mail,
+            route: PendingRoute::Component,
+        });
+        None
     }
 
     /// Append one prepared child birth at its exact declaration point in the
@@ -970,12 +1047,16 @@ impl NativeBinding {
     fn flush_outbound_inner(&self) {
         let flush_begin;
         // iamacoffeepot/aether#1158: the construct-start anchor stamped
-        // when this window's blob opened (`push_envelope_buffered`). Read
-        // it here and reset for the next window; fall back to `flush_begin`
-        // (construct ≈ 0) on the impossible `None` so the field is never
-        // a wire hole.
+        // when this outbound window opened (a native blob send or a retained
+        // component send). Read it here and reset for the next window; fall
+        // back to `flush_begin` (construct ≈ 0) on the impossible `None` so
+        // the field is never a wire hole.
         let construct_start;
-        let (routed, births, owner_batches): (Vec<Mail>, Vec<PendingBirthWork>, Vec<PendingOwnerBatchWork>) = {
+        let (routed, births, owner_batches): (
+            Vec<RoutedPendingMail>,
+            Vec<PendingBirthWork>,
+            Vec<PendingOwnerBatchWork>,
+        ) = {
             let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
             if buf.activation_held {
                 return;
@@ -1006,10 +1087,16 @@ impl NativeBinding {
                             MailRef::in_ring(Arc::clone(ring.expect("ring exists once an InRing mail was minted")), loc)
                         }
                         PendingPayload::Owned(bytes) => MailRef::from(bytes),
+                        #[cfg(feature = "wasm")]
+                        PendingPayload::Prebuilt(payload) => payload,
                     };
-                    Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
-                        .with_reply_to(p.reply_to)
-                        .with_lineage(p.mail_id, p.root, p.parent_mail)
+                    RoutedPendingMail {
+                        mail: Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
+                            .with_reply_to(p.reply_to)
+                            .with_lineage(p.mail_id, p.root, p.parent_mail),
+                        sender: p.sender,
+                        route: p.route,
+                    }
                 })
                 .collect();
             (routed, buf.births.drain(..).collect(), buf.owner_batches.drain(..).collect())
@@ -1020,12 +1107,13 @@ impl NativeBinding {
         // routing (the lock is already released — `push_trace_ring` runs
         // off the actor's own ring). `in_flight` was bumped eagerly at
         // the send call, so this is purely the trace-event half.
-        for mail in &routed {
+        for pending in &routed {
+            let mail = &pending.mail;
             self.mailer.record_sent_event_at(
                 mail.mail_id,
                 mail.root,
                 mail.parent_mail,
-                self.self_mailbox(),
+                pending.sender,
                 mail.recipient,
                 mail.kind,
                 construct_start,
@@ -1047,8 +1135,8 @@ impl NativeBinding {
             let mut effects = Vec::with_capacity(births.len());
             for mut birth in births {
                 for mail in routed.iter_mut().skip(birth.after_mail) {
-                    if mail.as_ref().is_some_and(|mail| mail.recipient == birth.recipient) {
-                        let mail = mail.take().expect("matched same-flush child mail remains present");
+                    if mail.as_ref().is_some_and(|pending| pending.mail.recipient == birth.recipient) {
+                        let mail = mail.take().expect("matched same-flush child mail remains present").mail;
                         let kind_name = self
                             .spawner
                             .as_ref()
@@ -1065,21 +1153,50 @@ impl NativeBinding {
             routed.into_iter().flatten().collect()
         };
 
-        // ADR-0087 / iamacoffeepot/aether#1137: fold the blob into this
+        self.route_pending_mails(routed);
+    }
+
+    /// ADR-0087 / iamacoffeepot/aether#1137: fold native mail into this
+    /// actor's single active cursor-shared blob. A staged component mail keeps
+    /// the direct component route that supplies its canonical origin; the
+    /// activation-only mixed window routes sequentially so send order remains
+    /// explicit.
+    fn route_pending_mails(&self, routed: Vec<RoutedPendingMail>) {
+        // Fold the blob into this
         // actor's single active cursor-shared blob (recipient-grouped,
         // cooperatively drained, broadcast-recruited for wide fan-outs)
         // when a pool sink is wired. Otherwise route per mail (a test
         // binding with no `Spawner`).
-        if self.spawner.is_some() {
+        let has_component_mail = routed.iter().any(|pending| {
+            #[cfg(feature = "wasm")]
+            {
+                matches!(pending.route, PendingRoute::Component)
+            }
+            #[cfg(not(feature = "wasm"))]
+            {
+                let _ = pending;
+                false
+            }
+        });
+        if self.spawner.is_some() && !has_component_mail {
             let mut guard = self.blob_producer.lock().expect("blob_producer poisoned; fail-fast per ADR-0063");
             let producer = guard.get_or_insert_with(|| {
                 let sink = self.spawner.as_ref().expect("spawner present in this branch").wake_sink().clone();
                 super::blob_work::BlobProducer::new(Arc::clone(&self.mailer), sink)
             });
-            producer.flush(routed);
+            producer.flush(routed.into_iter().map(|pending| pending.mail).collect());
         } else {
-            for mail in routed {
-                self.mailer.push(mail);
+            for pending in routed {
+                match pending.route {
+                    PendingRoute::Mailer => self.mailer.push(pending.mail),
+                    #[cfg(feature = "wasm")]
+                    PendingRoute::Component => ComponentCtx::dispatch_routed_mail(
+                        self.mailer.registry(),
+                        &self.mailer,
+                        pending.mail,
+                        pending.sender,
+                    ),
+                }
             }
         }
     }
@@ -1262,6 +1379,8 @@ mod tests {
     use super::*;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
     use crate::testing::bare_substrate;
+    #[cfg(feature = "wasm")]
+    use crate::{actor::wasm::component::ComponentCtx, mail::HubOutbound, mail::Registry};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1286,6 +1405,106 @@ mod tests {
             // mpsc with no field-by-field translation.
             let _ = tx.send(dispatch);
         })
+    }
+
+    #[cfg(feature = "wasm")]
+    fn component_ctx_with_binding(
+        registry: Arc<Registry>,
+        mailer: Arc<Mailer>,
+        sender: MailboxId,
+    ) -> (ComponentCtx, Arc<NativeBinding>) {
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), sender));
+        let mut ctx = ComponentCtx::new(sender, registry, mailer, HubOutbound::disconnected());
+        ctx.install_binding(Arc::clone(&binding));
+        (ctx, binding)
+    }
+
+    /// ADR-0165 interleaving: guest `wire` mail stays behind the activation
+    /// hold, then release publishes it with the exact component dispatch
+    /// metadata and settlement lineage it would have carried while Live.
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn activation_hold_releases_component_mail_with_original_dispatch_shape() {
+        let (registry, mailer) = bare_substrate();
+        let sender = MailboxId(0x0041_4501);
+        let (sender_tx, _sender_rx) = mpsc::channel::<Envelope>();
+        registry
+            .try_register_inbox_with_id(sender, "test.activation.sender", forward_to_envelope_sender(sender_tx))
+            .expect("register component sender");
+        let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
+        let recipient = registry.register_inbox("test.activation.recipient", forward_to_envelope_sender(recipient_tx));
+        let (ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), sender);
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let parent = MailId::new(MailboxId(0x0041_4502), 7);
+        let root = MailId::new(MailboxId(0x0041_4503), 9);
+        let kind = KindId(0x0041_4504);
+
+        binding.hold_outbound_for_activation();
+        ctx.set_in_flight(parent, root);
+        ctx.send(recipient, kind, vec![1, 2, 3], 2, sender);
+
+        assert!(recipient_rx.try_recv().is_err(), "wire mail must remain quarantined before activation");
+        assert_eq!(counter.live_roots(), 1, "accepted wire mail holds its inherited root open");
+
+        binding.release_outbound_after_activation();
+        let envelope = recipient_rx.try_recv().expect("release routes the retained wire mail exactly once");
+        assert_eq!(envelope.kind, kind);
+        assert_eq!(envelope.payload.bytes(), &[1, 2, 3]);
+        assert_eq!(envelope.count, 2);
+        assert_eq!(envelope.sender.addr, SourceAddr::Component(sender));
+        assert_eq!(envelope.sender.correlation_id, 1);
+        assert_eq!(envelope.mail_id, MailId::new(sender, 1));
+        assert_eq!(envelope.root, root);
+        assert_eq!(envelope.parent_mail, Some(parent));
+        assert_eq!(envelope.recipient, recipient);
+        assert_eq!(envelope.origin.as_deref(), Some("test.activation.sender"));
+        assert!(recipient_rx.try_recv().is_err(), "release must not duplicate retained mail");
+
+        mailer.record_finished(envelope.mail_id, envelope.root);
+        assert_eq!(counter.live_roots(), 0, "recipient completion balances the retained send");
+    }
+
+    /// A failed staged activation rejects guest `wire` mail locally: no route
+    /// becomes observable, and the eager settlement bump is balanced once.
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn activation_discard_rejects_component_mail_and_balances_settlement() {
+        let (registry, mailer) = bare_substrate();
+        let sender = MailboxId(0x0041_4511);
+        let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
+        let recipient = registry.register_inbox("test.activation.reject", forward_to_envelope_sender(recipient_tx));
+        let (ctx, binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+
+        binding.hold_outbound_for_activation();
+        ctx.send(recipient, KindId(0x0041_4512), vec![4, 5], 1, MailboxId::NONE);
+        assert!(recipient_rx.try_recv().is_err(), "rejected wire mail never escapes before discard");
+        assert_eq!(counter.live_roots(), 1, "accepted wire mail records one in-flight send");
+
+        binding.discard_outbound_after_activation();
+        assert!(recipient_rx.try_recv().is_err(), "discard must not route retained component mail");
+        assert_eq!(counter.live_roots(), 0, "discard balances the retained send exactly once");
+    }
+
+    /// Outside staged activation the same binding rejects the hold offer and
+    /// preserves the ordinary synchronous component route.
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn live_component_mail_remains_eager_with_binding_installed() {
+        let (registry, mailer) = bare_substrate();
+        let sender = MailboxId(0x0041_4521);
+        let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
+        let recipient = registry.register_inbox("test.activation.live", forward_to_envelope_sender(recipient_tx));
+        let (ctx, _binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+
+        ctx.send(recipient, KindId(0x0041_4522), vec![6], 1, MailboxId::NONE);
+        let envelope = recipient_rx.try_recv().expect("Live component send remains eager");
+        assert_eq!(envelope.payload.bytes(), &[6]);
+        assert_eq!(counter.live_roots(), 1);
+
+        mailer.record_finished(envelope.mail_id, envelope.root);
+        assert_eq!(counter.live_roots(), 0);
     }
 
     /// `prev_correlation` returns 0 before any send and tracks the

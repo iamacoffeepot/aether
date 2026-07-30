@@ -7,7 +7,7 @@ use crate::actor::wasm::reply_table::ReplyTable;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
-use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, Source, SourceAddr};
+use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
 use crate::actor::wasm::asset_manifest::LoadWindow;
@@ -385,9 +385,10 @@ impl ComponentCtx {
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
-    /// the inbound lineage, fire the ADR-0080 §2 `Sent` hook, then
-    /// dispatch by recipient class (inline sink, actor inbox, or
-    /// dropped/unknown bubble-up). The caller supplies the `reply_to`
+    /// the inbound lineage, offer lifecycle-authored mail to the staged
+    /// activation hold, then fire the ADR-0080 §2 `Sent` hook and dispatch
+    /// by recipient class (inline sink, actor inbox, or dropped/unknown
+    /// bubble-up). The caller supplies the `reply_to`
     /// (fresh `Component(self)` correlation for a send, echoed inbound
     /// correlation with target `None` for a reply) and the lineage
     /// `mail_id`.
@@ -433,22 +434,45 @@ impl ComponentCtx {
             (parent_mail, inherited_root)
         };
         let root = inherited_root.unwrap_or(mail_id);
+        let mail =
+            Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(mail_id, root, parent_mail);
+
+        // ADR-0165: guest `wire` runs before this actor's route is
+        // authoritatively Live. A trampoline-backed ctx therefore offers its
+        // fully-stamped mail to the binding's existing activation hold. The
+        // hold check and append share one lock with release: rejection means
+        // release already won, so this mail may take the ordinary eager path.
+        let mail = if let Some(binding) = &self.binding {
+            match binding.try_hold_component_mail(mail, identity) {
+                Some(mail) => mail,
+                None => return,
+            }
+        } else {
+            mail
+        };
+
         // Issue 1987: the recorded source + the `origin` name stamped below
         // read the dispatch `identity` the caller resolved from the guest's
         // `from`, so an inline child's mail is attributed to the child's
         // address; a normally-addressed actor's is its own id.
         self.queue.record_sent(mail_id, root, parent_mail, identity, recipient, kind);
+        Self::dispatch_routed_mail(&self.registry, &self.queue, mail, identity);
+    }
 
-        // Closure-bound (actor-enqueue) and Sink-bound (synchronous
-        // handler) recipients dispatch inline here, bypassing the
-        // mailer's full route. Issue 838: `Sink` gets a
-        // `Received`/`Finished` bracket so the chain's `in_flight`
-        // balances; `Closure` does NOT because the actor's
-        // downstream dispatch loop records the bracket. See
-        // [`MailboxEntry`] docs for the contract.
-        match self.registry.entry(recipient) {
+    /// Dispatch one component-originated mail after its `Sent` accounting has
+    /// been recorded. Kept as the shared eager/release tail so a mail retained
+    /// during staged activation preserves the same origin, reply, lineage, and
+    /// recipient-class behavior as an ordinary Live component send.
+    pub(crate) fn dispatch_routed_mail(registry: &Registry, queue: &Mailer, mail: Mail, identity: MailboxId) {
+        // Closure-bound (actor-enqueue) and Sink-bound (synchronous handler)
+        // recipients dispatch inline here, bypassing the mailer's full route.
+        // Issue 838: `Sink` gets a `Received`/`Finished` bracket so the chain's
+        // `in_flight` balances; `Closure` does NOT because the actor's
+        // downstream dispatch loop records the bracket. See [`MailboxEntry`]
+        // docs for the contract.
+        match registry.entry(mail.recipient) {
             Some(MailboxEntry::Inbox { handler, .. }) => {
-                let kind_name = self.registry.kind_name_or_empty_shared(kind);
+                let kind_name = registry.kind_name_or_empty_shared(mail.kind);
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any
                 // sink cares about (ADR-0011), and the same mailbox id
@@ -462,54 +486,54 @@ impl ComponentCtx {
                 // and move payload + kind_name into it. The bytes
                 // flow straight into the downstream cap's mpsc
                 // envelope without a `to_vec()` clone.
-                let origin = self.registry.mailbox_name(identity);
+                let origin = registry.mailbox_name(identity);
                 // ADR-0094: the second of two production mint sites
                 // (ComponentCtx's inline send bypasses `route_mail`). Armed
                 // here; the recipient actor's dispatcher discharges it.
                 handler.enqueue(OwnedDispatch::armed(
-                    kind,
+                    mail.kind,
                     kind_name,
                     origin,
-                    reply_to,
-                    MailRef::from(payload),
-                    count,
-                    mail_id,
-                    root,
-                    parent_mail,
+                    mail.reply_to,
+                    mail.payload,
+                    mail.count,
+                    mail.mail_id,
+                    mail.root,
+                    mail.parent_mail,
                     // iamacoffeepot/aether#1134: the second production
                     // deposit chokepoint (ComponentCtx's inline send
                     // bypasses `route_mail`), so stamp the deposit instant
                     // + scheduler backlog here too — else the recipient's
                     // `Received` would read a zeroed `t_enqueue`.
-                    self.queue.now_nanos(),
+                    queue.now_nanos(),
                     pending_depth(),
-                    recipient,
+                    mail.recipient,
                 ));
                 return;
             }
             Some(MailboxEntry::Inline(handler)) => {
-                let kind_name = self.registry.kind_name_or_empty_shared(kind);
-                let origin = self.registry.mailbox_name(identity);
+                let kind_name = registry.kind_name_or_empty_shared(mail.kind);
+                let origin = registry.mailbox_name(identity);
                 handler.dispatch(crate::mail::registry::MailDispatch {
-                    kind,
+                    kind: mail.kind,
                     kind_name: &kind_name,
                     origin: origin.as_deref(),
-                    sender: reply_to,
-                    payload: &payload,
-                    count,
-                    mail_id,
-                    root,
-                    parent_mail,
+                    sender: mail.reply_to,
+                    payload: mail.payload.bytes(),
+                    count: mail.count,
+                    mail_id: mail.mail_id,
+                    root: mail.root,
+                    parent_mail: mail.parent_mail,
                 });
                 // ADR-0080 §2 settlement hook. Inline mailboxes have no
                 // per-actor trace ring, so post-ADR-0086 Phase 3c their
                 // Received/Finished trace events aren't recorded — only
                 // settlement accounting runs here.
-                self.queue.record_finished(mail_id, root);
+                queue.record_finished(mail.mail_id, mail.root);
                 return;
             }
             Some(MailboxEntry::Dropped) | None => {
-                // Falls through to the `self.queue.push` path below
+                // Falls through to the `queue.push` path below
                 // — Dropped warn-drops in `route_mail` (with the
                 // Finished bracket from issue 839); unknown bubbles
                 // up via ADR-0037 (also with the local-side
@@ -523,11 +547,7 @@ impl ComponentCtx {
         //   `MailToHubSubstrate`; the `source_mailbox_id` it carries is
         //   recovered from `reply_to.addr` when it's a Component
         //   variant (warn-drops otherwise).
-        self.queue.push(Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(
-            mail_id,
-            root,
-            parent_mail,
-        ));
+        queue.push(mail);
     }
 
     /// Set the in-flight `(mail_id, root)` context the next
