@@ -169,10 +169,12 @@ mod tests {
     // Test harness resolves the server/sink actor mailboxes by their NAMESPACE
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
+    use super::runtime::{FleetServerState, FleetSpawnContinuation, PendingEngine, ProxySpawnOutcome};
     use super::{FleetConfig, FleetServer, ReplyCells, ReplySink};
     use crate::kinds::{EngineAlive, EngineDied};
+    use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
     use aether_actor::Addressable;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use aether_data::{EngineId, Kind, MailboxId, Uuid, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
         BinarySelector, DeathReason, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
@@ -184,9 +186,11 @@ mod tests {
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{Mail, Source, SourceAddr};
     use aether_substrate::testing::TestChassis;
+    use std::collections::{HashMap, VecDeque};
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-    use std::{env, process, thread};
+    use std::{env, fs, process, thread};
 
     /// Boot a passive chassis hosting `FleetServer` + the reply sink.
     /// Returns the chassis (kept alive for its dispatcher threads), the
@@ -219,6 +223,30 @@ mod tests {
     fn isolated_store_dir() -> String {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         env::temp_dir().join(format!("aether-binstore-engcap-{}-{nanos}", process::id())).to_string_lossy().into_owned()
+    }
+
+    /// Minimal state for deterministic lifecycle reducer tests. These tests
+    /// manually step pending/death/apply order; the integration suite owns
+    /// scheduler interaction and real process teardown.
+    fn lifecycle_state() -> (FleetServerState, PathBuf) {
+        let root = PathBuf::from(isolated_store_dir());
+        let store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("test lifecycle store opens");
+        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
+        (
+            FleetServerState {
+                engines: HashMap::new(),
+                pending_engines: HashMap::new(),
+                next_engine_seq: 1,
+                mailer,
+                heartbeat: None,
+                connect_budget: None,
+                spawn_attempts: 1,
+                fleet_store_root: root.join("engines"),
+                recently_died: VecDeque::new(),
+                store,
+            },
+            root,
+        )
     }
 
     /// Drive one request kind at `aether.fleet`, reply-to the sink,
@@ -259,6 +287,105 @@ mod tests {
         let result =
             drive(&mailer, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take());
         assert!(result.engines.is_empty(), "fresh cap supervises no engines");
+    }
+
+    /// The fleet table changes only at authoritative completion. This is a
+    /// controlled reducer proof, not a scheduler-order proof: the real-process
+    /// integration test below covers the owner/task wake path.
+    #[test]
+    fn pending_proxy_is_invisible_until_authoritative_apply() {
+        let (mut state, root) = lifecycle_state();
+        let engine_id = EngineId(Uuid::from_u128(1));
+        let rpc_port = 40_680;
+        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+
+        assert!(state.engines.is_empty(), "a prepared proxy is not yet supervised");
+        let reply = state
+            .settle_pending_spawn(
+                FleetSpawnContinuation { engine_id, rpc_port },
+                ProxySpawnOutcome::Applied(MailboxId(0x4068)),
+            )
+            .expect("the matching completion settles once");
+
+        assert!(matches!(reply, SpawnEngineResult::Ok { rpc_port: port, .. } if port == rpc_port));
+        assert!(state.pending_engines.is_empty(), "completion consumes the reservation");
+        assert_eq!(state.engines.get(&engine_id).map(|entry| entry.proxy_mailbox), Some(MailboxId(0x4068)));
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A proxy can report death from its catch-up wake before the parent task
+    /// turn. Manual stepping proves the interleaving: the first report wins,
+    /// apply cannot install a corpse, and stale/duplicate settlement creates
+    /// neither a second reply value nor a second death record.
+    #[test]
+    fn early_proxy_death_wins_over_apply_once() {
+        let (mut state, root) = lifecycle_state();
+        let engine_id = EngineId(Uuid::from_u128(2));
+        let rpc_port = 40_681;
+        let continuation = FleetSpawnContinuation { engine_id, rpc_port };
+        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+
+        state.observe_engine_death(
+            engine_id,
+            DeathReason::Crashed { detail: "connection closed during activation".to_owned() },
+        );
+        state.observe_engine_death(
+            engine_id,
+            DeathReason::Evicted { detail: "duplicate late heartbeat report".to_owned() },
+        );
+
+        let reply = state
+            .settle_pending_spawn(continuation.clone(), ProxySpawnOutcome::Applied(MailboxId(0x4068_0002)))
+            .expect("the first completion settles");
+        assert!(
+            matches!(reply, SpawnEngineResult::Err { engine_id: Some(ref id), ref error }
+                if id == &engine_id.0.to_string() && error.contains("died before supervision committed")),
+            "an early-dead proxy returns an id-bearing failure: {reply:?}",
+        );
+        assert!(state.engines.is_empty(), "authoritative apply cannot install the reported-dead proxy");
+        assert_eq!(state.recently_died.len(), 1, "the first death is recorded exactly once");
+        assert!(matches!(state.recently_died[0].reason, DeathReason::Crashed { ref detail }
+            if detail == "connection closed during activation"));
+
+        assert!(
+            state
+                .settle_pending_spawn(continuation, ProxySpawnOutcome::Rejected("stale owner result".to_owned()))
+                .is_none(),
+            "a duplicate/stale completion has no second reply value",
+        );
+        assert_eq!(state.recently_died.len(), 1, "a stale completion cannot duplicate the death record");
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Owner rejection is distinct from an init/refork failure: it consumes
+    /// the pending record, never exposes a live row, and records one
+    /// id-bearing `SpawnFailed` result for the caller.
+    #[test]
+    fn owner_rejection_settles_pending_spawn_as_failed_once() {
+        let (mut state, root) = lifecycle_state();
+        let engine_id = EngineId(Uuid::from_u128(3));
+        let rpc_port = 40_682;
+        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+
+        let reply = state
+            .settle_pending_spawn(
+                FleetSpawnContinuation { engine_id, rpc_port },
+                ProxySpawnOutcome::Rejected("canonical route collision".to_owned()),
+            )
+            .expect("matching owner rejection settles");
+        assert!(matches!(reply, SpawnEngineResult::Err { engine_id: Some(ref id), .. }
+            if id == &engine_id.0.to_string()));
+        assert!(state.engines.is_empty());
+        assert!(state.pending_engines.is_empty());
+        assert_eq!(state.recently_died.len(), 1);
+        assert!(matches!(state.recently_died[0].reason, DeathReason::SpawnFailed { .. }));
+
+        drop(state);
+        let _ = fs::remove_dir_all(root);
     }
 
     /// `on_spawn` with a selector that resolves to no stored binary
@@ -303,7 +430,6 @@ mod tests {
         use super::artifacts::{bootstrap_ingest, resolve_selector};
         use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
         use std::collections::HashSet;
-        use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
