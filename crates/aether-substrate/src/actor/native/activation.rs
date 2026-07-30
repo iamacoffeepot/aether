@@ -177,6 +177,10 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
             finalizer.retain(mail);
         }
     }
+
+    fn id_is_retired(&self) -> bool {
+        self.spawner.actor_registry().is_tombstoned(self.id)
+    }
 }
 
 struct DiscardJob<A: NativeActor> {

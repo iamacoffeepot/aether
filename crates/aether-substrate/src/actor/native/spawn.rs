@@ -1609,16 +1609,20 @@ mod tests {
         assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
     }
 
-    /// A child that closes itself hands its parent-local subname back at its
-    /// own close path, without waiting for chassis teardown. The regression
-    /// this catches: the live key rode the child's binding inside
-    /// [`Spawner::instanced_slots`], and only `shutdown_instanced` ever
-    /// emptied that map — so a parent that churns named children leaked one
-    /// table entry per dead child and rejected every re-staged subname
-    /// synchronously with a stale local `SubnameInUse`, shadowing the
-    /// authoritative owner-time `SubnameRetired` (ADR-0165).
+    /// Re-staging a self-closed child's subname reports the authoritative
+    /// `SubnameRetired`, and the parent's key comes back at the child's own
+    /// close path rather than at chassis teardown. Issue 4152's two
+    /// independent regressions, in the order a caller meets them: the live
+    /// key rode the child's binding inside [`Spawner::instanced_slots`],
+    /// which only `shutdown_instanced` ever empties, so the re-stage was
+    /// rejected locally as `SubnameInUse` and one table entry leaked per
+    /// dead child; and the owner then rejected the birth on its surviving
+    /// route — also as `SubnameInUse` — before
+    /// [`super::activation::LegacyPreparedActivation::reserve`] could
+    /// report the retirement. Either one alone turns the retired-name
+    /// diagnostic (ADR-0165) into a "name in use" lie.
     #[test]
-    fn self_close_releases_the_parent_local_child_key_before_chassis_teardown() {
+    fn closed_child_subname_restages_as_retired_not_in_use() {
         let (spawner, registry, mailer, pool) = activation_fixture();
         let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
         let owner =
@@ -1657,6 +1661,20 @@ mod tests {
             "the key came back from the actor's close path — its slot is still parked for chassis teardown"
         );
         drop(restaged);
+
+        let (events_tx, _events_rx) = crossbeam_channel::unbounded();
+        let (reborn, reborn_dispatch, _) = finalized_probe(&spawner, &parent, "self-close", events_tx, 2);
+        let rejection = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(reborn)])).unwrap();
+        owner.run_once();
+
+        assert!(matches!(rejection.wait_timeout(Duration::from_secs(1)).unwrap(), Err(RegistryEffectError::Name(_))));
+        let reborn_done = await_spawn_done(&parent, reborn_dispatch);
+        assert!(
+            matches!(reborn_done.output(), Err(SpawnError::SubnameRetired { .. })),
+            "the owner classified the surviving route of a retired id, not a live occupant: {:?}",
+            reborn_done.output()
+        );
+        reborn_done.release_no_reply();
 
         spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1));
         drop(owner);
