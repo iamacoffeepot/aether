@@ -133,6 +133,10 @@ aether-chassis = { path = "../aether-chassis" }
 # The test stages a `LifecycleConfig` (ADR-0156 §3 relocated the lifecycle
 # advance-timeout knob onto the lifecycle cap's own config).
 aether-lifecycle = { path = "../aether-lifecycle" }
+# ADR-0165 consumer proof: boot the real scheduler/registry without a wasm
+# component and drive a cold HTTP request across one frame while dispatch
+# shards activate through the staged owner path.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
 # `locate_component_wasm` / `init_save_sandbox` / `test_namespace_roots`
 # — the shared wasm-discovery + sandbox helpers the test boots with.
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }

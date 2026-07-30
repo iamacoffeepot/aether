@@ -2,15 +2,17 @@
 // `Builder::new` rather than the `composed` boot seam production chassis use.
 #![allow(clippy::disallowed_methods)]
 
+use super::shard::HttpDispatchShard;
 use super::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 use crate::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
 use aether_actor::Addressable;
 use aether_data::Kind as KindTrait;
-use aether_data::KindId;
+use aether_data::{KindId, MailboxId, mailbox_id_from_path};
 use aether_substrate::Mail;
 use aether_substrate::Subname;
 use aether_substrate::actor::native::NativeActor;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
+use aether_substrate::mail::registry::{OwnedDispatch, Registry};
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 use aether_trace::TraceDispatchCapability;
 use std::io::{self, Read, Write};
@@ -922,6 +924,23 @@ fn config_for(max_request_bytes: usize) -> HttpServerConfig {
     }
 }
 
+fn shard_canonical_name(index: usize) -> String {
+    format!(
+        "{}/{}:shard-{index}",
+        <HttpServerCapability as Addressable>::NAMESPACE,
+        <HttpDispatchShard as Addressable>::NAMESPACE,
+    )
+}
+
+fn register_shard_collision(registry: &Registry, index: usize) -> MailboxId {
+    let canonical_name = shard_canonical_name(index);
+    let id = mailbox_id_from_path(&canonical_name);
+    registry
+        .try_register_inbox_with_id(id, canonical_name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
+        .expect("install test-only dispatch-shard collision authority");
+    id
+}
+
 /// Boot a passive chassis holding one handler actor `H` plus the HTTP
 /// server cap under `config` — the single-handler shape most server
 /// tests share. Multi-handler and cap-only boots stay explicit at their
@@ -1422,6 +1441,78 @@ fn connections_distribute_across_shards() {
                 "conn {index} round {round}: reply correlated to the wrong request: {response:?}",
             );
         }
+    }
+}
+
+/// Scheduler-backed partial apply rejection: index zero collides under
+/// explicit test authority, index one activates, and the cold first request
+/// remains supervisor-owned until both attempts settle. The surviving shard
+/// then serves it; completion order cannot turn the rejected slot into a
+/// selectable sink or lose the trigger connection.
+#[test]
+fn cold_first_request_survives_partial_shard_activation_failure() {
+    let (registry, mailer) = fresh_substrate();
+    let collision = register_shard_collision(&registry, 0);
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor_configured::<HttpServerCapability>(
+            (),
+            HttpServerConfig {
+                enabled: true,
+                bind_addr: "127.0.0.1:0".to_string(),
+                request_timeout_millis: 5_000,
+                dispatch_shards: 2,
+                ..HttpServerConfig::default()
+            },
+        )
+        .build_passive()
+        .expect("http server boots with test-only shard collision");
+
+    let response = round_trip_live(port_of(&chassis), b"GET /cold HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 200 "), "surviving shard serves the cold peer: {response:?}");
+    let surviving = shard_canonical_name(1);
+    assert_eq!(
+        registry.lookup(&surviving),
+        Some(mailbox_id_from_path(&surviving)),
+        "the successful deterministic index is Live before the retained peer is dispatched",
+    );
+
+    drop(chassis);
+    registry.drop_mailbox(collision).expect("remove test-only shard collision");
+}
+
+/// Scheduler-backed total apply rejection: every staged shard loses its
+/// canonical-name claim, so the retained first socket receives one controlled
+/// `503`. The supervisor stays `Failed`; a later peer receives the same
+/// refusal without implicitly spawning another generation.
+#[test]
+fn all_shard_activation_failures_refuse_without_implicit_retry() {
+    let (registry, mailer) = fresh_substrate();
+    let collisions = [register_shard_collision(&registry, 0), register_shard_collision(&registry, 1)];
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<EchoHttpHandler>(())
+        .with_actor_configured::<HttpServerCapability>(
+            (),
+            HttpServerConfig {
+                enabled: true,
+                bind_addr: "127.0.0.1:0".to_string(),
+                request_timeout_millis: 5_000,
+                dispatch_shards: 2,
+                ..HttpServerConfig::default()
+            },
+        )
+        .build_passive()
+        .expect("http server boots with test-only shard collisions");
+    let port = port_of(&chassis);
+
+    let first = round_trip(port, b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(first.starts_with("HTTP/1.1 503 "), "cold retained peer receives controlled refusal: {first:?}");
+    let later = round_trip(port, b"GET /later HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(later.starts_with("HTTP/1.1 503 "), "failed startup does not retry implicitly: {later:?}");
+
+    drop(chassis);
+    for collision in collisions {
+        registry.drop_mailbox(collision).expect("remove test-only shard collision");
     }
 }
 

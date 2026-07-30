@@ -499,6 +499,189 @@ mod route_registration {
     }
 }
 
+mod shard_startup {
+    //! Manual reducer proofs for the startup interleavings. These tests do
+    //! not claim scheduler ordering; the loopback server tests exercise the
+    //! real owner/activation/task turns.
+
+    use super::super::{
+        Arc, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement, ShardSlot,
+        ShardStartup, WakeSink,
+    };
+    use crate::kinds::HttpInboundReady;
+    use aether_data::{Kind, KindId, MailboxId};
+    use aether_substrate::actor::native::NativeCtx;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use aether_substrate::mail::{MailId, Source};
+    use std::collections::VecDeque;
+    use std::io::Read;
+    use std::iter::once;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn socket_pair() -> (PendingPeer, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind pending-peer probe");
+        let address = listener.local_addr().expect("pending-peer probe address");
+        let client = TcpStream::connect(address).expect("connect pending-peer probe");
+        let (stream, peer) = listener.accept().expect("accept pending-peer probe");
+        (PendingPeer { stream, peer }, client)
+    }
+
+    fn sink(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> (WakeSink, mpsc::Receiver<InboundEvent>) {
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let self_id = registry
+            .register_inbox(name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()) as Arc<dyn InboxHandler>);
+        (
+            WakeSink {
+                inbound_tx,
+                mailer: Arc::clone(mailer),
+                self_id,
+                wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+                dirty: Arc::new(AtomicBool::new(false)),
+            },
+            inbound_rx,
+        )
+    }
+
+    fn starting_state(count: usize, pending_peers: VecDeque<PendingPeer>) -> (Arc<Registry>, HttpSupervisorState) {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let mut state = HttpSupervisorState::disabled(
+            HttpServerConfig { enabled: true, max_connections: 8, ..HttpServerConfig::default() },
+            mailer,
+        );
+        state.shard_startup = ShardStartup::Starting {
+            remaining: count,
+            next_to_stage: None,
+            slots_by_index: (0..count).map(|_| ShardSlot::Pending).collect(),
+            pending_peers,
+        };
+        (registry, state)
+    }
+
+    fn event_peer(event: InboundEvent) -> SocketAddr {
+        let InboundEvent::PeerAccepted { peer, .. } = event else {
+            panic!("startup drain posts only PeerAccepted events")
+        };
+        peer
+    }
+
+    /// Out-of-order task completion must not expose the first successful
+    /// sink early. The last completion compacts successful indexes in their
+    /// configured order, then drains pending sockets FIFO through that stable
+    /// round-robin set.
+    #[test]
+    fn out_of_order_completion_waits_then_drains_fifo_by_index() {
+        let (first, first_client) = socket_pair();
+        let (second, second_client) = socket_pair();
+        let (third, third_client) = socket_pair();
+        let expected = [first.peer, second.peer, third.peer];
+        let pending_peers = [first, second, third].into_iter().collect();
+        let (registry, mut state) = starting_state(3, pending_peers);
+        let (sink_zero, rx_zero) = sink(&registry, &state.mailer, "test.http.shard-zero");
+        let (sink_two, rx_two) = sink(&registry, &state.mailer, "test.http.shard-two");
+
+        assert!(matches!(state.finish_shard_spawn(2, Some(sink_two)), ShardSettlement::Pending));
+        assert!(rx_zero.try_recv().is_err());
+        assert!(rx_two.try_recv().is_err(), "a successful shard is not selectable before every attempt settles");
+
+        assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
+        let settled = state.finish_shard_spawn(1, None);
+        assert!(matches!(settled, ShardSettlement::Ready { shard_count: 2, .. }));
+        state.apply_shard_settlement(settled);
+
+        assert_eq!(event_peer(rx_zero.recv().expect("first FIFO peer reaches index zero")), expected[0]);
+        assert_eq!(event_peer(rx_two.recv().expect("second FIFO peer reaches index two")), expected[1]);
+        assert_eq!(event_peer(rx_zero.recv().expect("third FIFO peer wraps to index zero")), expected[2]);
+        assert!(rx_two.try_recv().is_err());
+        assert_eq!(state.live_connections.load(Ordering::Acquire), 3);
+
+        drop((first_client, second_client, third_client));
+    }
+
+    /// A duplicate or stale task result cannot decrement the attempt count a
+    /// second time and therefore cannot transition startup before the real
+    /// remaining index settles.
+    #[test]
+    fn duplicate_completion_cannot_finish_startup_twice() {
+        let (registry, mut state) = starting_state(2, VecDeque::new());
+        let (sink_zero, _rx_zero) = sink(&registry, &state.mailer, "test.http.duplicate-zero");
+
+        assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
+        assert!(matches!(state.finish_shard_spawn(0, None), ShardSettlement::Stale));
+        assert!(matches!(state.shard_startup, ShardStartup::Starting { remaining: 1, .. }));
+        assert!(matches!(state.finish_shard_spawn(1, None), ShardSettlement::Ready { shard_count: 1, .. }));
+    }
+
+    /// When every deterministic child fails, each retained socket receives
+    /// the existing controlled `503` and closes. No socket was charged live,
+    /// so the global connection count remains balanced.
+    #[test]
+    fn all_failed_shards_refuse_every_retained_peer() {
+        let (pending, mut client) = socket_pair();
+        client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound refusal read");
+        let (_registry, mut state) = starting_state(1, once(pending).collect());
+
+        let settled = state.finish_shard_spawn(0, None);
+        assert!(matches!(settled, ShardSettlement::Failed { .. }));
+        state.apply_shard_settlement(settled);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read controlled startup refusal");
+        assert!(response.starts_with("HTTP/1.1 503 "), "expected startup 503, got {response:?}");
+        assert_eq!(state.live_connections.load(Ordering::Acquire), 0);
+
+        assert!(matches!(state.shard_startup, ShardStartup::Failed));
+    }
+
+    /// Capacity counts supervisor-owned sockets while shard activation is
+    /// pending. A second peer is refused immediately and never grows the
+    /// pending FIFO or the live-shard count.
+    #[test]
+    fn pending_peer_counts_toward_the_global_connection_ceiling() {
+        let (first, first_client) = socket_pair();
+        let (second, mut second_client) = socket_pair();
+        second_client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound capacity refusal read");
+        let (_registry, mut state) = starting_state(1, once(first).collect());
+        state.config.max_connections = 1;
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&state.mailer), MailboxId(0x4067)));
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        state.assign_peer(&mut ctx, second.stream, second.peer);
+
+        let mut response = String::new();
+        second_client.read_to_string(&mut response).expect("read pending-capacity refusal");
+        assert!(response.starts_with("HTTP/1.1 503 "), "pending peer enforces the ceiling: {response:?}");
+        assert!(matches!(
+            &state.shard_startup,
+            ShardStartup::Starting { pending_peers, .. } if pending_peers.len() == 1
+        ));
+        assert_eq!(state.live_connections.load(Ordering::Acquire), 0);
+
+        drop(first_client);
+    }
+
+    /// Dropping a supervisor during startup drops its one owner of every
+    /// retained socket. The peer observes EOF; there is no leaked reader
+    /// thread or second socket owner to keep the connection alive.
+    #[test]
+    fn dropping_starting_state_closes_retained_peer() {
+        let (pending, mut client) = socket_pair();
+        client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound teardown read");
+        let (_registry, state) = starting_state(1, once(pending).collect());
+
+        drop(state);
+
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).expect("retained peer observes supervisor teardown");
+        assert!(bytes.is_empty(), "teardown closes without fabricating an HTTP response");
+    }
+}
+
 mod wake_coalescing {
     //! ADR-0135 §4 — the wake-mail coalescing protocol on [`WakeSink`].
 

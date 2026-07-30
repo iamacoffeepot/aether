@@ -7,6 +7,61 @@ use super::*;
 use crate::server::shard::HttpDispatchShard;
 use aether_substrate::Subname;
 
+/// One socket retained by the supervisor while its dispatch shards are
+/// `Starting`. It is not charged to `live_connections` until a Live shard
+/// accepts it, but it does count toward the configured connection ceiling.
+pub struct PendingPeer {
+    pub stream: TcpStream,
+    pub peer: SocketAddr,
+}
+
+/// Move-only context attached to one staged shard birth. The sender and wake
+/// flag remain supervisor-owned until authoritative activation identifies the
+/// child's real mailbox and completes the [`WakeSink`].
+pub struct ShardSpawnContinuation {
+    pub index: usize,
+    pub subname: String,
+    pub inbound_tx: mpsc::Sender<InboundEvent>,
+    pub wake_dirty: Arc<AtomicBool>,
+}
+
+/// Per-index startup result. Keeping failures distinct from pending attempts
+/// makes a stale or duplicate task completion unable to decrement `remaining`
+/// twice.
+pub enum ShardSlot {
+    Pending,
+    Ready(WakeSink),
+    Failed,
+}
+
+/// Lazy dispatch-shard lifecycle. `Starting` retains accepted sockets and
+/// indexed child results until every birth settles; `Ready` alone exposes
+/// sinks to round-robin assignment.
+pub enum ShardStartup {
+    Idle,
+    Starting {
+        remaining: usize,
+        next_to_stage: Option<usize>,
+        slots_by_index: Vec<ShardSlot>,
+        pending_peers: VecDeque<PendingPeer>,
+    },
+    Ready {
+        shards: Vec<WakeSink>,
+        next_shard: usize,
+    },
+    Failed,
+}
+
+/// State transition produced by one shard attempt. The final transition owns
+/// the retained FIFO so it can be drained exactly once after the startup enum
+/// has already become `Ready` or `Failed`.
+pub enum ShardSettlement {
+    Pending,
+    Ready { pending_peers: VecDeque<PendingPeer>, shard_count: usize },
+    Failed { pending_peers: VecDeque<PendingPeer> },
+    Stale,
+}
+
 /// `aether.http.server` supervisor state (ADR-0135). Owns the TCP listener +
 /// accept thread, the shared route table, the global live-connection ceiling,
 /// and the dispatch-shard sinks. Per-request work never runs here — the
@@ -45,12 +100,14 @@ pub struct HttpSupervisorState {
     /// shared with the accept sink; cleared at the top of
     /// `on_inbound_ready`.
     pub wake_dirty: Arc<AtomicBool>,
-    /// One wake sink per spawned dispatch shard, in spawn order; empty until
-    /// the first accepted connection forces the spawn (the dispatcher ctx is
-    /// not available at `init`).
-    pub shards: Vec<WakeSink>,
-    /// Round-robin cursor over `shards`.
-    pub next_shard: usize,
+    /// Stable target for the private `HttpInboundReady` turns that stage one
+    /// shard per transactional owner batch. This is the supervisor's
+    /// already-Live mailbox, never a reserved child route.
+    pub self_mailbox: MailboxId,
+    /// Lazy dispatch-shard lifecycle. Accepted sockets remain here while
+    /// child activation is pending and only enter a shard after its
+    /// `SpawnApplied` completion proves the route Live.
+    pub shard_startup: ShardStartup,
     /// Cap-global stream-id source, cloned into every shard's seed
     /// (ADR-0135) — see [`HttpShardState::next_stream_id`].
     pub next_stream_id: Arc<AtomicU64>,
@@ -167,107 +224,247 @@ impl HttpSupervisorState {
             accept_thread: None,
             inbound_rx,
             wake_dirty: Arc::new(AtomicBool::new(false)),
-            shards: Vec::new(),
-            next_shard: 0,
+            self_mailbox: MailboxId::NONE,
+            shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
         }
     }
 
-    /// Spawn the dispatch shards (ADR-0135) — deferred to the first accepted
-    /// connection because `init` has no dispatcher ctx to spawn children
-    /// from. `dispatch_shards == 0` sizes automatically, mirroring the
-    /// scheduler pool's worker default (`available_parallelism - 1`).
-    pub fn ensure_shards(&mut self, ctx: &mut NativeCtx<'_>) {
-        if !self.shards.is_empty() {
-            return;
-        }
-        let count = if self.config.dispatch_shards == 0 {
+    fn configured_shard_count(&self) -> usize {
+        if self.config.dispatch_shards == 0 {
             thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1))
         } else {
             self.config.dispatch_shards
-        };
-        for index in 0..count {
-            let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
-            let wake_dirty = Arc::new(AtomicBool::new(false));
-            let seed = HttpShardSeed {
-                inbound_rx: Some(inbound_rx),
-                inbound_tx: inbound_tx.clone(),
-                wake_dirty: Arc::clone(&wake_dirty),
-                routes: Arc::clone(&self.routes),
-                live_connections: Arc::clone(&self.live_connections),
-                max_request_bytes: self.config.max_request_bytes,
-                max_header_bytes: self.config.max_header_bytes,
-                request_timeout: Duration::from_millis(self.config.request_timeout_millis),
-                keep_alive_timeout: Duration::from_millis(self.config.keep_alive_timeout_millis),
-                ws_idle_timeout: Duration::from_millis(self.config.websocket_idle_timeout_millis),
-                response_stream_window: self.config.response_stream_window,
-                request_stream_window: self.config.request_stream_window,
-                next_stream_id: Arc::clone(&self.next_stream_id),
-            };
-            let subname = format!("shard-{index}");
-            match ctx
-                .spawn_child::<HttpServerCapability, HttpDispatchShard>(Subname::Named(&subname), seed, ())
-                .finish()
-            {
-                Ok(mailbox) => self.shards.push(WakeSink {
-                    inbound_tx,
-                    mailer: Arc::clone(&self.mailer),
-                    self_id: mailbox,
-                    wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-                    dirty: wake_dirty,
-                }),
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_http::server",
-                        shard = %subname,
-                        error = ?e,
-                        "http dispatch shard spawn failed",
-                    );
-                }
-            }
         }
-        tracing::info!(
-            target: "aether_http::server",
-            port = self.listener_port,
-            shards = self.shards.len(),
-            "http dispatch shards spawned",
+    }
+
+    fn pending_peer_count(&self) -> usize {
+        match &self.shard_startup {
+            ShardStartup::Starting { pending_peers, .. } => pending_peers.len(),
+            ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => 0,
+        }
+    }
+
+    fn schedule_shard_wake(&self, ctx: &NativeCtx<'_>) {
+        let _ = ctx.send_envelope_tracked(
+            self.self_mailbox,
+            KindId(<HttpInboundReady as Kind>::ID.0),
+            &HttpInboundReady::default().encode_into_bytes(),
         );
     }
 
-    /// Adopt one accepted connection: enforce the global ceiling, pick the
-    /// next shard round-robin, and hand the socket over. Refuses `503`
-    /// before any reader thread exists (ADR-0108 §6) when the table is at
-    /// capacity or no shard came up.
-    pub fn assign_peer(&mut self, ctx: &mut NativeCtx<'_>, stream: TcpStream, peer: SocketAddr) {
-        self.ensure_shards(ctx);
-        if self.shards.is_empty() {
-            refuse_connection(stream, 503, "no dispatch shards");
+    /// Stage at most one deterministic dispatch-shard child in this handler
+    /// turn. Owner batches are transactional, so this turn boundary preserves
+    /// the pre-migration partial-start contract: one apply conflict rejects
+    /// one index rather than every sibling prepared beside it.
+    ///
+    /// Returns `true` when this wake was consumed as a startup step. The
+    /// caller then ends the handler so its birth flushes as an independent
+    /// batch. A follow-up wake is always scheduled: it stages the next index,
+    /// or resumes ordinary accepted-peer draining after the last index.
+    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_>) -> bool {
+        let index = match &mut self.shard_startup {
+            ShardStartup::Starting { next_to_stage, .. } => next_to_stage.take(),
+            ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => None,
+        };
+        let Some(index) = index else {
+            return false;
+        };
+
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+        let wake_dirty = Arc::new(AtomicBool::new(false));
+        let seed = HttpShardSeed {
+            inbound_rx: Some(inbound_rx),
+            inbound_tx: inbound_tx.clone(),
+            wake_dirty: Arc::clone(&wake_dirty),
+            routes: Arc::clone(&self.routes),
+            live_connections: Arc::clone(&self.live_connections),
+            max_request_bytes: self.config.max_request_bytes,
+            max_header_bytes: self.config.max_header_bytes,
+            request_timeout: Duration::from_millis(self.config.request_timeout_millis),
+            keep_alive_timeout: Duration::from_millis(self.config.keep_alive_timeout_millis),
+            ws_idle_timeout: Duration::from_millis(self.config.websocket_idle_timeout_millis),
+            response_stream_window: self.config.response_stream_window,
+            request_stream_window: self.config.request_stream_window,
+            next_stream_id: Arc::clone(&self.next_stream_id),
+        };
+        let subname = format!("shard-{index}");
+        let continuation = ShardSpawnContinuation { index, subname: subname.clone(), inbound_tx, wake_dirty };
+        if let Err(error) = ctx
+            .spawn_child::<HttpServerCapability, HttpDispatchShard>(Subname::Named(&subname), seed, ())
+            .stage_with(continuation)
+        {
             tracing::warn!(
                 target: "aether_http::server",
-                %peer,
-                "http conn refused: no dispatch shards",
+                shard = %subname,
+                error = ?error,
+                "http dispatch shard preparation failed",
             );
-            return;
+            let settlement = self.finish_shard_spawn(index, None);
+            self.apply_shard_settlement(settlement);
         }
+
+        if let ShardStartup::Starting { next_to_stage, slots_by_index, .. } = &mut self.shard_startup
+            && index + 1 < slots_by_index.len()
+        {
+            *next_to_stage = Some(index + 1);
+        }
+        self.schedule_shard_wake(ctx);
+        true
+    }
+
+    /// Record one synchronous or authoritative shard result. Completions may
+    /// arrive out of index order; the final compaction always walks the slots
+    /// in deterministic index order.
+    pub fn finish_shard_spawn(&mut self, index: usize, sink: Option<WakeSink>) -> ShardSettlement {
+        let finished = match &mut self.shard_startup {
+            ShardStartup::Starting { remaining, slots_by_index, .. } => {
+                let Some(slot) = slots_by_index.get_mut(index) else {
+                    return ShardSettlement::Stale;
+                };
+                if !matches!(slot, ShardSlot::Pending) {
+                    return ShardSettlement::Stale;
+                }
+                *slot = sink.map_or_else(|| ShardSlot::Failed, ShardSlot::Ready);
+                *remaining -= 1;
+                *remaining == 0
+            }
+            ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => {
+                return ShardSettlement::Stale;
+            }
+        };
+        if !finished {
+            return ShardSettlement::Pending;
+        }
+
+        let ShardStartup::Starting { slots_by_index, pending_peers, .. } =
+            mem::replace(&mut self.shard_startup, ShardStartup::Failed)
+        else {
+            unreachable!("the final shard result can only settle Starting")
+        };
+        let shards = slots_by_index
+            .into_iter()
+            .filter_map(|slot| match slot {
+                ShardSlot::Ready(sink) => Some(sink),
+                ShardSlot::Pending | ShardSlot::Failed => None,
+            })
+            .collect::<Vec<_>>();
+        if shards.is_empty() {
+            ShardSettlement::Failed { pending_peers }
+        } else {
+            let shard_count = shards.len();
+            self.shard_startup = ShardStartup::Ready { shards, next_shard: 0 };
+            ShardSettlement::Ready { pending_peers, shard_count }
+        }
+    }
+
+    /// Apply a final startup transition after `finish_shard_spawn` has made
+    /// the lifecycle authoritative. Ready drains retained sockets FIFO;
+    /// Failed returns one controlled `503` per retained socket. Pending and
+    /// stale attempts perform no side effect.
+    pub fn apply_shard_settlement(&mut self, settlement: ShardSettlement) {
+        match settlement {
+            ShardSettlement::Pending => {}
+            ShardSettlement::Ready { mut pending_peers, shard_count } => {
+                tracing::info!(
+                    target: "aether_http::server",
+                    port = self.listener_port,
+                    shards = shard_count,
+                    "http dispatch shards activated",
+                );
+                while let Some(PendingPeer { stream, peer }) = pending_peers.pop_front() {
+                    self.dispatch_ready_peer(stream, peer);
+                }
+            }
+            ShardSettlement::Failed { mut pending_peers } => {
+                tracing::warn!(
+                    target: "aether_http::server",
+                    port = self.listener_port,
+                    "http dispatch shard startup failed",
+                );
+                while let Some(PendingPeer { stream, peer }) = pending_peers.pop_front() {
+                    refuse_connection(stream, 503, "no dispatch shards");
+                    tracing::warn!(
+                        target: "aether_http::server",
+                        %peer,
+                        "http conn refused: no dispatch shards",
+                    );
+                }
+            }
+            ShardSettlement::Stale => {
+                tracing::debug!(
+                    target: "aether_http::server",
+                    "stale http dispatch shard completion ignored",
+                );
+            }
+        }
+    }
+
+    fn dispatch_ready_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
+        let ShardStartup::Ready { shards, next_shard } = &mut self.shard_startup else {
+            refuse_connection(stream, 503, "no dispatch shards");
+            return;
+        };
+        let index = *next_shard % shards.len();
+        *next_shard = next_shard.wrapping_add(1);
+        self.live_connections.fetch_add(1, Ordering::AcqRel);
+        if !shards[index].post(InboundEvent::PeerAccepted { stream, peer }) {
+            // The shard's receiver is gone — teardown is in progress; the
+            // socket just dropped with the event.
+            self.live_connections.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Adopt one accepted connection. Capacity counts both live shard-owned
+    /// sockets and supervisor-owned pending sockets. The first peer starts
+    /// lazy staging; later peers stay FIFO in `Starting`; only `Ready` may
+    /// post into a child sink.
+    pub fn assign_peer(&mut self, ctx: &mut NativeCtx<'_>, stream: TcpStream, peer: SocketAddr) {
         let live = self.live_connections.load(Ordering::Acquire);
-        if live >= self.config.max_connections {
+        let pending = self.pending_peer_count();
+        if live.saturating_add(pending) >= self.config.max_connections {
             refuse_connection(stream, 503, "server at connection capacity");
             tracing::warn!(
                 target: "aether_http::server",
                 %peer,
                 live,
+                pending,
                 "http conn refused: at capacity",
             );
             return;
         }
-        self.live_connections.fetch_add(1, Ordering::AcqRel);
-        let index = self.next_shard % self.shards.len();
-        self.next_shard = self.next_shard.wrapping_add(1);
-        if !self.shards[index].post(InboundEvent::PeerAccepted { stream, peer }) {
-            // The shard's receiver is gone — teardown is in progress; the
-            // socket just dropped with the event.
-            self.live_connections.fetch_sub(1, Ordering::AcqRel);
+
+        let mut start_count = None;
+        match &mut self.shard_startup {
+            ShardStartup::Idle => {
+                let count = self.configured_shard_count();
+                let mut pending_peers = VecDeque::with_capacity(self.config.max_connections.min(16));
+                pending_peers.push_back(PendingPeer { stream, peer });
+                self.shard_startup = ShardStartup::Starting {
+                    remaining: count,
+                    next_to_stage: Some(0),
+                    slots_by_index: (0..count).map(|_| ShardSlot::Pending).collect(),
+                    pending_peers,
+                };
+                start_count = Some(count);
+            }
+            ShardStartup::Starting { pending_peers, .. } => {
+                pending_peers.push_back(PendingPeer { stream, peer });
+            }
+            ShardStartup::Ready { .. } => self.dispatch_ready_peer(stream, peer),
+            ShardStartup::Failed => {
+                refuse_connection(stream, 503, "no dispatch shards");
+                tracing::warn!(
+                    target: "aether_http::server",
+                    %peer,
+                    "http conn refused: no dispatch shards",
+                );
+            }
+        }
+        if let Some(count) = start_count {
+            debug_assert!(count > 0, "configured shard count is always positive");
+            self.schedule_shard_wake(ctx);
         }
     }
 
