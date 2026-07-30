@@ -8,9 +8,10 @@ mod instance;
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::runtime;
+use aether_actor::{Manual, runtime};
+use aether_data::MailboxId;
 use aether_kinds::MonitorNotice;
-use aether_substrate::{MonitorHandle, Subname};
+use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
 use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
@@ -19,17 +20,44 @@ use crate::{
     SetWindowModeResult, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
     SyntheticWindowCapability, SyntheticWindowInstance, UnsubscribeAllWindows, UnsubscribeWindow,
     UnsubscribeWindowSelf, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
-    WindowMode, WindowOpened,
+    WindowMode, WindowOpened, WindowSpec,
 };
 
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
 
+/// A window whose child actor is staged but not yet authoritatively applied.
+///
+/// Its [`WindowId`] names a reservation, not a live actor, so the window stays
+/// out of `windows` — and therefore out of `ListWindows`, every subscriber
+/// fan-out, and `WindowOpened` — until the owner completes the birth. The
+/// reservation still participates in duplicate-name detection, and it owns the
+/// caller's reply so exactly one `CreateWindowResult` is ever sent.
+struct PendingWindowCreate {
+    window: WindowInfo,
+    /// Taken by whichever path settles the reservation, so the caller sees
+    /// exactly one `CreateWindowResult`. `Option` mirrors the desktop
+    /// manager's `PendingCreate`, whose boot window has no caller to answer.
+    reply: Option<Box<InboundMail>>,
+    /// A reservation that is already doomed: the deterministic child id
+    /// disagreed with the addressable prediction. The completion retires the
+    /// applied child and replies with this error instead of publishing.
+    rejection: Option<String>,
+}
+
+/// Completion context carried from staging to authoritative application. The
+/// reserved [`WindowId`] is the pending-state key.
+#[derive(Clone, Copy)]
+struct WindowCreateContinuation {
+    id: WindowId,
+}
+
 pub struct SyntheticWindowCapabilityState {
     windows: BTreeMap<WindowId, WindowInfo>,
+    pending_creates: HashMap<WindowId, PendingWindowCreate>,
     child_monitors: HashMap<WindowId, MonitorHandle>,
     subscribers: WindowSubscribers,
 }
@@ -39,8 +67,69 @@ impl SyntheticWindowCapabilityState {
         self.windows.get_mut(&window).ok_or_else(|| format!("unknown window {window:?}"))
     }
 
+    /// Validate one create request against the live windows and the reserved
+    /// names no `ListWindows` reply can see yet.
+    fn check_create(&self, spec: &WindowSpec) -> Result<(), String> {
+        crate::validate_window_name(&spec.name)?;
+        if self.windows.values().any(|window| window.name == spec.name)
+            || self.pending_creates.values().any(|pending| pending.window.name == spec.name)
+        {
+            return Err(format!("window name `{}` is already in use", spec.name));
+        }
+        Ok(())
+    }
+
+    fn describe(spec: WindowSpec, id: WindowId) -> WindowInfo {
+        let (width, height) = spec.size.map_or((DEFAULT_WIDTH, DEFAULT_HEIGHT), |size| (size.width, size.height));
+        WindowInfo {
+            id,
+            name: spec.name,
+            title: spec.title,
+            mode: spec.mode,
+            width,
+            height,
+            focused: false,
+            occluded: width == 0 || height == 0,
+        }
+    }
+
     fn publish<K: aether_data::Kind>(&self, ctx: &mut NativeCtx<'_>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
+    }
+
+    /// Promote an authoritatively applied child into the live window set, or
+    /// retire it and report why it could not become live. Either way the
+    /// reservation's reply is sent exactly once.
+    fn publish_applied_window(&mut self, ctx: &mut NativeCtx<'_>, child: MailboxId, pending: PendingWindowCreate) {
+        let PendingWindowCreate { window, mut reply, rejection } = pending;
+        if let Some(error) = rejection {
+            ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
+            answer(&mut reply, &CreateWindowResult::Err { error });
+            return;
+        }
+        let monitor = match ctx.monitor(child) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
+                answer(
+                    &mut reply,
+                    &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
+                );
+                return;
+            }
+        };
+        let id = window.id;
+        self.child_monitors.insert(id, monitor);
+        self.windows.insert(id, window.clone());
+        self.publish(ctx, id, &WindowOpened { window: window.clone() });
+        answer(&mut reply, &CreateWindowResult::Ok { window });
+    }
+}
+
+/// Discharge a reservation's deferred reply, if it owes one.
+fn answer(reply: &mut Option<Box<InboundMail>>, result: &CreateWindowResult) {
+    if let Some(reply) = reply.take() {
+        reply.reply(result);
     }
 }
 
@@ -54,9 +143,20 @@ impl NativeActor for SyntheticWindowCapability {
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<SyntheticWindowCapabilityState, BootError> {
         Ok(SyntheticWindowCapabilityState {
             windows: BTreeMap::new(),
+            pending_creates: HashMap::new(),
             child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
         })
+    }
+
+    /// Settle every reservation the manager still owes a reply for. The staged
+    /// child may not have been applied yet, so the retirement rides the ordered
+    /// tail its reserved route already parks.
+    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        for (id, mut pending) in state.pending_creates.drain() {
+            ctx.actor_at::<SyntheticWindowInstance>(MailboxId(id.0)).send(&RetireWindow);
+            answer(&mut pending.reply, &CreateWindowResult::Err { error: "window manager shutting down".to_owned() });
+        }
     }
 
     #[handler::single]
@@ -64,51 +164,59 @@ impl NativeActor for SyntheticWindowCapability {
         ListWindowsResult::Ok { windows: state.windows.values().cloned().collect() }
     }
 
-    #[handler::single]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> CreateWindowResult {
-        if let Err(error) = crate::validate_window_name(&mail.spec.name) {
-            return CreateWindowResult::Err { error };
-        }
-        if state.windows.values().any(|window| window.name == mail.spec.name) {
-            return CreateWindowResult::Err { error: format!("window name `{}` is already in use", mail.spec.name) };
+    #[handler::manual]
+    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CreateWindow) {
+        let reply = ctx.take_inbound();
+        if let Err(error) = state.check_create(&mail.spec) {
+            reply.reply(&CreateWindowResult::Err { error });
+            return;
         }
         let predicted = ctx.actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
-        let id = WindowId(predicted.0);
-        let spawned = match ctx
+        let receipt = match ctx
             .spawn_child::<WindowCapability, SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
-            .finish()
+            .stage_with(WindowCreateContinuation { id: WindowId(predicted.0) })
         {
-            Ok(spawned) => spawned,
-            Err(error) => return CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
-        };
-        if spawned != predicted {
-            ctx.actor_at::<SyntheticWindowInstance>(spawned).send(&RetireWindow);
-            return CreateWindowResult::Err {
-                error: format!("spawned window child {spawned:?} did not match predicted mailbox {predicted:?}"),
-            };
-        }
-        let monitor = match ctx.monitor(spawned) {
-            Ok(monitor) => monitor,
+            Ok(receipt) => receipt,
             Err(error) => {
-                ctx.actor_at::<SyntheticWindowInstance>(spawned).send(&RetireWindow);
-                return CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") };
+                reply.reply(&CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
+                return;
             }
         };
-        let (width, height) = mail.spec.size.map_or((DEFAULT_WIDTH, DEFAULT_HEIGHT), |size| (size.width, size.height));
-        let window = WindowInfo {
-            id,
-            name: mail.spec.name,
-            title: mail.spec.title,
-            mode: mail.spec.mode,
-            width,
-            height,
-            focused: false,
-            occluded: width == 0 || height == 0,
+        // The reservation is keyed by the prediction consumers address, so a
+        // divergent deterministic id dooms it rather than publishing a window
+        // nobody can reach. The completion retires the applied child.
+        let rejection = (receipt.mailbox_id != predicted).then(|| {
+            format!("spawned window child {:?} did not match predicted mailbox {predicted:?}", receipt.mailbox_id)
+        });
+        let id = WindowId(predicted.0);
+        let window = SyntheticWindowCapabilityState::describe(mail.spec, id);
+        let replaced =
+            state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(Box::new(reply)), rejection });
+        debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
+    }
+
+    #[handler(task)]
+    fn on_window_child_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, WindowCreateContinuation>,
+    ) {
+        let id = done.context().id;
+        let Some(mut pending) = state.pending_creates.remove(&id) else {
+            if let Ok(applied) = done.output() {
+                ctx.actor_at::<SyntheticWindowInstance>(applied.mailbox_id).send(&RetireWindow);
+            }
+            done.release_no_reply();
+            return;
         };
-        state.child_monitors.insert(id, monitor);
-        state.windows.insert(id, window.clone());
-        state.publish(ctx, id, &WindowOpened { window: window.clone() });
-        CreateWindowResult::Ok { window }
+        match done.output() {
+            Err(error) => answer(
+                &mut pending.reply,
+                &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
+            ),
+            Ok(applied) => state.publish_applied_window(ctx, applied.mailbox_id, pending),
+        }
+        done.release_no_reply();
     }
 
     #[handler::single]
@@ -266,6 +374,7 @@ mod tests {
     fn test_state() -> SyntheticWindowCapabilityState {
         SyntheticWindowCapabilityState {
             windows: BTreeMap::new(),
+            pending_creates: HashMap::new(),
             child_monitors: HashMap::new(),
             subscribers: WindowSubscribers::new(),
         }
@@ -273,12 +382,12 @@ mod tests {
 
     fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), aether_data::MailboxId(1)));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(1)));
         (binding, mailer)
     }
 
-    fn spec(name: &str, title: &str) -> crate::WindowSpec {
-        crate::WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+    fn spec(name: &str, title: &str) -> WindowSpec {
+        WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
     }
 
     #[test]
@@ -286,7 +395,7 @@ mod tests {
         let (binding, mailer) = test_ctx();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mut state = test_state();
-        let unknown = aether_data::MailboxId(0xBAD);
+        let unknown = MailboxId(0xBAD);
 
         assert!(matches!(
             SyntheticWindowCapability::on_subscribe(
@@ -314,52 +423,43 @@ mod tests {
         assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([dropped]));
     }
 
+    /// Reducer-only: drives `check_create` directly rather than the handler,
+    /// because staging a child needs a chassis-built binding this fixture has
+    /// no way to supply.
     #[test]
     fn invalid_names_are_rejected_before_child_spawn() {
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let state = test_state();
 
         for name in ["", "two words", "bad:name"] {
-            let mut state = test_state();
-            assert!(matches!(
-                SyntheticWindowCapability::on_create(
-                    &mut state,
-                    &mut ctx,
-                    CreateWindow { spec: spec(name, "Invalid") },
-                ),
-                CreateWindowResult::Err { .. }
-            ));
-            assert!(state.windows.is_empty());
+            assert!(state.check_create(&spec(name, "Invalid")).is_err());
         }
+        assert!(state.windows.is_empty());
+        assert!(state.pending_creates.is_empty());
     }
 
+    /// Reducer-only, for the same reason as above: it proves the reservation
+    /// set participates in duplicate detection, not the staged spawn path.
     #[test]
-    fn duplicate_live_names_are_rejected_and_distinct_names_predict_distinct_children() {
-        let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+    fn duplicate_live_and_reserved_names_are_rejected_and_distinct_names_predict_distinct_children() {
         let mut state = test_state();
-        state.windows.insert(
-            WindowId(7),
-            WindowInfo {
-                id: WindowId(7),
-                name: "main".to_owned(),
-                title: "Game".to_owned(),
-                mode: WindowMode::Windowed,
-                width: DEFAULT_WIDTH,
-                height: DEFAULT_HEIGHT,
-                focused: false,
-                occluded: false,
+        state.windows.insert(WindowId(7), SyntheticWindowCapabilityState::describe(spec("main", "Game"), WindowId(7)));
+
+        assert!(state.check_create(&spec("main", "Other title")).is_err());
+        assert!(state.check_create(&spec("palette", "Tools")).is_ok());
+
+        // A reserved-but-not-yet-live name is invisible to `ListWindows` and
+        // still blocks a second create for the same name.
+        state.pending_creates.insert(
+            WindowId(9),
+            PendingWindowCreate {
+                window: SyntheticWindowCapabilityState::describe(spec("palette", "Tools"), WindowId(9)),
+                reply: None,
+                rejection: None,
             },
         );
+        assert!(state.check_create(&spec("palette", "Other tools")).is_err());
+        assert!(!state.windows.contains_key(&WindowId(9)));
 
-        assert!(matches!(
-            SyntheticWindowCapability::on_create(
-                &mut state,
-                &mut ctx,
-                CreateWindow { spec: spec("main", "Other title") },
-            ),
-            CreateWindowResult::Err { .. }
-        ));
         assert_ne!(
             WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main"),
             WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "palette"),
@@ -397,6 +497,47 @@ mod tests {
 
         assert_eq!(state.windows[&id].name, "main");
         assert_eq!(state.windows[&id].title, "Renamed");
+    }
+
+    /// Scheduler-backed. `CreateWindow` now stages its child and answers from a
+    /// later turn, so this pins the ordering the staged path has to preserve:
+    /// by the time the caller sees `Ok`, the window is already enumerable and
+    /// its child already owns the name a second create is refused for. A
+    /// promotion that replied before publishing would list an empty set here.
+    #[test]
+    fn create_replies_only_after_the_staged_child_is_live() {
+        let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+        let report = harness
+            .execute(vec![
+                (
+                    "created",
+                    HarnessOp::send_and_await(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("main", "Main") },
+                    ),
+                ),
+                ("listed", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows)),
+                (
+                    "duplicate",
+                    HarnessOp::send_and_await(
+                        WindowCapability::NAMESPACE,
+                        &CreateWindow { spec: spec("main", "Second") },
+                    ),
+                ),
+            ])
+            .expect("staged window creation settles");
+
+        let Ok(CreateWindowResult::Ok { window }) = report.reply::<CreateWindowResult>("created") else {
+            panic!("staged create succeeds");
+        };
+        assert_eq!(window.id, WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main").0));
+
+        let Ok(ListWindowsResult::Ok { windows }) = report.reply::<ListWindowsResult>("listed") else {
+            panic!("synthetic list succeeds");
+        };
+        assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [window.id]);
+
+        assert!(matches!(report.reply::<CreateWindowResult>("duplicate"), Ok(CreateWindowResult::Err { .. })));
     }
 
     #[test]
