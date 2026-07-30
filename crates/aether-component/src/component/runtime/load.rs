@@ -1,36 +1,24 @@
-//! `handle_load` — the wasm component load sequence.
-//!
-//! Declared as `mod load;` at the `component` level (a sibling of `runtime`).
-//! Under the ADR-0122 split the sequence is a method on
-//! `ComponentHostCapabilityState`; its fields carry
-//! `pub` visibility so this sibling module retains the
-//! same access as an inline impl block would.
+//! Owner-staged component load, module-boot, and replacement continuations.
 
 use std::sync::Arc;
 
 use aether_actor::{Manual, OutboundReply, ReplyMode};
-use aether_data::Kind;
-use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_data::{Kind, KindDescriptor};
+use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, ReplaceComponent, ReplaceResult};
 use wasmtime::Module;
 
-use aether_substrate::actor::native::{NativeCtx, spawn::Subname};
+use aether_substrate::actor::native::{
+    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnApplied, SpawnError, TaskContinuation, TaskDone, spawn::Subname,
+};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
 use aether_substrate::mail::MailboxId;
-use aether_substrate::mail::helpers::register_or_match_all;
 
-use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
-
+use super::LoadResult;
 use crate::component::ComponentHostCapability;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
+use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
-/// sha256 hex over `wasm` — the ADR-0147 module-boot dedup key. A small local
-/// helper rather than a reach into the hub's private
-/// `engine::store::persistence::hash_hex`: that function is scoped to the
-/// content-addressed binary store (a hub-only domain), so the load path owns
-/// its own six-line hash rather than coupling the component loader to hub
-/// bookkeeping. Both call sites hash the same way; neither depends on the
-/// other.
 fn content_hash_hex(wasm: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
@@ -42,466 +30,484 @@ fn content_hash_hex(wasm: &[u8]) -> String {
     out
 }
 
+pub(super) struct PreparedLoad {
+    capabilities: ComponentCapabilities,
+    type_tag: Option<u64>,
+    actors: Vec<ActorInputs>,
+    boot_namespace: Option<String>,
+    module: Module,
+    wasm_bytes: Arc<[u8]>,
+    config: Vec<u8>,
+    name: String,
+}
+
+impl PreparedLoad {
+    fn requested_config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
+        WasmTrampolineConfig {
+            engine: Arc::clone(&state.engine),
+            linker: Arc::clone(&state.linker),
+            module: self.module.clone(),
+            registry: Arc::clone(&state.registry),
+            outbound: Arc::clone(&state.outbound),
+            capabilities: self.capabilities.clone(),
+            config: self.config.clone(),
+            type_tag: self.type_tag,
+            actor_caps: self.actors.clone(),
+            wasm_bytes: Arc::clone(&self.wasm_bytes),
+        }
+    }
+
+    fn boot_plan(&self) -> Option<PreparedBoot> {
+        let namespace = self.boot_namespace.clone()?;
+        Some(PreparedBoot::new(namespace, self.module.clone(), self.actors.clone(), Arc::clone(&self.wasm_bytes)))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct PreparedBoot {
+    hash: String,
+    namespace: String,
+    capabilities: ComponentCapabilities,
+    module: Module,
+    actors: Vec<ActorInputs>,
+    wasm_bytes: Arc<[u8]>,
+}
+
+impl PreparedBoot {
+    fn new(namespace: String, module: Module, actors: Vec<ActorInputs>, wasm_bytes: Arc<[u8]>) -> Self {
+        let capabilities = actors
+            .iter()
+            .find(|actor| actor.namespace.as_deref() == Some(namespace.as_str()))
+            .map(|actor| actor.capabilities.clone())
+            .unwrap_or_default();
+        let hash = content_hash_hex(&wasm_bytes);
+        Self { hash, namespace, capabilities, module, actors, wasm_bytes }
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
+        WasmTrampolineConfig {
+            engine: Arc::clone(&state.engine),
+            linker: Arc::clone(&state.linker),
+            module: self.module.clone(),
+            registry: Arc::clone(&state.registry),
+            outbound: Arc::clone(&state.outbound),
+            capabilities: self.capabilities.clone(),
+            config: Vec::new(),
+            type_tag: Some(aether_data::mailbox_id_from_name(&self.namespace).0),
+            actor_caps: self.actors.clone(),
+            wasm_bytes: Arc::clone(&self.wasm_bytes),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct KindRegistration {
+    load: Arc<PreparedLoad>,
+}
+
+#[derive(Clone)]
+pub(super) enum BootSuccessor {
+    Load(Arc<PreparedLoad>),
+    Replacement { pending: PendingReplace, result: ReplaceResult },
+}
+
+struct BootWaiter {
+    continuation: TaskContinuation,
+    successor: BootSuccessor,
+}
+
+pub(super) struct PendingBoot {
+    waiters: Vec<BootWaiter>,
+}
+
+impl PendingBoot {
+    fn new() -> Self {
+        Self { waiters: Vec::new() }
+    }
+}
+
+impl Drop for PendingBoot {
+    fn drop(&mut self) {
+        for waiter in self.waiters.drain(..) {
+            waiter.continuation.abandon_for_actor_close();
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum SpawnContinuation {
+    ModuleBoot { plan: Box<PreparedBoot>, first: Box<BootSuccessor> },
+    RequestedActor { load: Arc<PreparedLoad>, boot_hash: Option<String> },
+}
+
 impl ComponentHostCapabilityState {
+    pub fn begin_load(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent) {
+        let (descriptors, load) = match self.prepare_load(payload) {
+            Ok(prepared) => prepared,
+            Err(result) => {
+                ctx.reply(&result);
+                return;
+            }
+        };
+        let _ = ctx.stage_registry_batch(RegistryBatch::register_kinds(descriptors), KindRegistration { load });
+    }
+
     #[allow(
         clippy::too_many_lines,
-        reason = "one cohesive load sequence: parse + register kinds, resolve the export, \
-                  compile, name, spawn the trampoline, register caps, announce. Splitting it \
-                  would thread the load payload + registry/engine handles through a helper \
-                  for no clarity gain."
+        clippy::result_large_err,
+        reason = "cold synchronous preparation returns the exact public LoadResult error shape"
     )]
-    pub fn handle_load(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) -> LoadResult {
-        // 1. Parse + register kind descriptors (ADR-0028).
-        let descriptors = match kind_manifest::read_from_bytes(&payload.wasm) {
-            Ok(d) => d,
-            Err(error) => return LoadResult::Err { error },
-        };
-        if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
-            return LoadResult::Err { error };
-        }
+    fn prepare_load(&mut self, payload: LoadComponent) -> Result<(Vec<KindDescriptor>, Arc<PreparedLoad>), LoadResult> {
+        let descriptors = kind_manifest::read_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+        let actors =
+            kind_manifest::read_actor_inputs_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+        let boot_namespace =
+            kind_manifest::read_boot_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
 
-        // 2. Parse the per-actor capability manifest (ADR-0033 /
-        //    ADR-0096) and resolve which exported type to load.
-        //    `export: None` selects the default (first) type — the
-        //    only type a single-actor module has — so the legacy
-        //    load is unchanged. A named selector must match one of
-        //    the module's `ActorBoundary` namespaces, else the load
-        //    fails cleanly. The selected type's `type_tag` drives
-        //    `init_typed_p32` at instantiate; `None` keeps the
-        //    legacy default-init path.
-        let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
-            Ok(a) => a,
-            Err(error) => return LoadResult::Err { error },
-        };
-
-        // 2a. ADR-0147: read the module's optional `boot =` slot up front. It is
-        // needed here, before export resolution, because the boot actor is a
-        // member of `actors` yet is instantiated unconditionally — never the
-        // bare-load default and never selectable — so the default-actor branch
-        // below must exclude it and the selectability guard (step 2b) must
-        // reject a load that names it. A bootless module (the common case) reads
-        // `None` and keeps the pre-ADR-0147 path byte-for-byte.
-        let boot_namespace = match kind_manifest::read_boot_namespace_from_bytes(&payload.wasm) {
-            Ok(b) => b,
-            Err(error) => return LoadResult::Err { error },
-        };
-
-        // 2b. ADR-0147 non-selectability guard (§1): boot is instantiated
-        // unconditionally, once per loaded module, and is never reachable through
-        // the export selector. Reject a boot-naming selection up front, before
-        // export resolution runs, so no code path can treat the boot type as a
-        // selectable export.
         if let Some(boot_ns) = &boot_namespace
             && payload.export.as_deref() == Some(boot_ns.as_str())
         {
-            return LoadResult::Err {
-                error: format!(
-                    "export {boot_ns:?} names this module's boot actor, which is not selectable \
-                     (ADR-0147): the boot actor is instantiated unconditionally, once per loaded \
-                     module content hash, and cannot be loaded by an export selector"
-                ),
-            };
+            return Err(LoadResult::Err {
+                error: format!("export {boot_ns:?} names this module's boot actor, which is not selectable (ADR-0147)"),
+            });
         }
 
-        let (mut capabilities, type_tag, selected_namespace): (ComponentCapabilities, Option<u64>, Option<String>) =
-            if let Some(requested) = &payload.export {
-                let Some(group) = actors.iter().find(|a| a.namespace.as_deref() == Some(requested.as_str())) else {
-                    let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
-                    return LoadResult::Err {
-                        error: format!("export {requested:?} not found in module; exported types: {available:?}"),
-                    };
-                };
-                (
-                    group.capabilities.clone(),
-                    // Runtime-name routing: `requested` is the export namespace
-                    // from the wire load request, resolved to its actor-type tag.
-                    #[allow(clippy::disallowed_methods)]
-                    Some(aether_data::mailbox_id_from_name(requested).0),
-                    Some(requested.clone()),
-                )
-            } else if kind_manifest::read_no_default_marker(&payload.wasm) {
-                // ADR-0138: a defaultless multi-actor module (built with a bare
-                // `export!(A, B, …)`) carries no bare-load default. An unselected
-                // load is a hard error that names the exports so the caller can
-                // pick one, rather than instantiating an actor by list position.
-                let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
-                return LoadResult::Err {
-                    error: format!(
-                        "module has no default (ADR-0138): load one of its exports \
-                     by name via the export selector; exported types: {available:?}"
-                    ),
-                };
-            } else {
-                // ADR-0147: the boot actor is a member of `actors` but is never
-                // the bare-load default (it is instantiated unconditionally, not
-                // selected), so exclude it from the default candidate — else
-                // `actors.first()` could hand the caller the boot actor as the
-                // loaded component. A bootless module keeps `actors.first()`.
-                let default_actor = boot_namespace.as_deref().map_or_else(
-                    || actors.first(),
-                    |boot_ns| actors.iter().find(|a| a.namespace.as_deref() != Some(boot_ns)),
-                );
-                (
-                    default_actor.map(|a| a.capabilities.clone()).unwrap_or_default(),
-                    None,
-                    default_actor.and_then(|a| a.namespace.clone()),
-                )
+        let (mut capabilities, type_tag, selected_namespace) = if let Some(requested) = &payload.export {
+            let Some(group) = actors.iter().find(|actor| actor.namespace.as_deref() == Some(requested.as_str())) else {
+                let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
+                return Err(LoadResult::Err {
+                    error: format!("export {requested:?} not found in module; exported types: {available:?}"),
+                });
             };
+            #[allow(clippy::disallowed_methods)]
+            let tag = aether_data::mailbox_id_from_name(requested).0;
+            (group.capabilities.clone(), Some(tag), Some(requested.clone()))
+        } else if kind_manifest::read_no_default_marker(&payload.wasm) {
+            let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
+            return Err(LoadResult::Err {
+                error: format!(
+                    "module has no default (ADR-0138): load one of its exports by name via the export selector; exported types: {available:?}"
+                ),
+            });
+        } else {
+            let default_actor = boot_namespace.as_deref().map_or_else(
+                || actors.first(),
+                |boot_ns| actors.iter().find(|actor| actor.namespace.as_deref() != Some(boot_ns)),
+            );
+            (
+                default_actor.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
+                None,
+                default_actor.and_then(|actor| actor.namespace.clone()),
+            )
+        };
 
-        // 2c. ADR-0163 §3 (#3984): index the module's `aether.asset.*`
-        // custom sections into a load window. Its catalog (name / length /
-        // sha256 per asset) attaches to the capabilities so
-        // `describe_component` and `LoadResult` report what the bundle
-        // carries without executing it; the window itself rides into the
-        // trampoline (installed on the `ComponentCtx` before instantiate)
-        // so the guest's `init` / `wire` can pull asset bytes through the
-        // `asset_fetch_p32` host fn. A malformed asset section (duplicate or
-        // empty path) fails the load loudly, the same fail-at-load stance
-        // the kinds parse takes above. The `Arc<[u8]>` is shared with the
-        // module's boot window (below) so both index the one byte buffer.
         let wasm_bytes: Arc<[u8]> = Arc::from(payload.wasm.as_slice());
-        capabilities.assets = match asset_manifest::read_assets_from_bytes(&wasm_bytes) {
-            Ok(records) => records.into_iter().map(|record| record.info).collect(),
-            Err(error) => return LoadResult::Err { error },
-        };
-
-        // 3. Compile module.
-        let module = match Module::new(&self.engine, &payload.wasm) {
-            Ok(m) => m,
-            Err(e) => {
-                return LoadResult::Err { error: format!("invalid wasm module: {e}") };
-            }
-        };
-
-        // 3b. ADR-0147: ensure the module's boot singleton exists before
-        // spawning the requested actor, reusing the just-compiled module for
-        // the boot spawn (a cheap `Arc`-backed `Module::clone`). First sight of
-        // a module's content hash on this engine spawns the boot; a later load
-        // of any export of the same content finds it already present and only
-        // refcounts against it. The returned hash keys the refcount bump after
-        // the requested-actor spawn succeeds. `boot_freshly_inserted` records
-        // whether *this* load was the one that spawned the boot (as opposed to
-        // finding it already resident), so a later requested-actor spawn failure
-        // can tear the just-spawned boot back down instead of leaking it.
-        let (boot_hash, boot_freshly_inserted): (Option<String>, bool) = match &boot_namespace {
-            Some(boot_ns) => {
-                let hash = content_hash_hex(&payload.wasm);
-                let fresh = !self.boot_registry.contains_key(&hash);
-                if fresh {
-                    let boot_mailbox =
-                        match self.spawn_boot_singleton(ctx, &module, boot_ns, &actors, Arc::clone(&wasm_bytes)) {
-                            Ok(id) => id,
-                            Err(error) => return LoadResult::Err { error },
-                        };
-                    self.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot_mailbox, refcount: 0 });
-                }
-                (Some(hash), fresh)
-            }
-            None => (None, false),
-        };
-
-        // 4. Resolve the component name. Caller > selected export's
-        // namespace > wasm-declared default namespace > monotonic
-        // default. A non-default export defaults its mailbox name to
-        // the selected type's namespace, the multi-actor analog of
-        // the single-actor `aether.namespace` fallback.
+        capabilities.assets = asset_manifest::read_assets_from_bytes(&wasm_bytes)
+            .map_err(|error| LoadResult::Err { error })?
+            .into_iter()
+            .map(|record| record.info)
+            .collect();
+        let module = Module::new(&self.engine, &payload.wasm)
+            .map_err(|error| LoadResult::Err { error: format!("invalid wasm module: {error}") })?;
         let name = match payload.name.or(selected_namespace) {
-            Some(n) => n,
+            Some(name) => name,
             None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
                 Ok(Some(declared)) => declared,
                 Ok(None) => {
-                    let n = self.default_name_counter;
+                    let counter = self.default_name_counter;
                     self.default_name_counter += 1;
-                    format!("component_{n}")
+                    format!("component_{counter}")
                 }
-                Err(error) => return LoadResult::Err { error },
+                Err(error) => return Err(LoadResult::Err { error }),
             },
         };
 
-        // 5. Spawn the trampoline. The framework spawn machinery
-        // claims the namespace, registers the closure-bound
-        // mailbox at `aether.embedded:NAME`, runs
-        // `WasmTrampoline::init` (which instantiates `Component`
-        // against the trampoline's binding), and starts the
-        // dispatcher thread. The returned id is the trampoline's
-        // mailbox.
-        let trampoline_config = WasmTrampolineConfig {
-            engine: Arc::clone(&self.engine),
-            linker: Arc::clone(&self.linker),
-            module,
-            registry: Arc::clone(&self.registry),
-            outbound: Arc::clone(&self.outbound),
-            capabilities: capabilities.clone(),
-            // ADR-0090 (issue 1257): carry the load mail's init-config
-            // bytes into the trampoline; `WasmTrampoline::init` hands
-            // them to the guest's typed `init`.
-            config: payload.config,
-            // ADR-0096: the selected export's actor-type tag, threaded
-            // through to `Component::instantiate` so it calls
-            // `init_typed_p32`. `None` = default type (single-actor
-            // modules and unselected loads keep the legacy init path).
-            type_tag,
-            // ADR-0097: the full per-type capability map, so a guest
-            // `spawn_child::<Sibling>` can register the spawned
-            // sibling's own handler set (looked up by actor-type tag).
-            actor_caps: actors,
-            // ADR-0163 §3 (#3984): the module bytes, so the trampoline's
-            // `init` indexes + installs an asset load window (closed after
-            // `wire`) and later sibling spawns index their own.
-            wasm_bytes: Arc::clone(&wasm_bytes),
-        };
-        let (mailbox_id, full_name) = match ctx
-            .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&name), trampoline_config, ())
-            .finish_with_name()
-        {
-            Ok(id) => id,
-            Err(e) => {
-                // ADR-0147: if this load freshly spawned the module's boot
-                // singleton (first sight of its content hash), the requested
-                // actor never spawned, so nothing will ever refcount against
-                // that boot. Tear it back down — the same cleanup
-                // `release_boot_ref` performs at refcount zero (a detached
-                // `DropComponent` to the boot trampoline, whose drop handler
-                // vacates the mailbox's registrations, plus registry removal)
-                // — rather than leaking the boot singleton and its
-                // registrations. A load that only found an existing boot
-                // leaves it untouched: its other actors still hold the
-                // refcount.
-                if boot_freshly_inserted
-                    && let Some(hash) = &boot_hash
-                    && let Some(entry) = self.boot_registry.remove(hash)
-                {
-                    let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
-                    let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
-                }
-                return LoadResult::Err { error: format!("trampoline spawn failed: {e:?}") };
-            }
-        };
+        Ok((
+            descriptors,
+            Arc::new(PreparedLoad {
+                capabilities,
+                type_tag,
+                actors,
+                boot_namespace,
+                module,
+                wasm_bytes,
+                config: payload.config,
+                name,
+            }),
+        ))
+    }
 
-        // 5b. ADR-0147: refcount this non-boot actor against its module's boot
-        // singleton and record its mailbox → content-hash so a later drop /
-        // replace can find and decrement the right entry. Runs only for a
-        // boot-bearing module; a bootless load leaves both tables untouched.
-        if let Some(hash) = &boot_hash {
-            if let Some(entry) = self.boot_registry.get_mut(hash) {
-                entry.refcount += 1;
-            }
-            self.boot_hash_by_actor.insert(mailbox_id, hash.clone());
+    pub(super) fn finish_kind_registration(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<RegistryBatchResult, KindRegistration>,
+    ) {
+        if let Err(error) = done.output() {
+            let error = format!("kind registration failed: {error}");
+            done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
+            return;
         }
+        let load = Arc::clone(&done.context().load);
+        self.continue_load(ctx, done.handoff(), load);
+    }
 
-        // 6. iamacoffeepot/aether#1037: register the trampoline's
-        // ADR-0033 receive-side capabilities into the queryable
-        // `CapabilityRegistry` so the DAG validator can ask
-        // "does this mailbox accept kind K?". Same registry the
-        // native-cap-boot path populates — one source of truth for
-        // both transport flavours. `aether.component.replace`
-        // re-registers (same mailbox id); `aether.component.drop`
-        // clears.
-        self.mailer.capability_registry().register(mailbox_id, &capabilities);
-
-        // iamacoffeepot/aether#1128: the per-handler cost cells are
-        // seeded inside `WasmTrampoline::init` (run just above, under
-        // the spawn path's `with_stamped`), from the same
-        // `capabilities` — both the global `CostTable` and the
-        // trampoline's per-actor cache, over one shared `Arc`. Nothing
-        // to seed cap-side here: `init` has the `ActorSlots` stamp this
-        // thread does not.
-
-        // ADR-0081 retired the chassis-pushed `ConfigureLogDrain`
-        // mail. The freshly-spawned trampoline owns its own
-        // `ActorLogRing` like every other actor; no drain
-        // configuration is needed.
-
-        // Inventory egress is publication-driven through the component host's
-        // RegistryChanged handler; this mutation site no longer reads the
-        // freshly-published registry back.
-        LoadResult::Ok {
-            mailbox_id,
-            // ADR-0099 §3/§4: report the exact `/`-rendered lineage
-            // the spawn machinery registered. The id is the lineage
-            // fold, not `hash(name)`.
-            name: full_name,
-            capabilities,
+    fn continue_load(&mut self, ctx: &mut NativeCtx<'_>, continuation: TaskContinuation, load: Arc<PreparedLoad>) {
+        let Some(plan) = load.boot_plan() else {
+            self.stage_requested_actor(ctx, continuation, load, None);
+            return;
+        };
+        let hash = plan.hash.clone();
+        if self.boot_registry.contains_key(&hash) {
+            self.stage_requested_actor(ctx, continuation, load, Some(hash));
+        } else if let Some(pending) = self.pending_boots.get_mut(&hash) {
+            pending.waiters.push(BootWaiter { continuation, successor: BootSuccessor::Load(load) });
+        } else {
+            self.stage_module_boot(ctx, continuation, plan, BootSuccessor::Load(load));
         }
     }
 
-    /// ADR-0147: spawn a module's boot trampoline and register its
-    /// capabilities. The caller supplies the just-compiled `module` (reused via
-    /// a cheap `Arc`-backed clone) and the parsed `actors` list, and has already
-    /// confirmed the content hash is unregistered. Boot is spawned through the
-    /// same `WasmTrampoline` path as any named export — its type tag is its
-    /// `NAMESPACE` hash and it is constructed by `init_typed_p32` — but it
-    /// receives no caller config (it is not the export the caller asked for).
-    fn spawn_boot_singleton<M: ReplyMode>(
+    fn stage_module_boot<M: ReplyMode>(
         &mut self,
         ctx: &mut NativeCtx<'_, M>,
-        module: &Module,
-        boot_namespace: &str,
-        actors: &[ActorInputs],
-        wasm_bytes: Arc<[u8]>,
-    ) -> Result<MailboxId, String> {
-        let boot_caps = actors
-            .iter()
-            .find(|a| a.namespace.as_deref() == Some(boot_namespace))
-            .map(|a| a.capabilities.clone())
-            .unwrap_or_default();
-        // Runtime-name routing: the boot type tag is the fold of its NAMESPACE,
-        // the same resolution `handle_load` performs for a requested export.
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "runtime-name routing: the boot actor-type tag is derived from its NAMESPACE, \
-                      exactly as the requested export's tag is at the export-resolution step above"
-        )]
-        let boot_tag = aether_data::mailbox_id_from_name(boot_namespace).0;
-        let boot_config = WasmTrampolineConfig {
-            engine: Arc::clone(&self.engine),
-            linker: Arc::clone(&self.linker),
-            module: module.clone(),
-            registry: Arc::clone(&self.registry),
-            outbound: Arc::clone(&self.outbound),
-            capabilities: boot_caps.clone(),
-            // Boot receives no caller-supplied config — it is unconditional, not
-            // the export the load selected.
-            config: Vec::new(),
-            type_tag: Some(boot_tag),
-            actor_caps: actors.to_vec(),
-            // ADR-0163 §3 (#3984): the same module bytes, so the boot
-            // trampoline indexes its own window and a boot `wire` can pull
-            // assets too.
-            wasm_bytes,
-        };
-        let boot_mailbox = ctx
-            .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(boot_namespace), boot_config, ())
-            .finish()
-            .map_err(|e| format!("boot trampoline spawn failed: {e:?}"))?;
-        self.mailer.capability_registry().register(boot_mailbox, &boot_caps);
-        Ok(boot_mailbox)
+        continuation: TaskContinuation,
+        plan: PreparedBoot,
+        first: BootSuccessor,
+    ) {
+        let hash = plan.hash.clone();
+        let namespace = plan.namespace.clone();
+        let config = plan.config(self);
+        match ctx
+            .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&namespace), config, ())
+            .continue_with(
+                continuation,
+                SpawnContinuation::ModuleBoot { plan: Box::new(plan), first: Box::new(first.clone()) },
+            ) {
+            Ok(_) => {
+                let previous = self.pending_boots.insert(hash, PendingBoot::new());
+                debug_assert!(previous.is_none(), "one actor-local reservation owns a module boot hash");
+            }
+            Err((error, continuation)) => {
+                Self::resolve_boot_failure(
+                    ctx,
+                    continuation,
+                    first,
+                    format!("boot trampoline spawn failed: {error:?}"),
+                );
+            }
+        }
     }
 
-    /// ADR-0147: account a departing non-boot actor against its module's boot
-    /// singleton. Decrements the owning module's refcount; when it reaches zero
-    /// (the last non-boot actor from the module is gone), self-sends a
-    /// fire-and-forget [`DropComponent`] to the boot trampoline — tearing it
-    /// down through the same cleanup any component drop takes (the trampoline's
-    /// drop handler vacates the mailbox's registrations, ADR-0079 §8 amended)
-    /// — then forgets the registry entry.
-    /// A no-op for an actor from a bootless module (nothing was tracked). The
-    /// teardown send is detached, not a `forward_to_trampoline`: the boot's
-    /// `DropResult` must not route back to whoever originated the external drop,
-    /// so it starts a fresh chain and its reply lands harmlessly at the cap. It
-    /// is also sent straight to the boot trampoline rather than self-routed
-    /// through `on_drop_component`, whose ADR-0147 guard rejects boot mailboxes —
-    /// this internal path is exactly how the boot is *legitimately* dropped.
+    fn stage_requested_actor(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        continuation: TaskContinuation,
+        load: Arc<PreparedLoad>,
+        boot_hash: Option<String>,
+    ) {
+        let config = load.requested_config(self);
+        match ctx
+            .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&load.name), config, ())
+            .continue_with(
+                continuation,
+                SpawnContinuation::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() },
+            ) {
+            Ok(_) => {
+                if let Some(hash) = &boot_hash {
+                    let entry =
+                        self.boot_registry.get_mut(hash).expect("requested actor starts only after its boot is Live");
+                    entry.pending_requests = entry
+                        .pending_requests
+                        .checked_add(1)
+                        .expect("module boot pending-request count cannot overflow");
+                }
+            }
+            Err((error, continuation)) => {
+                continuation.resolve(ctx, &LoadResult::Err { error: format!("trampoline spawn failed: {error:?}") });
+            }
+        }
+    }
+
+    pub(super) fn finish_spawn(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, SpawnContinuation>,
+    ) {
+        match done.context().clone() {
+            SpawnContinuation::ModuleBoot { plan, first } => self.finish_module_boot(ctx, done, *plan, *first),
+            SpawnContinuation::RequestedActor { load, boot_hash } => {
+                self.finish_requested_actor(ctx, done, load, boot_hash);
+            }
+        }
+    }
+
+    fn finish_module_boot(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, SpawnContinuation>,
+        plan: PreparedBoot,
+        first: BootSuccessor,
+    ) {
+        let result = match done.output() {
+            Ok(applied) => Ok(applied.clone()),
+            Err(error) => Err(format!("{error:?}")),
+        };
+        let mut pending =
+            self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
+        match result {
+            Ok(applied) => {
+                self.mailer.capability_registry().register(applied.mailbox_id, &plan.capabilities);
+                self.boot_registry.insert(
+                    plan.hash.clone(),
+                    BootEntry { mailbox_id: applied.mailbox_id, refcount: 0, pending_requests: 0 },
+                );
+                self.finish_boot_successor(ctx, done.handoff(), first, &plan.hash);
+                for waiter in pending.waiters.drain(..) {
+                    self.finish_boot_successor(ctx, waiter.continuation, waiter.successor, &plan.hash);
+                }
+                self.drop_orphan_boot(ctx, &plan.hash);
+            }
+            Err(error) => {
+                Self::resolve_boot_failure(ctx, done.handoff(), first, error.clone());
+                for waiter in pending.waiters.drain(..) {
+                    Self::resolve_boot_failure(ctx, waiter.continuation, waiter.successor, error.clone());
+                }
+            }
+        }
+    }
+
+    fn finish_boot_successor(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        continuation: TaskContinuation,
+        successor: BootSuccessor,
+        hash: &str,
+    ) {
+        match successor {
+            BootSuccessor::Load(load) => {
+                self.stage_requested_actor(ctx, continuation, load, Some(hash.to_owned()));
+            }
+            BootSuccessor::Replacement { pending, result } => {
+                self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, Some(hash.to_owned()));
+                continuation.resolve(ctx, &result);
+            }
+        }
+    }
+
+    fn resolve_boot_failure<M: ReplyMode>(
+        ctx: &mut NativeCtx<'_, M>,
+        continuation: TaskContinuation,
+        successor: BootSuccessor,
+        error: String,
+    ) {
+        match successor {
+            BootSuccessor::Load(_) => continuation.resolve(
+                ctx,
+                &LoadResult::Err { error: format!("module boot failed before requested actor: {error}") },
+            ),
+            BootSuccessor::Replacement { pending, result } => {
+                tracing::warn!(
+                    target: "aether_component",
+                    actor = %pending.actor_mailbox,
+                    %error,
+                    "replace succeeded but the replacement module boot failed",
+                );
+                continuation.resolve(ctx, &result);
+            }
+        }
+    }
+
+    fn finish_requested_actor(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, SpawnContinuation>,
+        load: Arc<PreparedLoad>,
+        boot_hash: Option<String>,
+    ) {
+        match done.output() {
+            Ok(applied) => {
+                let applied = applied.clone();
+                if let Some(hash) = &boot_hash {
+                    self.settle_boot_request(ctx, hash, Some(applied.mailbox_id));
+                }
+                self.mailer.capability_registry().register(applied.mailbox_id, &load.capabilities);
+                let capabilities = load.capabilities.clone();
+                done.resolve_with(ctx, move |_, _| LoadResult::Ok {
+                    mailbox_id: applied.mailbox_id,
+                    name: applied.canonical_name.to_string(),
+                    capabilities,
+                });
+            }
+            Err(error) => {
+                let error = format!("trampoline spawn failed: {error:?}");
+                if let Some(hash) = &boot_hash {
+                    self.settle_boot_request(ctx, hash, None);
+                }
+                done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
+            }
+        }
+    }
+
+    fn drop_orphan_boot<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, hash: &str) {
+        let removable =
+            self.boot_registry.get(hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
+        if removable {
+            let entry = self.boot_registry.remove(hash).expect("orphan boot remains present");
+            let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
+            let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
+        }
+    }
+
+    fn settle_boot_request<M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, M>,
+        hash: &str,
+        live_actor: Option<MailboxId>,
+    ) {
+        let entry = self.boot_registry.get_mut(hash).expect("requested actor's Live boot remains registered");
+        entry.pending_requests = entry
+            .pending_requests
+            .checked_sub(1)
+            .expect("each accepted requested actor settles its boot pending count exactly once");
+        if let Some(actor_mailbox) = live_actor {
+            entry.refcount = entry.refcount.checked_add(1).expect("module boot reference count cannot overflow");
+            self.boot_hash_by_actor.insert(actor_mailbox, hash.to_owned());
+        }
+        self.drop_orphan_boot(ctx, hash);
+    }
+
     pub fn release_boot_ref<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, actor_mailbox: MailboxId) {
         let Some(hash) = self.boot_hash_by_actor.remove(&actor_mailbox) else {
             return;
         };
-        let Some(entry) = self.boot_registry.get_mut(&hash) else {
-            return;
+        let remove = if let Some(entry) = self.boot_registry.get_mut(&hash) {
+            entry.refcount = entry
+                .refcount
+                .checked_sub(1)
+                .expect("each boot-bearing actor releases its module boot reference exactly once");
+            entry.refcount == 0 && entry.pending_requests == 0
+        } else {
+            false
         };
-        entry.refcount = entry.refcount.saturating_sub(1);
-        if entry.refcount == 0 {
-            let boot_mailbox = entry.mailbox_id;
-            self.boot_registry.remove(&hash);
-            let bytes = DropComponent { mailbox_id: boot_mailbox }.encode_into_bytes();
-            let _ = ctx.send_envelope_detached(boot_mailbox, DropComponent::ID, &bytes);
+        if remove {
+            let entry = self.boot_registry.remove(&hash).expect("zero-ref boot remains present");
+            let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
+            let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
         }
     }
 
-    /// ADR-0147: rebind an actor's boot bookkeeping across an
-    /// `aether.component.replace` (ADR-0022 in-place module swap). The actor's
-    /// old module refcount is decremented exactly like a drop (tearing its boot
-    /// down if it was the last), and — if the replacement's `new_wasm` declares
-    /// a boot slot — the new module's boot singleton is spawned-if-absent and
-    /// incremented exactly like a load, with `boot_hash_by_actor` repointed at
-    /// the new content hash (or cleared if the replacement is bootless). The new
-    /// content is validated (manifest parse + compile) before the old refcount
-    /// is touched, so a replace onto malformed wasm leaves the old boot state
-    /// intact rather than tearing it down for a swap that will fail downstream.
-    ///
-    /// Returns `Err` only when the new module's boot singleton failed to spawn
-    /// (the old refcount was already decremented by then); the caller logs it
-    /// rather than swallowing it. Malformed / bootless replacement wasm is a
-    /// clean `Ok(())` no-op — the forwarded replace surfaces any wasm error, and
-    /// this must run only after that replace has actually succeeded (ADR-0147),
-    /// so a valid `Ok` swap always presents valid wasm here.
-    pub fn rebind_boot_ref<M: ReplyMode>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, M>,
-        actor_mailbox: MailboxId,
-        new_wasm: &[u8],
-    ) -> Result<(), String> {
-        // Resolve + validate the replacement's boot slot up front, before
-        // touching the old refcount. On any parse/compile error leave all boot
-        // bookkeeping untouched (an `Ok(())` no-op) — the forwarded replace
-        // surfaces the wasm error to the caller; a replace onto malformed wasm
-        // must not tear the old boot down. The spawn decision is deferred to
-        // after the decrement (a same-content replace may drop the shared entry
-        // to zero and back).
-        let new_boot: Option<(String, String, Vec<ActorInputs>, Module)> =
-            match kind_manifest::read_boot_namespace_from_bytes(new_wasm) {
-                Ok(Some(boot_ns)) => {
-                    match (kind_manifest::read_actor_inputs_from_bytes(new_wasm), Module::new(&self.engine, new_wasm)) {
-                        (Ok(actors), Ok(module)) => Some((boot_ns, content_hash_hex(new_wasm), actors, module)),
-                        _ => return Ok(()),
-                    }
-                }
-                Ok(None) => None,
-                Err(_) => return Ok(()),
-            };
-
-        // Decrement the old module refcount (drop semantics), tearing its boot
-        // down if this was its last non-boot actor.
-        self.release_boot_ref(ctx, actor_mailbox);
-
-        // Increment the new module refcount (load semantics), spawning its boot
-        // singleton if the content is not (or is no longer) resident.
-        if let Some((boot_ns, hash, actors, module)) = new_boot {
-            if !self.boot_registry.contains_key(&hash) {
-                // Propagate a boot spawn failure rather than discarding it: the
-                // old refcount is already decremented, so the new boot is missing
-                // and the caller must know. The registry publication wakes the
-                // component host, which egresses the coherent inventory after
-                // this mutation settles.
-                let boot_mailbox = self.spawn_boot_singleton(ctx, &module, &boot_ns, &actors, Arc::from(new_wasm))?;
-                self.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot_mailbox, refcount: 0 });
-            }
-            if let Some(entry) = self.boot_registry.get_mut(&hash) {
-                entry.refcount += 1;
-            }
-            self.boot_hash_by_actor.insert(actor_mailbox, hash);
-        }
-        Ok(())
-    }
-
-    /// ADR-0147 (finding: refcount desync on failed replace): begin an
-    /// `aether.component.replace` by forwarding the [`ReplaceComponent`] to the
-    /// target trampoline, but route its `ReplaceResult` reply back to this cap
-    /// (default `reply_to`) rather than straight to the caller, and park the
-    /// caller's reply target plus the replacement wasm under the forward's
-    /// correlation id. The boot-refcount transfer is deferred to
-    /// [`Self::finish_replace`], which commits it only if the swap actually
-    /// succeeded. The tracked forward keeps the caller's call open across the
-    /// hop (its `in_flight` count is bumped), and `finish_replace` settles it
-    /// with the trampoline's verdict. Mirrors the audio cap's fs-read
-    /// forward/intercept (ADR-0103 §2).
     pub fn begin_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         let source = ctx.reply_target();
         let actor_mailbox = payload.mailbox_id;
+        let boot_operation = self.next_boot_operation(actor_mailbox);
         let bytes = payload.encode_into_bytes();
         let mail_id = ctx.send_envelope_tracked(actor_mailbox, ReplaceComponent::ID, &bytes);
-        self.pending_replace
-            .insert(mail_id.correlation_id, PendingReplace { source, actor_mailbox, new_wasm: payload.wasm });
+        self.pending_replace.insert(
+            mail_id.correlation_id,
+            PendingReplace { source, actor_mailbox, new_wasm: Arc::from(payload.wasm), boot_operation },
+        );
     }
 
-    /// ADR-0147: settle a forwarded replace once the trampoline's
-    /// `ReplaceResult` lands back at the cap. Recovers the parked
-    /// [`PendingReplace`] by the reply's correlation id, commits the
-    /// boot-refcount transfer via [`Self::rebind_boot_ref`] only on a successful
-    /// swap (on failure the trampoline still hosts the old module, so the old
-    /// boot must stay and no new boot is spawned — the refcount is left exactly
-    /// as it was), then re-replies the verdict to the original caller so its
-    /// `replace` call settles.
     pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, Manual>, result: ReplaceResult) {
         let Some(correlation) = ctx.in_reply_to().map(|request| request.0) else {
             return;
@@ -509,20 +515,228 @@ impl ComponentHostCapabilityState {
         let Some(pending) = self.pending_replace.remove(&correlation) else {
             return;
         };
-        // `&&` short-circuits: `rebind_boot_ref` runs only on a successful swap
-        // (never on a failed replace, where the old module is still hosted), and
-        // its `Err` — a boot spawn failure after the old refcount was already
-        // decremented — is logged rather than swallowed (ADR-0147).
-        if matches!(result, ReplaceResult::Ok { .. })
-            && let Err(error) = self.rebind_boot_ref(ctx, pending.actor_mailbox, &pending.new_wasm)
-        {
-            tracing::warn!(
-                target: "aether_component",
-                actor = %pending.actor_mailbox,
-                %error,
-                "ADR-0147: replace succeeded but the new module's boot singleton failed to spawn",
-            );
+        if !matches!(result, ReplaceResult::Ok { .. }) {
+            ctx.reply_to(pending.source, &result);
+            return;
         }
-        ctx.reply_to(pending.source, &result);
+        if !self.accept_successful_boot_operation(pending.actor_mailbox, pending.boot_operation) {
+            ctx.reply_to(pending.source, &result);
+            return;
+        }
+
+        let plan = match self.prepare_replacement_boot(&pending.new_wasm) {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::warn!(target: "aether_component", actor = %pending.actor_mailbox, %error, "replacement boot metadata could not be prepared");
+                ctx.reply_to(pending.source, &result);
+                return;
+            }
+        };
+        let new_hash = plan.as_ref().map(|plan| plan.hash.clone());
+        if self.boot_hash_by_actor.get(&pending.actor_mailbox) == new_hash.as_ref() {
+            ctx.reply_to(pending.source, &result);
+            return;
+        }
+        let Some(plan) = plan else {
+            self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, None);
+            ctx.reply_to(pending.source, &result);
+            return;
+        };
+        if self.boot_registry.contains_key(&plan.hash) {
+            self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, Some(plan.hash));
+            ctx.reply_to(pending.source, &result);
+            return;
+        }
+
+        let continuation = ctx.continuation_to(pending.source);
+        if let Some(inflight) = self.pending_boots.get_mut(&plan.hash) {
+            inflight
+                .waiters
+                .push(BootWaiter { continuation, successor: BootSuccessor::Replacement { pending, result } });
+        } else {
+            self.stage_module_boot(ctx, continuation, plan, BootSuccessor::Replacement { pending, result });
+        }
+    }
+
+    fn prepare_replacement_boot(&self, wasm: &[u8]) -> Result<Option<PreparedBoot>, String> {
+        let Some(namespace) = kind_manifest::read_boot_namespace_from_bytes(wasm)? else {
+            return Ok(None);
+        };
+        let actors = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
+        let module = Module::new(&self.engine, wasm).map_err(|error| format!("invalid wasm module: {error}"))?;
+        Ok(Some(PreparedBoot::new(namespace, module, actors, Arc::from(wasm))))
+    }
+
+    fn commit_replacement_boot<M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, M>,
+        actor_mailbox: MailboxId,
+        boot_operation: u64,
+        new_hash: Option<String>,
+    ) {
+        if self.dominant_boot_operation_by_actor.get(&actor_mailbox) != Some(&boot_operation) {
+            return;
+        }
+        self.release_boot_ref(ctx, actor_mailbox);
+        if let Some(hash) = new_hash {
+            let entry =
+                self.boot_registry.get_mut(&hash).expect("replacement boot is Live before its reference commits");
+            entry.refcount = entry.refcount.checked_add(1).expect("module boot reference count cannot overflow");
+            self.boot_hash_by_actor.insert(actor_mailbox, hash);
+        }
+    }
+
+    fn next_boot_operation(&mut self, actor_mailbox: MailboxId) -> u64 {
+        let sequence = self.boot_operation_sequence_by_actor.entry(actor_mailbox).or_default();
+        *sequence = sequence.checked_add(1).expect("an actor's boot-operation sequence cannot overflow");
+        *sequence
+    }
+
+    fn accept_successful_boot_operation(&mut self, actor_mailbox: MailboxId, boot_operation: u64) -> bool {
+        let dominant = self.dominant_boot_operation_by_actor.entry(actor_mailbox).or_default();
+        if boot_operation < *dominant {
+            return false;
+        }
+        *dominant = boot_operation;
+        true
+    }
+
+    pub(super) fn invalidate_replacement_boot_operation(&mut self, actor_mailbox: MailboxId) {
+        let boot_operation = self.next_boot_operation(actor_mailbox);
+        self.dominant_boot_operation_by_actor.insert(actor_mailbox, boot_operation);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use aether_data::Source;
+    use aether_substrate::actor::native::NativeBinding;
+    use aether_substrate::mail::MailId;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_substrate::mail::registry::Registry;
+    use wasmtime::{Engine, Linker};
+
+    use super::*;
+
+    fn state() -> ComponentHostCapabilityState {
+        let registry = Arc::new(Registry::new());
+        let (outbound, _events) = HubOutbound::attached_loopback();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+        let engine = Arc::new(Engine::default());
+        ComponentHostCapabilityState {
+            linker: Arc::new(Linker::new(&engine)),
+            engine,
+            registry,
+            mailer,
+            outbound,
+            registry_subscription: None,
+            last_egressed_inventory: None,
+            default_name_counter: 0,
+            boot_registry: HashMap::new(),
+            pending_boots: HashMap::new(),
+            boot_hash_by_actor: HashMap::new(),
+            pending_replace: HashMap::new(),
+            boot_operation_sequence_by_actor: HashMap::new(),
+            dominant_boot_operation_by_actor: HashMap::new(),
+        }
+    }
+
+    fn binding(state: &ComponentHostCapabilityState) -> Arc<NativeBinding> {
+        Arc::new(NativeBinding::new_for_test(Arc::clone(&state.mailer), MailboxId(0xC065)))
+    }
+
+    #[test]
+    fn manual_interleaving_last_live_drop_then_pending_rejection_drops_boot() {
+        let mut state = state();
+        let binding = binding(&state);
+        let hash = "boot-with-one-pending-request".to_owned();
+        let boot = MailboxId(0xB001);
+        let live_actor = MailboxId(0xA001);
+        state.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot, refcount: 1, pending_requests: 1 });
+        state.boot_hash_by_actor.insert(live_actor, hash.clone());
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        // Manual state-machine proof: the last Live actor drops while another
+        // requested actor is still pending, then that pending birth rejects.
+        // This does not assert that a scheduler will choose this ordering.
+        state.release_boot_ref(&mut ctx, live_actor);
+        assert_eq!(state.boot_registry.get(&hash).map(|entry| (entry.refcount, entry.pending_requests)), Some((0, 1)));
+        state.settle_boot_request(&mut ctx, &hash, None);
+
+        assert!(!state.boot_registry.contains_key(&hash), "zero-ref/zero-pending boot must be removed after rejection");
+    }
+
+    #[test]
+    fn manual_interleaving_reverse_replacement_boot_completion_keeps_newest_epoch() {
+        let mut state = state();
+        let binding = binding(&state);
+        let actor = MailboxId(0xA002);
+        let old_hash = "replacement-n1".to_owned();
+        let new_hash = "replacement-n2".to_owned();
+        let old_operation = state.next_boot_operation(actor);
+        assert!(state.accept_successful_boot_operation(actor, old_operation));
+        let new_operation = state.next_boot_operation(actor);
+        assert!(state.accept_successful_boot_operation(actor, new_operation));
+        state
+            .boot_registry
+            .insert(old_hash.clone(), BootEntry { mailbox_id: MailboxId(0xB002), refcount: 0, pending_requests: 0 });
+        state
+            .boot_registry
+            .insert(new_hash.clone(), BootEntry { mailbox_id: MailboxId(0xB003), refcount: 0, pending_requests: 0 });
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        // Manual state-machine proof: N2's absent boot promotes first, then
+        // N1's different boot promotes late. This is not a scheduler-order
+        // proof; it directly drives the two completion orders that matter.
+        state.commit_replacement_boot(&mut ctx, actor, new_operation, Some(new_hash.clone()));
+        state.drop_orphan_boot(&mut ctx, &new_hash);
+        state.commit_replacement_boot(&mut ctx, actor, old_operation, Some(old_hash.clone()));
+        state.drop_orphan_boot(&mut ctx, &old_hash);
+
+        assert_eq!(state.boot_hash_by_actor.get(&actor), Some(&new_hash));
+        assert_eq!(state.boot_registry.get(&new_hash).map(|entry| entry.refcount), Some(1));
+        assert!(!state.boot_registry.contains_key(&old_hash), "the boot created only for stale N1 is dropped");
+    }
+
+    #[test]
+    fn later_failed_replacement_does_not_dominate_earlier_success() {
+        let mut state = state();
+        let actor = MailboxId(0xA004);
+        let earlier_success = state.next_boot_operation(actor);
+        let later_failure = state.next_boot_operation(actor);
+
+        // The later request reserves a sequence but its failed ReplaceResult
+        // never enters the dominant table. The earlier successful request may
+        // therefore still establish the actor's boot operation.
+        assert!(state.accept_successful_boot_operation(actor, earlier_success));
+        assert_eq!(state.dominant_boot_operation_by_actor.get(&actor), Some(&earlier_success));
+        assert!(later_failure > earlier_success);
+    }
+
+    #[test]
+    fn manual_interleaving_drop_before_replacement_boot_completion_cannot_resurrect_ref() {
+        let mut state = state();
+        let binding = binding(&state);
+        let actor = MailboxId(0xA003);
+        let hash = "replacement-completes-after-drop".to_owned();
+        let replacement_operation = state.next_boot_operation(actor);
+        assert!(state.accept_successful_boot_operation(actor, replacement_operation));
+        state.invalidate_replacement_boot_operation(actor);
+        state
+            .boot_registry
+            .insert(hash.clone(), BootEntry { mailbox_id: MailboxId(0xB004), refcount: 0, pending_requests: 0 });
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        // Manual state-machine proof: DropComponent invalidates the actor
+        // before its boot completion arrives. This deliberately proves the
+        // bookkeeping transition, not a particular scheduler ordering.
+        state.commit_replacement_boot(&mut ctx, actor, replacement_operation, Some(hash.clone()));
+        state.drop_orphan_boot(&mut ctx, &hash);
+
+        assert!(!state.boot_hash_by_actor.contains_key(&actor), "late completion cannot resurrect an actor boot ref");
+        assert!(!state.boot_registry.contains_key(&hash), "a boot created solely for the stale completion is dropped");
     }
 }

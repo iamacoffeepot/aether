@@ -45,6 +45,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Mutex, Weak};
 
+use aether_actor::ReplyMode;
 use aether_data::{Kind, KindId, MailId};
 
 use crate::mail::Source;
@@ -273,6 +274,66 @@ pub struct TaskDone<O, C = ()> {
     resolved: bool,
 }
 
+/// Move-only continuation for transferring an ADR-0093 completion across
+/// successive owner-staged operations without releasing its settlement hold.
+///
+/// A continuation owns the original caller's reply target and the exact hold
+/// acquired by the first stage. Successor staging consumes it only after all
+/// synchronous preparation succeeds; a preparation error must return it to the
+/// caller so the terminal error can still be replied exactly once.
+#[must_use = "stage a successor or resolve the original caller before dropping the continuation"]
+pub struct TaskContinuation {
+    hold: Option<SettlementHold>,
+    reply_to: Source,
+    consumed: bool,
+}
+
+impl TaskContinuation {
+    pub(crate) fn new(hold: SettlementHold, reply_to: Source) -> Self {
+        Self { hold: Some(hold), reply_to, consumed: false }
+    }
+
+    pub(crate) fn into_parts(mut self) -> (SettlementHold, Source) {
+        let hold = self.hold.take().expect("task continuation consumed exactly once");
+        self.consumed = true;
+        (hold, self.reply_to)
+    }
+
+    /// Send the terminal reply through the original target and then release
+    /// the continuously-held settlement root.
+    pub fn resolve<M, R>(mut self, ctx: &mut NativeCtx<'_, M>, reply: &R)
+    where
+        M: ReplyMode,
+        R: Kind + serde::Serialize,
+    {
+        let root = self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root);
+        ctx.reply_to_target(self.reply_to, reply, root, None);
+        drop(self.hold.take());
+        self.consumed = true;
+    }
+
+    /// Release a continuation because the actor that owned its pending state
+    /// is itself closing. This is the no-spurious-reply parent-disappearance
+    /// path, not an ordinary business completion.
+    #[doc(hidden)]
+    pub fn abandon_for_actor_close(mut self) {
+        drop(self.hold.take());
+        self.consumed = true;
+    }
+}
+
+impl Drop for TaskContinuation {
+    fn drop(&mut self) {
+        if self.hold.is_some() && !self.consumed {
+            drop(self.hold.take());
+            debug_assert!(
+                false,
+                "TaskContinuation dropped without successor staging or terminal reply (the hold was released, but the owed reply was lost)"
+            );
+        }
+    }
+}
+
 impl<O, C> TaskDone<O, C> {
     /// Borrow the worker's output. The common `resolve` re-replies this
     /// directly; `resolve_with` maps it.
@@ -284,6 +345,15 @@ impl<O, C> TaskDone<O, C> {
     /// [`dispatch_blocking`](NativeCtx::dispatch_blocking)).
     pub fn context(&self) -> &C {
         &self.context
+    }
+
+    /// Transfer this completion's hold and original reply target into a
+    /// successor stage. No `Release` is emitted: the same move-only hold stays
+    /// continuously owned until the successor eventually resolves or is
+    /// abandoned with its actor binding.
+    pub fn handoff(mut self) -> TaskContinuation {
+        self.resolved = true;
+        TaskContinuation { hold: self.hold.take(), reply_to: self.reply_to, consumed: false }
     }
 
     /// Mark resolved and drop the hold **after** the caller has sent the
@@ -997,6 +1067,41 @@ mod tests {
         assert_eq!(reply.sender.correlation_id, 77);
         assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes"), Answer { value: 42 });
         assert_eq!(counter.held_open(root), 0, "TaskDone release closes the ctx-captured hold");
+    }
+
+    #[test]
+    fn task_handoff_keeps_one_hold_across_successor_completion() {
+        let (registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(18);
+        let actor_mailbox = mailbox_id_from_name("test.deferred_completion.handoff");
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+        let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
+        registry.register_inbox("test.deferred_completion.handoff", forward_to(wake_tx));
+
+        let first = binding.dispatch_arm::<Answer, _>(
+            mailer.acquire_settlement_hold(root),
+            Source::NONE,
+            String::from("first"),
+        );
+        let first_id = first.dispatch_id();
+        first.complete(Answer { value: 1 });
+        assert_eq!(await_wake(&wake_rx), first_id);
+
+        let done = binding.dispatch_take::<Answer, String>(first_id).expect("first completion remains takeable");
+        let (hold, reply_to) = done.handoff().into_parts();
+        assert_eq!(counter.held_open(root), 1, "handoff moves the original hold without a release gap");
+
+        let second = binding.dispatch_arm::<Answer, _>(hold, reply_to, String::from("second"));
+        let second_id = second.dispatch_id();
+        second.complete(Answer { value: 2 });
+        assert_eq!(await_wake(&wake_rx), second_id);
+        let done = binding
+            .dispatch_take::<Answer, String>(second_id)
+            .expect("successor completion retains the transferred hold");
+        assert_eq!(done.context(), "second");
+        done.release_no_reply();
+        assert_eq!(counter.held_open(root), 0, "terminal successor release closes the one continuous hold");
     }
 
     #[test]

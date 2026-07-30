@@ -80,9 +80,10 @@ pub mod spawn;
 pub mod spawn_thread;
 pub mod task_queue;
 
+pub use crate::mail::registry::effect::{RegistryBatch, RegistryBatchError, RegistryBatchResult};
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
-pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
+pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskContinuation, TaskDone};
 pub use envelope::Envelope;
 pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
 pub use pumped_slot::PumpedSlot;

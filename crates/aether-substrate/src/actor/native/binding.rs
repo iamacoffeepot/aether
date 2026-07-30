@@ -44,7 +44,9 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::effect::{EffectBatch, PreparedSpawnCommit, RegistryEffect};
+use crate::mail::registry::effect::{
+    EffectBatch, PreparedSpawnCommit, RegistryBatch, RegistryBatchResult, RegistryEffect,
+};
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
@@ -95,6 +97,11 @@ struct PendingBirthWork {
     commit: PreparedSpawnCommit,
 }
 
+struct PendingOwnerBatchWork {
+    batch: RegistryBatch,
+    completion: super::dispatch_blocking::DeferredCompletion<RegistryBatchResult>,
+}
+
 /// Per-actor send-side buffer that builds blobs **in place** (2c,
 /// iamacoffeepot/aether#1110). `push_envelope_buffered` writes each send
 /// straight into the ring as it happens — the blob is opened lazily on
@@ -108,6 +115,11 @@ struct PendingBirthWork {
 /// lazily created on the first buffered send, so actors that never buffer
 /// (wasm trampolines, inline-only caps) pay no ring allocation.
 struct OutboundBuffer {
+    /// A staged activation keeps buffered lifecycle effects local until the
+    /// registry owner has promoted its route to `Live`. The private activation
+    /// barrier bypasses this buffer; ordinary `NativeCtx` drops remain harmless
+    /// while the hold is set.
+    activation_held: bool,
     /// Lazily created on the first buffered send. `Arc` so each minted
     /// [`MailRef::InRing`] carries the ring's lifetime by refcount.
     ring: Option<Arc<MailRing>>,
@@ -127,11 +139,22 @@ struct OutboundBuffer {
     /// Births are rare; this vector remains unallocated on the ordinary
     /// mail-only handler path.
     births: Vec<PendingBirthWork>,
+    /// Handler-staged registry batches are uncommon and stay unallocated on
+    /// the ordinary mail-only path.
+    owner_batches: Vec<PendingOwnerBatchWork>,
 }
 
 impl OutboundBuffer {
     fn new() -> Self {
-        Self { ring: None, blob_open: false, construct_start: None, mails: Vec::new(), births: Vec::new() }
+        Self {
+            activation_held: false,
+            ring: None,
+            blob_open: false,
+            construct_start: None,
+            mails: Vec::new(),
+            births: Vec::new(),
+            owner_batches: Vec::new(),
+        }
     }
 }
 
@@ -649,11 +672,40 @@ impl NativeBinding {
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
     ) -> MailId {
+        self.push_envelope_returning_root_before_push(
+            recipient,
+            kind,
+            bytes,
+            count,
+            parent_mail,
+            inherited_root,
+            |_| {},
+        )
+    }
+
+    /// Mint an eager envelope's identity, expose it to `before_push`, then
+    /// publish the mail. The activation barrier uses this narrow hook to make
+    /// its exact identity visible before another owner worker can consume it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the hook preserves the established eager-envelope dimensions and adds one ordering callback"
+    )]
+    pub(super) fn push_envelope_returning_root_before_push(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        parent_mail: Option<MailId>,
+        inherited_root: Option<MailId>,
+        before_push: impl FnOnce(MailId),
+    ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox()), correlation);
         let mail_id = MailId::new(self.self_mailbox(), correlation);
         let root = inherited_root.unwrap_or(mail_id);
+        before_push(mail_id);
         // ADR-0080 §2 producer hook: emit `Sent` before pushing the
         // mail. Every `Mailer` carries a trace handle by default
         // (per-chassis post iamacoffeepot/aether#953), so producer
@@ -788,6 +840,20 @@ impl NativeBinding {
         buffer.births.push(PendingBirthWork { after_mail, recipient, commit });
     }
 
+    /// Append one typed registry batch to the handler's ordered outbound work.
+    /// Submission happens at flush through the reserved owner-batch path.
+    pub(crate) fn stage_owner_batch(
+        &self,
+        batch: RegistryBatch,
+        completion: super::dispatch_blocking::DeferredCompletion<RegistryBatchResult>,
+    ) {
+        self.outbound
+            .lock()
+            .expect("outbound buffer poisoned; fail-fast per ADR-0063")
+            .owner_batches
+            .push(PendingOwnerBatchWork { batch, completion });
+    }
+
     /// ADR-0087 / 2c: seal the open ring blob and route the buffered
     /// mail. Called at handler end (via [`super::ctx::NativeCtx`]'s
     /// `Drop`). A no-op when nothing is buffered.
@@ -825,6 +891,67 @@ impl NativeBinding {
         self.flush_outbound_inner();
     }
 
+    /// Quarantine lifecycle-authored buffered work while a prepared actor is
+    /// wired but not yet authoritatively `Live`.
+    pub(super) fn hold_outbound_for_activation(&self) {
+        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        assert!(!buffer.activation_held, "one staged activation owns the outbound hold");
+        assert!(
+            !buffer.blob_open && buffer.mails.is_empty() && buffer.births.is_empty() && buffer.owner_batches.is_empty(),
+            "a prepared actor enters wire with an empty outbound window"
+        );
+        buffer.activation_held = true;
+    }
+
+    /// Publish the quarantined lifecycle suffix after the registry owner has
+    /// installed the `Live` route. The actor remains unwakeable while this
+    /// runs, preserving one logical producer for the ring.
+    pub(super) fn release_outbound_after_activation(&self) {
+        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        assert!(buffer.activation_held, "only a staged activation can release the outbound hold");
+        buffer.activation_held = false;
+        drop(buffer);
+        self.flush_outbound_inner();
+    }
+
+    /// Reject every buffered effect accumulated by `wire` and `unwire` when a
+    /// staged activation never reaches `Live`. Mail settlement bumps are
+    /// balanced locally, prepared births reject at their execution homes, and
+    /// deferred owner completions abandon their held actor work.
+    pub(super) fn discard_outbound_after_activation(&self) {
+        let (ring, mails, births, owner_batches) = {
+            let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            assert!(buffer.activation_held, "only a staged activation can discard the outbound hold");
+            buffer.activation_held = false;
+            if buffer.blob_open {
+                if let Some(ring) = buffer.ring.as_ref() {
+                    ring.seal();
+                }
+                buffer.blob_open = false;
+            }
+            buffer.construct_start = None;
+            (
+                buffer.ring.as_ref().map(Arc::clone),
+                buffer.mails.drain(..).collect::<Vec<_>>(),
+                buffer.births.drain(..).collect::<Vec<_>>(),
+                buffer.owner_batches.drain(..).collect::<Vec<_>>(),
+            )
+        };
+
+        for pending in mails {
+            let PendingMail { payload, mail_id, root, .. } = pending;
+            if let PendingPayload::InRing(location) = payload {
+                drop(MailRef::in_ring(
+                    Arc::clone(ring.as_ref().expect("ring exists once an InRing mail was minted")),
+                    location,
+                ));
+            }
+            self.mailer.record_finished(mail_id, root);
+        }
+        drop(births);
+        drop(owner_batches);
+    }
+
     /// Seal the open blob, mint a [`MailRef`] per buffered mail, and
     /// route. Folds the blob into this actor's cursor-shared
     /// [`BlobWork`] when a pool [`Spawner`](crate::Spawner) is wired,
@@ -848,8 +975,11 @@ impl NativeBinding {
         // (construct ≈ 0) on the impossible `None` so the field is never
         // a wire hole.
         let construct_start;
-        let (routed, births): (Vec<Mail>, Vec<PendingBirthWork>) = {
+        let (routed, births, owner_batches): (Vec<Mail>, Vec<PendingBirthWork>, Vec<PendingOwnerBatchWork>) = {
             let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            if buf.activation_held {
+                return;
+            }
             // Seal the open blob first (publishes the in-ring locks), so a
             // `MailRef::InRing` minted below reads a finalized header.
             if buf.blob_open {
@@ -858,7 +988,7 @@ impl NativeBinding {
                 }
                 buf.blob_open = false;
             }
-            if buf.mails.is_empty() && buf.births.is_empty() {
+            if buf.mails.is_empty() && buf.births.is_empty() && buf.owner_batches.is_empty() {
                 // Reset the stale anchor so the next window re-stamps.
                 buf.construct_start = None;
                 return;
@@ -882,7 +1012,7 @@ impl NativeBinding {
                         .with_lineage(p.mail_id, p.root, p.parent_mail)
                 })
                 .collect();
-            (routed, buf.births.drain(..).collect())
+            (routed, buf.births.drain(..).collect(), buf.owner_batches.drain(..).collect())
         };
 
         // iamacoffeepot/aether#1150: emit each buffered mail's deferred
@@ -901,6 +1031,13 @@ impl NativeBinding {
                 construct_start,
                 flush_begin,
             );
+        }
+
+        if !owner_batches.is_empty() {
+            let registry = self.spawner.as_ref().expect("staged owner batches require a spawner").registry();
+            for work in owner_batches {
+                let _ = registry.submit_deferred(work.batch.into_effects(), work.completion);
+            }
         }
 
         let routed = if births.is_empty() {
@@ -1176,6 +1313,30 @@ mod tests {
         assert_eq!(transport.prev_correlation(), 1);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
         assert_eq!(transport.prev_correlation(), 2);
+    }
+
+    #[test]
+    fn eager_identity_hook_runs_before_inline_publication() {
+        use crate::mail::registry::MailDispatch;
+
+        let (registry, mailer) = bare_substrate();
+        let published = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&published);
+        let (tx, rx) = mpsc::channel();
+        let recipient = registry.register_inline(
+            "test.binding.before-push",
+            Arc::new(move |_dispatch: MailDispatch<'_>| {
+                tx.send(*observed.lock().unwrap()).unwrap();
+            }),
+        );
+        let binding = NativeBinding::new_for_test(mailer, MailboxId(0xB4_221E));
+
+        let mail_id =
+            binding.push_envelope_returning_root_before_push(recipient.0, KindId(1).0, &[], 1, None, None, |mail_id| {
+                published.lock().unwrap().replace(mail_id);
+            });
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Some(mail_id));
     }
 
     /// #1695 / ADR-0080 §5/§6: a synchronous `ctx.reply` from a handler

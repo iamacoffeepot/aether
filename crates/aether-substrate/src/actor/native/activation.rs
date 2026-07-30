@@ -363,17 +363,23 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
             let id = live.id;
             self.live.lock().expect("activation live lock poisoned").replace(Box::new(live));
             // The live lease is visible to the owner before the barrier can
-            // leave this execution home.
-            let barrier_mail_id = binding.push_envelope_buffered(
+            // leave this execution home. This substrate-owned control mail is
+            // intentionally eager; buffered wire work stays behind the
+            // binding's activation hold until the owner's post-Live suffix.
+            binding.push_envelope_returning_root_before_push(
                 id.0,
                 ACTIVATION_BARRIER_KIND.0,
                 &self.token.value().to_le_bytes(),
                 1,
                 None,
                 None,
+                |barrier_mail_id| {
+                    self.barrier_mail_id
+                        .lock()
+                        .expect("activation barrier identity lock poisoned")
+                        .replace(barrier_mail_id);
+                },
             );
-            self.barrier_mail_id.lock().expect("activation barrier identity lock poisoned").replace(barrier_mail_id);
-            binding.flush_outbound();
             if self.cancelled.load(Ordering::Acquire)
                 && let Some(live) = self.live.lock().expect("activation live lock poisoned").take()
             {
@@ -424,6 +430,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             Arc::clone(spawner.mailer()),
             id,
         );
+        binding.hold_outbound_for_activation();
         slot.wire_activation();
 
         Self {
@@ -443,6 +450,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
     fn cancel_here(self) {
         let finalizer = self.finalizer.as_ref().map(Arc::clone);
         self.slot.cancel_activation();
+        self.binding.discard_outbound_after_activation();
         if let Some(finalizer) = finalizer {
             finalizer.reject(
                 self.failure
@@ -457,8 +465,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
 
 impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
-        let Self { spawner, id, token, subname, sender, strong_sender, binding: _, slot, finalizer, failure: _ } =
-            *self;
+        let Self { spawner, id, token, subname, sender, strong_sender, binding, slot, finalizer, failure: _ } = *self;
         for prepared in bootstrap.into_iter().chain(parked) {
             let PreparedMail { mail, kind_name, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
@@ -527,6 +534,15 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
         let wake = WakeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn), spawner.wake_sink().clone());
         spawner.retain_activated_slot(id, slot_dyn, wake.clone());
         let catch_up = Box::new(move || {
+            // The owner has published the Live route and released the
+            // registry publication lock before invoking this suffix. Owner
+            // serialization may remain held, so this flush must only submit
+            // or schedule work; it must never wait for owner application.
+            // Keep the actor unwakeable until that work is queued, then expose
+            // its wake/seize machinery. Self-mail and replies therefore queue
+            // behind the parked prefix without creating a second ring
+            // producer.
+            binding.release_outbound_after_activation();
             wake_slot.set(Arc::new({
                 let wake = wake.clone();
                 move || {

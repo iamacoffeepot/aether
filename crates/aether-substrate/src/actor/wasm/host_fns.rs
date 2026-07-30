@@ -5,14 +5,13 @@
 // as any other architectural change.
 
 use core::str::from_utf8;
-use std::sync::Arc;
 
 use aether_actor::{AssetCatalog, AssetWindow};
 use aether_data::wire;
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
-use crate::mail::registry::MailboxEntry;
+use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
 
@@ -209,15 +208,14 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
 
     // HOST_FN_OK: ADR-0114 — inline-child spawn is a synchronous host fn,
     // like `spawn_sibling`. Unlike `spawn_sibling` (which stages a
-    // detached spawn the trampoline drains after `receive`), this needs no
-    // staging: the inline child is co-located in the parent's wasm
-    // instance, so the host only folds the alias id and registers an
-    // *alias* `MailboxEntry` routing to the parent trampoline's own slot —
-    // both the parent's binding carry and the registry are on the
-    // `ComponentCtx`, readable here. The guest runs the child's `init`
-    // in-process and dispatches it behind a membrane keyed on the routed
-    // recipient (`aether-actor`'s `export!`). No config crosses: the guest
-    // owns construction.
+    // detached spawn the trampoline drains after `receive`), the inline
+    // child's state remains co-located in the parent's wasm instance. The
+    // host folds the deterministic alias id and stages a logical route to
+    // the parent; the trampoline drains it after the guest call and the
+    // registry owner publishes it at handler flush (ADR-0165). The guest
+    // runs the child's `init` in-process and dispatches it behind a membrane
+    // keyed on the routed recipient (`aether-actor`'s `export!`). No config
+    // crosses: the guest owns construction.
     //
     // ADR-0114: register an inline child's alias route. The guest passes
     // an `is_counter` flag and the bare subname (empty for `Counter`). The
@@ -225,9 +223,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // instanced(aether.embedded, subname)))` — the same fold a detached
     // sibling renders post-#1920 (so the synchronous prediction matches a
     // `Call`-by-name resolution). On any host-side error (no memory, OOB,
-    // bad UTF-8, no binding/spawner, parent not a live Inbox) it warn-logs
-    // and returns 0 without registering — the child simply never becomes
-    // addressable.
+    // bad UTF-8, no binding/spawner, or missing parent name) it warn-logs and
+    // returns 0 without staging — the child simply never becomes addressable.
     linker.func_wrap(
         "aether",
         "spawn_inline_child_p32",
@@ -295,30 +292,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 aether_data::fold_lineage(parent_carry, child_node),
             ));
 
-            // Route the alias to the parent trampoline's own slot: clone
-            // the parent's `Inbox` handler under the alias id + the
-            // rendered lineage name, so a producer can address the child by
-            // name (the engine's `Call` recipient-name path) or by the
-            // returned id, and the mail lands in the parent's inbox for the
-            // guest membrane to demux.
-            let Some(MailboxEntry::Inbox { handler, .. }) = ctx.registry.entry(ctx.sender) else {
-                tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: parent slot is not a live Inbox (cannot alias)");
-                return 0;
-            };
+            // The parent may still be `Starting` while its `wire` hook runs,
+            // so retain only its logical id + rendered name here. The owner
+            // resolves the target lifecycle when the staged batch lands.
             let Some(parent_name) = ctx.registry.mailbox_name(ctx.sender) else {
                 tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: parent has no registered name (cannot render alias)");
                 return 0;
             };
+            let target_parent = ctx.sender;
             let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
-            if let Err(e) =
-                ctx.registry
-                    .try_register_inbox_with_id(alias_id, alias_name, handler)
-            {
-                // A duplicate alias (same subname spawned twice) keeps the
-                // first route — log it and still return the id so the
-                // guest's re-register is harmless / idempotent.
-                tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: alias registration: {e:?}");
-            }
+            caller
+                .data_mut()
+                .stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent));
             alias_id.0
         },
     )?;
@@ -721,19 +706,11 @@ fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
     }
 }
 
-/// Whether `candidate` is a registered inline-child alias of *this* component
-/// (ADR-0114). `spawn_inline_child_p32` routes a child's alias to the parent
-/// trampoline's own dispatcher slot by cloning the parent's `Inbox` handler
-/// under the alias id, so an alias's handler and the component's own
-/// (`ctx.sender`) handler are clones of one `Arc<dyn InboxHandler>`. Cluster
-/// membership is therefore exactly handler-pointer identity: resolve both
-/// `Inbox` handlers and compare with `Arc::ptr_eq`. A non-`Inbox` entry, a
-/// missing entry, or a handler from a different component is `false`.
-fn is_own_cluster_alias(ctx: &ComponentCtx, candidate: MailboxId) -> bool {
-    let (Some(MailboxEntry::Inbox { handler: own, .. }), Some(MailboxEntry::Inbox { handler: alias, .. })) =
-        (ctx.registry.entry(ctx.sender), ctx.registry.entry(candidate))
-    else {
-        return false;
-    };
-    Arc::ptr_eq(&own, &alias)
+/// Whether `candidate` is an inline-child alias of *this* component
+/// (ADR-0114, ADR-0165). A just-created child may send during its immediate
+/// guest-side `init` / `wire`, before the handler flush publishes its alias,
+/// so the host trusts either the local prepared fact or the owner-published
+/// logical relation. Neither path clones nor compares an endpoint.
+pub(super) fn is_own_cluster_alias(ctx: &ComponentCtx, candidate: MailboxId) -> bool {
+    ctx.has_pending_alias(candidate) || ctx.registry.is_alias_to(candidate, ctx.sender)
 }

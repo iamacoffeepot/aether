@@ -123,10 +123,17 @@ impl QueueMeter {
         self.shed.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record that a drainer emptied its queue while holding the queue's
+    /// admission lock. A producer admitted after that lock is released writes
+    /// the new nonzero depth, and [`Self::drain`] deliberately does not erase
+    /// it when the retired prefix finishes applying.
+    pub(super) fn drained_to_empty(&self) {
+        self.depth.store(0, Ordering::Relaxed);
+    }
+
     /// Record one drain cycle: `count` items removed while the drainer held
     /// its serialization for `busy`.
     pub(super) fn drain(&self, count: usize, busy: Duration) {
-        self.depth.store(0, Ordering::Relaxed);
         self.busy_nanos.fetch_add(u64::try_from(busy.as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
         if count == 0 {
             return;

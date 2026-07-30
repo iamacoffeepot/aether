@@ -17,16 +17,20 @@ use std::sync::Mutex;
 
 use super::*;
 use crate::actor::wasm::host_fns;
+use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry;
 use crate::mail::registry::InboxHandler;
-use crate::mail::registry::MailboxEntry;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
+use crate::mail::registry::RegistryOwnerLease;
+use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
 use crate::mail::{Mail, MailId, MailboxId};
+use crate::scheduler::WakeSink;
 use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 /// Captured `(mail_id, root, parent_mail)` triple for the
 /// lineage-propagation tests in this module.
@@ -1186,38 +1190,43 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
-/// ADR-0114 step 1: an alias `MailboxEntry` cloned from the parent's
-/// `Inbox` routes mail addressed to the alias into the parent slot's
-/// inbox, and the rendered alias name resolves (the engine's `Call`
-/// recipient-name path) to the alias id. Mirrors the `spawn_inline_child`
-/// host fn's registration against a depth-2 parent registered with its
-/// lineage-folded id.
+/// ADR-0114 + ADR-0165: a logical alias route follows the parent's `Inbox`
+/// without retaining its handler, and the rendered alias name resolves (the
+/// engine's `Call` recipient-name path) to the alias id.
 #[test]
 fn inline_alias_routes_into_parent_slot_inbox() {
     let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let (captured, capture_handler) = lineage_capture_handler();
     let parent_name = "aether.component/aether.embedded:testparent".to_owned();
     let parent_id = aether_data::mailbox_id_from_path(&parent_name);
     registry
         .try_register_inbox_with_id(parent_id, parent_name.clone(), capture_handler)
         .expect("parent registers under its lineage id");
+    let owner =
+        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
 
-    // Mirror the host fn: fold the alias id and register an alias route
-    // to the parent's slot by cloning the parent's Inbox handler.
+    // Mirror the host/trampoline split: fold the alias id, then let the owner
+    // publish only the logical alias-to-parent relation.
     let alias_name = format!("{parent_name}/aether.embedded:widget");
     let alias_id = aether_data::mailbox_id_from_path(&alias_name);
-    let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(parent_id) else {
-        panic!("parent is registered as a live Inbox");
-    };
-    registry
-        .try_register_inbox_with_id(alias_id, alias_name.clone(), handler)
-        .expect("alias registers under the folded id");
+    let completion = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
+            alias_id,
+            alias_name.clone(),
+            parent_id,
+        ))]))
+        .expect("owner accepts the alias batch");
+    owner.run_once();
+    completion
+        .wait_timeout(Duration::from_millis(100))
+        .expect("alias completion arrives")
+        .expect("alias route publishes");
 
     // Name resolution (the wire `Call` path) resolves the alias.
     assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the rendered alias name resolves to the folded alias id");
 
     // Mail addressed to the alias lands in the parent slot's inbox.
-    let mailer = Mailer::new(Arc::clone(&registry));
     mailer.push(Mail::new(alias_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1));
     assert_eq!(captured.lock().unwrap().len(), 1, "alias mail dispatched into the parent slot's inbox");
 }
@@ -1260,4 +1269,25 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     let (mail_id, _root, _parent) = captured[0];
     assert_eq!(mail_id.sender, alias, "origin stamps the alias (dispatch identity) when from is a child");
     assert_ne!(mail_id.sender, sender, "the child's send must not stamp the parent component");
+}
+
+/// ADR-0165: a freshly created inline child runs `init` and `wire` before its
+/// logical route reaches the owner. Its locally prepared alias must already be
+/// trusted as an in-cluster identity, or sends from those hooks are
+/// incorrectly attributed to the physical parent.
+#[test]
+fn pending_inline_alias_is_trusted_before_owner_publication() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
+    let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    ctx.stage_alias(PreparedAliasRoute::new(alias, "pending-inline-alias", sender));
+
+    assert!(!registry.is_alias_to(alias, sender), "the owner has not published the route yet");
+    assert!(host_fns::is_own_cluster_alias(&ctx, alias), "the prepared alias is already trusted in-cluster");
+    assert!(
+        !host_fns::is_own_cluster_alias(&ctx, MailboxId(aether_data::with_tag(Tag::Mailbox, 0xF0E1))),
+        "a local prepared fact does not admit an unrelated identity"
+    );
 }

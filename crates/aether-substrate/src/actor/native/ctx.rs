@@ -39,10 +39,11 @@ use crate::runtime::trace::SettlementHold;
 use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
-use crate::actor::native::dispatch_blocking::{DeferredCompletion, DispatchId, Pending, TaskDone};
+use crate::actor::native::dispatch_blocking::{DeferredCompletion, DispatchId, Pending, TaskContinuation, TaskDone};
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn_thread;
 use crate::chassis::inbox::InboundMail;
+use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 use crate::mail::{Mail, SourceAddr};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
@@ -283,6 +284,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         self.binding.mailer()
     }
 
+    /// Clone this actor's transport. Runtime adapters that rebuild an
+    /// embedded execution context during a handler (the Wasm trampoline's
+    /// replacement path) use the same binding as the actor they remain behind.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn transport_arc(&self) -> Arc<NativeBinding> {
+        Arc::clone(self.binding)
+    }
+
     /// The actor's own [`MailboxId`] — the handler-ctx mirror of
     /// [`NativeInitCtx::self_id`]. A cap that subscribes settlement or
     /// keys a per-instance table from inside a handler needs its own
@@ -483,12 +493,47 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// tying completion to a blocking worker. Future staged effects can move
     /// this capability to their authoritative owner and retain no parent
     /// lifetime beyond a weak binding reference.
-    #[allow(dead_code, reason = "ADR-0165 ctx arming seam lands before production staged spawn wiring")]
     pub(crate) fn arm_deferred_completion<O, C>(&self, context: C) -> DeferredCompletion<O>
     where
         C: Send + 'static,
     {
         self.binding.dispatch_arm(self.acquire_settlement_hold(), self.reply_target(), context)
+    }
+
+    /// Stage a typed registry-owner batch from the current handler. The batch
+    /// uses reserved owner admission and completes on a later actor turn.
+    pub fn stage_registry_batch<C>(&mut self, batch: RegistryBatch, context: C) -> DispatchId
+    where
+        C: Send + 'static,
+    {
+        let completion = self.arm_deferred_completion::<RegistryBatchResult, _>(context);
+        let id = completion.dispatch_id();
+        self.binding.stage_owner_batch(batch, completion);
+        id
+    }
+
+    /// Continue an existing deferred chain through another registry batch
+    /// without releasing or reacquiring its settlement hold.
+    pub fn continue_registry_batch<C>(
+        &mut self,
+        continuation: TaskContinuation,
+        batch: RegistryBatch,
+        context: C,
+    ) -> DispatchId
+    where
+        C: Send + 'static,
+    {
+        let (hold, reply_to) = continuation.into_parts();
+        let completion = self.binding.dispatch_arm(hold, reply_to, context);
+        let id = completion.dispatch_id();
+        self.binding.stage_owner_batch(batch, completion);
+        id
+    }
+
+    /// Capture the current root for a later staged operation while directing
+    /// the eventual terminal reply to an explicitly carried target.
+    pub fn continuation_to(&self, reply_to: Source) -> TaskContinuation {
+        TaskContinuation::new(self.acquire_settlement_hold(), reply_to)
     }
 
     /// ADR-0093 completion-routing entry point: remove the in-flight

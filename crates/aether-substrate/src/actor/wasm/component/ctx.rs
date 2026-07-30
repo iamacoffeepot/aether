@@ -1,11 +1,12 @@
 use std::cell::Cell;
+use std::mem;
 use std::sync::Arc;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::ReplyTable;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
+use crate::mail::registry::{MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailRef, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
@@ -120,6 +121,10 @@ pub struct ComponentCtx {
     /// actual `spawn_child::<WasmTrampoline>`; substrate can't name that
     /// capabilities-layer type (ADR-0097 §4).
     pub pending_spawns: Vec<PendingSpawn>,
+    /// ADR-0165: logical inline-child aliases staged by the host function.
+    /// The trampoline drains these after the guest call and submits them to
+    /// the registry owner; no parent endpoint is retained in the Store.
+    pending_aliases: Vec<PreparedAliasRoute>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -189,8 +194,21 @@ impl ComponentCtx {
             in_flight_root: Cell::new(MailId::NONE),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawns: Vec::new(),
+            pending_aliases: Vec::new(),
             load_window: None,
         }
+    }
+
+    pub(crate) fn stage_alias(&mut self, alias: PreparedAliasRoute) {
+        self.pending_aliases.push(alias);
+    }
+
+    pub(crate) fn take_pending_aliases(&mut self) -> Vec<PreparedAliasRoute> {
+        mem::take(&mut self.pending_aliases)
+    }
+
+    pub(crate) fn has_pending_alias(&self, alias: MailboxId) -> bool {
+        self.pending_aliases.iter().any(|pending| pending.alias == alias && pending.target_parent == self.sender)
     }
 
     /// Install the ADR-0163 asset load window before

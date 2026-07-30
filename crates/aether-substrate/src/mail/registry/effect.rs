@@ -10,6 +10,8 @@ use aether_actor::RegistryChanged;
 use aether_data::Kind;
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
+use crate::actor::native::dispatch_blocking::DeferredCompletion;
+
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
@@ -64,6 +66,22 @@ pub fn barrier_token(mail: &Mail) -> Option<ActivationToken> {
 pub struct PreparedRoute {
     pub id: MailboxId,
     pub canonical_name: String,
+}
+
+/// Logical inline-child route prepared by a Wasm host call. The owner stores
+/// only the target mailbox identity; it never clones or retains the parent's
+/// endpoint, dispatcher slot, or component Store.
+pub struct PreparedAliasRoute {
+    pub alias: MailboxId,
+    pub rendered_name: Arc<str>,
+    pub target_parent: MailboxId,
+}
+
+impl PreparedAliasRoute {
+    #[must_use]
+    pub fn new(alias: MailboxId, rendered_name: impl Into<Arc<str>>, target_parent: MailboxId) -> Self {
+        Self { alias, rendered_name: rendered_name.into(), target_parent }
+    }
 }
 
 /// Exact actor-local cost cells carried into the fused owner commit.
@@ -257,6 +275,7 @@ impl PreparedActivation {
 
 pub enum RegistryEffect {
     PreparedSpawn(PreparedSpawnCommit),
+    PublishAlias(PreparedAliasRoute),
     ReserveStarting { route: PreparedRoute },
     CancelStarting { id: MailboxId, token: ActivationToken },
     PublishLive { route: PreparedRoute, activation: PreparedActivation },
@@ -310,6 +329,7 @@ pub enum RegistryEffectError {
     Name(super::NameConflict),
     Drop(super::DropError),
     Kind(super::KindConflict),
+    AliasTargetUnavailable { alias: MailboxId, target_parent: MailboxId },
     ActivationRejected,
     OwnerClosed,
 }
@@ -320,6 +340,9 @@ impl fmt::Display for RegistryEffectError {
             Self::Name(error) => error.fmt(formatter),
             Self::Drop(error) => error.fmt(formatter),
             Self::Kind(error) => error.fmt(formatter),
+            Self::AliasTargetUnavailable { alias, target_parent } => {
+                write!(formatter, "inline alias {alias} targets unavailable parent {target_parent}")
+            }
             Self::ActivationRejected => {
                 formatter.write_str("prepared actor activation could not reserve its lifecycle")
             }
@@ -332,6 +355,89 @@ impl Error for RegistryEffectError {}
 
 pub struct EffectBatch {
     pub(super) effects: Vec<RegistryEffect>,
+}
+
+/// Public, typed owner-batch vocabulary available to native handlers. The
+/// effects remain private; callers can construct only the atomic operations
+/// deliberately exposed here.
+pub struct RegistryBatch {
+    batch: EffectBatch,
+}
+
+impl RegistryBatch {
+    /// Atomically register or match every descriptor. A conflict rejects the
+    /// complete batch and publishes no partial kind view.
+    #[must_use]
+    pub fn register_kinds(descriptors: Vec<KindDescriptor>) -> Self {
+        Self {
+            batch: EffectBatch::new(
+                descriptors
+                    .into_iter()
+                    .map(|descriptor| RegistryEffect::RegisterKind { descriptor, reject_conflict: true })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Publish one logical inline-child alias through the owner. The route
+    /// follows its target parent's current lifecycle and endpoint.
+    #[must_use]
+    pub fn publish_alias(alias: PreparedAliasRoute) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::PublishAlias(alias)]) }
+    }
+
+    pub(crate) fn into_effects(self) -> EffectBatch {
+        self.batch
+    }
+}
+
+/// Public failure vocabulary for a deferred native-actor registry batch.
+/// Success is intentionally opaque: owner apply details remain private to the
+/// legacy registry channel API, while actor handlers need only know whether
+/// their atomic batch committed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegistryBatchError {
+    Rejected(String),
+    OwnerClosed,
+}
+
+impl fmt::Display for RegistryBatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(error) => error.fmt(formatter),
+            Self::OwnerClosed => formatter.write_str("registry owner closed before applying the effect batch"),
+        }
+    }
+}
+
+impl Error for RegistryBatchError {}
+
+impl From<RegistryEffectError> for RegistryBatchError {
+    fn from(error: RegistryEffectError) -> Self {
+        match error {
+            RegistryEffectError::OwnerClosed => Self::OwnerClosed,
+            error => Self::Rejected(error.to_string()),
+        }
+    }
+}
+
+pub type RegistryBatchResult = Result<(), RegistryBatchError>;
+type RegistryOwnerBatchResult = Result<Vec<RegistryApplied>, RegistryEffectError>;
+
+pub(super) enum RegistryBatchCompletionSink {
+    Channel(crossbeam_channel::Sender<RegistryOwnerBatchResult>),
+    Deferred(DeferredCompletion<RegistryBatchResult>),
+}
+
+impl RegistryBatchCompletionSink {
+    pub(super) fn complete(self, result: RegistryOwnerBatchResult) {
+        match self {
+            Self::Channel(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Deferred(completion) => completion.complete(result.map(|_| ()).map_err(RegistryBatchError::from)),
+        }
+    }
 }
 
 impl EffectBatch {
