@@ -69,11 +69,7 @@ pub enum WindowHostEffect {
 
 struct PendingCreate {
     spec: WindowSpec,
-    /// Stored inline: this struct exists *because* a reply is owed, so the slot
-    /// is occupied for essentially the reservation's whole life and a box would
-    /// buy nothing. (The boot window is the one exception — it has no caller to
-    /// answer, which is what the `Option` is for.)
-    reply: Option<InboundMail>,
+    reply: Option<Box<InboundMail>>,
     shutdown_on_failure: bool,
     /// The reserved child, once [`DesktopWindowCapabilityState::finish_window_attachment`]
     /// has staged its birth. `None` while the create is still waiting on the
@@ -102,9 +98,6 @@ struct DesktopWindowState {
     focused: bool,
     occluded: bool,
     lifecycle: DesktopWindowLifecycle,
-    /// Boxed, unlike [`PendingCreate::reply`]: this field rides every window
-    /// for the window's whole life and is `None` almost always, so an
-    /// out-of-line pointer is the cheap representation here.
     close_reply: Option<Box<InboundMail>>,
 }
 
@@ -534,16 +527,12 @@ impl DesktopWindowCapabilityState {
         should_shutdown.then_some(WindowHostEffect::LastWindowClosed).into_iter().collect()
     }
 
-    #[allow(
-        clippy::result_large_err,
-        reason = "the cold rejection hands the move-only owed reply back intact so the caller answers it exactly once"
-    )]
     fn queue_create(
         &mut self,
         spec: WindowSpec,
-        reply: Option<InboundMail>,
+        reply: Option<Box<InboundMail>>,
         shutdown_on_failure: bool,
-    ) -> Result<WindowId, (String, Option<InboundMail>)> {
+    ) -> Result<WindowId, (String, Option<Box<InboundMail>>)> {
         if let Err(error) = crate::validate_window_name(&spec.name) {
             return Err((error, reply));
         }
@@ -674,7 +663,7 @@ impl NativeActor for DesktopWindowCapability {
     #[handler::manual]
     fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CreateWindow) {
         let reply = ctx.take_inbound();
-        if let Err((error, reply)) = state.queue_create(mail.spec, Some(reply), false)
+        if let Err((error, reply)) = state.queue_create(mail.spec, Some(Box::new(reply)), false)
             && let Some(reply) = reply
         {
             reply.reply(&CreateWindowResult::Err { error });

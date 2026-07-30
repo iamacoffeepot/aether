@@ -41,10 +41,7 @@ struct PendingWindowCreate {
     /// Taken by whichever path settles the reservation, so the caller sees
     /// exactly one `CreateWindowResult`. `Option` mirrors the desktop
     /// manager's `PendingCreate`, whose boot window has no caller to answer.
-    /// Stored inline: this struct exists *because* a reply is owed, so the
-    /// slot is occupied for essentially the reservation's whole life and a box
-    /// would buy nothing.
-    reply: Option<InboundMail>,
+    reply: Option<Box<InboundMail>>,
 }
 
 pub struct SyntheticWindowCapabilityState {
@@ -114,7 +111,7 @@ impl SyntheticWindowCapabilityState {
 }
 
 /// Discharge a reservation's deferred reply, if it owes one.
-fn answer(reply: &mut Option<InboundMail>, result: &CreateWindowResult) {
+fn answer(reply: &mut Option<Box<InboundMail>>, result: &CreateWindowResult) {
     if let Some(reply) = reply.take() {
         reply.reply(result);
     }
@@ -185,7 +182,7 @@ impl NativeActor for SyntheticWindowCapability {
 
         let id = WindowId(predicted.0);
         let window = SyntheticWindowCapabilityState::describe(mail.spec, id);
-        let replaced = state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(reply) });
+        let replaced = state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(Box::new(reply)) });
         debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
     }
 
