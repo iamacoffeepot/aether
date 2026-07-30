@@ -7,6 +7,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,7 +32,9 @@ use super::{
     GameGatewayCapability, GameGatewayConfig, GameGatewayParams, PlayerFrame, PlayerSessionActor, WIRE_VERSION,
 };
 use crate::{GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary, TickBundle};
-use aether_tcp::{BindListener, ListListeners, ListListenersResult, TcpCapability, TcpListenerActor, TcpSessionActor};
+use aether_tcp::{
+    BindListener, ListListeners, ListListenersResult, SessionData, TcpCapability, TcpListenerActor, TcpSessionActor,
+};
 
 const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
@@ -67,6 +70,7 @@ struct PlayerTestSubstrate {
 
 struct PlayerTestHarness {
     registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
     observed: mpsc::Receiver<ObservedSimMail>,
     chassis: PassiveChassis<TestChassis>,
     listener_port: u16,
@@ -177,7 +181,7 @@ fn boot_player_substrate_with_limits(
     let (observed_tx, observed_rx) = mpsc::channel();
     let gateway_mailbox = GameGatewayCapability::resolve(0, ());
     let turn_sim_mailbox = TestTurnSim::resolve(0, ());
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TcpCapability>(())
         .with_actor::<TestTurnSim>(TestTurnSimParams {
             sim: SimConfig { fact_sink: Some(gateway_mailbox), ring_depth: 8, grid_bounds: GridBounds::default() },
@@ -199,7 +203,7 @@ fn boot_player_substrate_with_limits(
         .build_passive()
         .expect("player test chassis boots");
     let listener_port = await_player_listener_port(&registry, &outbound_replies);
-    PlayerTestHarness { registry, observed: observed_rx, chassis, listener_port }
+    PlayerTestHarness { registry, mailer, observed: observed_rx, chassis, listener_port }
 }
 
 fn enqueue<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, mail: &K) {
@@ -220,6 +224,34 @@ fn enqueue_with_source<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, ma
         1,
         MailId::NONE,
         MailId::NONE,
+        None,
+        Nanos(0),
+        0,
+        MailboxId::NONE,
+    ));
+}
+
+fn enqueue_rooted<K: Kind>(
+    registry: &Registry,
+    mailer: &Mailer,
+    mailbox: MailboxId,
+    mail: &K,
+    source: Source,
+    root: MailId,
+) {
+    mailer.record_sent(root, root, None, root.sender, mailbox, K::ID);
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox).expect("target mailbox is registered") else {
+        panic!("expected actor inbox");
+    };
+    handler.enqueue(OwnedDispatch::disarmed(
+        K::ID,
+        K::NAME.to_owned(),
+        None,
+        source,
+        MailRef::from(mail.encode_into_bytes()),
+        1,
+        root,
+        root,
         None,
         Nanos(0),
         0,
@@ -296,6 +328,23 @@ fn expected_tcp_session_mailbox(session_name: &str) -> MailboxId {
         Tag::Mailbox,
         fold_lineage(listener_carry, ActorId::instanced(TcpSessionActor::NAMESPACE, session_name)),
     ))
+}
+
+fn register_player_route_collision(registry: &Registry, session_name: &str, deliveries: Arc<AtomicUsize>) -> MailboxId {
+    let mailbox = expected_player_session_mailbox(session_name);
+    let canonical_name =
+        format!("{}/{}:{}", GameGatewayCapability::NAMESPACE, PlayerSessionActor::NAMESPACE, session_name);
+    registry
+        .try_register_inbox_with_id(
+            mailbox,
+            &canonical_name,
+            Arc::new(move |dispatch: OwnedDispatch| {
+                deliveries.fetch_add(1, Ordering::Relaxed);
+                dispatch.discharge();
+            }),
+        )
+        .expect("install test-only player-session collision authority");
+    mailbox
 }
 
 fn expect_fact(stream: &mut TcpStream, expected_tick: u64) {
@@ -387,9 +436,98 @@ fn player_wire_round_trips_and_rejects_malformed_bytes() {
     assert!(wire::from_bytes::<PlayerFrame>(&[0xff, 0xff]).is_err());
 }
 
+/// Scheduler-backed pending-tail proof. The second frame is written before
+/// the first can complete its Hello round trip. Depending on whether `TurnSim`'s
+/// `PollResult` wins the race, it is either admitted as an active intent or
+/// rejected in-order while the session is catching up; warn-dropping it would
+/// produce neither observable outcome.
+#[test]
+fn frame_racing_player_birth_is_delivered_after_the_bootstrap_frame() {
+    let PlayerTestHarness { observed, chassis: _chassis, listener_port, .. } = boot_player_substrate();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect racing player client");
+    client.set_read_timeout(Some(Duration::from_secs(2))).expect("set racing player timeout");
+
+    write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "racing".into() })
+        .expect("write racing Hello");
+    write_frame(
+        &mut client,
+        &PlayerFrame::Intent {
+            kind: Spawn::ID,
+            payload: Spawn { entity_id: 0, cell_x: 4, cell_z: 6 }.encode_into_bytes(),
+        },
+    )
+    .expect("write frame racing activation");
+
+    assert!(matches!(
+        observed.recv_timeout(Duration::from_secs(2)).expect("bootstrap Hello reaches the player child first"),
+        ObservedSimMail::Poll { .. }
+    ));
+    match observed.recv_timeout(Duration::from_secs(2)) {
+        Ok(ObservedSimMail::Spawn { mail, source }) => {
+            assert_eq!(source, Some(expected_player_session_mailbox("conn-0")));
+            assert_eq!((mail.cell_x, mail.cell_z), (4, 6));
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let close: PlayerFrame = read_frame(&mut client).expect("an early second frame closes in order");
+            assert!(matches!(close, PlayerFrame::Close { reason } if reason == "player frame arrived before HelloAck"));
+        }
+        Ok(other) => panic!("unexpected simulation mail after bootstrap: {other:?}"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("simulation observation channel disconnected"),
+    }
+}
+
+/// A test-only canonical route owns the would-be child id before the handler
+/// stages it. Local init succeeds, authoritative apply rejects, and the
+/// no-reply task turn must still release the original root without installing
+/// a live fan-out index. This is the scheduler proof; the runtime module's
+/// reducer tests cover pending capacity and close idempotence directly.
+#[test]
+fn owner_rejected_player_birth_settles_without_a_live_session() {
+    let PlayerTestHarness { registry, mailer, chassis, .. } = boot_player_substrate();
+    let session_name = "apply-collision";
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let collision = register_player_route_collision(&registry, session_name, Arc::clone(&deliveries));
+    let source_mailbox = expected_tcp_session_mailbox(session_name);
+    let correlation_id = 0x4069_C011;
+    let root = MailId::new(source_mailbox, correlation_id);
+    let settled = chassis.settlement_registry().subscribe_settlement(root);
+    let session_data = SessionData {
+        session_name: session_name.to_owned(),
+        peer: "127.0.0.1:4069".to_owned(),
+        bytes: wire::to_vec(&PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "collision".into() })
+            .expect("encode collision Hello"),
+    };
+
+    enqueue_rooted(
+        &registry,
+        &mailer,
+        GameGatewayCapability::resolve(0, ()),
+        &session_data,
+        Source::with_correlation(SourceAddr::Component(source_mailbox), correlation_id),
+        root,
+    );
+    settled.recv_timeout(Duration::from_secs(2)).expect("owner rejection settles after the gateway task completion");
+
+    let turn_sim = TestTurnSim::resolve(0, ());
+    let fanout_root = MailId::new(turn_sim, correlation_id + 1);
+    let fanout_settled = chassis.settlement_registry().subscribe_settlement(fanout_root);
+    enqueue_rooted(
+        &registry,
+        &mailer,
+        GameGatewayCapability::resolve(0, ()),
+        &bundle(7),
+        Source::with_correlation(SourceAddr::Component(turn_sim), correlation_id + 1),
+        fanout_root,
+    );
+    fanout_settled.recv_timeout(Duration::from_secs(2)).expect("post-rejection live fan-out probe settles");
+    assert_eq!(deliveries.load(Ordering::Relaxed), 0, "rejected child never receives bootstrap or live fan-out mail");
+
+    registry.drop_mailbox(collision).expect("remove test-only player-session collision authority");
+}
+
 #[test]
 fn gateway_refuses_a_new_session_at_configured_capacity() {
-    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port } =
+    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port, .. } =
         boot_player_substrate_with_limits(1, GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES, false);
     let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
     first.set_read_timeout(Some(Duration::from_secs(2))).expect("set first-session timeout");
@@ -429,7 +567,7 @@ fn gateway_refuses_a_new_session_at_configured_capacity() {
 
 #[test]
 fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
-    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port } =
+    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port, .. } =
         boot_player_substrate_with_limits(GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS, 1, true);
     let mut client =
         TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect catching-up player client");
@@ -456,7 +594,7 @@ fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
 
 #[test]
 fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
-    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port } = boot_player_substrate();
+    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port, .. } = boot_player_substrate();
     let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect player client");
     client.set_read_timeout(Some(Duration::from_secs(2))).expect("set player read timeout");
 

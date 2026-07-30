@@ -8,7 +8,7 @@ use aether_actor::runtime;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
 use aether_substrate::chassis::error::BootError;
 
 use super::{BindListenerResult, GameGatewayCapability, MonitorNotice, SessionClosed, SessionData, TickBundle};
@@ -92,8 +92,20 @@ pub struct GameGatewayState {
     interval_nanos: u64,
     max_active_sessions: usize,
     max_pending_live_bundles: usize,
+    pending_sessions: HashMap<String, PendingPlayerSession>,
     sessions: HashMap<String, PlayerSessionEntry>,
     session_by_child: HashMap<MailboxId, String>,
+}
+
+struct PendingPlayerSession {
+    child: MailboxId,
+    cancellation: Option<SessionClosed>,
+}
+
+#[derive(Clone)]
+struct PlayerSessionContinuation {
+    session_name: String,
+    peer: String,
 }
 
 struct PlayerSessionEntry {
@@ -121,6 +133,7 @@ impl NativeActor for GameGatewayCapability {
             interval_nanos: config.interval_nanos,
             max_active_sessions: config.max_active_sessions,
             max_pending_live_bundles: config.max_pending_live_bundles,
+            pending_sessions: HashMap::new(),
             sessions: HashMap::new(),
             session_by_child: HashMap::new(),
         })
@@ -132,6 +145,28 @@ impl NativeActor for GameGatewayCapability {
         };
 
         ctx.actor::<TcpCapability>().bind_listener(listener_addr, Some(&state.listener_name), Some(state.self_mailbox));
+    }
+
+    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        for (session_name, pending) in state.pending_sessions.drain() {
+            let close_notice = pending.cancellation.unwrap_or_else(|| SessionClosed {
+                session_name: session_name.clone(),
+                peer: String::new(),
+                reason: "game gateway shutting down".to_owned(),
+            });
+            let _ = ctx.send_envelope_tracked(pending.child, SessionClosed::ID, &close_notice.encode_into_bytes());
+            ctx.actor::<TcpCapability>().session_close(&state.listener_name, &session_name);
+        }
+        for (session_name, entry) in state.sessions.drain() {
+            let close_notice = SessionClosed {
+                session_name: session_name.clone(),
+                peer: String::new(),
+                reason: "game gateway shutting down".to_owned(),
+            };
+            let _ = ctx.send_envelope_tracked(entry.child, SessionClosed::ID, &close_notice.encode_into_bytes());
+            ctx.actor::<TcpCapability>().session_close(&state.listener_name, &session_name);
+        }
+        state.session_by_child.clear();
     }
 
     #[handler::single]
@@ -183,7 +218,12 @@ impl NativeActor for GameGatewayCapability {
             return;
         }
 
-        if state.sessions.len() >= state.max_active_sessions {
+        if let Some(entry) = state.pending_sessions.get(&mail.session_name) {
+            let _ = ctx.send_envelope_tracked(entry.child, SessionData::ID, &mail.encode_into_bytes());
+            return;
+        }
+
+        if state.is_at_capacity() {
             tracing::warn!(
                 target: "aether_game",
                 session = %mail.session_name,
@@ -200,12 +240,8 @@ impl NativeActor for GameGatewayCapability {
         };
 
         let session_name = mail.session_name.clone();
-        let close_notice = SessionClosed {
-            session_name: session_name.clone(),
-            peer: mail.peer.clone(),
-            reason: "player session supervision failed".into(),
-        };
-        let child = match ctx
+        let continuation = PlayerSessionContinuation { session_name: session_name.clone(), peer: mail.peer.clone() };
+        let receipt = match ctx
             .spawn_child::<GameGatewayCapability, PlayerSessionActor>(
                 Subname::Named(&session_name),
                 PlayerSessionConfig {
@@ -219,9 +255,9 @@ impl NativeActor for GameGatewayCapability {
                 (),
             )
             .after_init(mail)
-            .finish()
+            .stage_with(continuation)
         {
-            Ok(child) => child,
+            Ok(receipt) => receipt,
             Err(error) => {
                 tracing::warn!(
                     target: "aether_game",
@@ -233,23 +269,83 @@ impl NativeActor for GameGatewayCapability {
                 return;
             }
         };
-        let monitor = match ctx.monitor(child) {
-            Ok(monitor) => monitor,
+
+        let replaced = state
+            .pending_sessions
+            .insert(session_name, PendingPlayerSession { child: receipt.mailbox_id, cancellation: None });
+        debug_assert!(replaced.is_none(), "a staged session is reserved exactly once");
+    }
+
+    #[handler(task)]
+    fn on_player_session_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, PlayerSessionContinuation>,
+    ) {
+        let continuation = done.context().clone();
+        let Some(pending) = state.pending_sessions.remove(&continuation.session_name) else {
+            tracing::warn!(
+                target: "aether_game",
+                session = %continuation.session_name,
+                "game gateway ignored a stale player-session spawn completion",
+            );
+            if let Ok(applied) = done.output() {
+                state.close_live_child(ctx, applied.mailbox_id, &continuation, "stale player session activation");
+            }
+            done.release_no_reply();
+            return;
+        };
+
+        match done.output() {
             Err(error) => {
                 tracing::warn!(
                     target: "aether_game",
-                    session = %session_name,
+                    session = %continuation.session_name,
                     error = ?error,
-                    "player session monitor failed",
+                    "player session activation failed",
                 );
-                let _ = ctx.send_envelope_tracked(child, SessionClosed::ID, &close_notice.encode_into_bytes());
-                ctx.actor::<TcpCapability>().session_close(&state.listener_name, &session_name);
-                return;
+                ctx.actor::<TcpCapability>().session_close(&state.listener_name, &continuation.session_name);
             }
-        };
-
-        state.sessions.insert(session_name.clone(), PlayerSessionEntry { child, _monitor: monitor });
-        state.session_by_child.insert(child, session_name);
+            Ok(applied) => {
+                debug_assert_eq!(pending.child, applied.mailbox_id, "spawn completion must match its reservation");
+                if let Some(cancellation) = pending.cancellation {
+                    let _ = ctx.send_envelope_tracked(
+                        applied.mailbox_id,
+                        SessionClosed::ID,
+                        &cancellation.encode_into_bytes(),
+                    );
+                    ctx.actor::<TcpCapability>().session_close(&state.listener_name, &continuation.session_name);
+                } else {
+                    match ctx.monitor(applied.mailbox_id) {
+                        Ok(monitor) => {
+                            let replaced = state.sessions.insert(
+                                continuation.session_name.clone(),
+                                PlayerSessionEntry { child: applied.mailbox_id, _monitor: monitor },
+                            );
+                            debug_assert!(replaced.is_none(), "a player session becomes live exactly once");
+                            let replaced =
+                                state.session_by_child.insert(applied.mailbox_id, continuation.session_name.clone());
+                            debug_assert!(replaced.is_none(), "a player child supervises exactly one session");
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "aether_game",
+                                session = %continuation.session_name,
+                                error = ?error,
+                                "player session monitor failed",
+                            );
+                            state.close_live_child(
+                                ctx,
+                                applied.mailbox_id,
+                                &continuation,
+                                "player session supervision failed",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        done.release_no_reply();
     }
 
     #[handler::single]
@@ -259,6 +355,12 @@ impl NativeActor for GameGatewayCapability {
         }
         if let Some(entry) = state.sessions.remove(&mail.session_name) {
             state.session_by_child.remove(&entry.child);
+            let _ = ctx.send_envelope_tracked(entry.child, SessionClosed::ID, &mail.encode_into_bytes());
+            return;
+        }
+        if let Some(entry) = state.pending_sessions.get_mut(&mail.session_name)
+            && entry.cancel(mail.clone())
+        {
             let _ = ctx.send_envelope_tracked(entry.child, SessionClosed::ID, &mail.encode_into_bytes());
         }
     }
@@ -285,9 +387,91 @@ impl NativeActor for GameGatewayCapability {
 }
 
 impl GameGatewayState {
+    fn is_at_capacity(&self) -> bool {
+        self.sessions.len() + self.pending_sessions.len() >= self.max_active_sessions
+    }
+
+    fn close_live_child(
+        &self,
+        ctx: &mut NativeCtx<'_>,
+        child: MailboxId,
+        continuation: &PlayerSessionContinuation,
+        reason: &str,
+    ) {
+        let close_notice = SessionClosed {
+            session_name: continuation.session_name.clone(),
+            peer: continuation.peer.clone(),
+            reason: reason.to_owned(),
+        };
+        let _ = ctx.send_envelope_tracked(child, SessionClosed::ID, &close_notice.encode_into_bytes());
+        ctx.actor::<TcpCapability>().session_close(&self.listener_name, &continuation.session_name);
+    }
+
     fn is_trusted_tcp_session(&self, ctx: &NativeCtx<'_>, session_name: &str) -> bool {
         let session =
             ctx.actor::<TcpCapability>().session::<TcpSessionActor>(&self.listener_name, session_name).mailbox_id();
         ctx.source_mailbox() == Some(session)
+    }
+}
+
+impl PendingPlayerSession {
+    fn cancel(&mut self, notice: SessionClosed) -> bool {
+        if self.cancellation.is_some() {
+            return false;
+        }
+        self.cancellation = Some(notice);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_capacity(max_active_sessions: usize) -> GameGatewayState {
+        GameGatewayState {
+            self_mailbox: MailboxId::NONE,
+            listener_addr: None,
+            listener_name: DEFAULT_LISTENER_NAME.to_owned(),
+            turn_sim_mailbox: None,
+            interval_nanos: DEFAULT_INTERVAL_NANOS,
+            max_active_sessions,
+            max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
+            pending_sessions: HashMap::new(),
+            sessions: HashMap::new(),
+            session_by_child: HashMap::new(),
+        }
+    }
+
+    /// Controlled actor-local reducer proof: scheduler-backed loopback tests
+    /// below cover the owner/task interaction that promotes the reservation.
+    #[test]
+    fn pending_session_consumes_capacity_before_live_promotion() {
+        let mut state = state_with_capacity(1);
+        state
+            .pending_sessions
+            .insert("conn-0".to_owned(), PendingPlayerSession { child: MailboxId(0x4069), cancellation: None });
+
+        assert!(state.is_at_capacity());
+        assert!(state.sessions.is_empty(), "a reservation is not a supervised live session");
+        assert!(state.session_by_child.is_empty(), "a reservation has no reverse live index");
+    }
+
+    /// Controlled cancellation reducer proof: only the first TCP close is
+    /// forwarded by the handler, so a later task completion cannot resurrect
+    /// the session or overwrite the reason that won the race.
+    #[test]
+    fn pending_session_latches_the_first_close_once() {
+        let mut pending = PendingPlayerSession { child: MailboxId(0x4069), cancellation: None };
+        let first = SessionClosed {
+            session_name: "conn-0".to_owned(),
+            peer: "127.0.0.1:4069".to_owned(),
+            reason: "peer closed".to_owned(),
+        };
+        let duplicate = SessionClosed { reason: "duplicate reader notice".to_owned(), ..first.clone() };
+
+        assert!(pending.cancel(first));
+        assert!(!pending.cancel(duplicate));
+        assert_eq!(pending.cancellation.as_ref().map(|notice| notice.reason.as_str()), Some("peer closed"));
     }
 }
