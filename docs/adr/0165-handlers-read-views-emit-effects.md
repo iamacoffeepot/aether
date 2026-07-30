@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-23
-- **Last amended:** 2026-07-24
+- **Last amended:** 2026-07-30
 
 ## Context
 
@@ -256,7 +256,7 @@ Because the table belongs to one parent binding, the key does not repeat the par
 
 A synchronous validation, construction, or `init` failure releases the reservation and returns directly. The deferred completion is armed only after locally fallible preparation has succeeded.
 
-`ParentReservation` is a move-only weak capability into the spawning binding’s child-key table. It does not keep the binding alive and does not itself imply lifecycle ownership. On authoritative rejection, it releases the staged key after rollback and before completing `SpawnError`. On successful Live publication, it promotes the staged key to the binding’s live-child set before completing `SpawnApplied`; ordinary live teardown later releases that live key. If the binding has disappeared, finalization is a no-op and the independently live actor retains its accepted lifetime policy. No path may finalize the reservation twice.
+`ParentReservation` is a move-only weak capability into the spawning binding’s child-key table. It does not keep the binding alive and does not itself imply lifecycle ownership. On authoritative rejection, it releases the staged key after rollback and before completing the failed `SpawnOutcome`. On successful Live publication, it promotes the staged key to the binding’s live-child set before completing the successful one; ordinary live teardown later releases that live key. If the binding has disappeared, finalization is a no-op and the independently live actor retains its accepted lifetime policy. No path may finalize the reservation twice.
 
 Arbitrary application effects explicitly permitted from `init` remain application behavior. The runtime guarantee is narrower: handler-time spawn preparation performs no direct write to the routing registry, global namespace table, actor-liveness registry, or global cost index.
 
@@ -270,7 +270,7 @@ struct PreparedSpawnCommit {
     costs: PreparedCostCells,
     after_init: Vec<Envelope>,
     parent_reservation: ParentReservation,
-    completion: DeferredCompletion<Result<SpawnApplied, SpawnError>>,
+    completion: DeferredCompletion<SpawnOutcome>,
 }
 ```
 
@@ -364,13 +364,13 @@ registry owner
     emit the inventory change
     issue one catch-up wake
     promote the parent-local reservation to the live-child set
-    complete SpawnApplied into the parent ledger
+    complete SpawnOutcome into the parent ledger
 
 parent actor’s later turn
-    receive TaskDone<SpawnApplied, ConsumerContext>
+    receive TaskDone<SpawnOutcome>
     commit monitors, maps, resources, and success replies
     or perform typed failure cleanup
-    resolve TaskDone or explicitly release without reply
+    reply through the TaskDone or explicitly release without reply
 ```
 
 The deterministic mailbox id returned during the first step is a reservation, not evidence of success.

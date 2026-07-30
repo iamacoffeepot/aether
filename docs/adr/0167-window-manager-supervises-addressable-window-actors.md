@@ -321,11 +321,12 @@ shutdown behavior. Desktop and synthetic runtimes construct the same actor
 graph; the headless manager reports that no window peripheral is available and
 spawns no child.
 
-`NativeCtx::spawn_child(...).finish()` is currently authoritative when it
-returns. If the pending ADR-0165 handler-spawn work changes that contract, this
-transaction must wait for the authoritative activation result before
-publishing success; it must not infer liveness from a predicted mailbox id or
-from enqueueing a spawn request.
+A handler-staged birth is not authoritative when `stage` returns. ADR-0165
+settled that contract, so this transaction waits for the authoritative
+activation result before publishing success: the manager holds the caller's
+owed reply until the `SpawnOutcome` completion arrives, and uses the predicted
+mailbox id only to key its pending state and to reject a divergence — never to
+infer that the child is live.
 
 ### 6. The manager supervises child lifetime and owns cleanup
 
