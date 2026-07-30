@@ -44,7 +44,7 @@ pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
 pub use effect::{PreparedAliasRoute, RegistryInventory, RegistrySubscription};
 pub use errors::{DropError, KindConflict, NameConflict};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
-pub(crate) use mailbox::{BirthProgress, CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
+pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use mailbox::{MailboxEntry, Registry};
 pub use metrics::RegistryQueueMetrics;
 pub(crate) use owner::ParkAdmission;

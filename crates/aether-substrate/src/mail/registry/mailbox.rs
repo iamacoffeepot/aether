@@ -147,21 +147,6 @@ enum RouteLifecycle {
     Dropped,
 }
 
-/// Where a birth the registry owner accepted currently stands. Read from the
-/// published route view by [`Registry::birth_progress`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BirthProgress {
-    /// Reserved and keyed, not yet enumerable or deliverable. Mail addressed
-    /// here parks in the owner.
-    Starting,
-    /// The activation's execution home wired the actor and the owner promoted
-    /// it; the route is deliverable.
-    Live,
-    /// The reservation was released — cancelled, rejected, or the owner
-    /// closed under it.
-    Gone,
-}
-
 #[derive(Clone)]
 pub enum RouteEndpoint {
     Inbox { handler: Arc<dyn InboxHandler>, seize: SeizeCell },
@@ -1641,21 +1626,6 @@ impl Registry {
             ResolvedRoute::Live { endpoint } => Some(endpoint.as_entry()),
             ResolvedRoute::Dropped => Some(MailboxEntry::Dropped),
             ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => None,
-        }
-    }
-
-    /// How far a birth the owner already accepted has got, read off the
-    /// published route view — no lock, no owner round-trip.
-    ///
-    /// The post-seal external spawn (ADR-0165) watches this to stay
-    /// synchronous: the owner's completion says the reservation was accepted
-    /// and its activation scheduled, and this says whether the activation's
-    /// execution home has since handed the route back as `Live`.
-    pub(crate) fn birth_progress(&self, id: MailboxId) -> BirthProgress {
-        match self.routes.load().entry_for(&id).map(|route| &route.lifecycle) {
-            Some(RouteLifecycle::Starting { .. }) => BirthProgress::Starting,
-            Some(RouteLifecycle::Live { .. } | RouteLifecycle::Alias { .. }) => BirthProgress::Live,
-            Some(RouteLifecycle::Dropped) | None => BirthProgress::Gone,
         }
     }
 
