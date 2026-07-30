@@ -343,32 +343,32 @@ impl SubstrateHarnessChassis {
         // thread per SubstrateHarness.
         //
         // iamacoffeepot/aether#4171: the harness composes its own chain rather
-        // than routing through `aether_substrate::chassis::composed`, so it spends
-        // the shared boot's `BootAuthority` itself. The token is taken
-        // unconditionally — the observer is optional, the spend is not — and the
-        // block scopes it to this registration, well before `build_passive`
-        // installs the ADR-0165 seal. The `SubstrateBoot` the embedder receives
-        // therefore carries no authority, which is what keeps the registry's
-        // direct mutators unnameable once the owner has taken over.
-        {
-            let authority = boot.take_authority().ok_or(BootError::AlreadyComposed)?;
-            if let Some(sink) = observed_kinds {
-                let observed_for_handler = sink;
-                boot.registry.register_inline(
-                    &authority,
-                    SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
-                    Arc::new(move |dispatch: MailDispatch<'_>| {
-                        if dispatch.kind_name.is_empty() {
-                            return;
-                        }
-                        observed_for_handler
-                            .lock()
-                            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
-                            .push(dispatch.kind_name.to_owned());
-                    }),
-                );
-            }
+        // than routing through `aether_substrate::chassis::composed`, so it runs
+        // that function's borrow-then-spend itself — the observer names the direct
+        // mutator through a borrowed authority, and the token is then spent
+        // unconditionally (the observer is optional, the spend is not), well
+        // before `build_passive` installs the ADR-0165 seal. The `SubstrateBoot`
+        // the embedder receives therefore carries no authority, which is what
+        // keeps the registry's direct mutators unnameable once the owner has
+        // taken over.
+        let authority = boot.authority().ok_or(BootError::AlreadyComposed)?;
+        if let Some(sink) = observed_kinds {
+            let observed_for_handler = sink;
+            boot.registry.register_inline(
+                authority,
+                SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
+                Arc::new(move |dispatch: MailDispatch<'_>| {
+                    if dispatch.kind_name.is_empty() {
+                        return;
+                    }
+                    observed_for_handler
+                        .lock()
+                        .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
+                        .push(dispatch.kind_name.to_owned());
+                }),
+            );
         }
+        let _spent = boot.take_authority();
 
         // ADR-0082 §1 / PR 3b: substrate-harness uses the shared frame
         // lifecycle graph. The embedder pushes `LifecycleAdvance` via

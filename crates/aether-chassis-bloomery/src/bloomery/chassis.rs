@@ -15,7 +15,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, BuildProvenance, composed};
 use aether_substrate::config::ConfigError;
-use aether_substrate::{BootAuthority, Chassis, SubstrateBoot};
+use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
 use crate::api::{ApiParams, BloomeryApiCapability};
@@ -194,12 +194,7 @@ impl BootableChassis for BloomeryChassis {
     /// `TraceDispatchCapability` in this delta; the aborter is supplied by
     /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
     /// move the same `boot` into the driver afterward.
-    fn compose(
-        builder: Builder<Self>,
-        boot: &SubstrateBoot,
-        _authority: &BootAuthority,
-        env: BloomeryEnv,
-    ) -> Result<Builder<Self>, BootError> {
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).

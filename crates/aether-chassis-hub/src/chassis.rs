@@ -18,7 +18,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, ComposeBase, composed};
 use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, validate_env};
 use aether_substrate::runtime::log_install::apply_filter;
-use aether_substrate::{BootAuthority, Chassis, SubstrateBoot};
+use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::DEFAULT_RPC_PORT;
 use aether_chassis::boot::{
@@ -111,7 +111,6 @@ impl BootableChassis for HubChassis {
     fn compose(
         builder: Builder<Self>,
         _boot: &SubstrateBoot,
-        _authority: &BootAuthority,
         mut sources: ConfigSources,
     ) -> Result<Builder<Self>, BootError> {
         // #3930: resolve the three base non-cap members off the stack as structs.

@@ -29,7 +29,7 @@ use aether_render::HeadlessRenderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, composed};
-use aether_substrate::{BootAuthority, Chassis, SubstrateBoot};
+use aether_substrate::{Chassis, SubstrateBoot};
 use aether_window::HeadlessWindowCapability;
 
 use aether_chassis::{TickConfig, apply_manifest_tick_settings};
@@ -162,12 +162,7 @@ impl BootableChassis for HeadlessChassis {
     /// that [`Chassis::build`] resolves at the driver seam (ADR-0162), so it
     /// takes no part in this claim chain. Headless's delta resolves nothing
     /// itself, so it returns `Ok`.
-    fn compose(
-        builder: Builder<Self>,
-        boot: &SubstrateBoot,
-        authority: &BootAuthority,
-        env: CommonEnv,
-    ) -> Result<Builder<Self>, BootError> {
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: CommonEnv) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
@@ -190,6 +185,13 @@ impl BootableChassis for HeadlessChassis {
         // ADR-0155: registering the sink here (Compose) is what puts
         // `aether.audio` in the claim-derived `--describe` roster — an
         // inline sink is a claim like any other.
+        //
+        // iamacoffeepot/aether#4171: the direct mutator is named through the
+        // boot's authority, borrowed for this call. `composed` spends the token
+        // the moment this delta returns, so the sink registration is inside the
+        // window and nothing after it — including the driver that ends up owning
+        // this `boot` — can reach the direct write path.
+        let authority = boot.authority().ok_or(BootError::AlreadyComposed)?;
         let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_inline(

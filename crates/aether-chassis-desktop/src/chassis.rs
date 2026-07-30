@@ -25,7 +25,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::runtime::log_install::apply_filter;
-use aether_substrate::{BootAuthority, Chassis, SubstrateBoot};
+use aether_substrate::{Chassis, SubstrateBoot};
 use winit::event_loop::EventLoop;
 
 use aether_chassis::{WindowConfig, apply_manifest_window_settings};
@@ -178,12 +178,7 @@ impl BootableChassis for DesktopChassis {
     /// [`Chassis::build`] resolves at the driver seam (ADR-0162), so they take no
     /// part in this claim chain. Desktop's delta resolves nothing itself, so it
     /// returns `Ok`.
-    fn compose(
-        builder: Builder<Self>,
-        boot: &SubstrateBoot,
-        _authority: &BootAuthority,
-        env: CommonEnv,
-    ) -> Result<Builder<Self>, BootError> {
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: CommonEnv) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
