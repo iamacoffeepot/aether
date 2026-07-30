@@ -479,9 +479,25 @@ not know — a peer address, a channel, which leg of a multi-step plan this birt
 belongs to. A handler that must know the child is live before it reports success
 waits for that completion; one that only needs somewhere to send mail can use
 the receipt directly. Synchronous commit still exists, but only at the
-boot/embedder boundary (`BuiltChassis::spawn_actor` /
-`PassiveChassis::spawn_actor` and their `.finish()` terminal), where there is no
-owner to serialize against yet.
+boot/embedder boundary — `BuiltChassis::spawn_actor` /
+`PassiveChassis::spawn_actor` and their `.finish()` terminal, which block until
+the birth is live and hand back the `MailboxId` you can immediately address.
+
+That terminal spans the chassis's one authority boundary, the **registry
+authority seal**. A chassis seals once boot is over: a built chassis after its
+driver's `Start` stage returns successfully, a passive chassis immediately
+before the `PassiveChassis` reaches you. Before the seal, boot writes the
+registry directly — it wants synchronous apply and read-your-writes with no
+scheduler thread in the picture yet. After it, there is no direct writer left to
+name, so an embedder's `.finish()` submits the birth to the owner and waits for
+it exactly the way a handler's staged birth is applied: `Starting`, `wire` at
+the actor's execution home, then `Live`. Every birth in a running engine follows
+that one protocol, whoever asked for it.
+
+Waiting there is safe because of who waits: an embedder thread is not a pool
+worker, so it can never be the worker the owner needs to make progress. That is
+also why a *handler* has no such terminal — a handler blocking on the owner
+could be the last worker, so it stages instead.
 
 When the handler that receives a completion owes a reply of its own and answers
 it by staging *another* birth, it hands that debt straight on with

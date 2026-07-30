@@ -4,7 +4,7 @@
 //! applies them, and every steady-state mutation lands through that one
 //! writer. The direct path — `Registry::apply_batches`, reached through
 //! the eager mutators — was left additive, so two writers still shared one
-//! `RwLock` (iamacoffeepot/aether#4156). Boot genuinely needs the direct
+//! routing guard (iamacoffeepot/aether#4156). Boot genuinely needs the direct
 //! path: it wants synchronous apply, a typed `BootError`, and
 //! read-your-writes before any scheduler thread exists (#4035's carve-out).
 //! So the direct mutators are not routed through the owner — they are made

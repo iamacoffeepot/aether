@@ -264,6 +264,224 @@ fn driver_build_runs_driver_and_tears_down_passives() {
     assert!(ran.load(Ordering::SeqCst));
 }
 
+/// ADR-0165 seal fixtures. The `Spawner` holds the last `BootAuthority` in
+/// circulation, so "was the seal installed" is exactly "is that token gone".
+/// A driver's Claim hook is the earliest place a test can reach the live
+/// `Arc<Spawner>`, and it is the only reach that survives a build whose driver
+/// `Start` fails — the `BootedPassives` that would otherwise hold it is
+/// dropped on that path.
+mod seal {
+    use super::*;
+    use crate::mail::Mail;
+    use std::cell::RefCell;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    thread_local! {
+        static PROBED_SPAWNER: RefCell<Option<Arc<crate::Spawner>>> = const { RefCell::new(None) };
+    }
+
+    /// Driver that stashes the chassis `Spawner` at Claim, then either boots
+    /// or fails its Start stage.
+    struct SealProbeDriver {
+        fail_start: bool,
+    }
+
+    struct SealProbeRunning;
+
+    impl DriverCapability for SealProbeDriver {
+        type Running = SealProbeRunning;
+
+        fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+            PROBED_SPAWNER.with(|slot| slot.borrow_mut().replace(Arc::clone(ctx.spawner_arc())));
+            Ok(())
+        }
+
+        fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+            if self.fail_start {
+                return Err(BootError::Other(Box::new(io::Error::other("driver Start refused"))));
+            }
+            Ok(SealProbeRunning)
+        }
+    }
+
+    impl DriverRunning for SealProbeRunning {
+        fn run(self: Box<Self>) -> Result<(), RunError> {
+            Ok(())
+        }
+    }
+
+    fn take_probed_spawner() -> Arc<crate::Spawner> {
+        PROBED_SPAWNER.with(|slot| slot.borrow_mut().take()).expect("the driver Claim hook stashed the spawner")
+    }
+
+    /// A passive chassis seals immediately before it is handed to the
+    /// embedder, and everything the embedder spawns afterwards still lands —
+    /// through the owner, because the token that reaches the direct writer no
+    /// longer exists.
+    ///
+    /// Tripwire: the seal must be *installed* (the token is gone) and must not
+    /// cost the embedder its spawn surface. Dropping either half — a seal that
+    /// never runs, or one that strands `spawn_actor` — fails here.
+    #[test]
+    fn passive_chassis_seals_before_it_is_returned_and_still_spawns() {
+        struct Spawned;
+        impl Addressable for Spawned {
+            const NAMESPACE: &'static str = "test.chassis_builder.seal.post_seal_spawn";
+            type Resolver = aether_actor::Many;
+        }
+        impl aether_actor::Root for Spawned {}
+        impl aether_actor::Lifecycle<Self> for Spawned {
+            type Config = ();
+            type Params = ();
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): Self::Config, (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+        impl NativeActor for Spawned {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Spawned {
+            fn dispatch(
+                _state: &mut Self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = bare_substrate();
+        let chassis =
+            Builder::<TestChassis>::new(Arc::clone(&registry), mailer).build_passive().expect("empty chassis boots");
+
+        assert!(
+            chassis.booted.spawner.seal().is_none(),
+            "build_passive seals before returning, so no boot authority survives into the embedder"
+        );
+
+        let id = chassis
+            .spawn_actor::<Spawned>(crate::Subname::Named("post-seal"), (), ())
+            .finish()
+            .expect("a post-seal root birth still lands");
+        assert!(registry.entry(id).is_some(), "the owner-routed root birth reached Live before finish() returned");
+    }
+
+    pod_kind!(Poke { value: u32 }, "test.chassis_builder.seal.poke", 0x5ea1_0001);
+
+    /// A pumped actor booted onto an already-sealed passive chassis runs the
+    /// two-ack handshake against the registry owner: reserve `Starting`, run
+    /// `init` / `wire` on this thread (its execution home), then hand the
+    /// owner the wired endpoint to publish.
+    ///
+    /// Tripwire: the route the owner publishes has to be the endpoint the
+    /// caller thread wired, not a fresh one — asserting on liveness alone
+    /// would pass against a route bound to a dead handler, so the check is
+    /// that mail addressed to the actor arrives at the slot the caller holds.
+    #[test]
+    fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
+        struct Pumped {
+            seen: Arc<AtomicU32>,
+        }
+        impl Addressable for Pumped {
+            const NAMESPACE: &'static str = "test.chassis_builder.seal.pumped";
+            type Resolver = aether_actor::One;
+        }
+        impl aether_actor::Root for Pumped {}
+        impl HandlesKind<Poke> for Pumped {}
+        impl aether_actor::Lifecycle<Self> for Pumped {
+            type Config = ();
+            type Params = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): Self::Config, params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { seen: params })
+            }
+        }
+        impl NativeActor for Pumped {
+            type State = Self;
+        }
+        impl Dispatch<Self> for Pumped {
+            fn dispatch(
+                state: &mut Self,
+                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                kind: KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == <Poke as aether_data::Kind>::ID.0 {
+                    let poke = <Poke as aether_data::Kind>::decode_from_bytes(payload)?;
+                    state.seen.fetch_add(poke.value, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = bare_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let seen = Arc::new(AtomicU32::new(0));
+        let (mut slot, _wake) =
+            chassis.boot_pumped_actor::<Pumped>((), Arc::clone(&seen)).expect("post-seal pumped boot succeeds");
+
+        let id = registry.lookup(Pumped::NAMESPACE).expect("the owner published the pumped route");
+        assert!(registry.entry(id).is_some(), "the second ack promoted the reservation to Live");
+
+        mailer.push(Mail::new(
+            id,
+            <Poke as aether_data::Kind>::ID,
+            <Poke as aether_data::Kind>::encode_into_bytes(&Poke { value: 7 }),
+            1,
+        ));
+        slot.drain_available();
+        assert_eq!(seen.load(AtomicOrdering::SeqCst), 7, "mail routed to the endpoint the caller thread wired");
+    }
+
+    /// A built chassis seals after its driver's `Start` returns `Ok`.
+    #[test]
+    fn built_chassis_seals_after_a_successful_driver_start() {
+        let (registry, mailer) = bare_substrate();
+        let chassis = Builder::<DrivenTestChassis<SealProbeDriver>>::new(registry, mailer)
+            .driver(SealProbeDriver { fail_start: false })
+            .build()
+            .expect("build succeeds");
+
+        assert!(
+            take_probed_spawner().seal().is_none(),
+            "a successful driver Start is followed by the seal, so the boot authority is spent"
+        );
+        drop(chassis);
+    }
+
+    /// A driver whose `Start` fails must leave boot's own writer intact: the
+    /// chassis is unwinding, and the teardown that follows is still boot.
+    ///
+    /// Tripwire: moving the seal ahead of `driver_boot(..)?` — the obvious
+    /// "seal once the passives are up" simplification — is exactly what this
+    /// catches.
+    #[test]
+    fn failed_driver_start_does_not_seal() {
+        let (registry, mailer) = bare_substrate();
+        let error = Builder::<DrivenTestChassis<SealProbeDriver>>::new(registry, mailer)
+            .driver(SealProbeDriver { fail_start: true })
+            .build()
+            .expect_err("the driver refuses its Start stage");
+        drop(error);
+
+        assert!(
+            take_probed_spawner().seal().is_some(),
+            "a failed driver Start never reaches the seal, so boot's authority is still held"
+        );
+    }
+}
+
 /// Test driver whose value-free ADR-0155 claim hook reserves a
 /// driver-as-actor mailbox (the shape the desktop driver's
 /// `aether.window` claim will take once the Env split lands). `boot` is

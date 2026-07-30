@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::process::abort;
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rustc_hash::FxHashMap;
 
@@ -15,10 +15,10 @@ use crate::actor::native::dispatch_blocking::DeferredCompletion;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::authority::BootAuthority;
 use crate::mail::registry::effect::{
-    ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, ChangeSubscriber, EffectBatch, PreparedCostCells,
-    PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryBatchCompletionSink, RegistryBatchError,
-    RegistryBatchResult, RegistryCompletion, RegistryEffect, RegistryEffectError, RegistryInventory,
-    RegistrySubscription, StartingCancellation, barrier_token, bytes_kind, subscriber,
+    ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, ChangeSubscriber, EffectBatch, PreparedActivation,
+    PreparedCostCells, PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryBatchCompletionSink,
+    RegistryBatchError, RegistryBatchResult, RegistryCompletion, RegistryEffect, RegistryEffectError,
+    RegistryInventory, RegistrySubscription, StartingCancellation, barrier_token, bytes_kind, subscriber,
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
@@ -114,7 +114,7 @@ pub enum MailboxEntry {
 }
 
 pub struct Registry {
-    inner: RwLock<Inner>,
+    inner: Mutex<Inner>,
     routes: View<FxHashMap<MailboxId, RouteRecord>>,
     kinds: View<KindTable>,
     empty_kind_name: Arc<str>,
@@ -145,6 +145,21 @@ enum RouteLifecycle {
         target_parent: MailboxId,
     },
     Dropped,
+}
+
+/// Where a birth the registry owner accepted currently stands. Read from the
+/// published route view by [`Registry::birth_progress`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BirthProgress {
+    /// Reserved and keyed, not yet enumerable or deliverable. Mail addressed
+    /// here parks in the owner.
+    Starting,
+    /// The activation's execution home wired the actor and the owner promoted
+    /// it; the route is deliverable.
+    Live,
+    /// The reservation was released — cancelled, rejected, or the owner
+    /// closed under it.
+    Gone,
 }
 
 #[derive(Clone)]
@@ -512,7 +527,7 @@ impl Registry {
         });
         let inventory = inventory_publisher.view();
         Self {
-            inner: RwLock::new(Inner {
+            inner: Mutex::new(Inner {
                 mailboxes: FxHashMap::default(),
                 pending_births: FxHashMap::default(),
                 next_activation_token: 0,
@@ -576,6 +591,57 @@ impl Registry {
         self.owner.get().map(RegistryOwnerHandle::metrics)
     }
 
+    /// First ack of the post-seal pumped activation handshake (ADR-0165):
+    /// reserve `name` as a `Starting` route through the owner and block for
+    /// the token it assigned.
+    ///
+    /// Mail addressed here from now on parks in the owner rather than
+    /// warn-dropping, so the window between the reservation and the caller's
+    /// `wire` loses nothing. The caller is an embedder thread, never a pool
+    /// worker, so waiting on the owner cannot starve it.
+    pub(crate) fn reserve_starting_through_owner(
+        &self,
+        name: &str,
+    ) -> Result<(MailboxId, ActivationToken), RegistryEffectError> {
+        let effect = RegistryEffect::reserve_named(name.to_owned());
+        let Some(completion) = self.submit(EffectBatch::new(vec![effect])) else {
+            return Err(RegistryEffectError::OwnerClosed);
+        };
+        match completion.wait()?.as_slice() {
+            [RegistryApplied::Starting { id, token }] => Ok((*id, *token)),
+            _ => Err(RegistryEffectError::ActivationRejected),
+        }
+    }
+
+    /// Second ack of the same handshake: hand the owner the endpoint the
+    /// caller thread finished wiring at its own execution home, and block
+    /// until the route is `Live` and its parked mail has been released.
+    pub(crate) fn promote_starting_through_owner(
+        &self,
+        id: MailboxId,
+        token: ActivationToken,
+        handler: Arc<dyn InboxHandler>,
+    ) -> Result<(), RegistryEffectError> {
+        let effect = RegistryEffect::PromoteStarting {
+            id,
+            token,
+            activation: PreparedActivation::legacy(MailboxEntry::Inbox { handler, seize: SeizeCell::default() }),
+        };
+        let Some(completion) = self.submit(EffectBatch::new(vec![effect])) else {
+            return Err(RegistryEffectError::OwnerClosed);
+        };
+        completion.wait().map(|_| ())
+    }
+
+    /// Release a reservation whose caller-thread `init` / `wire` failed. The
+    /// route disappears and anything parked behind it continues under the
+    /// unknown-recipient policy, exactly as a cancelled prepared birth does.
+    pub(crate) fn cancel_starting_through_owner(&self, id: MailboxId, token: ActivationToken) {
+        if let Some(completion) = self.submit(EffectBatch::new(vec![RegistryEffect::CancelStarting { id, token }])) {
+            drop(completion.wait());
+        }
+    }
+
     pub(crate) fn activation_cancelled(&self, id: MailboxId, token: ActivationToken) {
         if let Some(owner) = self.owner.get() {
             let _ = owner.activation_cancelled(id, token);
@@ -630,7 +696,7 @@ impl Registry {
             CatchUp(Box<dyn FnOnce() + Send>),
         }
 
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.lock().expect("registry lock poisoned; fail-fast per ADR-0063");
         let mut publication = Publication::default();
         let mut after_lock = Vec::new();
         let mut readiness = Vec::new();
@@ -692,7 +758,7 @@ impl Registry {
     }
 
     pub(super) fn close_owner_commands(&self, commands: Vec<OwnerCommand>, mailer: &Mailer) -> u64 {
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.lock().expect("registry lock poisoned; fail-fast per ADR-0063");
         let mut completions = Vec::new();
         let mut continuations = Vec::new();
         let mut discarded = Vec::new();
@@ -737,7 +803,7 @@ impl Registry {
             let _ = done.recv();
         }
 
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.lock().expect("registry lock poisoned; fail-fast per ADR-0063");
         let mut publication = Publication::default();
         for (id, birth) in &pending_births {
             if matches!(
@@ -772,7 +838,7 @@ impl Registry {
         _authority: &BootAuthority,
         batches: Vec<EffectBatch>,
     ) -> Vec<Result<Vec<RegistryApplied>, RegistryEffectError>> {
-        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.lock().expect("registry lock poisoned; fail-fast per ADR-0063");
         let mut publication = Publication::default();
         let results = batches
             .into_iter()
@@ -810,6 +876,7 @@ impl Registry {
         let mut applied = Vec::with_capacity(batch.effects.len());
         let mut prepared_births = FxHashMap::<MailboxId, PendingBirth>::default();
         let mut prepared_cancellations = HashSet::<(MailboxId, ActivationToken)>::new();
+        let mut promotions = Vec::<(MailboxId, RouteEndpoint)>::new();
 
         for effect in batch.effects {
             match effect {
@@ -940,6 +1007,26 @@ impl Registry {
                     staged_pending.insert(route.id, Some(token));
                     publication.route_updates.push(Update::Insert(route.id, record));
                     applied.push(RegistryApplied::Starting { id: route.id, token });
+                }
+                RegistryEffect::PromoteStarting { id, token, activation } => {
+                    let reserved = matches!(
+                        staged_route(&staged_routes, inner, id).map(|route| &route.lifecycle),
+                        Some(RouteLifecycle::Starting { token: current }) if *current == token
+                    ) && staged_pending_token(&staged_pending, inner, id) == Some(token);
+                    let Some(canonical_name) = reserved
+                        .then(|| staged_route(&staged_routes, inner, id).map(|route| route.canonical_name.clone()))
+                        .flatten()
+                    else {
+                        return Err(RegistryEffectError::ActivationRejected);
+                    };
+                    let endpoint = RouteEndpoint::from_entry(activation.into_legacy());
+                    let record =
+                        RouteRecord { canonical_name, lifecycle: RouteLifecycle::Live { endpoint: endpoint.clone() } };
+                    staged_routes.insert(id, Some(record.clone()));
+                    publication.route_updates.push(Update::Insert(id, record));
+                    publication.inventory_dirty = true;
+                    promotions.push((id, endpoint));
+                    applied.push(RegistryApplied::Mailbox(id));
                 }
                 RegistryEffect::CancelStarting { id, token } => {
                     let prepared_cancel = !staged_routes.contains_key(&id)
@@ -1081,7 +1168,29 @@ impl Registry {
         }
 
         inner.next_activation_token = next_activation_token;
-        let continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
+        let mut continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
+        // The promoted route is Live now, so the mail parked behind its
+        // `Starting` reservation continues to the endpoint the caller thread
+        // just wired — in the order the owner observed it, ahead of anything
+        // routed after this apply.
+        for (id, endpoint) in promotions {
+            let Some(mut birth) = inner.pending_births.remove(&id) else {
+                continue;
+            };
+            continuations.extend(birth.parked.drain(..).map(|mail| {
+                RouteContinuation {
+                    disposition: CapturedDisposition::Live {
+                        endpoint: endpoint.clone(),
+                        kind_name: inner
+                            .kinds
+                            .get(&mail.kind)
+                            .map_or_else(|| Arc::clone(&inner.empty_kind_name), |slot| Arc::clone(&slot.name)),
+                    },
+                    mail,
+                }
+            }));
+            birth.disarm();
+        }
         for (id, token) in prepared_cancellations {
             let birth = inner.pending_births.get_mut(&id).expect("validated prepared cancellation remains pending");
             assert_eq!(birth.token, token, "validated prepared cancellation retains its exact token");
@@ -1281,7 +1390,7 @@ impl Registry {
     /// route) name the same authority production boot would.
     ///
     /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn drop_mailbox(&self, authority: &BootAuthority, id: MailboxId) -> Result<String, DropError> {
@@ -1321,7 +1430,7 @@ impl Registry {
     /// payload reads as "I should be Inline."
     ///
     /// # Panics
-    /// Panics on a name collision (or if the inner `RwLock` is
+    /// Panics on a name collision (or if the inner routing lock is
     /// poisoned) — fail-fast per ADR-0063: substrate-internal
     /// registrations should never collide; use
     /// [`Self::try_register_inbox`] when a collision is a recoverable
@@ -1357,7 +1466,7 @@ impl Registry {
     /// stages a `RegistryEffect` through the ADR-0165 owner instead.
     ///
     /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn try_register_inbox(
@@ -1414,7 +1523,7 @@ impl Registry {
     /// Inbox" smell.
     ///
     /// # Panics
-    /// Panics on a name collision (or if the inner `RwLock` is
+    /// Panics on a name collision (or if the inner routing lock is
     /// poisoned) — fail-fast per ADR-0063: substrate-internal
     /// registrations should never collide.
     /// Direct write path — takes a [`BootAuthority`] so only the boot
@@ -1464,7 +1573,7 @@ impl Registry {
     /// `MailboxId::from_name` directly.
     ///
     /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
@@ -1535,6 +1644,21 @@ impl Registry {
         }
     }
 
+    /// How far a birth the owner already accepted has got, read off the
+    /// published route view — no lock, no owner round-trip.
+    ///
+    /// The post-seal external spawn (ADR-0165) watches this to stay
+    /// synchronous: the owner's completion says the reservation was accepted
+    /// and its activation scheduled, and this says whether the activation's
+    /// execution home has since handed the route back as `Live`.
+    pub(crate) fn birth_progress(&self, id: MailboxId) -> BirthProgress {
+        match self.routes.load().entry_for(&id).map(|route| &route.lifecycle) {
+            Some(RouteLifecycle::Starting { .. }) => BirthProgress::Starting,
+            Some(RouteLifecycle::Live { .. } | RouteLifecycle::Alias { .. }) => BirthProgress::Live,
+            Some(RouteLifecycle::Dropped) | None => BirthProgress::Gone,
+        }
+    }
+
     /// Test whether `alias` is the logical inline-child route owned by
     /// `target_parent`. This checks route identity, not endpoint identity.
     pub(crate) fn is_alias_to(&self, alias: MailboxId, target_parent: MailboxId) -> bool {
@@ -1558,7 +1682,7 @@ impl Registry {
     /// embedder eager spawn can name it (iamacoffeepot/aether#4156).
     ///
     /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn install_seize_handle(&self, authority: &BootAuthority, id: MailboxId, handle: SeizeHandle) -> bool {
         match self.apply_one(authority, RegistryEffect::InstallSeize { id, handle }) {
@@ -1617,7 +1741,7 @@ impl Registry {
     /// `<K as Kind>::ID` on the guest side.
     ///
     /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard. The internal `expect("Bytes default cannot produce a
     /// conflict")` is unreachable by construction.
@@ -1652,7 +1776,7 @@ impl Registry {
     /// `RegistryBatch::register_kinds` through the ADR-0165 owner instead.
     ///
     /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
+    /// Panics if the inner routing lock is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn register_kind_with_descriptor(

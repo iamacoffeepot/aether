@@ -112,7 +112,7 @@ The owner:
 
 The registry owner is an internal runtime authority, not a public `NativeActor` that application code can address with arbitrary mail.
 
-During migration, owner-applied effects and legacy direct effects share the existing transitional writer serialization. Both paths publish the same views and events. This transitional writer is removed only after every handler-time writer has migrated and the final runtime seal is installed.
+During migration, owner-applied effects and legacy direct effects share the existing transitional writer serialization. Both paths publish the same views and events. The seal is what removes that shared writer: it takes the last boot token out of circulation, leaving the owner as the only caller that can name the guard at all. The guard itself survives as a plain `Mutex` — it never had a reader half, because every table read loads a published view.
 
 A handler must never synchronously wait for owner completion. Such a wait can deadlock a one-worker pool and prevents the parent actor from receiving its own completion turn.
 
@@ -575,47 +575,47 @@ Passive chassis
     return PassiveChassis
 ```
 
-Direct boot mutation is allowed only through crate-private authority carrying an unforgeable boot token. The token cannot be produced after the seal.
+Direct boot mutation is allowed only through crate-private authority carrying an unforgeable boot token, `BootAuthority`. Every route into the direct writer takes one by reference, so the seal is the moment the last token leaves circulation rather than a flag anything has to consult.
 
-The spawn APIs are separated by authority:
+That last token is the one on the chassis `Spawner`, which is the only holder that outlives boot. `Spawner::seal` takes it; nothing can mint another, because `BootAuthority::new` is crate-private and every remaining mint site (the shared boot, the chassis ctx, the owner attach) is spent or dropped by then.
+
+The authority domains are therefore distinguished by what a caller can reach, not by three parallel builder types:
 
 ```rust
-/// Private direct bootstrap authority.
-struct BootSpawnBuilder<A> {
-    /* unforgeable boot token */
-}
-
 /// Handler authority. Can only stage a prepared effect and receipt.
 struct HandlerSpawnBuilder<A, Parent> {
     /* no eager/direct terminal */
 }
 
-/// Post-seal host or embedder authority.
-struct ExternalSpawnBuilder<A> {
-    /* submits through owner and waits outside actor execution */
+/// Boot and post-seal external authority, resolved at commit time.
+struct SpawnBuilder<A> {
+    /* pre-seal: direct apply under the Spawner's token
+       post-seal: submits through the owner and waits outside actor execution */
 }
 ```
 
 An eager or synchronous return does not imply a direct write.
 
-`ExternalSpawnBuilder::finish()` may synchronously return:
+`SpawnBuilder::finish()` synchronously returns:
 
 ```rust
 Result<MailboxId, SpawnError>
 ```
 
-but it does so by submitting through the owner and waiting outside an actor handler.
+Post-seal it does so by submitting through the owner and waiting outside an actor handler — first for the owner to accept the birth, then for the activation's execution home to hand the route back `Live`, so a caller that sees `Ok` can address the mailbox it was given. Waiting is safe here and only here: the caller is an embedder thread, never a pool worker, so it is never the worker the owner needs.
 
 Post-build pumped actors use a two-ack handshake:
 
 ```text
-external caller submits prepared spawn
-registry owner publishes Starting
-caller-thread execution home runs wire
-caller returns ActivationReady
-registry owner promotes Live
+external caller reserves a Starting route
+registry owner publishes Starting and returns its token
+caller-thread execution home runs init and wire
+caller hands the owner the wired endpoint
+registry owner promotes Live and releases the parked mail
 external caller receives final result
 ```
+
+The window between the two acks is why the reservation exists: mail addressed to the actor while its caller is still wiring parks in the owner and continues to the promoted endpoint in owner-observed order, instead of warn-dropping against a name that does not exist yet.
 
 The caller thread never receives direct post-seal registry writer authority.
 

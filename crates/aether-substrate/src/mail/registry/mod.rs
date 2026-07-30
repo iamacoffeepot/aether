@@ -3,13 +3,16 @@
 // kind id → name + descriptor, ids derived from (name, schema) via
 // ADR-0030 Phase 2's `kind_id_from_parts`). Both id spaces are a pure
 // function of declaration-time data — no sequential allocation, no
-// registration order dependence. The registry uses an `RwLock` only to
-// serialize writers so mailboxes and kinds can be added at runtime —
-// ADR-0010's runtime component loading mutates both tables after an
-// `Arc<Registry>` has already been shared with the scheduler and hub
-// client. Successful writes synchronously publish point-in-time route and
-// kind views while holding that guard. Every table read loads those views
-// without acquiring the writer lock (ADR-0165).
+// registration order dependence. The working tables sit behind a plain
+// `Mutex` — there is no reader half, because every table read loads a
+// published view instead (ADR-0165). Successful writes synchronously
+// publish point-in-time route and kind views while holding that guard.
+//
+// Before the ADR-0165 runtime seal two writers share that guard: the
+// registry owner draining its queue, and the boot path applying directly
+// under a `BootAuthority`. The seal takes the last authority token out of
+// circulation, after which the owner is the only caller that can name the
+// guard at all.
 
 mod address;
 mod authority;
@@ -41,7 +44,7 @@ pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
 pub use effect::{PreparedAliasRoute, RegistryInventory, RegistrySubscription};
 pub use errors::{DropError, KindConflict, NameConflict};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
-pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
+pub(crate) use mailbox::{BirthProgress, CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use mailbox::{MailboxEntry, Registry};
 pub use metrics::RegistryQueueMetrics;
 pub(crate) use owner::ParkAdmission;
