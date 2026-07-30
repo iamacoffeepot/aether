@@ -568,6 +568,7 @@ dependencies = [
  "aether-chassis-headless",
  "aether-component",
  "aether-data",
+ "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-http-derive",
  "aether-kinds",

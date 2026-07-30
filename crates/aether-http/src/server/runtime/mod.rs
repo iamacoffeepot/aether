@@ -27,7 +27,7 @@
 use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
 use aether_actor::runtime;
 
-pub use std::collections::HashMap;
+pub use std::collections::{HashMap, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub use std::sync::{Arc, RwLock, mpsc};
@@ -36,7 +36,7 @@ pub use std::time::Duration;
 
 pub use aether_data::{Kind, KindId, MailboxId};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::MailId;
 pub use aether_substrate::mail::mailer::Mailer;
@@ -200,8 +200,8 @@ impl NativeActor for HttpServerCapability {
             accept_thread: Some(accept_thread),
             inbound_rx,
             wake_dirty,
-            shards: Vec::new(),
-            next_shard: 0,
+            self_mailbox: self_id,
+            shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
         })
@@ -248,6 +248,14 @@ impl NativeActor for HttpServerCapability {
     #[handler::single]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
+        // One deterministic child per handler turn keeps each birth in its
+        // own transactional owner batch. A canonical-name conflict can then
+        // reject one shard without rolling back its siblings. The private
+        // wake scheduled by this step brings the next index (or resumes the
+        // accept drain after the final index).
+        if state.stage_next_shard(ctx) {
+            return;
+        }
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
                 InboundEvent::PeerAccepted { stream, peer } => {
@@ -264,6 +272,43 @@ impl NativeActor for HttpServerCapability {
                 }
             }
         }
+    }
+
+    /// Settle one dispatch-shard birth. A successful child becomes
+    /// selectable only from its authoritative `SpawnApplied`; startup waits
+    /// for every deterministic index so completion order cannot reorder the
+    /// round-robin set. The task carries no application reply, so discharge
+    /// its settlement hold explicitly after reading the typed result.
+    #[handler(task)]
+    fn on_shard_spawn_done(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, ShardSpawnContinuation>,
+    ) {
+        let index = done.context().index;
+        let subname = done.context().subname.clone();
+        let sink = match done.output() {
+            Ok(applied) => Some(WakeSink {
+                inbound_tx: done.context().inbound_tx.clone(),
+                mailer: Arc::clone(&state.mailer),
+                self_id: applied.mailbox_id,
+                wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+                dirty: Arc::clone(&done.context().wake_dirty),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_http::server",
+                    shard = %subname,
+                    error = ?error,
+                    "http dispatch shard activation failed",
+                );
+                None
+            }
+        };
+        done.release_no_reply();
+
+        let settlement = state.finish_shard_spawn(index, sink);
+        state.apply_shard_settlement(settlement);
     }
 
     /// Claim a route for an explicitly named mailbox (ADR-0130).
