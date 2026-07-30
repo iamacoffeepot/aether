@@ -433,7 +433,44 @@ parent and child types, and can spawn an `Instanced` native actor only when the
 child declares `ChildOf<Parent>`:
 `ctx.spawn_child::<TcpListenerActor, TcpSessionActor>(subname, config, params)`.
 The runtime also verifies that the binding executing the handler has the
-declared parent's logical namespace before constructing the child. Wasm uses
+declared parent's logical namespace before constructing the child.
+
+A native birth **stages** during the handler turn and commits afterward. The
+handler chains any
+`after_init` bootstrap mail and ends with `.stage()` (or `.stage_with(context)`
+to carry your own value forward), which does the local half of the work — the
+permission and subname checks, `A::init`, the transport — and appends one
+ordered prepared birth to the parent's buffer
+([ADR-0165](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0165-handlers-read-views-emit-effects.md)). Nothing in the shared
+registry moves while the handler runs, so no spawn takes a global lock
+mid-turn. What comes back is a `SpawnReceipt`: the child's `mailbox_id` and
+`canonical_name`, both derived from the parent's identity and usable
+immediately as a send target, plus a `completion` `DispatchId`.
+
+```rust
+let Ok(receipt) = ctx
+    .spawn_child::<TcpListenerActor, TcpSessionActor>(Subname::Counter, config, params)
+    .after_init(Hello)
+    .stage()
+else {
+    return;
+};
+ctx.send_envelope_tracked(receipt.mailbox_id, Frame::ID, &frame.encode_into_bytes());
+```
+
+The receipt says the birth was accepted locally; the registry owner applies it
+after the handler returns, and *that* result is authoritative. It arrives back
+at the spawner through the ordinary task-completion path as
+`TaskDone<Result<SpawnApplied, SpawnError>, C>`, keyed by `receipt.completion` —
+so an apply-time conflict (a name another actor won first, say) surfaces as one
+typed failure rather than a silent half-spawn. A handler that must know the
+child is live before it reports success waits for that completion; one that
+only needs somewhere to send mail can use the receipt directly. Synchronous
+commit still exists, but only at the boot/embedder boundary
+(`BuiltChassis::spawn_actor` / `PassiveChassis::spawn_actor` and their
+`.finish()` terminal), where there is no owner to serialize against yet.
+
+Wasm uses
 the same two-type permission: a component spawns its own **sibling** types —
 `Instanced` actors its module also exports
 ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)) — only when the child declares the exact

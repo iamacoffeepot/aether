@@ -1247,7 +1247,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
                         (),
                         Arc::clone(&state.init_count),
                     )
-                    .finish()
+                    .stage()
                     .expect_err("the invalid subname must be rejected");
                 if matches!(error, SpawnError::SubnameInvalid(_)) {
                     state.invalid_subname_observed.store(true, AtomicOrdering::SeqCst);
@@ -1256,7 +1256,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
             }
             let error = ctx
                 .spawn_child::<DeclaredParent, Child>(Subname::Counter, (), Arc::clone(&state.init_count))
-                .finish()
+                .stage()
                 .expect_err("the executing binding is not DeclaredParent");
             if let SpawnError::ParentTypeMismatch { declared_namespace, actual_logical, actual_canonical_name } = error
                 && declared_namespace == DeclaredParent::NAMESPACE
@@ -1409,7 +1409,7 @@ fn ctx_spawn_child_accepts_a_distinct_parent_type_with_the_same_logical_namespac
             }
             let _ = Hatch::decode_from_bytes(payload)?;
             ctx.spawn_child::<DeclaredParent, Child>(Subname::Named("accepted"), (), Arc::clone(&state.init_count))
-                .finish()
+                .stage()
                 .expect("logical namespace equality, not Rust type identity, authorizes the parent");
             Some(())
         }
@@ -1433,8 +1433,11 @@ fn ctx_spawn_child_accepts_a_distinct_parent_type_with_the_same_logical_namespac
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
     handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
 
+    // The staged birth's route lands when the owner applies it, so wait on
+    // the authoritative registration rather than on the handler-local `init`.
     let deadline = Instant::now() + Duration::from_millis(500);
-    while init_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+    while registry.lookup("test.shared_parent/test.shared_parent.child:accepted").is_none() && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(init_count.load(AtomicOrdering::SeqCst), 1);
@@ -2412,12 +2415,13 @@ fn instanced_can_spawn_grandchild() {
                 // grandchild. Pre-load a Ping so the grandchild's
                 // first envelope dispatches without an external
                 // mail step.
-                let result = ctx
+                let receipt = ctx
                     .spawn_child::<Self, Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
                     .after_init(Ping { tag: 0xCAFE })
-                    .finish_with_name()
+                    .stage()
                     .expect("recursive spawn must succeed");
-                *state.spawned_name.lock().expect("spawned-name mutex poisoned") = Some(result);
+                *state.spawned_name.lock().expect("spawned-name mutex poisoned") =
+                    Some((receipt.mailbox_id, receipt.canonical_name.to_string()));
                 return Some(());
             }
             if kind.0 == Quit::ID.0 {
@@ -2481,7 +2485,7 @@ fn instanced_can_spawn_grandchild() {
     assert_eq!(
         *spawned_name.lock().expect("spawned-name mutex poisoned"),
         Some((grandchild_id, "test.recursive.parent:p1/test.recursive.grandchild:only".to_owned())),
-        "finish_with_name must return the exact nested canonical registration name",
+        "the staged receipt must carry the exact nested canonical registration name",
     );
     assert!(
         chassis.actor_registry().is_live(grandchild_id),

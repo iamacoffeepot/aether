@@ -12,7 +12,7 @@
 //! plus the `spawn_child` builder) stay inherent — they expose
 //! types that don't belong on a cross-transport trait
 //! (`Arc<Mailer>`, `Arc<Spawner>`, the chassis `ExportedHandles` map,
-//! the substrate-only `SpawnBuilder<'_, A>` whose
+//! the substrate-only `HandlerSpawnBuilder<'_, A>` whose
 //! `A: NativeActor + NativeDispatch` bound can't sit on a trait
 //! method declared in `aether-actor`). The inherent + trait surface
 //! coexist; cap authors reach for whichever is in scope.
@@ -757,12 +757,14 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// `SourceAddr::Component` routes back here.
     ///
     /// Returns a [`HandlerSpawnBuilder`](crate::HandlerSpawnBuilder) the
-    /// caller chains `after_init` and then `stage` or `stage_with` against.
-    /// Its `finish` terminal is only the temporary eager bridge for the
-    /// unmigrated #4065-#4069 consumers. Chassis-level
-    /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor` still use
-    /// [`SpawnBuilder`](crate::SpawnBuilder); both builder shapes flow through
-    /// the same [`crate::Spawner`].
+    /// caller chains `after_init` and then `stage`, `stage_with`, or
+    /// `continue_with` against. Those staged terminals are the only ones it
+    /// has, so a handler cannot commit the birth itself; the authoritative
+    /// result arrives later as
+    /// `TaskDone<Result<SpawnApplied, SpawnError>, C>`. Eager commit belongs
+    /// to the boot/embedder [`SpawnBuilder`](crate::SpawnBuilder) behind
+    /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`; both
+    /// builder shapes flow through the same [`crate::Spawner`].
     ///
     /// # Panics
     /// Panics if the transport was constructed via
