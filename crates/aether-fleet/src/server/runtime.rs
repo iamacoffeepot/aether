@@ -11,6 +11,7 @@ pub use crate::kinds::ForwardEnvelope;
 use crate::kinds::{EngineAlive, EngineDied};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
+pub use aether_actor::Manual;
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
 pub use aether_kinds::{
@@ -25,7 +26,9 @@ use aether_kinds::{
 use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Mail;
 pub use aether_substrate::Subname;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{
+    NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskContinuation, TaskDone,
+};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
@@ -76,6 +79,39 @@ pub struct EngineEntry {
     pub last_alive: Instant,
 }
 
+/// Actor-local bookkeeping for a proxy whose initialized state has been
+/// staged but whose route is not authoritatively Live yet. Pending engines
+/// are deliberately absent from [`FleetServerState::engines`], so list,
+/// route, and terminate cannot observe a reservation as a supervised engine.
+pub struct PendingEngine {
+    pub rpc_port: u16,
+    /// A Live proxy can report its death from the activation catch-up wake
+    /// before the parent's later task completion runs. Latch only the first
+    /// report so completion cannot install a corpse or duplicate its death.
+    pub early_death: Option<DeathReason>,
+}
+
+/// Context carried by the staged proxy birth into its authoritative task
+/// completion. Process ownership stays solely in `FleetProxyState`; this
+/// context contains only the metadata needed to commit supervision.
+#[derive(Clone)]
+pub struct FleetSpawnContinuation {
+    pub engine_id: EngineId,
+    pub rpc_port: u16,
+}
+
+pub enum ProxySpawnOutcome {
+    Applied(MailboxId),
+    Rejected(String),
+}
+
+pub enum EngineDeathDisposition {
+    PendingLatched,
+    PendingDuplicate,
+    LiveRemoved,
+    Unknown,
+}
+
 /// `aether.fleet` runtime state (ADR-0122 split): supervises a fleet of
 /// [`FleetProxy`] actors, one per spawned substrate. The addressing identity
 /// is the distinct ZST [`FleetServer`](super::FleetServer); the dispatcher
@@ -85,6 +121,9 @@ pub struct EngineEntry {
 /// it as crate-public API.
 pub struct FleetServerState {
     pub engines: HashMap<EngineId, EngineEntry>,
+    /// Initialized proxy births awaiting authoritative owner settlement.
+    /// Entries never participate in the public fleet surfaces.
+    pub pending_engines: HashMap<EngineId, PendingEngine>,
     /// Monotonic source of `EngineId`s. Engine ids only need to be
     /// unique among the engines this cap currently supervises — a
     /// process-local counter delivers that without a `uuid` rng
@@ -154,6 +193,61 @@ impl FleetServerState {
         self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error.clone() });
         SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
     }
+
+    /// Apply the actor-local half of a staged proxy settlement. Returning
+    /// `None` suppresses a stale completion; the binding-owned task ledger
+    /// still gets discharged by the caller without emitting a second reply.
+    pub fn settle_pending_spawn(
+        &mut self,
+        continuation: FleetSpawnContinuation,
+        outcome: ProxySpawnOutcome,
+    ) -> Option<SpawnEngineResult> {
+        let FleetSpawnContinuation { engine_id, rpc_port } = continuation;
+        let pending = self.pending_engines.remove(&engine_id)?;
+        debug_assert_eq!(pending.rpc_port, rpc_port, "spawn completion must match its pending engine");
+
+        Some(match outcome {
+            ProxySpawnOutcome::Rejected(error) => self.fail_spawn(engine_id, rpc_port, error),
+            ProxySpawnOutcome::Applied(proxy_mailbox) => {
+                if let Some(reason) = pending.early_death {
+                    let error = format!("proxy died before supervision committed: {reason:?}");
+                    self.record_death(engine_id.0.to_string(), rpc_port, reason);
+                    SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
+                } else {
+                    self.engines.insert(
+                        engine_id,
+                        EngineEntry {
+                            proxy_mailbox,
+                            rpc_port,
+                            // Authoritative activation + no early death =
+                            // alive at the supervision commit boundary.
+                            last_alive: Instant::now(),
+                        },
+                    );
+                    SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port }
+                }
+            }
+        })
+    }
+
+    /// Reconcile a proxy death against pending and committed supervision.
+    /// Pending reports latch once for the later apply completion; committed
+    /// reports evict and record once; repeats are inert.
+    pub fn observe_engine_death(&mut self, engine_id: EngineId, reason: DeathReason) -> EngineDeathDisposition {
+        if let Some(pending) = self.pending_engines.get_mut(&engine_id) {
+            return if pending.early_death.is_none() {
+                pending.early_death = Some(reason);
+                EngineDeathDisposition::PendingLatched
+            } else {
+                EngineDeathDisposition::PendingDuplicate
+            };
+        }
+        if let Some(entry) = self.engines.remove(&engine_id) {
+            self.record_death(engine_id.0.to_string(), entry.rpc_port, reason);
+            return EngineDeathDisposition::LiveRemoved;
+        }
+        EngineDeathDisposition::Unknown
+    }
 }
 
 #[runtime]
@@ -183,6 +277,7 @@ impl NativeActor for FleetServer {
         bootstrap_ingest(&mut store, &config.binary_bootstrap);
         Ok(FleetServerState {
             engines: HashMap::new(),
+            pending_engines: HashMap::new(),
             next_engine_seq: 1,
             mailer: ctx.mailer(),
             heartbeat: config.heartbeat_params(),
@@ -245,19 +340,27 @@ impl NativeActor for FleetServer {
     /// `engine_id` (`Some`) and records a `SpawnFailed` death in the
     /// recently-died ring, so a caller can correlate and reap; a
     /// pre-allocation failure (selector miss, port allocation) carries
-    /// `None`.
-    #[handler::single]
-    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) -> SpawnEngineResult {
+    /// `None`. Process preparation remains synchronous, but success is
+    /// replied only after the registry owner authoritatively activates the
+    /// staged proxy.
+    #[handler::manual]
+    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SpawnEngine) {
+        let mut continuation: TaskContinuation = ctx.continuation_to(ctx.reply_target());
+
         // Resolve the registry selector to stored content bytes before
         // any side effect, so a miss returns without reserving a port
         // or burning an engine id (ADR-0115, #1954).
         let Some(artifact) = resolve_selector(&mut state.store, &mail.selector) else {
             // Pre-allocation failure: no engine id minted yet, so there
             // is nothing to correlate or reap — `engine_id` is `None`.
-            return SpawnEngineResult::Err {
-                engine_id: None,
-                error: format!("no binary in the registry matched selector {:?}", mail.selector),
-            };
+            continuation.resolve(
+                ctx,
+                &SpawnEngineResult::Err {
+                    engine_id: None,
+                    error: format!("no binary in the registry matched selector {:?}", mail.selector),
+                },
+            );
+            return;
         };
 
         // Bounded re-fork (issue 2422): a freshly-forked substrate can
@@ -283,10 +386,14 @@ impl NativeActor for FleetServer {
                 Err(e) => {
                     // Still pre-allocation — no engine id minted this
                     // attempt, so no death record and `engine_id` is `None`.
-                    return SpawnEngineResult::Err {
-                        engine_id: None,
-                        error: format!("could not allocate an RPC port: {e}"),
-                    };
+                    continuation.resolve(
+                        ctx,
+                        &SpawnEngineResult::Err {
+                            engine_id: None,
+                            error: format!("could not allocate an RPC port: {e}"),
+                        },
+                    );
+                    return;
                 }
             };
 
@@ -307,7 +414,8 @@ impl NativeActor for FleetServer {
                 // was ever registered, so record a `SpawnFailed` death and
                 // carry the id back so a caller can correlate and reap.
                 let error = format!("materializing binary {} to {}: {e}", artifact.hash, exec_path.display());
-                return state.fail_spawn(engine_id, rpc_port, error);
+                continuation.resolve(ctx, &state.fail_spawn(engine_id, rpc_port, error));
+                return;
             }
 
             let mut command = Command::new(&exec_path);
@@ -338,17 +446,19 @@ impl NativeActor for FleetServer {
                 Ok(child) => child,
                 Err(e) => {
                     let error = format!("failed to spawn {}: {e}", exec_path.display());
-                    return state.fail_spawn(engine_id, rpc_port, error);
+                    continuation.resolve(ctx, &state.fail_spawn(engine_id, rpc_port, error));
+                    return;
                 }
             };
 
             let subname = engine_id.0.simple().to_string();
             let rpc_addr = format!("127.0.0.1:{rpc_port}");
 
-            // `finish()` runs `FleetProxy::init` on this thread: it
-            // dials the substrate (retrying while it comes up) and, on
-            // failure, kills the child it was handed — so a failed
-            // spawn never leaves an orphan for the cap to clean up.
+            // `continue_with` still runs `FleetProxy::init` on this thread:
+            // it dials the substrate (retrying while it comes up) and, on
+            // failure, kills the child it was handed. A successful init
+            // transfers the original caller obligation into the staged
+            // birth; only its later task completion may commit the engine.
             let result = ctx
                 .spawn_child::<FleetServer, FleetProxy>(
                     Subname::Named(&subname),
@@ -361,23 +471,17 @@ impl NativeActor for FleetServer {
                     },
                     (),
                 )
-                .finish();
+                .continue_with(continuation, FleetSpawnContinuation { engine_id, rpc_port });
 
-            return match result {
-                Ok(proxy_mailbox) => {
-                    state.engines.insert(
-                        engine_id,
-                        EngineEntry {
-                            proxy_mailbox,
-                            rpc_port,
-                            // Just connected = alive; the heartbeat
-                            // refreshes this on each confirmed Pong.
-                            last_alive: Instant::now(),
-                        },
-                    );
-                    SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port }
+            match result {
+                Ok(_) => {
+                    let replaced =
+                        state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
+                    debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
+                    return;
                 }
-                Err(e) => {
+                Err((e, returned_continuation)) => {
+                    continuation = returned_continuation;
                     last_error = format!("proxy failed to connect to the spawned substrate: {e:?}");
                     // Re-fork only the bind-stolen-port child-exited
                     // death, and only if attempts remain. Any other
@@ -394,15 +498,44 @@ impl NativeActor for FleetServer {
                         );
                         continue;
                     }
-                    state.fail_spawn(engine_id, rpc_port, last_error)
+                    continuation.resolve(ctx, &state.fail_spawn(engine_id, rpc_port, last_error));
+                    return;
                 }
-            };
+            }
         }
 
         // Only reached if `attempts` is 0, which `spawn_attempts()`
         // clamps away — keep an honest terminal `Err` rather than an
         // unreachable panic.
-        SpawnEngineResult::Err { engine_id: None, error: last_error }
+        continuation.resolve(ctx, &SpawnEngineResult::Err { engine_id: None, error: last_error });
+    }
+
+    /// Settle one staged proxy birth. Only an authoritative apply with no
+    /// earlier proxy death becomes publicly supervised. Owner rejection
+    /// arrives after prepared-state rollback has dropped `FleetProxyState`,
+    /// which kills and reaps its sole `Child` owner.
+    #[handler(task)]
+    fn on_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, FleetSpawnContinuation>,
+    ) {
+        let continuation = done.context().clone();
+        let engine_id = continuation.engine_id;
+        let outcome = match done.output() {
+            Ok(applied) => ProxySpawnOutcome::Applied(applied.mailbox_id),
+            Err(error) => ProxySpawnOutcome::Rejected(format!("proxy activation failed: {error:?}")),
+        };
+        let Some(reply) = state.settle_pending_spawn(continuation, outcome) else {
+            tracing::warn!(
+                target: "aether_substrate::fleet_server",
+                engine_id = %engine_id.0,
+                "stale proxy spawn completion ignored",
+            );
+            done.release_no_reply();
+            return;
+        };
+        done.resolve_value(ctx, &reply);
     }
 
     /// Terminate a supervised engine.
@@ -525,18 +658,24 @@ impl NativeActor for FleetServer {
             );
             return;
         };
-        if let Some(entry) = state.engines.remove(&EngineId(uuid)) {
-            tracing::info!(
-                target: "aether_substrate::fleet_server",
-                engine_id = %mail.engine_id,
-                reason = ?mail.reason,
-                "engine evicted: proxy reported death",
-            );
-            // Record inside the `is_some` guard so a duplicate `died`
-            // (e.g. one a concurrent terminate already dropped) adds no
-            // second record — one record per death (issue 1339/1906).
-            let rpc_port = entry.rpc_port;
-            state.record_death(mail.engine_id, rpc_port, mail.reason);
+        match state.observe_engine_death(EngineId(uuid), mail.reason.clone()) {
+            EngineDeathDisposition::PendingLatched => {
+                tracing::info!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %mail.engine_id,
+                    reason = ?mail.reason,
+                    "engine death latched while proxy activation is pending",
+                );
+            }
+            EngineDeathDisposition::LiveRemoved => {
+                tracing::info!(
+                    target: "aether_substrate::fleet_server",
+                    engine_id = %mail.engine_id,
+                    reason = ?mail.reason,
+                    "engine evicted: proxy reported death",
+                );
+            }
+            EngineDeathDisposition::PendingDuplicate | EngineDeathDisposition::Unknown => {}
         }
     }
 

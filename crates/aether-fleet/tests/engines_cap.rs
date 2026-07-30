@@ -14,9 +14,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_actor::Addressable;
-use aether_data::{Kind, mailbox_id_from_name};
-use aether_fleet::{FleetConfig, FleetServer};
+use aether_data::{Kind, MailboxId, Uuid, mailbox_id_from_name, mailbox_id_from_path};
+use aether_fleet::{FleetConfig, FleetProxy, FleetServer};
 use aether_kinds::descriptors;
+use aether_kinds::trace::Nanos;
 use aether_kinds::{
     BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
     TerminateEngineResult,
@@ -25,12 +26,13 @@ use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::Registry;
-use aether_substrate::mail::{Mail, Source, SourceAddr};
+use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
+use aether_substrate::mail::{Mail, MailId, MailRef, Source, SourceAddr};
 use aether_substrate::testing::TestChassis;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::process;
 use std::sync::{Arc, Mutex};
@@ -44,6 +46,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub struct ReplyCells {
     pub list: Arc<Mutex<Option<ListEnginesResult>>>,
     pub spawn: Arc<Mutex<Option<SpawnEngineResult>>>,
+    pub spawn_correlation: Arc<Mutex<Option<u64>>>,
     pub terminate: Arc<Mutex<Option<TerminateEngineResult>>>,
 }
 
@@ -78,7 +81,9 @@ impl NativeActor for ReplySink {
     }
 
     #[handler::single]
-    fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
+    fn on_spawn_result(&mut self, ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
+        *self.cells.spawn_correlation.lock().expect("test setup: spawn correlation cell is never poisoned") =
+            Some(ctx.reply_target().correlation_id);
         *self.cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
     }
 
@@ -88,7 +93,7 @@ impl NativeActor for ReplySink {
     }
 }
 
-fn boot(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
+fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -101,7 +106,7 @@ fn boot(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, Arc<Mailer>
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");
-    (chassis, mailer, cells)
+    (registry, chassis, mailer, cells)
 }
 
 /// Build the engines-cap config that isolates the hub binary store
@@ -140,12 +145,68 @@ fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, deadline: Duration, prob
         Mail::new(server, K::ID, request.encode_into_bytes(), 1)
             .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
     );
+    wait_for(deadline, probe)
+}
+
+fn wait_for<T>(deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
     let until = Instant::now() + deadline;
     loop {
         if let Some(value) = probe() {
             return value;
         }
         assert!(Instant::now() < until, "no reply within {deadline:?}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Inject one request with an explicit trace root. This pins the deferred
+/// reply's correlation and lets the test prove that the original settlement
+/// stays open through the later staged-spawn task turn.
+fn enqueue_with_root<K: Kind>(registry: &Registry, mailer: &Mailer, request: &K, root: MailId, correlation_id: u64) {
+    let server = registry.lookup(FleetServer::NAMESPACE).expect("fleet server mailbox registered");
+    let sink = registry.lookup(ReplySink::NAMESPACE).expect("reply sink mailbox registered");
+    mailer.record_sent(root, root, None, root.sender, server, K::ID);
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(server).expect("fleet server route exists") else {
+        panic!("fleet server route is an inbox");
+    };
+    handler.enqueue(OwnedDispatch::disarmed(
+        K::ID,
+        K::NAME.to_owned(),
+        None,
+        Source::with_correlation(SourceAddr::Component(sink), correlation_id),
+        MailRef::from(request.encode_into_bytes()),
+        1,
+        root,
+        root,
+        None,
+        Nanos(0),
+        0,
+        MailboxId(0),
+    ));
+}
+
+fn register_proxy_collision(registry: &Registry, engine_id: Uuid) -> MailboxId {
+    let canonical_name = format!("{}/{}:{}", FleetServer::NAMESPACE, FleetProxy::NAMESPACE, engine_id.simple());
+    let mailbox_id = mailbox_id_from_path(&canonical_name);
+    registry
+        .try_register_inbox_with_id(
+            mailbox_id,
+            &canonical_name,
+            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
+        )
+        .expect("install test-only proxy collision authority");
+    mailbox_id
+}
+
+fn assert_port_closes(rpc_port: u16) {
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
+            Err(_) => return,
+            Ok(stream) => drop(stream),
+        }
+        assert!(Instant::now() < deadline, "rolled-back proxy child still listens on {address}");
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -208,16 +269,29 @@ mod tests {
         let store_dir = env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
 
-        let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
+        let (registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
 
-        // Spawn: the cap assigns a port, forks the substrate, and the
-        // proxy retries the dial until the fresh process binds. Generous
-        // deadline — this covers a debug-build chassis cold start.
-        let spawn = drive(
+        // Spawn: the cap assigns a port, forks the substrate, and the proxy
+        // retries the dial until the fresh process binds. The explicit root
+        // proves the manual handler retains the original correlation and
+        // settlement through owner apply and the later task turn.
+        let correlation_id = 0x4068;
+        let root_mail = MailId::new(MailboxId(0x4068_5A6E), correlation_id);
+        let settled = chassis.settlement_registry().subscribe_settlement(root_mail);
+        enqueue_with_root(
+            &registry,
             &mailer,
             &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
-            Duration::from_secs(30),
-            || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
+            root_mail,
+            correlation_id,
+        );
+        let spawn = wait_for(Duration::from_secs(30), || {
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
+        });
+        assert_eq!(
+            cells.spawn_correlation.lock().expect("test setup: spawn correlation cell is never poisoned").take(),
+            Some(correlation_id),
+            "the deferred reply keeps the originating correlation",
         );
         let engine_id = match spawn {
             SpawnEngineResult::Ok { engine_id, rpc_port } => {
@@ -226,6 +300,9 @@ mod tests {
             }
             SpawnEngineResult::Err { error, .. } => panic!("spawn failed: {error}"),
         };
+        settled
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the original root settles after the staged reply is delivered");
         let mut reaper =
             EngineReaper { mailer: Arc::clone(&mailer), cells: cells.clone(), engine_id: Some(engine_id.clone()) };
 
@@ -259,6 +336,72 @@ mod tests {
             "terminated engine {engine_id} should be gone from ListEngines: {list_after:?}",
         );
 
+        let _ = fs::remove_dir_all(&store_dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Scheduler-backed authoritative rejection: `FleetProxy::init` connects
+    /// to a real headless child, but a test-only canonical route owns the
+    /// would-be proxy name when the registry owner applies the birth. The
+    /// prepared proxy state must roll back before the single id-bearing reply,
+    /// leaving no live row and no process still listening on its assigned port.
+    #[test]
+    fn owner_rejected_staged_proxy_replies_once_and_reaps_the_child() {
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let store_dir = env::temp_dir().join(format!("aether-engcap-rejected-store-{}-{nanos}", process::id()));
+        let root = env::temp_dir().join(format!("aether-engcap-rejected-engine-{}-{nanos}", process::id()));
+        let (registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
+
+        let expected_engine = Uuid::from_u128(1);
+        let collision = register_proxy_collision(&registry, expected_engine);
+        let correlation_id = 0x4068_C011;
+        let root_mail = MailId::new(MailboxId(0x4068_C011), correlation_id);
+        let settled = chassis.settlement_registry().subscribe_settlement(root_mail);
+        enqueue_with_root(
+            &registry,
+            &mailer,
+            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
+            root_mail,
+            correlation_id,
+        );
+
+        let rejected = wait_for(Duration::from_secs(30), || {
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
+        });
+        assert_eq!(
+            cells.spawn_correlation.lock().expect("test setup: spawn correlation cell is never poisoned").take(),
+            Some(correlation_id),
+        );
+        let engine_id = match rejected {
+            SpawnEngineResult::Err { engine_id: Some(engine_id), error } => {
+                assert_eq!(engine_id, expected_engine.to_string());
+                assert!(error.contains("proxy activation failed"), "unexpected apply error: {error}");
+                engine_id
+            }
+            other => panic!("owner collision must produce one id-bearing spawn failure, got {other:?}"),
+        };
+        settled.recv_timeout(Duration::from_secs(5)).expect("the rejected staged reply releases the original root");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").is_none(),
+            "owner rejection emits exactly one spawn result",
+        );
+
+        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+        });
+        assert!(list.engines.is_empty(), "a rejected reservation never becomes publicly live: {list:?}");
+        let record = list
+            .recently_died
+            .iter()
+            .find(|record| record.engine_id == engine_id)
+            .unwrap_or_else(|| panic!("rejected spawn {engine_id} leaves one death record: {list:?}"));
+        assert!(matches!(record.reason, DeathReason::SpawnFailed { .. }));
+        assert_port_closes(record.rpc_port);
+
+        registry.drop_mailbox(collision).expect("remove test-only proxy collision authority");
+        drop(chassis);
         let _ = fs::remove_dir_all(&store_dir);
         let _ = fs::remove_dir_all(&root);
     }
@@ -323,7 +466,7 @@ mod tests {
             proxy_connect_budget_secs: 2,
             ..FleetConfig::default()
         };
-        let (_chassis, mailer, cells) = boot(config);
+        let (_registry, _chassis, mailer, cells) = boot(config);
 
         // The spawn forks the stand-in, the proxy dials for the 2 s
         // budget, then the cap returns Err. Deadline comfortably over
