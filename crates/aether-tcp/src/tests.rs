@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     BindListener, BindListenerResult, Connect, ConnectResult, ListListeners, ListListenersResult, SessionClosed,
-    SessionData, TcpCapability, TcpNativeExt, TcpSessionActor, UnbindListener, UnbindListenerResult,
+    SessionData, TcpCapability, TcpListenerActor, TcpNativeExt, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
@@ -77,7 +77,7 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, cap_namespace: &str, mail: &K, sou
         MailRef::from(mail.encode_into_bytes()),
         1,
         root,
-        MailId::NONE,
+        root,
         None,
         Nanos(0),
         0,
@@ -127,6 +127,21 @@ fn framed_body(body: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(&body_len.to_le_bytes());
     frame.extend_from_slice(body);
     frame
+}
+
+fn available_loopback_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a loopback address");
+    let addr = listener.local_addr().expect("reserved loopback address");
+    drop(listener);
+    addr
+}
+
+fn register_route_collision(registry: &Registry, canonical_name: &str) -> MailboxId {
+    let id = mailbox_id_from_path(canonical_name);
+    registry
+        .try_register_inbox_with_id(id, canonical_name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
+        .expect("install the test-only collision authority");
+    id
 }
 
 /// Push an encoded mail (via the kind's `encode_into_bytes`) at
@@ -206,6 +221,216 @@ fn bind_then_list_then_unbind_roundtrip() {
     let list_reply: ListListenersResult =
         drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
     assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener");
+}
+
+#[test]
+fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
+    const LISTENER_NAME: &str = "held-bind";
+    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let session = SessionToken(Uuid::from_u128(0x4066_B1AD));
+    let correlation_id = 0x4066;
+    let root = MailId::new(MailboxId(0x4066_B1AD), correlation_id);
+    let settled = chassis.settlement_registry().subscribe_settlement(root);
+    let cap_id = registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered");
+    mailer.record_sent(root, root, None, root.sender, cap_id, BindListener::ID);
+    enqueue(
+        &registry,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
+        Source::with_correlation(SourceAddr::Session(session), correlation_id),
+        root,
+    );
+
+    let event = rx.recv_timeout(Duration::from_secs(2)).expect("staged bind reply arrives");
+    let EgressEvent::ToSession {
+        session: reply_session, kind_name, payload, correlation_id: reply_correlation_id, ..
+    } = event
+    else {
+        panic!("expected staged bind reply to the originating session");
+    };
+    assert_eq!(reply_session, session);
+    assert_eq!(reply_correlation_id, correlation_id);
+    assert_eq!(kind_name, BindListenerResult::NAME);
+    let BindListenerResult::Ok { listener_name, local_port, .. } =
+        BindListenerResult::decode_from_bytes(&payload).expect("decode staged BindListenerResult")
+    else {
+        panic!("staged bind should succeed");
+    };
+    assert_eq!(listener_name, LISTENER_NAME);
+    settled.recv_timeout(Duration::from_secs(2)).expect("the original root settles after the staged reply");
+
+    let listed: ListListenersResult =
+        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    assert!(
+        listed.listeners.iter().any(|entry| entry.name == LISTENER_NAME && entry.port == local_port),
+        "the success reply is sent only after monitor installation and supervisor-map commit",
+    );
+    let unbound: UnbindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &UnbindListener { listener_name: LISTENER_NAME.into() },
+    );
+    assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
+}
+
+#[test]
+fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() {
+    const LISTENER_NAME: &str = "owner-rejected-listener";
+    let socket_addr = available_loopback_addr();
+    let canonical_name = format!("{}/{}:{LISTENER_NAME}", TcpCapability::NAMESPACE, TcpListenerActor::NAMESPACE);
+    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let collision_id = register_route_collision(&registry, &canonical_name);
+
+    let rejected: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+    );
+    assert!(
+        matches!(rejected, BindListenerResult::Err { ref addr, ref reason }
+            if addr == &socket_addr.to_string() && reason.contains("spawn failed")),
+        "owner rejection returns one typed bind failure: {rejected:?}",
+    );
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
+        "authoritative rejection emits exactly one bind result",
+    );
+
+    let rebound =
+        TcpListener::bind(socket_addr).expect("the prepared listener socket is dropped before failure completion");
+    drop(rebound);
+    registry.drop_mailbox(collision_id).expect("remove test-only collision route");
+
+    let retried: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+    );
+    assert!(
+        matches!(retried, BindListenerResult::Ok { ref listener_name, local_port, .. }
+            if listener_name == LISTENER_NAME && local_port == socket_addr.port()),
+        "the rejected parent-local reservation is released for retry: {retried:?}",
+    );
+
+    let unbound: UnbindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &UnbindListener { listener_name: LISTENER_NAME.into() },
+    );
+    assert!(matches!(unbound, UnbindListenerResult::Ok { .. }), "retry listener shuts down cleanly");
+}
+
+#[test]
+fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
+    const LISTENER_NAME: &str = "duplicate-staged-listener";
+    let reservation_alpha = TcpListener::bind("127.0.0.1:0").expect("reserve alpha duplicate-name socket");
+    let reservation_beta = TcpListener::bind("127.0.0.1:0").expect("reserve beta duplicate-name socket");
+    let addr_alpha = reservation_alpha.local_addr().expect("alpha duplicate-name address");
+    let addr_beta = reservation_beta.local_addr().expect("beta duplicate-name address");
+    drop(reservation_alpha);
+    drop(reservation_beta);
+    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let session_alpha = SessionToken(Uuid::from_u128(0x4066_DA1A));
+    let session_beta = SessionToken(Uuid::from_u128(0x4066_DB7A));
+
+    enqueue(
+        &registry,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: addr_alpha.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+        Source::with_correlation(SourceAddr::Session(session_alpha), 1),
+        MailId::NONE,
+    );
+    enqueue(
+        &registry,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: addr_beta.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+        Source::with_correlation(SourceAddr::Session(session_beta), 2),
+        MailId::NONE,
+    );
+
+    let mut replies = Vec::new();
+    for _ in 0..2 {
+        let EgressEvent::ToSession { session, kind_name, payload, .. } =
+            rx.recv_timeout(Duration::from_secs(2)).expect("both duplicate-name callers receive a result")
+        else {
+            panic!("expected duplicate bind reply to a session");
+        };
+        assert_eq!(kind_name, BindListenerResult::NAME);
+        replies.push((session, BindListenerResult::decode_from_bytes(&payload).expect("decode duplicate bind result")));
+    }
+    assert!(replies.iter().any(|(session, _)| *session == session_alpha), "alpha receives its own result");
+    assert!(replies.iter().any(|(session, _)| *session == session_beta), "beta receives its own result");
+
+    let successes: Vec<_> = replies
+        .iter()
+        .filter_map(|(_, result)| match result {
+            BindListenerResult::Ok { local_port, .. } => Some(*local_port),
+            BindListenerResult::Err { .. } => None,
+        })
+        .collect();
+    let failures: Vec<_> = replies
+        .iter()
+        .filter_map(|(_, result)| match result {
+            BindListenerResult::Err { addr, reason } => Some((addr.clone(), reason.clone())),
+            BindListenerResult::Ok { .. } => None,
+        })
+        .collect();
+    assert_eq!(successes.len(), 1, "one staged child owns the parent-local name: {replies:?}");
+    assert_eq!(failures.len(), 1, "the duplicate staged child receives one rejection: {replies:?}");
+    assert!(failures[0].1.contains("spawn failed"), "the duplicate is rejected by staged spawn authority");
+
+    let failed_addr = failures[0].0.parse::<SocketAddr>().expect("failed bind address remains parseable");
+    let rebound = TcpListener::bind(failed_addr).expect("the rejected duplicate's socket is closed before its reply");
+    drop(rebound);
+    let live_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), successes[0]);
+    assert!(TcpListener::bind(live_addr).is_err(), "the accepted listener retains its socket");
+
+    let unbound: UnbindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &UnbindListener { listener_name: LISTENER_NAME.into() },
+    );
+    assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
+fn staged_connect_rejection_closes_the_stream_and_replies_once() {
+    const SESSION_NAME: &str = "owner-rejected-session";
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind rejection probe server");
+    let socket_addr = listener.local_addr().expect("rejection probe address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept the staged outbound stream");
+        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("bound rejection wait");
+        let mut byte = [0_u8; 1];
+        stream.read(&mut byte).expect("rejected prepared session closes its socket")
+    });
+
+    let canonical_name = format!("{}/{}:{SESSION_NAME}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
+    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let _collision_id = register_route_collision(&registry, &canonical_name);
+    let rejected: ConnectResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &Connect { addr: socket_addr.to_string(), name: Some(SESSION_NAME.into()), consumer: None },
+    );
+
+    assert!(
+        matches!(rejected, ConnectResult::Err { ref addr, ref reason }
+            if addr == &socket_addr.to_string() && reason.contains("spawn failed")),
+        "owner rejection returns one typed connect failure: {rejected:?}",
+    );
+    assert_eq!(server.join().expect("rejection server completes"), 0, "the peer observes EOF after rollback");
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
+        "authoritative rejection emits exactly one connect result",
+    );
 }
 
 /// Issue 3051: asynchronous unbind retains the originating settlement root
@@ -415,24 +640,31 @@ fn concurrent_connects_reply_to_their_own_origins() {
     let server_alpha = thread::spawn(move || listener_alpha.accept().expect("accept alpha connect").1);
     let server_beta = thread::spawn(move || listener_beta.accept().expect("accept beta connect").1);
 
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
     let session_alpha = SessionToken(Uuid::from_u128(0xA11A));
     let session_beta = SessionToken(Uuid::from_u128(0xB37A));
     let correlation_alpha = 0xA11A;
     let correlation_beta = 0xB37A;
+    let root_alpha = MailId::new(MailboxId(0xA11A), correlation_alpha);
+    let root_beta = MailId::new(MailboxId(0xB37A), correlation_beta);
+    let settled_alpha = chassis.settlement_registry().subscribe_settlement(root_alpha);
+    let settled_beta = chassis.settlement_registry().subscribe_settlement(root_beta);
+    let cap_id = registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered");
+    mailer.record_sent(root_alpha, root_alpha, None, root_alpha.sender, cap_id, Connect::ID);
+    mailer.record_sent(root_beta, root_beta, None, root_beta.sender, cap_id, Connect::ID);
     enqueue(
         &registry,
         TcpCapability::NAMESPACE,
         &Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None },
         Source::with_correlation(SourceAddr::Session(session_alpha), correlation_alpha),
-        MailId::new(MailboxId(0xA11A), correlation_alpha),
+        root_alpha,
     );
     enqueue(
         &registry,
         TcpCapability::NAMESPACE,
         &Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None },
         Source::with_correlation(SourceAddr::Session(session_beta), correlation_beta),
-        MailId::new(MailboxId(0xB37A), correlation_beta),
+        root_beta,
     );
 
     let mut saw_alpha = false;
@@ -479,6 +711,12 @@ fn concurrent_connects_reply_to_their_own_origins() {
         }
     }
     assert!(saw_alpha && saw_beta, "each caller receives its own reply");
+    settled_alpha.recv_timeout(Duration::from_secs(2)).expect("alpha settles after its staged reply");
+    settled_beta.recv_timeout(Duration::from_secs(2)).expect("beta settles after its staged reply");
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
+        "each staged connect emits exactly one result",
+    );
     assert!(server_alpha.join().expect("alpha server thread completes").ip().is_loopback());
     assert!(server_beta.join().expect("beta server thread completes").ip().is_loopback());
 }
