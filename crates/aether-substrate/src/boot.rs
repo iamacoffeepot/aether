@@ -140,6 +140,7 @@ impl SubstrateBoot {
         // dispatch loop behind it, so without the bracket the
         // chain's `in_flight` would leak.
         registry.register_inline(
+            &authority,
             AETHER_DIAGNOSTICS,
             Arc::new(|dispatch: MailDispatch<'_>| {
                 let kind_name = dispatch.kind_name;
@@ -194,7 +195,7 @@ mod tests {
         let boot = SubstrateBoot::build().expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
-        boot.registry.register_inbox("test_chassis_sink", Arc::new(|_dispatch| {}));
+        boot.registry.register_inbox(&boot.authority, "test_chassis_sink", Arc::new(|_dispatch| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `RpcServerCapability`
         // themselves through their `Builder`.

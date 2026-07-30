@@ -236,6 +236,15 @@ impl Spawner {
         }
     }
 
+    /// Borrow the `Spawner`'s [`BootAuthority`] — the proof the eager
+    /// commit half already holds, lent to the sibling embedder-boot path
+    /// that claims a relay mailbox outside a live `ChassisCtx`
+    /// (`PassiveChassis::boot_pumped_actor`, ADR-0161 slice R4). Crate-private,
+    /// so lending it never widens who can mint one.
+    pub(crate) fn boot_authority(&self) -> &BootAuthority {
+        &self.authority
+    }
+
     /// Borrow the chassis worker pool's wake sink (ready-queue sender +
     /// spin/park coordinator). The Pooled instanced spawn branch clones
     /// it into each slot's [`WakeHandle`].
@@ -1418,6 +1427,7 @@ mod tests {
     fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, crossbeam_channel::Receiver<KindId>) {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let id = registry.register_inline(
+            &boot_authority(),
             name,
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 let _ = sender.send(dispatch.kind);

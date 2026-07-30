@@ -276,7 +276,7 @@ fn standard_inbox_handler_relay_does_not_panic() {
 #[test]
 fn register_and_lookup_closure_mailbox() {
     let r = Registry::new();
-    let id = r.register_inbox("physics", noop_handler());
+    let id = r.register_inbox(&auth(), "physics", noop_handler());
     assert_eq!(id, MailboxId::from_name("physics"));
     assert_eq!(r.lookup("physics"), Some(id));
     assert!(matches!(r.entry(id), Some(MailboxEntry::Inbox { .. })));
@@ -309,10 +309,10 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
     let initial_inventory = r.inventory();
     subscription.acknowledge(initial_inventory.mailbox_generation, initial_inventory.kind_generation);
-    let kind = r.register_kind("test.seize.kind");
+    let kind = r.register_kind(&auth(), "test.seize.kind");
 
     // Closure-backed inbox: no slot, so no seize handle ever resolves.
-    let closure_id = r.register_inbox("closure", noop_handler());
+    let closure_id = r.register_inbox(&auth(), "closure", noop_handler());
     assert!(
         r.route_lookup(kind, closure_id).seize_handle().is_none(),
         "a closure-backed inbox exposes no seize handle"
@@ -320,7 +320,7 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
 
     // A `Pooled`-shaped inbox: empty before the slot is wired, then a
     // live handle after `install_seize_handle`.
-    let pooled_id = r.register_inbox("pooled", noop_handler());
+    let pooled_id = r.register_inbox(&auth(), "pooled", noop_handler());
     let inventory_generation = r.mailbox_generation();
     wakes.recv_timeout(Duration::from_millis(100)).expect("live and kind publications coalesce");
     let published = r.inventory();
@@ -359,8 +359,8 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
         "a rejected seize installation must not publish a route generation"
     );
 
-    r.register_inbox("reuse-one", noop_handler());
-    r.register_inbox("reuse-two", noop_handler());
+    r.register_inbox(&auth(), "reuse-one", noop_handler());
+    r.register_inbox(&auth(), "reuse-two", noop_handler());
     assert!(
         r.route_lookup(kind, pooled_id).seize_handle().is_some(),
         "the installed handle survives both alternating buffers being reused"
@@ -374,24 +374,24 @@ fn route_generations_advance_only_for_successful_mutations() {
     let kind = KindId(0);
     let initial = r.route_lookup(kind, MailboxId::NONE).generation();
 
-    assert!(r.try_register_inbox("aether.chassis", noop_handler()).is_err());
+    assert!(r.try_register_inbox(&auth(), "aether.chassis", noop_handler()).is_err());
     assert_eq!(r.route_lookup(kind, MailboxId::NONE).generation(), initial);
 
-    let id = r.try_register_inbox("generation", noop_handler()).expect("fresh route");
+    let id = r.try_register_inbox(&auth(), "generation", noop_handler()).expect("fresh route");
     let inserted = r.route_lookup(kind, id).generation();
     assert!(inserted > initial);
 
-    assert!(r.try_register_inbox("generation", noop_handler()).is_err());
+    assert!(r.try_register_inbox(&auth(), "generation", noop_handler()).is_err());
     assert_eq!(r.route_lookup(kind, id).generation(), inserted);
 
-    r.drop_mailbox(id).expect("live route drops");
+    r.drop_mailbox(&auth(), id).expect("live route drops");
     let dropped = r.route_lookup(kind, id).generation();
     assert!(dropped > inserted);
 
-    assert!(r.drop_mailbox(id).is_err());
+    assert!(r.drop_mailbox(&auth(), id).is_err());
     assert_eq!(r.route_lookup(kind, id).generation(), dropped);
 
-    r.try_register_inbox("generation", noop_handler()).expect("dropped route re-registers");
+    r.try_register_inbox(&auth(), "generation", noop_handler()).expect("dropped route re-registers");
     let reregistered = r.route_lookup(kind, id).generation();
     assert!(reregistered > dropped);
 
@@ -410,6 +410,7 @@ fn closure_handler_runs_on_call() {
     let counter = Arc::new(AtomicU32::new(0));
     let c2 = Arc::clone(&counter);
     let id = r.register_inbox(
+        &auth(),
         "heartbeat",
         Arc::new(move |dispatch: OwnedDispatch| {
             c2.fetch_add(dispatch.count, Ordering::SeqCst);
@@ -440,9 +441,9 @@ fn closure_handler_runs_on_call() {
 #[test]
 fn mailbox_ids_are_name_derived() {
     let r = Registry::new();
-    let a = r.register_inbox("a", noop_handler());
-    let b = r.register_inbox("b", noop_handler());
-    let c = r.register_inbox("c", noop_handler());
+    let a = r.register_inbox(&auth(), "a", noop_handler());
+    let b = r.register_inbox(&auth(), "b", noop_handler());
+    let c = r.register_inbox(&auth(), "c", noop_handler());
     assert_eq!(a, MailboxId::from_name("a"));
     assert_eq!(b, MailboxId::from_name("b"));
     assert_eq!(c, MailboxId::from_name("c"));
@@ -457,8 +458,8 @@ fn mailbox_ids_are_name_derived() {
 #[should_panic(expected = "mailbox name already registered")]
 fn duplicate_name_panics() {
     let r = Registry::new();
-    r.register_inbox("x", noop_handler());
-    r.register_inbox("x", noop_handler());
+    r.register_inbox(&auth(), "x", noop_handler());
+    r.register_inbox(&auth(), "x", noop_handler());
 }
 
 #[test]
@@ -514,8 +515,8 @@ fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
 #[test]
 fn mailbox_name_reverse_lookup() {
     let r = Registry::new();
-    let a = r.register_inbox("physics", noop_handler());
-    let b = r.register_inbox("graphics", noop_handler());
+    let a = r.register_inbox(&auth(), "physics", noop_handler());
+    let b = r.register_inbox(&auth(), "graphics", noop_handler());
     assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
     assert_eq!(r.mailbox_name(b).as_deref(), Some("graphics"));
     assert!(r.mailbox_name(MailboxId(999)).is_none());
@@ -524,9 +525,9 @@ fn mailbox_name_reverse_lookup() {
 #[test]
 fn kind_ids_are_derived_from_name_and_schema() {
     let r = Registry::new();
-    let a = r.register_kind("aether.tick");
-    let b = r.register_kind("aether.key");
-    let c = r.register_kind("hello.npc_health");
+    let a = r.register_kind(&auth(), "aether.tick");
+    let b = r.register_kind(&auth(), "aether.key");
+    let c = r.register_kind(&auth(), "hello.npc_health");
     // Ids are the fnv1a hash of canonical (name, schema) bytes —
     // distinct names under the same default schema must produce
     // distinct ids, and matching the expected const derivation
@@ -540,12 +541,12 @@ fn kind_ids_are_derived_from_name_and_schema() {
 #[test]
 fn kind_registration_is_idempotent() {
     let r = Registry::new();
-    let first = r.register_kind("aether.tick");
-    let second = r.register_kind("aether.tick");
+    let first = r.register_kind(&auth(), "aether.tick");
+    let second = r.register_kind(&auth(), "aether.tick");
     assert_eq!(first, second);
     // Different name produces a different id — the id is a pure
     // function of the input, not an allocation order.
-    assert_ne!(r.register_kind("aether.key"), first);
+    assert_ne!(r.register_kind(&auth(), "aether.key"), first);
 }
 
 #[test]
@@ -553,14 +554,14 @@ fn kind_publication_advances_only_for_new_definitions() {
     let r = Registry::new();
     assert_eq!(r.kind_generation(), 0);
 
-    let first = r.register_kind("aether.tick");
+    let first = r.register_kind(&auth(), "aether.tick");
     assert_eq!(r.kind_generation(), 1);
     assert_eq!(r.kind_id("aether.tick"), Some(first));
 
-    assert_eq!(r.register_kind("aether.tick"), first);
+    assert_eq!(r.register_kind(&auth(), "aether.tick"), first);
     assert_eq!(r.kind_generation(), 1, "idempotent registration must not fabricate a generation");
 
-    let second = r.register_kind("aether.key");
+    let second = r.register_kind(&auth(), "aether.key");
     assert_eq!(r.kind_generation(), 2);
     assert_eq!(r.kind_name(second).as_deref(), Some("aether.key"));
     assert_eq!(r.list_kind_descriptors().len(), 2);
@@ -569,7 +570,7 @@ fn kind_publication_advances_only_for_new_definitions() {
 #[test]
 fn kind_id_lookup() {
     let r = Registry::new();
-    let id = r.register_kind("aether.tick");
+    let id = r.register_kind(&auth(), "aether.tick");
     assert_eq!(r.kind_id("aether.tick"), Some(id));
     assert!(r.kind_id("absent").is_none());
 }
@@ -577,8 +578,8 @@ fn kind_id_lookup() {
 #[test]
 fn kind_name_reverse_lookup() {
     let r = Registry::new();
-    let a = r.register_kind("aether.tick");
-    let b = r.register_kind("aether.key");
+    let a = r.register_kind(&auth(), "aether.tick");
+    let b = r.register_kind(&auth(), "aether.key");
     assert_eq!(r.kind_name(a).as_deref(), Some("aether.tick"));
     assert_eq!(r.kind_name(b).as_deref(), Some("aether.key"));
     assert!(r.kind_name(KindId(999)).is_none());
@@ -587,9 +588,10 @@ fn kind_name_reverse_lookup() {
 #[test]
 fn repeated_routed_inbox_mail_shares_registered_kind_name_and_preserves_metadata() {
     let registry = Arc::new(Registry::new());
-    let kind = registry.register_kind("aether.shared.kind");
+    let kind = registry.register_kind(&auth(), "aether.shared.kind");
     let (tx, rx) = mpsc::channel();
     let recipient = registry.register_inbox(
+        &auth(),
         "shared-kind-recipient",
         Arc::new(move |dispatch: OwnedDispatch| {
             let _ = tx.send(dispatch);
@@ -716,7 +718,7 @@ fn register_kind_with_descriptor_distinct_schemas_take_distinct_ids() {
 #[test]
 fn register_kind_defaults_to_bytes() {
     let r = Registry::new();
-    let id = r.register_kind("aether.bar");
+    let id = r.register_kind(&auth(), "aether.bar");
     let stored = r.kind_descriptor(id).expect("descriptor present");
     assert_eq!(stored.schema, SchemaType::Bytes);
 }
@@ -733,7 +735,7 @@ fn name_only_and_with_descriptor_resolve_to_distinct_ids() {
     // `register_kind_with_descriptor` exclusively.
     let r = Registry::new();
     let real = r.register_kind_with_descriptor(&auth(), cast_struct_desc("aether.foo")).expect("real schema");
-    let bytes = r.register_kind("aether.foo");
+    let bytes = r.register_kind(&auth(), "aether.foo");
     assert_ne!(real, bytes);
     assert!(matches!(r.kind_descriptor(real).unwrap().schema, SchemaType::Struct { .. }));
     assert!(matches!(r.kind_descriptor(bytes).unwrap().schema, SchemaType::Bytes,));
@@ -742,8 +744,8 @@ fn name_only_and_with_descriptor_resolve_to_distinct_ids() {
 #[test]
 fn try_register_inbox_is_non_panicking_on_collision() {
     let r = Registry::new();
-    let first = r.try_register_inbox("loaded", noop_handler()).expect("fresh name");
-    let err = r.try_register_inbox("loaded", noop_handler()).expect_err("collision must not panic");
+    let first = r.try_register_inbox(&auth(), "loaded", noop_handler()).expect("fresh name");
+    let err = r.try_register_inbox(&auth(), "loaded", noop_handler()).expect_err("collision must not panic");
     assert_eq!(err.name, "loaded");
     assert_eq!(r.lookup("loaded"), Some(first));
     // Entries count unchanged after the failed second attempt.
@@ -758,7 +760,7 @@ fn try_register_inbox_is_non_panicking_on_collision() {
 #[test]
 fn try_register_inbox_rejects_reserved_chassis_name() {
     let r = Registry::new();
-    let err = r.try_register_inbox("aether.chassis", noop_handler()).expect_err("reserved name must reject");
+    let err = r.try_register_inbox(&auth(), "aether.chassis", noop_handler()).expect_err("reserved name must reject");
     assert_eq!(err.name, "aether.chassis");
     assert_eq!(r.len(), 0);
 }
@@ -766,8 +768,8 @@ fn try_register_inbox_rejects_reserved_chassis_name() {
 #[test]
 fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     let r = Registry::new();
-    let id = r.try_register_inbox("loaded", noop_handler()).unwrap();
-    let name = r.drop_mailbox(id).expect("drop");
+    let id = r.try_register_inbox(&auth(), "loaded", noop_handler()).unwrap();
+    let name = r.drop_mailbox(&auth(), id).expect("drop");
     assert_eq!(name, "loaded");
     assert!(r.lookup("loaded").is_none(), "name should be reusable");
     assert!(matches!(r.entry(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
@@ -778,7 +780,7 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     // Under ADR-0029 the id is a function of the name, so a
     // re-register produces the *same* id and flips the entry back
     // to `Component`.
-    let reloaded = r.try_register_inbox("loaded", noop_handler()).unwrap();
+    let reloaded = r.try_register_inbox(&auth(), "loaded", noop_handler()).unwrap();
     assert_eq!(reloaded, id);
     assert_eq!(r.lookup("loaded"), Some(reloaded));
     assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox { .. })));
@@ -791,10 +793,10 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
 #[test]
 fn drop_mailbox_rejects_unknown_and_repeat() {
     let r = Registry::new();
-    assert!(matches!(r.drop_mailbox(MailboxId(999)), Err(DropError::UnknownId(_))));
-    let c = r.try_register_inbox("x", noop_handler()).unwrap();
-    r.drop_mailbox(c).unwrap();
-    assert!(matches!(r.drop_mailbox(c), Err(DropError::AlreadyDropped(_))));
+    assert!(matches!(r.drop_mailbox(&auth(), MailboxId(999)), Err(DropError::UnknownId(_))));
+    let c = r.try_register_inbox(&auth(), "x", noop_handler()).unwrap();
+    r.drop_mailbox(&auth(), c).unwrap();
+    assert!(matches!(r.drop_mailbox(&auth(), c), Err(DropError::AlreadyDropped(_))));
 }
 
 /// Issue iamacoffeepot/aether#730: `list_mailbox_descriptors`
@@ -805,9 +807,9 @@ fn drop_mailbox_rejects_unknown_and_repeat() {
 #[test]
 fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
     let r = Registry::new();
-    r.register_inbox("aether.input", noop_handler());
-    r.register_inbox("aether.embedded:cam", noop_handler());
-    r.register_inbox("user_thing", noop_handler());
+    r.register_inbox(&auth(), "aether.input", noop_handler());
+    r.register_inbox(&auth(), "aether.embedded:cam", noop_handler());
+    r.register_inbox(&auth(), "user_thing", noop_handler());
 
     let snap = r.list_mailbox_descriptors();
     // Four entries: 3 registered + 1 synthetic chassis sentinel.
@@ -846,7 +848,7 @@ fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
 #[test]
 fn list_mailbox_descriptors_ids_match_name_hashes() {
     let r = Registry::new();
-    let id = r.register_inbox("aether.audio", noop_handler());
+    let id = r.register_inbox(&auth(), "aether.audio", noop_handler());
     let entry = r.list_mailbox_descriptors().into_iter().find(|d| d.name == "aether.audio").expect("audio entry");
     assert_eq!(entry.id, id);
     assert_eq!(entry.id, MailboxId::from_name("aether.audio"));
@@ -866,6 +868,7 @@ fn inventory_subscription_fixture() -> (Arc<Registry>, Arc<Mailer>, crossbeam_ch
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let (sender, receiver) = crossbeam_channel::unbounded();
     let target = registry.register_inbox(
+        &auth(),
         "inventory-subscriber",
         Arc::new(move |dispatch: OwnedDispatch| {
             sender.send(dispatch.kind).expect("inventory test receiver stays connected");
@@ -886,8 +889,8 @@ fn inventory_wake_follows_coherent_publication_and_coalesces() {
     let initial = registry.inventory();
     subscription.acknowledge(initial.mailbox_generation, initial.kind_generation);
 
-    registry.register_inbox("aether.input", noop_handler());
-    registry.register_kind("aether.inventory.test");
+    registry.register_inbox(&auth(), "aether.input", noop_handler());
+    registry.register_kind(&auth(), "aether.inventory.test");
 
     assert_eq!(
         wakes.recv_timeout(Duration::from_millis(100)).expect("published inventory emits one wake"),
@@ -909,8 +912,8 @@ fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial wake");
     let observed = registry.inventory();
 
-    registry.register_inbox("aether.input", noop_handler());
-    let kind = registry.register_kind("aether.inventory.race");
+    registry.register_inbox(&auth(), "aether.input", noop_handler());
+    let kind = registry.register_kind(&auth(), "aether.inventory.race");
     subscription.acknowledge(observed.mailbox_generation, observed.kind_generation);
 
     wakes.recv_timeout(Duration::from_millis(100)).expect("stale pair re-arms a wake");
@@ -919,8 +922,12 @@ fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
     assert_eq!(latest.kind_generation, observed.kind_generation + 1);
     subscription.acknowledge(latest.mailbox_generation, latest.kind_generation);
 
-    registry.try_register_inbox("aether.input", noop_handler()).expect_err("conflict is observable");
-    assert_eq!(registry.register_kind("aether.inventory.race"), kind, "matching kind registration is idempotent");
+    registry.try_register_inbox(&auth(), "aether.input", noop_handler()).expect_err("conflict is observable");
+    assert_eq!(
+        registry.register_kind(&auth(), "aether.inventory.race"),
+        kind,
+        "matching kind registration is idempotent"
+    );
     assert_eq!(
         (registry.inventory().mailbox_generation, registry.inventory().kind_generation),
         (latest.mailbox_generation, latest.kind_generation),
@@ -1328,8 +1335,8 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let first_handler = noop_handler();
-    let first_parent = registry.register_inbox("alias-parent-first", Arc::clone(&first_handler));
-    let second_parent = registry.register_inbox("alias-parent-second", noop_handler());
+    let first_parent = registry.register_inbox(&auth(), "alias-parent-first", Arc::clone(&first_handler));
+    let second_parent = registry.register_inbox(&auth(), "alias-parent-second", noop_handler());
     let owner = RegistryOwnerLease::attach(
         auth(),
         &registry,
@@ -1393,7 +1400,7 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
     let completion = registry.submit(EffectBatch::new(vec![effect])).unwrap();
     owner.run_once();
     let token = starting_token(&completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
-    registry.register_inbox("prepared-cancel-conflict", noop_handler());
+    registry.register_inbox(&auth(), "prepared-cancel-conflict", noop_handler());
     let rejected = registry
         .submit(EffectBatch::new(vec![
             RegistryEffect::CancelStarting { id, token },
@@ -1601,7 +1608,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     assert_eq!(registry.mailbox_generation(), initial_mailbox_generation, "Starting is not public inventory");
     assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "Starting emits no public inventory event");
     assert!(registry.route_generation() > initial_route_generation, "Starting advances only the keyed generation");
-    assert!(matches!(registry.drop_mailbox(id), Err(DropError::UnknownId(found)) if found == id));
+    assert!(matches!(registry.drop_mailbox(&auth(), id), Err(DropError::UnknownId(found)) if found == id));
     assert!(!registry.remove_closure(&auth(), id), "ordinary removal does not treat Starting as live");
     let slot: Arc<dyn Drainable> = Arc::new(TestSlot);
     let handle = SeizeHandle::new(Arc::new(SlotState::new()), Arc::downgrade(&slot));
@@ -1619,7 +1626,7 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    registry.register_inbox("occupied", noop_handler());
+    registry.register_inbox(&auth(), "occupied", noop_handler());
     let before_rollback = registry.route_generation();
     let rolled_back = registry
         .submit(EffectBatch::new(vec![
@@ -1756,7 +1763,7 @@ fn owner_admission_catches_up_after_transitional_direct_publication() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    registry.register_inbox("direct-generation-advance", noop_handler());
+    registry.register_inbox(&auth(), "direct-generation-advance", noop_handler());
     let unknown = MailboxId::from_name("unknown-after-direct-generation-advance");
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let pushing = Arc::clone(&mailer);
@@ -1826,6 +1833,7 @@ fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
     let wakes = Arc::new(AtomicU32::new(0));
     let wakes_for_handler = Arc::clone(&wakes);
     let target = registry.register_inline(
+        &auth(),
         "inline-inventory-subscriber",
         Arc::new(move |_dispatch: MailDispatch<'_>| {
             wakes_for_handler.fetch_add(1, Ordering::SeqCst);
@@ -1865,6 +1873,7 @@ fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
     let (entered_sender, entered_receiver) = crossbeam_channel::bounded(1);
     let (release_sender, release_receiver) = crossbeam_channel::bounded(1);
     let target = registry.register_inline(
+        &auth(),
         "relay-close-order",
         Arc::new(move |dispatch: MailDispatch<'_>| {
             let value = dispatch.payload[0];
@@ -2012,6 +2021,7 @@ fn owner_completion_reentry_requeues_and_preserves_depth_metric() {
     let (reentered_tx, reentered_rx) = mpsc::channel();
     let registry_for_wake = Arc::clone(&registry);
     let actor_mailbox = registry.register_inbox(
+        &auth(),
         "test.registry.owner-completion-reentry",
         Arc::new(move |dispatch: OwnedDispatch| {
             dispatch.discharge();
@@ -2063,6 +2073,7 @@ fn relay_admits_owner_committed_continuations_past_capacity_in_order() {
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let delivered_for_handler = Arc::clone(&delivered);
     let target = registry.register_inline(
+        &auth(),
         "relay-past-capacity",
         Arc::new(move |dispatch: MailDispatch<'_>| {
             delivered_for_handler.lock().unwrap().push(dispatch.payload[0]);
@@ -2212,7 +2223,7 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
     let direct_barrier = Arc::clone(&barrier);
     let direct = thread::spawn(move || {
         direct_barrier.wait();
-        direct_registry.try_register_inbox("shared-writer", noop_handler())
+        direct_registry.try_register_inbox(&auth(), "shared-writer", noop_handler())
     });
     barrier.wait();
     owner.run_once();
@@ -2256,6 +2267,7 @@ fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
     let actor_mailbox = registry.register_inbox(
+        &auth(),
         "test.registry.deferred-owner-close",
         Arc::new(move |dispatch: OwnedDispatch| {
             dispatch.discharge();
@@ -2330,9 +2342,9 @@ fn registration_through_shared_arc() {
     // mailboxes and kinds from a handler that holds an Arc.
     let r = Arc::new(Registry::new());
     let r2 = Arc::clone(&r);
-    let id = r2.register_inbox("late", noop_handler());
+    let id = r2.register_inbox(&auth(), "late", noop_handler());
     assert_eq!(r.lookup("late"), Some(id));
-    let kind_id = r.register_kind("aether.late");
+    let kind_id = r.register_kind(&auth(), "aether.late");
     assert_eq!(
         r.kind_id("aether.late"),
         Some(kind_id),

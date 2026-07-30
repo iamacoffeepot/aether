@@ -56,7 +56,7 @@ fn lineage_capture_handler() -> (LineageCapture, Arc<dyn InboxHandler>) {
 /// registered mailbox id.
 fn register_lineage_capture_sink(registry: &Arc<Registry>, name: &str) -> (LineageCapture, MailboxId) {
     let (captured, handler) = lineage_capture_handler();
-    let sink_id = registry.try_register_inbox(name, handler).expect("register sink");
+    let sink_id = registry.try_register_inbox(&boot_authority(), name, handler).expect("register sink");
     (captured, sink_id)
 }
 
@@ -994,6 +994,7 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
     let captured_for_handler = Arc::clone(&captured);
     let recipient = registry
         .try_register_inbox(
+            &boot_authority(),
             "issue_1465_reply_recipient",
             Arc::new(move |dispatch: OwnedDispatch| {
                 // ADR-0094: terminal test capture sink — discharge.
@@ -1042,7 +1043,9 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
 fn unknown_recipient_bubbles_up_with_sender_mailbox() {
     let (outbound, outbound_rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
-    let sender = registry.try_register_inbox("client", registry::noop_handler()).expect("register client mailbox");
+    let sender = registry
+        .try_register_inbox(&boot_authority(), "client", registry::noop_handler())
+        .expect("register client mailbox");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
@@ -1073,7 +1076,9 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 fn unknown_recipient_without_outbound_warn_drops() {
     let (outbound, outbound_rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
-    let sender = registry.try_register_inbox("client", registry::noop_handler()).expect("register client mailbox");
+    let sender = registry
+        .try_register_inbox(&boot_authority(), "client", registry::noop_handler())
+        .expect("register client mailbox");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     // Deliberately no `with_outbound` — exercises the local warn-drop path.

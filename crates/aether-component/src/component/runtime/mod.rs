@@ -440,6 +440,7 @@ mod tests {
 
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::noop_handler;
+    use aether_substrate::testing::boot_authority;
 
     use super::*;
 
@@ -449,7 +450,8 @@ mod tests {
         let (outbound, rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
         let engine = Arc::new(Engine::default());
-        let subscriber = registry.register_inbox("test.component.inventory-subscriber", noop_handler());
+        let subscriber =
+            registry.register_inbox(&boot_authority(), "test.component.inventory-subscriber", noop_handler());
         let mut state = ComponentHostCapabilityState {
             linker: Arc::new(Linker::new(&engine)),
             engine,
@@ -480,14 +482,14 @@ mod tests {
         // A kind-only publication and a mailbox-only publication each refresh
         // the entire coherent projection. The #4062 registry tests cover the
         // producer's coalescing and publish-vs-clear re-arm internals.
-        registry.register_kind("test.component.inventory.kind");
+        registry.register_kind(&boot_authority(), "test.component.inventory.kind");
         state.refresh_registry_inventory();
         assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
         assert!(
             matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count)
         );
 
-        registry.register_inbox("test.component.inventory.mailbox", noop_handler());
+        registry.register_inbox(&boot_authority(), "test.component.inventory.mailbox", noop_handler());
         state.refresh_registry_inventory();
         assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 1));
         assert!(
@@ -496,14 +498,16 @@ mod tests {
 
         // Bursts collapse to their latest inventory. An unchanged wake and a
         // rejected mutation cannot cause another egress.
-        registry.register_kind("test.component.inventory.burst-first");
-        registry.register_kind("test.component.inventory.burst-latest");
+        registry.register_kind(&boot_authority(), "test.component.inventory.burst-first");
+        registry.register_kind(&boot_authority(), "test.component.inventory.burst-latest");
         state.refresh_registry_inventory();
         assert!(matches!(rx.try_recv(), Ok(EgressEvent::KindsChanged { descriptors }) if descriptors.len() == 3));
         assert!(
             matches!(rx.try_recv(), Ok(EgressEvent::MailboxesChanged { descriptors }) if descriptors.len() == initial_mailbox_count + 1)
         );
-        assert!(registry.try_register_inbox("test.component.inventory.mailbox", noop_handler()).is_err());
+        assert!(
+            registry.try_register_inbox(&boot_authority(), "test.component.inventory.mailbox", noop_handler()).is_err()
+        );
         state.refresh_registry_inventory();
         assert!(rx.try_recv().is_err());
         state.refresh_registry_inventory();

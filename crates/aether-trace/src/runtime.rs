@@ -120,6 +120,7 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::MailDispatch;
     use aether_substrate::mail::{Source, SourceAddr};
+    use aether_substrate::testing::boot_authority;
 
     /// Shared scaffolding for the `on_dispatch_traced` tests:
     /// fresh registry + mailer + outbound + transport + state wired
@@ -167,6 +168,7 @@ mod tests {
         /// `Vec`. Used twice to register two stub recipients.
         fn register_capture(registry: &Registry, name: &str, sink: Arc<Mutex<Vec<Capture>>>) {
             registry.register_inline(
+                &boot_authority(),
                 name,
                 Arc::new(move |d: MailDispatch<'_>| {
                     sink.lock().expect("test stub: captured mutex poisoned").push((
@@ -186,8 +188,8 @@ mod tests {
         let captured: Arc<Mutex<Vec<Capture>>> = Arc::new(Mutex::new(Vec::new()));
         register_capture(&fix.registry, "aether.test.spec_a", Arc::clone(&captured));
         register_capture(&fix.registry, "aether.test.spec_b", Arc::clone(&captured));
-        let kind_alpha = fix.registry.register_kind("aether.test.kind_a");
-        let kind_beta = fix.registry.register_kind("aether.test.kind_b");
+        let kind_alpha = fix.registry.register_kind(&boot_authority(), "aether.test.kind_a");
+        let kind_beta = fix.registry.register_kind(&boot_authority(), "aether.test.kind_b");
 
         let inbound = MailId::new(MailboxId(0xC0DE), 7);
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);

@@ -347,7 +347,11 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
     // Inline sink registered directly on the shared registry — the
     // headless chassis's `aether.audio` fail-fast sink takes this path,
     // outside the `with_actor` chain.
-    registry.register_inline("test.claim_only.inline_sink", Arc::new(|_dispatch: registry::MailDispatch<'_>| {}));
+    registry.register_inline(
+        &boot_authority(),
+        "test.claim_only.inline_sink",
+        Arc::new(|_dispatch: registry::MailDispatch<'_>| {}),
+    );
 
     let claimed = Builder::<DrivenTestChassis<ClaimingDriver>>::new(registry, Arc::clone(&mailer))
         .with_actor::<StubLog>(())

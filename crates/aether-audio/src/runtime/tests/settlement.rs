@@ -14,6 +14,7 @@ fn settlement_substrate() -> (Arc<Mailer>, mpsc::Receiver<EgressEvent>, MailboxI
     let mailer = Arc::new(Mailer::new(Arc::clone(&reg)).with_outbound(outbound));
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
     let caller_mailbox = reg.register_inbox(
+        &boot_authority(),
         "test.audio.settlement.caller",
         Arc::new(move |dispatch: OwnedDispatch| {
             // ADR-0094: terminal consumer — discharge before forwarding.

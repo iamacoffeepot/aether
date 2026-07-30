@@ -515,6 +515,7 @@ mod shard_startup {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::boot_authority;
     use std::collections::VecDeque;
     use std::io::Read;
     use std::iter::once;
@@ -533,8 +534,11 @@ mod shard_startup {
 
     fn sink(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> (WakeSink, mpsc::Receiver<InboundEvent>) {
         let (inbound_tx, inbound_rx) = mpsc::channel();
-        let self_id = registry
-            .register_inbox(name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()) as Arc<dyn InboxHandler>);
+        let self_id = registry.register_inbox(
+            &boot_authority(),
+            name,
+            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()) as Arc<dyn InboxHandler>,
+        );
         (
             WakeSink {
                 inbound_tx,
@@ -690,6 +694,7 @@ mod wake_coalescing {
     use aether_data::{Kind, KindId};
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use aether_substrate::testing::boot_authority;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -705,7 +710,11 @@ mod wake_coalescing {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
-        let self_id = registry.register_inbox("test.wake_target", Arc::clone(&counter) as Arc<dyn InboxHandler>);
+        let self_id = registry.register_inbox(
+            &boot_authority(),
+            "test.wake_target",
+            Arc::clone(&counter) as Arc<dyn InboxHandler>,
+        );
         let (inbound_tx, inbound_rx) = mpsc::channel();
         let sink = WakeSink {
             inbound_tx,

@@ -860,6 +860,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch};
     use aether_substrate::mail::{MailId, Source, SourceAddr};
+    use aether_substrate::testing::boot_authority;
 
     use super::*;
 
@@ -929,10 +930,13 @@ mod tests {
         ));
         assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
 
-        let dropped =
-            mailer.registry().register_inline("test.window.dropped", Arc::new(|_dispatch: MailDispatch<'_>| {}));
+        let dropped = mailer.registry().register_inline(
+            &boot_authority(),
+            "test.window.dropped",
+            Arc::new(|_dispatch: MailDispatch<'_>| {}),
+        );
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, dropped);
-        mailer.registry().drop_mailbox(dropped).expect("drop subscriber mailbox");
+        mailer.registry().drop_mailbox(&boot_authority(), dropped).expect("drop subscriber mailbox");
 
         assert!(matches!(
             DesktopWindowCapability::on_unsubscribe(
@@ -1150,6 +1154,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
         let subscriber = registry.register_inbox(
+            &boot_authority(),
             "test.window.subscriber",
             Arc::new(move |dispatch: OwnedDispatch| {
                 dispatch.discharge();

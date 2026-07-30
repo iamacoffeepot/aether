@@ -43,6 +43,14 @@ serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
+[dev-dependencies]
+# `test-support` exposes `aether_substrate::testing::boot_authority`, the
+# test-only mint for the `BootAuthority` the registry's eager mutators now
+# require (ADR-0165 / iamacoffeepot/aether#4161). The harness's own
+# `#[cfg(test)]` fixtures register observer mailboxes directly against the
+# booted registry, so they need the token production boot holds.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
 # cargo-machete's source-only scan cannot see that `clap` and `confique`
 # are used exclusively through `#[derive(aether_substrate::Config)]`
 # codegen on `SettlementConfig` (`confique` via the emitted config layer,

@@ -231,7 +231,7 @@ mod tests {
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::testing::fresh_substrate;
+    use aether_substrate::testing::{boot_authority, fresh_substrate};
     use std::sync::Arc;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces. Hand-rolled `Kind`
@@ -266,7 +266,7 @@ mod tests {
     fn harness(tag: &str) -> Arc<NativeBinding> {
         let (registry, mailer) = fresh_substrate();
         let mailbox = mailbox_id_from_name(tag);
-        registry.register_inbox(tag, Arc::new(|_d| {}));
+        registry.register_inbox(&boot_authority(), tag, Arc::new(|_d| {}));
         Arc::new(NativeBinding::new_for_test(mailer, mailbox))
     }
 
@@ -415,7 +415,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let mailbox = mailbox_id_from_name("test.egress.hold");
-        registry.register_inbox("test.egress.hold", Arc::new(|_d| {}));
+        registry.register_inbox(&boot_authority(), "test.egress.hold", Arc::new(|_d| {}));
         let binding = Arc::new(NativeBinding::new_for_test(mailer, mailbox));
 
         let sender = MailboxId(7);

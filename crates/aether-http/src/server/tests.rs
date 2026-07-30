@@ -1483,7 +1483,7 @@ fn cold_first_request_survives_partial_shard_activation_failure() {
     );
 
     drop(chassis);
-    registry.drop_mailbox(collision).expect("remove test-only shard collision");
+    registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only shard collision");
 }
 
 /// Scheduler-backed total apply rejection: every staged shard loses its
@@ -1517,7 +1517,7 @@ fn all_shard_activation_failures_refuse_without_implicit_retry() {
 
     drop(chassis);
     for collision in collisions {
-        registry.drop_mailbox(collision).expect("remove test-only shard collision");
+        registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only shard collision");
     }
 }
 

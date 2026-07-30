@@ -344,6 +344,7 @@ impl SubstrateHarnessChassis {
         if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
             boot.registry.register_inline(
+                &boot.authority,
                 SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
                 Arc::new(move |dispatch: MailDispatch<'_>| {
                     if dispatch.kind_name.is_empty() {

@@ -762,7 +762,16 @@ impl Registry {
         self.routes.load().generation()
     }
 
-    fn apply_batches(&self, batches: Vec<EffectBatch>) -> Vec<Result<Vec<RegistryApplied>, RegistryEffectError>> {
+    /// The direct write path itself. Named only by [`Self::apply_one`],
+    /// which every eager mutator funnels through, so the
+    /// [`BootAuthority`] taken here is the single structural gate on the
+    /// pre-owner writer (iamacoffeepot/aether#4161): a caller that cannot
+    /// produce the token cannot reach this `inner.write()` at all.
+    fn apply_batches(
+        &self,
+        _authority: &BootAuthority,
+        batches: Vec<EffectBatch>,
+    ) -> Vec<Result<Vec<RegistryApplied>, RegistryEffectError>> {
         let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
         let mut publication = Publication::default();
         let results = batches
@@ -1207,8 +1216,12 @@ impl Registry {
         }
     }
 
-    fn apply_one(&self, effect: RegistryEffect) -> Result<RegistryApplied, RegistryEffectError> {
-        self.apply_batches(vec![EffectBatch::new(vec![effect])])
+    fn apply_one(
+        &self,
+        authority: &BootAuthority,
+        effect: RegistryEffect,
+    ) -> Result<RegistryApplied, RegistryEffectError> {
+        self.apply_batches(authority, vec![EffectBatch::new(vec![effect])])
             .pop()
             .expect("one submitted batch returns one result")?
             .pop()
@@ -1219,10 +1232,10 @@ impl Registry {
     /// On a `Dropped` entry at the same id (same name re-registered
     /// after a drop), the entry transitions back to live. Any other
     /// occupied entry is a collision.
-    fn insert(&self, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
+    fn insert(&self, authority: &BootAuthority, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
         // Depth-1 / root registrations derive the id from the name
         // (ADR-0029) — the lineage fold's fixed point.
-        self.insert_with_id(MailboxId::from_name(&name), name, entry)
+        self.insert_with_id(authority, MailboxId::from_name(&name), name, entry)
     }
 
     /// ADR-0099 §3: register under an explicit, caller-computed `id`
@@ -1232,8 +1245,14 @@ impl Registry {
     /// `ActorId`s — so the spawn path passes the folded id here instead
     /// of letting the name derive it. [`Self::insert`] is the depth-1
     /// case where the two coincide.
-    fn insert_with_id(&self, id: MailboxId, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
-        match self.apply_one(RegistryEffect::publish_with_id(id, name, entry)) {
+    fn insert_with_id(
+        &self,
+        authority: &BootAuthority,
+        id: MailboxId,
+        name: String,
+        entry: MailboxEntry,
+    ) -> Result<MailboxId, NameConflict> {
+        match self.apply_one(authority, RegistryEffect::publish_with_id(id, name, entry)) {
             Ok(RegistryApplied::Mailbox(id)) => Ok(id),
             Err(RegistryEffectError::Name(error)) => Err(error),
             Ok(_) | Err(_) => unreachable!("publish-live returns mailbox or name conflict"),
@@ -1256,12 +1275,17 @@ impl Registry {
     /// now, which clears the per-handler cost cells and never touches a
     /// registry route.
     ///
+    /// Direct write path — takes a [`BootAuthority`] like every other
+    /// eager mutator (iamacoffeepot/aether#4161), so the remaining callers
+    /// (all tests, which use it to clear a deliberately-installed collision
+    /// route) name the same authority production boot would.
+    ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
-    pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
-        match self.apply_one(RegistryEffect::DropMailbox(id)) {
+    pub fn drop_mailbox(&self, authority: &BootAuthority, id: MailboxId) -> Result<String, DropError> {
+        match self.apply_one(authority, RegistryEffect::DropMailbox(id)) {
             Ok(RegistryApplied::Dropped(name)) => Ok(name),
             Err(RegistryEffectError::Drop(error)) => Err(error),
             Ok(_) | Err(_) => unreachable!("drop effect returns a name or drop error"),
@@ -1302,8 +1326,17 @@ impl Registry {
     /// registrations should never collide; use
     /// [`Self::try_register_inbox`] when a collision is a recoverable
     /// outcome rather than a bug.
-    pub fn register_inbox(&self, name: impl Into<String>, handler: Arc<dyn InboxHandler>) -> MailboxId {
-        match self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() }) {
+    ///
+    /// Direct write path — takes a [`BootAuthority`] so only the boot
+    /// claim passes can name it (iamacoffeepot/aether#4161). A handler
+    /// stages a `RegistryEffect` through the ADR-0165 owner instead.
+    pub fn register_inbox(
+        &self,
+        authority: &BootAuthority,
+        name: impl Into<String>,
+        handler: Arc<dyn InboxHandler>,
+    ) -> MailboxId {
+        match self.insert(authority, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() }) {
             Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
@@ -1319,16 +1352,21 @@ impl Registry {
     /// transition diff) can surface the collision as a typed error
     /// rather than aborting the chassis.
     ///
+    /// Direct write path — takes a [`BootAuthority`] so only the boot
+    /// claim passes can name it (iamacoffeepot/aether#4161). A handler
+    /// stages a `RegistryEffect` through the ADR-0165 owner instead.
+    ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn try_register_inbox(
         &self,
+        authority: &BootAuthority,
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
+        self.insert(authority, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
     }
 
     /// ADR-0099 §3: [`Self::try_register_inbox`] but under an explicit,
@@ -1343,12 +1381,12 @@ impl Registry {
     /// instead.
     pub fn try_register_inbox_with_id(
         &self,
-        _authority: &BootAuthority,
+        authority: &BootAuthority,
         id: MailboxId,
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        self.insert_with_id(id, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
+        self.insert_with_id(authority, id, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() })
     }
 
     /// Issue 838: register a mailbox whose handler runs inline on
@@ -1379,8 +1417,17 @@ impl Registry {
     /// Panics on a name collision (or if the inner `RwLock` is
     /// poisoned) — fail-fast per ADR-0063: substrate-internal
     /// registrations should never collide.
-    pub fn register_inline(&self, name: impl Into<String>, handler: Arc<dyn InlineHandler>) -> MailboxId {
-        match self.insert(name.into(), MailboxEntry::Inline(handler)) {
+    /// Direct write path — takes a [`BootAuthority`] so only the boot
+    /// claim passes and the chassis diagnostic sinks can name it
+    /// (iamacoffeepot/aether#4161). A handler stages a `RegistryEffect`
+    /// through the ADR-0165 owner instead.
+    pub fn register_inline(
+        &self,
+        authority: &BootAuthority,
+        name: impl Into<String>,
+        handler: Arc<dyn InlineHandler>,
+    ) -> MailboxId {
+        match self.insert(authority, name.into(), MailboxEntry::Inline(handler)) {
             Ok(id) => id,
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
@@ -1404,8 +1451,8 @@ impl Registry {
     /// Direct write path — takes a [`BootAuthority`] so only the boot
     /// unwind and the boot / embedder eager spawn can name it
     /// (iamacoffeepot/aether#4156).
-    pub(crate) fn remove_closure(&self, _authority: &BootAuthority, id: MailboxId) -> bool {
-        match self.apply_one(RegistryEffect::RemoveMailbox(id)) {
+    pub(crate) fn remove_closure(&self, authority: &BootAuthority, id: MailboxId) -> bool {
+        match self.apply_one(authority, RegistryEffect::RemoveMailbox(id)) {
             Ok(RegistryApplied::Removed(removed)) => removed,
             Ok(_) | Err(_) => unreachable!("remove effect is infallible and returns a bool"),
         }
@@ -1513,8 +1560,8 @@ impl Registry {
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn install_seize_handle(&self, _authority: &BootAuthority, id: MailboxId, handle: SeizeHandle) -> bool {
-        match self.apply_one(RegistryEffect::InstallSeize { id, handle }) {
+    pub(crate) fn install_seize_handle(&self, authority: &BootAuthority, id: MailboxId, handle: SeizeHandle) -> bool {
+        match self.apply_one(authority, RegistryEffect::InstallSeize { id, handle }) {
             Ok(RegistryApplied::SeizeInstalled(installed)) => installed,
             Ok(_) | Err(_) => unreachable!("seize effect is infallible and returns a bool"),
         }
@@ -1574,12 +1621,16 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard. The internal `expect("Bytes default cannot produce a
     /// conflict")` is unreachable by construction.
-    pub fn register_kind(&self, name: impl Into<String>) -> KindId {
+    ///
+    /// Direct write path — takes a [`BootAuthority`] like its descriptor
+    /// sibling (iamacoffeepot/aether#4161); `load_component` stages a
+    /// `RegistryBatch::register_kinds` through the ADR-0165 owner instead.
+    pub fn register_kind(&self, authority: &BootAuthority, name: impl Into<String>) -> KindId {
         let descriptor = bytes_kind(name.into());
         // A fresh `Bytes` descriptor can only conflict with a prior
         // `Bytes` registration under the same name — in which case the
         // schemas match and the call is idempotent. Not reachable.
-        self.register_kind_internal(descriptor, /*reject_conflict=*/ false)
+        self.register_kind_internal(authority, descriptor, /*reject_conflict=*/ false)
             .expect("Bytes default cannot produce a conflict")
     }
 
@@ -1606,18 +1657,19 @@ impl Registry {
     /// the guard.
     pub fn register_kind_with_descriptor(
         &self,
-        _authority: &BootAuthority,
+        authority: &BootAuthority,
         descriptor: KindDescriptor,
     ) -> Result<KindId, KindConflict> {
-        self.register_kind_internal(descriptor, /*reject_conflict=*/ true)
+        self.register_kind_internal(authority, descriptor, /*reject_conflict=*/ true)
     }
 
     fn register_kind_internal(
         &self,
+        authority: &BootAuthority,
         descriptor: KindDescriptor,
         reject_conflict: bool,
     ) -> Result<KindId, KindConflict> {
-        match self.apply_one(RegistryEffect::RegisterKind { descriptor, reject_conflict }) {
+        match self.apply_one(authority, RegistryEffect::RegisterKind { descriptor, reject_conflict }) {
             Ok(RegistryApplied::Kind(id)) => Ok(id),
             Err(RegistryEffectError::Kind(error)) => Err(error),
             Ok(_) | Err(_) => unreachable!("register-kind returns a kind id or kind conflict"),

@@ -138,7 +138,7 @@ mod tests {
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use std::sync::Arc;
 
-    use crate::testing::fresh_substrate;
+    use crate::testing::{boot_authority, fresh_substrate};
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
     /// re-replies. Hand-rolled `Kind` (cast-shape) so the tests don't
@@ -184,7 +184,7 @@ mod tests {
         let actor_mailbox = mailbox_id_from_name("test.task_queue.actor");
         // Register a sink for the worker's completion-wake push so it
         // routes to a real inbox rather than warn-dropping.
-        registry.register_inbox("test.task_queue.actor", Arc::new(|_d| {}));
+        registry.register_inbox(&boot_authority(), "test.task_queue.actor", Arc::new(|_d| {}));
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         let mut q = TaskQueue::new(2);
@@ -206,7 +206,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let actor_mailbox = mailbox_id_from_name("test.task_queue.actor2");
-        registry.register_inbox("test.task_queue.actor2", Arc::new(|_d| {}));
+        registry.register_inbox(&boot_authority(), "test.task_queue.actor2", Arc::new(|_d| {}));
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         // Bound of 1 so the second submit queues.
