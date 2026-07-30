@@ -15,7 +15,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, BuildProvenance, composed};
 use aether_substrate::config::ConfigError;
-use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate::{BootAuthority, Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
 use crate::api::{ApiParams, BloomeryApiCapability};
@@ -142,12 +142,12 @@ impl Chassis for BloomeryChassis {
     type Env = BloomeryEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         // Bloomery's base is the unit no-op — it stages no config sources — but it
         // still routes through `composed`, so it gets the framework-minted
         // `OutboundFatalAborter` by construction (previously the implicit
         // `PanicAborter`).
-        let builder = composed::<Self>(&boot, (), env)?;
+        let builder = composed::<Self>(&mut boot, (), env)?;
         // The driver owns the boot and drops it on the shutdown signal — it
         // moves in here, after `compose` finished borrowing it.
         let driver = BloomeryDriverCapability { boot };
@@ -194,7 +194,12 @@ impl BootableChassis for BloomeryChassis {
     /// `TraceDispatchCapability` in this delta; the aborter is supplied by
     /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
     /// move the same `boot` into the driver afterward.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+    fn compose(
+        builder: Builder<Self>,
+        boot: &SubstrateBoot,
+        _authority: &BootAuthority,
+        env: BloomeryEnv,
+    ) -> Result<Builder<Self>, BootError> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).

@@ -25,7 +25,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, composed};
 use aether_substrate::runtime::log_install::apply_filter;
-use aether_substrate::{Chassis, SubstrateBoot};
+use aether_substrate::{BootAuthority, Chassis, SubstrateBoot};
 use winit::event_loop::EventLoop;
 
 use aether_chassis::{WindowConfig, apply_manifest_window_settings};
@@ -73,7 +73,7 @@ impl Chassis for DesktopChassis {
         })?;
         event_loop.set_control_flow(ControlFlow::Poll);
 
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
@@ -121,7 +121,7 @@ impl Chassis for DesktopChassis {
             "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
-        let builder = composed::<Self>(&boot, base, env)?;
+        let builder = composed::<Self>(&mut boot, base, env)?;
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `resolve_env`) because the
@@ -178,7 +178,12 @@ impl BootableChassis for DesktopChassis {
     /// [`Chassis::build`] resolves at the driver seam (ADR-0162), so they take no
     /// part in this claim chain. Desktop's delta resolves nothing itself, so it
     /// returns `Ok`.
-    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: CommonEnv) -> Result<Builder<Self>, BootError> {
+    fn compose(
+        builder: Builder<Self>,
+        boot: &SubstrateBoot,
+        _authority: &BootAuthority,
+        env: CommonEnv,
+    ) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
