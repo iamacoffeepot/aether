@@ -1,4 +1,5 @@
-//! Owner-staged component load, module-boot, and replacement continuations.
+//! Owner-staged component load, module-boot, and replacement stages, and the
+//! deferred replies they carry from one stage to the next.
 
 use std::sync::Arc;
 
@@ -8,7 +9,8 @@ use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, ReplaceC
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{
-    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnApplied, SpawnError, TaskContinuation, TaskDone, spawn::Subname,
+    DeferredReply, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
+    spawn::Subname,
 };
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
@@ -113,7 +115,7 @@ pub(super) enum BootSuccessor {
 }
 
 struct BootWaiter {
-    continuation: TaskContinuation,
+    owed: DeferredReply,
     successor: BootSuccessor,
 }
 
@@ -130,13 +132,19 @@ impl PendingBoot {
 impl Drop for PendingBoot {
     fn drop(&mut self) {
         for waiter in self.waiters.drain(..) {
-            waiter.continuation.abandon_for_actor_close();
+            waiter.owed.abandon_for_actor_close();
         }
     }
 }
 
+/// The multi-step load plan a staged trampoline birth carries into its
+/// authoritative completion. Unlike the caps whose completion context was only
+/// an id, this names *which stage of the load pipeline* the birth belongs to —
+/// the module-boot leg or the requested-actor leg — plus the prepared inputs
+/// that leg still needs. The identity the birth reports rides
+/// [`SpawnOutcome`] instead.
 #[derive(Clone)]
-pub(super) enum SpawnContinuation {
+pub(super) enum SpawnContext {
     ModuleBoot { plan: Box<PreparedBoot>, first: Box<BootSuccessor> },
     RequestedActor { load: Arc<PreparedLoad>, boot_hash: Option<String> },
 }
@@ -249,28 +257,28 @@ impl ComponentHostCapabilityState {
             return;
         }
         let load = Arc::clone(&done.context().load);
-        self.continue_load(ctx, done.handoff(), load);
+        self.continue_load(ctx, done.into_deferred_reply(), load);
     }
 
-    fn continue_load(&mut self, ctx: &mut NativeCtx<'_>, continuation: TaskContinuation, load: Arc<PreparedLoad>) {
+    fn continue_load(&mut self, ctx: &mut NativeCtx<'_>, owed: DeferredReply, load: Arc<PreparedLoad>) {
         let Some(plan) = load.boot_plan() else {
-            self.stage_requested_actor(ctx, continuation, load, None);
+            self.stage_requested_actor(ctx, owed, load, None);
             return;
         };
         let hash = plan.hash.clone();
         if self.boot_registry.contains_key(&hash) {
-            self.stage_requested_actor(ctx, continuation, load, Some(hash));
+            self.stage_requested_actor(ctx, owed, load, Some(hash));
         } else if let Some(pending) = self.pending_boots.get_mut(&hash) {
-            pending.waiters.push(BootWaiter { continuation, successor: BootSuccessor::Load(load) });
+            pending.waiters.push(BootWaiter { owed, successor: BootSuccessor::Load(load) });
         } else {
-            self.stage_module_boot(ctx, continuation, plan, BootSuccessor::Load(load));
+            self.stage_module_boot(ctx, owed, plan, BootSuccessor::Load(load));
         }
     }
 
     fn stage_module_boot<M: ReplyMode>(
         &mut self,
         ctx: &mut NativeCtx<'_, M>,
-        continuation: TaskContinuation,
+        owed: DeferredReply,
         plan: PreparedBoot,
         first: BootSuccessor,
     ) {
@@ -279,21 +287,14 @@ impl ComponentHostCapabilityState {
         let config = plan.config(self);
         match ctx
             .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&namespace), config, ())
-            .continue_with(
-                continuation,
-                SpawnContinuation::ModuleBoot { plan: Box::new(plan), first: Box::new(first.clone()) },
-            ) {
+            .continue_from(owed, SpawnContext::ModuleBoot { plan: Box::new(plan), first: Box::new(first.clone()) })
+        {
             Ok(_) => {
                 let previous = self.pending_boots.insert(hash, PendingBoot::new());
                 debug_assert!(previous.is_none(), "one actor-local reservation owns a module boot hash");
             }
-            Err((error, continuation)) => {
-                Self::resolve_boot_failure(
-                    ctx,
-                    continuation,
-                    first,
-                    format!("boot trampoline spawn failed: {error:?}"),
-                );
+            Err((error, owed)) => {
+                Self::reply_boot_failure(ctx, owed, first, format!("boot trampoline spawn failed: {error:?}"));
             }
         }
     }
@@ -301,17 +302,15 @@ impl ComponentHostCapabilityState {
     fn stage_requested_actor(
         &mut self,
         ctx: &mut NativeCtx<'_>,
-        continuation: TaskContinuation,
+        owed: DeferredReply,
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
     ) {
         let config = load.requested_config(self);
         match ctx
             .spawn_child::<ComponentHostCapability, WasmTrampoline>(Subname::Named(&load.name), config, ())
-            .continue_with(
-                continuation,
-                SpawnContinuation::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() },
-            ) {
+            .continue_from(owed, SpawnContext::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() })
+        {
             Ok(_) => {
                 if let Some(hash) = &boot_hash {
                     let entry =
@@ -322,20 +321,16 @@ impl ComponentHostCapabilityState {
                         .expect("module boot pending-request count cannot overflow");
                 }
             }
-            Err((error, continuation)) => {
-                continuation.resolve(ctx, &LoadResult::Err { error: format!("trampoline spawn failed: {error:?}") });
+            Err((error, owed)) => {
+                owed.reply(ctx, &LoadResult::Err { error: format!("trampoline spawn failed: {error:?}") });
             }
         }
     }
 
-    pub(super) fn finish_spawn(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, SpawnContinuation>,
-    ) {
+    pub(super) fn finish_spawn(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome, SpawnContext>) {
         match done.context().clone() {
-            SpawnContinuation::ModuleBoot { plan, first } => self.finish_module_boot(ctx, done, *plan, *first),
-            SpawnContinuation::RequestedActor { load, boot_hash } => {
+            SpawnContext::ModuleBoot { plan, first } => self.finish_module_boot(ctx, done, *plan, *first),
+            SpawnContext::RequestedActor { load, boot_hash } => {
                 self.finish_requested_actor(ctx, done, load, boot_hash);
             }
         }
@@ -344,33 +339,29 @@ impl ComponentHostCapabilityState {
     fn finish_module_boot(
         &mut self,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, SpawnContinuation>,
+        done: TaskDone<SpawnOutcome, SpawnContext>,
         plan: PreparedBoot,
         first: BootSuccessor,
     ) {
-        let result = match done.output() {
-            Ok(applied) => Ok(applied.clone()),
-            Err(error) => Err(format!("{error:?}")),
-        };
+        let outcome = done.output();
+        let booted = outcome.result.as_ref().map(|()| outcome.mailbox_id).map_err(|error| format!("{error:?}"));
         let mut pending =
             self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
-        match result {
-            Ok(applied) => {
-                self.mailer.capability_registry().register(applied.mailbox_id, &plan.capabilities);
-                self.boot_registry.insert(
-                    plan.hash.clone(),
-                    BootEntry { mailbox_id: applied.mailbox_id, refcount: 0, pending_requests: 0 },
-                );
-                self.finish_boot_successor(ctx, done.handoff(), first, &plan.hash);
+        match booted {
+            Ok(mailbox_id) => {
+                self.mailer.capability_registry().register(mailbox_id, &plan.capabilities);
+                self.boot_registry
+                    .insert(plan.hash.clone(), BootEntry { mailbox_id, refcount: 0, pending_requests: 0 });
+                self.finish_boot_successor(ctx, done.into_deferred_reply(), first, &plan.hash);
                 for waiter in pending.waiters.drain(..) {
-                    self.finish_boot_successor(ctx, waiter.continuation, waiter.successor, &plan.hash);
+                    self.finish_boot_successor(ctx, waiter.owed, waiter.successor, &plan.hash);
                 }
                 self.drop_orphan_boot(ctx, &plan.hash);
             }
             Err(error) => {
-                Self::resolve_boot_failure(ctx, done.handoff(), first, error.clone());
+                Self::reply_boot_failure(ctx, done.into_deferred_reply(), first, error.clone());
                 for waiter in pending.waiters.drain(..) {
-                    Self::resolve_boot_failure(ctx, waiter.continuation, waiter.successor, error.clone());
+                    Self::reply_boot_failure(ctx, waiter.owed, waiter.successor, error.clone());
                 }
             }
         }
@@ -379,32 +370,34 @@ impl ComponentHostCapabilityState {
     fn finish_boot_successor(
         &mut self,
         ctx: &mut NativeCtx<'_>,
-        continuation: TaskContinuation,
+        owed: DeferredReply,
         successor: BootSuccessor,
         hash: &str,
     ) {
         match successor {
             BootSuccessor::Load(load) => {
-                self.stage_requested_actor(ctx, continuation, load, Some(hash.to_owned()));
+                self.stage_requested_actor(ctx, owed, load, Some(hash.to_owned()));
             }
             BootSuccessor::Replacement { pending, result } => {
                 self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, Some(hash.to_owned()));
-                continuation.resolve(ctx, &result);
+                owed.reply(ctx, &result);
             }
         }
     }
 
-    fn resolve_boot_failure<M: ReplyMode>(
+    fn reply_boot_failure<M: ReplyMode>(
         ctx: &mut NativeCtx<'_, M>,
-        continuation: TaskContinuation,
+        owed: DeferredReply,
         successor: BootSuccessor,
         error: String,
     ) {
         match successor {
-            BootSuccessor::Load(_) => continuation.resolve(
-                ctx,
-                &LoadResult::Err { error: format!("module boot failed before requested actor: {error}") },
-            ),
+            BootSuccessor::Load(_) => {
+                owed.reply(
+                    ctx,
+                    &LoadResult::Err { error: format!("module boot failed before requested actor: {error}") },
+                );
+            }
             BootSuccessor::Replacement { pending, result } => {
                 tracing::warn!(
                     target: "aether_component",
@@ -412,7 +405,7 @@ impl ComponentHostCapabilityState {
                     %error,
                     "replace succeeded but the replacement module boot failed",
                 );
-                continuation.resolve(ctx, &result);
+                owed.reply(ctx, &result);
             }
         }
     }
@@ -420,32 +413,28 @@ impl ComponentHostCapabilityState {
     fn finish_requested_actor(
         &mut self,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, SpawnContinuation>,
+        done: TaskDone<SpawnOutcome, SpawnContext>,
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
     ) {
-        match done.output() {
-            Ok(applied) => {
-                let applied = applied.clone();
-                if let Some(hash) = &boot_hash {
-                    self.settle_boot_request(ctx, hash, Some(applied.mailbox_id));
-                }
-                self.mailer.capability_registry().register(applied.mailbox_id, &load.capabilities);
-                let capabilities = load.capabilities.clone();
-                done.resolve_with(ctx, move |_, _| LoadResult::Ok {
-                    mailbox_id: applied.mailbox_id,
-                    name: applied.canonical_name.to_string(),
-                    capabilities,
-                });
+        let mailbox_id = done.output().mailbox_id;
+        let name = done.output().canonical_name.to_string();
+        let failure = done.output().result.as_ref().err().map(|error| format!("trampoline spawn failed: {error:?}"));
+
+        if let Some(error) = failure {
+            if let Some(hash) = &boot_hash {
+                self.settle_boot_request(ctx, hash, None);
             }
-            Err(error) => {
-                let error = format!("trampoline spawn failed: {error:?}");
-                if let Some(hash) = &boot_hash {
-                    self.settle_boot_request(ctx, hash, None);
-                }
-                done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
-            }
+            done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
+            return;
         }
+
+        if let Some(hash) = &boot_hash {
+            self.settle_boot_request(ctx, hash, Some(mailbox_id));
+        }
+        self.mailer.capability_registry().register(mailbox_id, &load.capabilities);
+        let capabilities = load.capabilities.clone();
+        done.resolve_with(ctx, move |_, _| LoadResult::Ok { mailbox_id, name, capabilities });
     }
 
     fn drop_orphan_boot<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, hash: &str) {
@@ -548,13 +537,11 @@ impl ComponentHostCapabilityState {
             return;
         }
 
-        let continuation = ctx.continuation_to(pending.source);
+        let owed = ctx.defer_reply_to(pending.source);
         if let Some(inflight) = self.pending_boots.get_mut(&plan.hash) {
-            inflight
-                .waiters
-                .push(BootWaiter { continuation, successor: BootSuccessor::Replacement { pending, result } });
+            inflight.waiters.push(BootWaiter { owed, successor: BootSuccessor::Replacement { pending, result } });
         } else {
-            self.stage_module_boot(ctx, continuation, plan, BootSuccessor::Replacement { pending, result });
+            self.stage_module_boot(ctx, owed, plan, BootSuccessor::Replacement { pending, result });
         }
     }
 

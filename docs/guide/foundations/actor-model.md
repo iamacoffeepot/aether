@@ -461,14 +461,50 @@ ctx.send_envelope_tracked(receipt.mailbox_id, Frame::ID, &frame.encode_into_byte
 The receipt says the birth was accepted locally; the registry owner applies it
 after the handler returns, and *that* result is authoritative. It arrives back
 at the spawner through the ordinary task-completion path as
-`TaskDone<Result<SpawnApplied, SpawnError>, C>`, keyed by `receipt.completion` —
-so an apply-time conflict (a name another actor won first, say) surfaces as one
-typed failure rather than a silent half-spawn. A handler that must know the
-child is live before it reports success waits for that completion; one that
-only needs somewhere to send mail can use the receipt directly. Synchronous
-commit still exists, but only at the boot/embedder boundary
-(`BuiltChassis::spawn_actor` / `PassiveChassis::spawn_actor` and their
-`.finish()` terminal), where there is no owner to serialize against yet.
+`TaskDone<SpawnOutcome, C>`, keyed by `receipt.completion` — so an apply-time
+conflict (a name another actor won first, say) surfaces as one typed failure
+rather than a silent half-spawn. A `SpawnOutcome` names itself on both arms:
+
+```rust
+struct SpawnOutcome {
+    mailbox_id: MailboxId,
+    canonical_name: Arc<str>,
+    result: Result<(), SpawnError>,
+}
+```
+
+so a handler correlates the completion with the birth it staged straight off the
+outcome, and `C` stays `()` unless there is something the spawn genuinely does
+not know — a peer address, a channel, which leg of a multi-step plan this birth
+belongs to. A handler that must know the child is live before it reports success
+waits for that completion; one that only needs somewhere to send mail can use
+the receipt directly. Synchronous commit still exists, but only at the
+boot/embedder boundary (`BuiltChassis::spawn_actor` /
+`PassiveChassis::spawn_actor` and their `.finish()` terminal), where there is no
+owner to serialize against yet.
+
+When the handler that receives a completion owes a reply of its own and answers
+it by staging *another* birth, it hands that debt straight on with
+`.continue_from(done, context)`. The reply the caller is waiting for is a `DeferredReply` — who is waiting, plus
+the [settlement hold](../systems/tracing-and-settlement.md) keeping their chain
+open — and it rides inside the `TaskDone` the handler already holds, so the
+successor stage inherits one continuously-held chain instead of closing and
+reopening it. Every synchronous failure in
+`continue_from` hands the value back untouched, so the terminal error still goes
+out exactly once:
+
+```rust
+match ctx.spawn_child::<Host, Worker>(Subname::Named(&name), config, ()).continue_from(done, plan) {
+    Ok(receipt) => { /* the successor now owns the reply */ }
+    Err((error, done)) => done.resolve_err(ctx, &Failed { error: format!("{error:?}") }),
+}
+```
+
+A handler with no `TaskDone` in hand — one that parks a caller across a worker
+thread, say — mints the same debt from its ctx with `ctx.defer_reply_to(target)`
+and passes that to `continue_from` instead. Dropping a `DeferredReply` without
+replying releases its hold (settlement is never wedged) and trips a
+`debug_assert`, because a lost reply strands the caller forever.
 
 Wasm uses
 the same two-type permission: a component spawns its own **sibling** types —

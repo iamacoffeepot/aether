@@ -23,7 +23,7 @@ use crate::{
     WindowMode, WindowOpened, WindowSpec,
 };
 
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 const DEFAULT_WIDTH: u32 = 800;
@@ -41,18 +41,10 @@ struct PendingWindowCreate {
     /// Taken by whichever path settles the reservation, so the caller sees
     /// exactly one `CreateWindowResult`. `Option` mirrors the desktop
     /// manager's `PendingCreate`, whose boot window has no caller to answer.
-    reply: Option<Box<InboundMail>>,
-    /// A reservation that is already doomed: the deterministic child id
-    /// disagreed with the addressable prediction. The completion retires the
-    /// applied child and replies with this error instead of publishing.
-    rejection: Option<String>,
-}
-
-/// Completion context carried from staging to authoritative application. The
-/// reserved [`WindowId`] is the pending-state key.
-#[derive(Clone, Copy)]
-struct WindowCreateContinuation {
-    id: WindowId,
+    /// Stored inline: this struct exists *because* a reply is owed, so the
+    /// slot is occupied for essentially the reservation's whole life and a box
+    /// would buy nothing.
+    reply: Option<InboundMail>,
 }
 
 pub struct SyntheticWindowCapabilityState {
@@ -101,12 +93,7 @@ impl SyntheticWindowCapabilityState {
     /// retire it and report why it could not become live. Either way the
     /// reservation's reply is sent exactly once.
     fn publish_applied_window(&mut self, ctx: &mut NativeCtx<'_>, child: MailboxId, pending: PendingWindowCreate) {
-        let PendingWindowCreate { window, mut reply, rejection } = pending;
-        if let Some(error) = rejection {
-            ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
-            answer(&mut reply, &CreateWindowResult::Err { error });
-            return;
-        }
+        let PendingWindowCreate { window, mut reply } = pending;
         let monitor = match ctx.monitor(child) {
             Ok(monitor) => monitor,
             Err(error) => {
@@ -127,7 +114,7 @@ impl SyntheticWindowCapabilityState {
 }
 
 /// Discharge a reservation's deferred reply, if it owes one.
-fn answer(reply: &mut Option<Box<InboundMail>>, result: &CreateWindowResult) {
+fn answer(reply: &mut Option<InboundMail>, result: &CreateWindowResult) {
     if let Some(reply) = reply.take() {
         reply.reply(result);
     }
@@ -174,7 +161,7 @@ impl NativeActor for SyntheticWindowCapability {
         let predicted = ctx.actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
         let receipt = match ctx
             .spawn_child::<WindowCapability, SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
-            .stage_with(WindowCreateContinuation { id: WindowId(predicted.0) })
+            .stage()
         {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -182,39 +169,44 @@ impl NativeActor for SyntheticWindowCapability {
                 return;
             }
         };
-        // The reservation is keyed by the prediction consumers address, so a
-        // divergent deterministic id dooms it rather than publishing a window
-        // nobody can reach. The completion retires the applied child.
-        let rejection = (receipt.mailbox_id != predicted).then(|| {
-            format!("spawned window child {:?} did not match predicted mailbox {predicted:?}", receipt.mailbox_id)
-        });
+        // The reservation is keyed by the id consumers address, so a divergent
+        // deterministic id dooms it rather than publishing a window nobody can
+        // reach: answer now and reserve nothing, and the completion's
+        // no-reservation arm retires the child the owner still applies.
+        if receipt.mailbox_id != predicted {
+            reply.reply(&CreateWindowResult::Err {
+                error: format!(
+                    "spawned window child {:?} did not match predicted mailbox {predicted:?}",
+                    receipt.mailbox_id
+                ),
+            });
+            return;
+        }
+
         let id = WindowId(predicted.0);
         let window = SyntheticWindowCapabilityState::describe(mail.spec, id);
-        let replaced =
-            state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(Box::new(reply)), rejection });
+        let replaced = state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(reply) });
         debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
     }
 
     #[handler(task)]
-    fn on_window_child_spawn_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, WindowCreateContinuation>,
-    ) {
-        let id = done.context().id;
-        let Some(mut pending) = state.pending_creates.remove(&id) else {
-            if let Ok(applied) = done.output() {
-                ctx.actor_at::<SyntheticWindowInstance>(applied.mailbox_id).send(&RetireWindow);
+    fn on_window_child_spawn_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome, ()>) {
+        // The birth names itself on both arms, so the reservation key comes
+        // straight off the outcome rather than a context struct carrying it.
+        let child = done.output().mailbox_id;
+        let Some(mut pending) = state.pending_creates.remove(&WindowId(child.0)) else {
+            if done.output().result.is_ok() {
+                ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
             }
             done.release_no_reply();
             return;
         };
-        match done.output() {
+        match &done.output().result {
             Err(error) => answer(
                 &mut pending.reply,
                 &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
             ),
-            Ok(applied) => state.publish_applied_window(ctx, applied.mailbox_id, pending),
+            Ok(()) => state.publish_applied_window(ctx, child, pending),
         }
         done.release_no_reply();
     }
@@ -454,7 +446,6 @@ mod tests {
             PendingWindowCreate {
                 window: SyntheticWindowCapabilityState::describe(spec("palette", "Tools"), WindowId(9)),
                 reply: None,
-                rejection: None,
             },
         );
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());

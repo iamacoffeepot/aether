@@ -169,7 +169,7 @@ mod tests {
     // Test harness resolves the server/sink actor mailboxes by their NAMESPACE
     // for fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
-    use super::runtime::{FleetServerState, FleetSpawnContinuation, PendingEngine, ProxySpawnOutcome};
+    use super::runtime::{FleetServerState, FleetSpawnContext, PendingEngine, ProxySpawnOutcome};
     use super::{FleetConfig, FleetServer, ReplyCells, ReplySink};
     use crate::kinds::{EngineAlive, EngineDied};
     use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
@@ -302,7 +302,7 @@ mod tests {
         assert!(state.engines.is_empty(), "a prepared proxy is not yet supervised");
         let reply = state
             .settle_pending_spawn(
-                FleetSpawnContinuation { engine_id, rpc_port },
+                FleetSpawnContext { engine_id, rpc_port },
                 ProxySpawnOutcome::Applied(MailboxId(0x4068)),
             )
             .expect("the matching completion settles once");
@@ -324,7 +324,7 @@ mod tests {
         let (mut state, root) = lifecycle_state();
         let engine_id = EngineId(Uuid::from_u128(2));
         let rpc_port = 40_681;
-        let continuation = FleetSpawnContinuation { engine_id, rpc_port };
+        let spawn = FleetSpawnContext { engine_id, rpc_port };
         state.pending_engines.insert(engine_id, PendingEngine { rpc_port, early_death: None });
 
         state.observe_engine_death(
@@ -337,7 +337,7 @@ mod tests {
         );
 
         let reply = state
-            .settle_pending_spawn(continuation.clone(), ProxySpawnOutcome::Applied(MailboxId(0x4068_0002)))
+            .settle_pending_spawn(spawn.clone(), ProxySpawnOutcome::Applied(MailboxId(0x4068_0002)))
             .expect("the first completion settles");
         assert!(
             matches!(reply, SpawnEngineResult::Err { engine_id: Some(ref id), ref error }
@@ -350,9 +350,7 @@ mod tests {
             if detail == "connection closed during activation"));
 
         assert!(
-            state
-                .settle_pending_spawn(continuation, ProxySpawnOutcome::Rejected("stale owner result".to_owned()))
-                .is_none(),
+            state.settle_pending_spawn(spawn, ProxySpawnOutcome::Rejected("stale owner result".to_owned())).is_none(),
             "a duplicate/stale completion has no second reply value",
         );
         assert_eq!(state.recently_died.len(), 1, "a stale completion cannot duplicate the death record");
@@ -373,7 +371,7 @@ mod tests {
 
         let reply = state
             .settle_pending_spawn(
-                FleetSpawnContinuation { engine_id, rpc_port },
+                FleetSpawnContext { engine_id, rpc_port },
                 ProxySpawnOutcome::Rejected("canonical route collision".to_owned()),
             )
             .expect("matching owner rejection settles");

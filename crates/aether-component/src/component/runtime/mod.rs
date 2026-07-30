@@ -49,7 +49,7 @@ use std::sync::Arc;
 use wasmtime::{Engine, Linker};
 
 use aether_substrate::actor::native::{
-    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnApplied, SpawnError, TaskDone,
+    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::chassis::error::BootError;
@@ -101,7 +101,7 @@ pub struct ComponentHostCapabilityState {
     pub boot_registry: HashMap<String, BootEntry>,
     /// Actor-local reservations for module boots that have been staged but are
     /// not authoritative `Live` yet. Same-hash loads and replacements retain
-    /// their own move-only continuations here and join the first boot result.
+    /// their own move-only deferred replies here and join the first boot result.
     pending_boots: HashMap<String, load::PendingBoot>,
     /// ADR-0147: a loaded non-boot actor's own trampoline mailbox → the content
     /// hash of the module it came from. Populated only for actors sourced from a
@@ -255,7 +255,7 @@ impl NativeActor for ComponentHostCapability {
     fn on_component_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, load::SpawnContinuation>,
+        done: TaskDone<SpawnOutcome, load::SpawnContext>,
     ) {
         state.finish_spawn(ctx, done);
     }

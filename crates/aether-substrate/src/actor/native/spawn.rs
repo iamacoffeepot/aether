@@ -26,7 +26,7 @@ use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::dispatch_blocking::TaskContinuation;
+use crate::actor::native::dispatch_blocking::IntoDeferredReply;
 use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
@@ -70,8 +70,8 @@ pub use aether_actor::Subname;
 /// return local validation, parent-reservation, and initialization failures
 /// synchronously. Global namespace, tombstone, route, storage, and owner
 /// decisions are authoritative only when the registry owner applies the staged
-/// birth; those failures arrive later in the matching ADR-0093
-/// `TaskDone<Result<SpawnApplied, SpawnError>, _>`. The transitional eager
+/// birth; those failures arrive later on the [`SpawnOutcome::result`] of the
+/// matching ADR-0093 `TaskDone<SpawnOutcome, _>`. The transitional eager
 /// [`SpawnBuilder::finish`] path returns all of its failures directly.
 #[derive(Debug)]
 pub enum SpawnError {
@@ -113,12 +113,20 @@ pub struct SpawnReceipt {
     pub completion: super::DispatchId,
 }
 
-/// Authoritative successful promotion delivered through the ADR-0093 task
-/// completion path after the child is published Live and catch-up is armed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpawnApplied {
+/// The authoritative fate of one staged child birth, delivered through the
+/// ADR-0093 task completion path once the registry owner has decided it.
+///
+/// Self-identifying on **both** arms: `mailbox_id` and `canonical_name` name
+/// the child the handler staged whether or not it reached Live, so a completion
+/// handler correlates the result without a hand-rolled context struct whose
+/// only job was carrying an id back. `result` is `Ok(())` after the child is
+/// published Live and catch-up is armed, and the precise [`SpawnError`]
+/// otherwise.
+#[derive(Debug)]
+pub struct SpawnOutcome {
     pub mailbox_id: MailboxId,
     pub canonical_name: Arc<str>,
+    pub result: Result<(), SpawnError>,
 }
 
 /// Chassis-level spawn machinery (Phase 3). One per chassis; cloned as
@@ -864,7 +872,7 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
 /// Handler-owned child builder, the only spawn surface
 /// [`NativeCtx::spawn_child`](super::ctx::NativeCtx::spawn_child) hands back.
 /// Every terminal it carries — [`stage`](Self::stage),
-/// [`stage_with`](Self::stage_with), [`continue_with`](Self::continue_with) —
+/// [`stage_with`](Self::stage_with), [`continue_from`](Self::continue_from) —
 /// performs only local preparation during the actor turn and appends one
 /// ordered prepared birth to the parent binding, so a handler never takes the
 /// spawn path's shared locks mid-turn (ADR-0165). It deliberately exposes no
@@ -905,9 +913,8 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         self.stage_with(())
     }
 
-    /// Prepare and stage a birth with caller-owned continuation context. The
-    /// authoritative result later lands as
-    /// `TaskDone<Result<SpawnApplied, SpawnError>, C>`.
+    /// Prepare and stage a birth with caller-owned completion context. The
+    /// authoritative result later lands as `TaskDone<SpawnOutcome, C>`.
     ///
     /// # Panics
     ///
@@ -953,24 +960,21 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             .reserve_child(key)
             .ok_or_else(|| SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() })?;
         let staged = spawner.build::<A>(identity, config, params, after_init)?;
-        let applied = SpawnApplied {
-            mailbox_id: staged.identity.id,
-            canonical_name: Arc::clone(&staged.identity.canonical_name),
-        };
         let completion = parent_binding.dispatch_arm(
             spawner.mailer().acquire_settlement_hold(completion_root),
             completion_reply_to,
             context,
         );
         let receipt = SpawnReceipt {
-            mailbox_id: applied.mailbox_id,
-            canonical_name: Arc::clone(&applied.canonical_name),
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
             completion: completion.dispatch_id(),
         };
         let finalizer = super::activation::NativeSpawnFinalizer::new(
             parent_reservation,
             completion,
-            applied,
+            staged.identity.id,
+            Arc::clone(&staged.identity.canonical_name),
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
@@ -980,9 +984,12 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         Ok(receipt)
     }
 
-    /// Stage a successor birth using an existing move-only task continuation.
-    /// Every synchronous validation/build failure returns the continuation
-    /// intact so the original terminal reply can still be sent exactly once.
+    /// Stage a successor birth that inherits an already-owed reply — either a
+    /// bare [`DeferredReply`](super::DeferredReply) or the
+    /// [`TaskDone`](super::TaskDone) a completion handler is already holding,
+    /// whose debt rides inside it. Every synchronous validation/build failure
+    /// hands `owed` back untouched so the original terminal reply can still be
+    /// sent exactly once.
     ///
     /// # Panics
     ///
@@ -990,14 +997,11 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     /// safe code cannot do because this method takes ownership of `self`.
     #[allow(
         clippy::result_large_err,
-        reason = "the cold synchronous rejection returns the move-only continuation intact beside the precise SpawnError"
+        reason = "the cold synchronous rejection returns the move-only owed reply intact beside the precise SpawnError"
     )]
-    pub fn continue_with<C>(
-        self,
-        continuation: TaskContinuation,
-        context: C,
-    ) -> Result<SpawnReceipt, (SpawnError, TaskContinuation)>
+    pub fn continue_from<R, C>(self, owed: R, context: C) -> Result<SpawnReceipt, (SpawnError, R)>
     where
+        R: IntoDeferredReply,
         C: Send + 'static,
     {
         let Self { inner, parent_binding, .. } = self;
@@ -1012,12 +1016,12 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             after_init,
             ..
         } = inner;
-        let config = config.expect("HandlerSpawnBuilder::continue_with consumed exactly once");
-        let params = params.expect("HandlerSpawnBuilder::continue_with consumed exactly once");
+        let config = config.expect("HandlerSpawnBuilder::continue_from consumed exactly once");
+        let params = params.expect("HandlerSpawnBuilder::continue_from consumed exactly once");
         if let Subname::Named(subname) = subname
             && let Err(error) = validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)
         {
-            return Err((error, continuation));
+            return Err((error, owed));
         }
         let parent = parent.expect("handler child builder always carries a typed parent identity");
         let declared_namespace = declared_parent_namespace.expect("handler child builder names its declared parent");
@@ -1028,40 +1032,39 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
                     actual_logical: parent.logical(),
                     actual_canonical_name: Arc::clone(parent.canonical_name()),
                 },
-                continuation,
+                owed,
             ));
         }
 
         let identity = match spawner.prepare_identity::<A>(subname, Some(&parent)) {
             Ok(identity) => identity,
-            Err(error) => return Err((error, continuation)),
+            Err(error) => return Err((error, owed)),
         };
         let key = ChildReservationKey::new(
             ActorId::singleton(A::NAMESPACE),
             ActorId::instanced(A::NAMESPACE, &identity.subname),
         );
         let Some(parent_reservation) = parent_binding.reserve_child(key) else {
-            return Err((SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() }, continuation));
+            return Err((SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() }, owed));
         };
         let staged = match spawner.build::<A>(identity, config, params, after_init) {
             Ok(staged) => staged,
-            Err(error) => return Err((error, continuation)),
+            Err(error) => return Err((error, owed)),
         };
-        let applied = SpawnApplied {
-            mailbox_id: staged.identity.id,
-            canonical_name: Arc::clone(&staged.identity.canonical_name),
-        };
-        let (hold, reply_to) = continuation.into_parts();
+        // Every fallible step is behind us, so the debt can finally leave the
+        // caller's hands: converting is what makes returning it impossible.
+        let (hold, reply_to) = owed.into_deferred_reply().into_parts();
         let completion = parent_binding.dispatch_arm(hold, reply_to, context);
         let receipt = SpawnReceipt {
-            mailbox_id: applied.mailbox_id,
-            canonical_name: Arc::clone(&applied.canonical_name),
+            mailbox_id: staged.identity.id,
+            canonical_name: Arc::clone(&staged.identity.canonical_name),
             completion: completion.dispatch_id(),
         };
         let finalizer = super::activation::NativeSpawnFinalizer::new(
             parent_reservation,
             completion,
-            applied,
+            staged.identity.id,
+            Arc::clone(&staged.identity.canonical_name),
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
@@ -1437,11 +1440,7 @@ mod tests {
         let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
         let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
         let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
-        let applied = SpawnApplied {
-            mailbox_id: staged.identity.id,
-            canonical_name: Arc::clone(&staged.identity.canonical_name),
-        };
-        let deferred = parent.dispatch_arm::<Result<SpawnApplied, SpawnError>, _>(
+        let deferred = parent.dispatch_arm::<SpawnOutcome, _>(
             spawner.mailer().acquire_settlement_hold(MailId::new(parent.self_mailbox(), correlation)),
             Source::NONE,
             (),
@@ -1450,7 +1449,8 @@ mod tests {
         let finalizer = super::super::activation::NativeSpawnFinalizer::new(
             parent_reservation,
             deferred,
-            applied,
+            staged.identity.id,
+            Arc::clone(&staged.identity.canonical_name),
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
@@ -1458,10 +1458,7 @@ mod tests {
         (spawner.prepare_commit_with_finalizer(staged, finalizer), dispatch_id, key)
     }
 
-    fn await_spawn_done(
-        parent: &NativeBinding,
-        dispatch_id: DispatchId,
-    ) -> TaskDone<Result<SpawnApplied, SpawnError>, ()> {
+    fn await_spawn_done(parent: &NativeBinding, dispatch_id: DispatchId) -> TaskDone<SpawnOutcome, ()> {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             if let Some(done) = parent.dispatch_take(dispatch_id) {
@@ -1555,11 +1552,7 @@ mod tests {
             spawner.prepare_identity::<ActivationProbe>(Subname::Named("owner-close-before-apply"), None).unwrap();
         let staged =
             spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
-        let applied = SpawnApplied {
-            mailbox_id: staged.identity.id,
-            canonical_name: Arc::clone(&staged.identity.canonical_name),
-        };
-        let deferred = parent.dispatch_arm::<Result<SpawnApplied, SpawnError>, _>(
+        let deferred = parent.dispatch_arm::<SpawnOutcome, _>(
             mailer.acquire_settlement_hold(MailId::new(parent_id, 1)),
             Source::NONE,
             (),
@@ -1568,7 +1561,8 @@ mod tests {
         let finalizer = super::super::activation::NativeSpawnFinalizer::new(
             parent_reservation,
             deferred,
-            applied,
+            staged.identity.id,
+            Arc::clone(&staged.identity.canonical_name),
             Arc::downgrade(&staged.transport),
             Arc::clone(&mailer),
         );
@@ -1588,9 +1582,10 @@ mod tests {
         assert!(registry.entry(child_id).is_none(), "owner-close rejection publishes no route");
 
         let done = parent
-            .dispatch_take::<Result<SpawnApplied, SpawnError>, ()>(dispatch_id)
+            .dispatch_take::<SpawnOutcome, ()>(dispatch_id)
             .expect("owner-close finalization fills the typed deferred result");
-        assert!(matches!(done.output(), Err(SpawnError::OwnerClosed)));
+        assert_eq!(done.output().mailbox_id, child_id, "a rejection still names the birth it belongs to");
+        assert!(matches!(done.output().result, Err(SpawnError::OwnerClosed)));
         done.release_no_reply();
         drop(parent.reserve_child(key).expect("owner-close rejection releases the staged parent key"));
 
@@ -1651,13 +1646,16 @@ mod tests {
         assert!(registry.entry(later_id).is_none());
 
         let first_done = await_spawn_done(&parent, first_dispatch);
-        assert!(matches!(first_done.output(), Err(SpawnError::ActivationRejected)));
+        assert_eq!(first_done.output().mailbox_id, first_id, "each rejection names its own birth");
+        assert!(matches!(first_done.output().result, Err(SpawnError::ActivationRejected)));
         first_done.release_no_reply();
         let middle_done = await_spawn_done(&parent, middle_dispatch);
-        assert!(matches!(middle_done.output(), Err(SpawnError::SubnameInUse { .. })));
+        assert_eq!(middle_done.output().mailbox_id, middle_id);
+        assert!(matches!(middle_done.output().result, Err(SpawnError::SubnameInUse { .. })));
         middle_done.release_no_reply();
         let later_done = await_spawn_done(&parent, later_dispatch);
-        assert!(matches!(later_done.output(), Err(SpawnError::ActivationRejected)));
+        assert_eq!(later_done.output().mailbox_id, later_id);
+        assert!(matches!(later_done.output().result, Err(SpawnError::ActivationRejected)));
         later_done.release_no_reply();
         for key in [first_key, middle_key, later_key] {
             drop(parent.reserve_child(key).expect("transactional rejection releases every parent key"));
@@ -1744,7 +1742,7 @@ mod tests {
         completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
 
         let done = await_spawn_done(&parent, dispatch_id);
-        assert!(matches!(done.output(), Ok(applied) if applied.mailbox_id == child_id));
+        assert!(matches!(done.output(), SpawnOutcome { mailbox_id, result: Ok(()), .. } if *mailbox_id == child_id));
         done.release_no_reply();
         assert!(parent.reserve_child(key).is_none(), "Live promotion carries the same key into the live-child set");
 
@@ -1772,7 +1770,7 @@ mod tests {
         assert!(matches!(rejection.wait_timeout(Duration::from_secs(1)).unwrap(), Err(RegistryEffectError::Name(_))));
         let reborn_done = await_spawn_done(&parent, reborn_dispatch);
         assert!(
-            matches!(reborn_done.output(), Err(SpawnError::SubnameRetired { .. })),
+            matches!(reborn_done.output().result, Err(SpawnError::SubnameRetired { .. })),
             "the owner classified the surviving route of a retired id, not a live occupant: {:?}",
             reborn_done.output()
         );

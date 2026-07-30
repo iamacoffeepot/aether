@@ -77,7 +77,7 @@ pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 // lifecycle is the shared `aether_actor::Lifecycle<S>` (no native re-export).
 pub use actor::native::pumped_slot::PumpedSlot;
 pub use actor::native::{Dispatch, NativeActor};
-pub use actor::native::{HandlerSpawnBuilder, SpawnApplied, SpawnReceipt};
+pub use actor::native::{HandlerSpawnBuilder, SpawnOutcome, SpawnReceipt};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};

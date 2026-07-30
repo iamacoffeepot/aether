@@ -27,7 +27,7 @@ use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Mail;
 pub use aether_substrate::Subname;
 pub use aether_substrate::actor::native::{
-    NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskContinuation, TaskDone,
+    DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone,
 };
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::SourceAddr;
@@ -92,10 +92,12 @@ pub struct PendingEngine {
 }
 
 /// Context carried by the staged proxy birth into its authoritative task
-/// completion. Process ownership stays solely in `FleetProxyState`; this
-/// context contains only the metadata needed to commit supervision.
+/// completion. Process ownership stays solely in `FleetProxyState`; the proxy's
+/// own identity rides its `SpawnOutcome`. What this carries is the fleet
+/// metadata no spawn result knows: the engine id the cap minted and the RPC
+/// port it reserved for the forked substrate.
 #[derive(Clone)]
-pub struct FleetSpawnContinuation {
+pub struct FleetSpawnContext {
     pub engine_id: EngineId,
     pub rpc_port: u16,
 }
@@ -199,10 +201,10 @@ impl FleetServerState {
     /// still gets discharged by the caller without emitting a second reply.
     pub fn settle_pending_spawn(
         &mut self,
-        continuation: FleetSpawnContinuation,
+        spawn: FleetSpawnContext,
         outcome: ProxySpawnOutcome,
     ) -> Option<SpawnEngineResult> {
-        let FleetSpawnContinuation { engine_id, rpc_port } = continuation;
+        let FleetSpawnContext { engine_id, rpc_port } = spawn;
         let pending = self.pending_engines.remove(&engine_id)?;
         debug_assert_eq!(pending.rpc_port, rpc_port, "spawn completion must match its pending engine");
 
@@ -345,7 +347,7 @@ impl NativeActor for FleetServer {
     /// staged proxy.
     #[handler::manual]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SpawnEngine) {
-        let mut continuation: TaskContinuation = ctx.continuation_to(ctx.reply_target());
+        let mut owed: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
 
         // Resolve the registry selector to stored content bytes before
         // any side effect, so a miss returns without reserving a port
@@ -353,7 +355,7 @@ impl NativeActor for FleetServer {
         let Some(artifact) = resolve_selector(&mut state.store, &mail.selector) else {
             // Pre-allocation failure: no engine id minted yet, so there
             // is nothing to correlate or reap — `engine_id` is `None`.
-            continuation.resolve(
+            owed.reply(
                 ctx,
                 &SpawnEngineResult::Err {
                     engine_id: None,
@@ -386,7 +388,7 @@ impl NativeActor for FleetServer {
                 Err(e) => {
                     // Still pre-allocation — no engine id minted this
                     // attempt, so no death record and `engine_id` is `None`.
-                    continuation.resolve(
+                    owed.reply(
                         ctx,
                         &SpawnEngineResult::Err {
                             engine_id: None,
@@ -414,7 +416,7 @@ impl NativeActor for FleetServer {
                 // was ever registered, so record a `SpawnFailed` death and
                 // carry the id back so a caller can correlate and reap.
                 let error = format!("materializing binary {} to {}: {e}", artifact.hash, exec_path.display());
-                continuation.resolve(ctx, &state.fail_spawn(engine_id, rpc_port, error));
+                owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
                 return;
             }
 
@@ -446,7 +448,7 @@ impl NativeActor for FleetServer {
                 Ok(child) => child,
                 Err(e) => {
                     let error = format!("failed to spawn {}: {e}", exec_path.display());
-                    continuation.resolve(ctx, &state.fail_spawn(engine_id, rpc_port, error));
+                    owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
                     return;
                 }
             };
@@ -454,7 +456,7 @@ impl NativeActor for FleetServer {
             let subname = engine_id.0.simple().to_string();
             let rpc_addr = format!("127.0.0.1:{rpc_port}");
 
-            // `continue_with` still runs `FleetProxy::init` on this thread:
+            // `continue_from` still runs `FleetProxy::init` on this thread:
             // it dials the substrate (retrying while it comes up) and, on
             // failure, kills the child it was handed. A successful init
             // transfers the original caller obligation into the staged
@@ -471,7 +473,7 @@ impl NativeActor for FleetServer {
                     },
                     (),
                 )
-                .continue_with(continuation, FleetSpawnContinuation { engine_id, rpc_port });
+                .continue_from(owed, FleetSpawnContext { engine_id, rpc_port });
 
             match result {
                 Ok(_) => {
@@ -480,8 +482,8 @@ impl NativeActor for FleetServer {
                     debug_assert!(replaced.is_none(), "fresh engine ids cannot replace a pending spawn");
                     return;
                 }
-                Err((e, returned_continuation)) => {
-                    continuation = returned_continuation;
+                Err((e, returned)) => {
+                    owed = returned;
                     last_error = format!("proxy failed to connect to the spawned substrate: {e:?}");
                     // Re-fork only the bind-stolen-port child-exited
                     // death, and only if attempts remain. Any other
@@ -498,7 +500,7 @@ impl NativeActor for FleetServer {
                         );
                         continue;
                     }
-                    continuation.resolve(ctx, &state.fail_spawn(engine_id, rpc_port, last_error));
+                    owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, last_error));
                     return;
                 }
             }
@@ -507,7 +509,7 @@ impl NativeActor for FleetServer {
         // Only reached if `attempts` is 0, which `spawn_attempts()`
         // clamps away — keep an honest terminal `Err` rather than an
         // unreachable panic.
-        continuation.resolve(ctx, &SpawnEngineResult::Err { engine_id: None, error: last_error });
+        owed.reply(ctx, &SpawnEngineResult::Err { engine_id: None, error: last_error });
     }
 
     /// Settle one staged proxy birth. Only an authoritative apply with no
@@ -518,15 +520,15 @@ impl NativeActor for FleetServer {
     fn on_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, FleetSpawnContinuation>,
+        done: TaskDone<SpawnOutcome, FleetSpawnContext>,
     ) {
-        let continuation = done.context().clone();
-        let engine_id = continuation.engine_id;
-        let outcome = match done.output() {
-            Ok(applied) => ProxySpawnOutcome::Applied(applied.mailbox_id),
+        let spawn = done.context().clone();
+        let engine_id = spawn.engine_id;
+        let outcome = match &done.output().result {
+            Ok(()) => ProxySpawnOutcome::Applied(done.output().mailbox_id),
             Err(error) => ProxySpawnOutcome::Rejected(format!("proxy activation failed: {error:?}")),
         };
-        let Some(reply) = state.settle_pending_spawn(continuation, outcome) else {
+        let Some(reply) = state.settle_pending_spawn(spawn, outcome) else {
             tracing::warn!(
                 target: "aether_substrate::fleet_server",
                 engine_id = %engine_id.0,

@@ -83,11 +83,11 @@ pub mod task_queue;
 pub use crate::mail::registry::effect::{RegistryBatch, RegistryBatchError, RegistryBatchResult};
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
-pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskContinuation, TaskDone};
+pub use dispatch_blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use envelope::Envelope;
 pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
 pub use pumped_slot::PumpedSlot;
-pub use spawn::{HandlerSpawnBuilder, SpawnApplied, SpawnBuilder, SpawnError, SpawnReceipt, Spawner, Subname};
+pub use spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Spawner, Subname};
 pub use spawn_thread::{InheritCtx, RootCtx};
 // iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the
 // ADR-0093 `dispatch_blocking` primitive it wraps — a substrate-tier native
