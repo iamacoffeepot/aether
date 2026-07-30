@@ -41,7 +41,7 @@ impl Chassis for HubChassis {
     type Env = ConfigSources;
 
     fn build(mut sources: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         // #3849 / ADR-0162 §config-at-its-seam: re-apply the fully-resolved
         // `AETHER_LOG_FILTER` directive now the subscriber is installed (env >
         // `[runtime]` file > `info`). Resolved HERE, at the seam that applies it,
@@ -56,7 +56,7 @@ impl Chassis for HubChassis {
         // implicit `PanicAborter`) and the unit no-op base, then runs the hub's
         // fallible `compose` delta — which resolves the always-bind RPC port and
         // the base stratum off the source stack it now receives (ADR-0162).
-        let builder = composed::<Self>(&boot, (), sources)?;
+        let builder = composed::<Self>(&mut boot, (), sources)?;
         // ADR-0162 (was ADR-0156 §4): warn on any unknown `AETHER_*` env var,
         // sweeping against the composition-derived known-key set plus the hub
         // residual hand records. Post-ADR-0162 the hub's env speaks to a single

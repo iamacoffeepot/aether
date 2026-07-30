@@ -25,6 +25,15 @@ pub enum BootError {
     /// A second capability tried to register a fallback router after
     /// one was already installed. The slot is single-claim by design.
     FallbackRouterAlreadyClaimed,
+    /// The composition point found the shared boot's [`BootAuthority`]
+    /// already spent — the same `SubstrateBoot` was composed twice
+    /// (iamacoffeepot/aether#4171). A boot handle carries one authority and
+    /// lends it to one composition; a chassis that wants a second chain
+    /// stands up a second boot, as `describe_caps` / `config_manifest` /
+    /// `Chassis::build` each already do.
+    ///
+    /// [`BootAuthority`]: crate::mail::registry::BootAuthority
+    AlreadyComposed,
     /// Anything else a capability's boot wants to surface.
     Other(Box<dyn StdError + Send + Sync + 'static>),
 }
@@ -36,6 +45,7 @@ impl fmt::Display for BootError {
                 write!(f, "mailbox {name:?} already claimed")
             }
             Self::FallbackRouterAlreadyClaimed => f.write_str("fallback router slot already claimed"),
+            Self::AlreadyComposed => f.write_str("substrate boot already composed — its boot authority is spent"),
             Self::Other(e) => write!(f, "capability boot failed: {e}"),
         }
     }

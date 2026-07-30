@@ -73,7 +73,7 @@ impl Chassis for DesktopChassis {
         })?;
         event_loop.set_control_flow(ControlFlow::Poll);
 
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
@@ -121,7 +121,7 @@ impl Chassis for DesktopChassis {
             "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
-        let builder = composed::<Self>(&boot, base, env)?;
+        let builder = composed::<Self>(&mut boot, base, env)?;
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `resolve_env`) because the

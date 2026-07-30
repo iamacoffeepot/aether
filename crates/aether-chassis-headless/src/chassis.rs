@@ -61,7 +61,7 @@ impl Chassis for HeadlessChassis {
     /// wrap the timer in a [`HeadlessTimerDriverCapability`] and hand it to
     /// the builder.
     fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         // #3849: `SubstrateBoot::build` installed the subscriber with an
         // env-or-`info` filter (before the config file loaded); re-apply the
         // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
@@ -109,7 +109,7 @@ impl Chassis for HeadlessChassis {
             "componentless boot — load a component via aether.component.load",
         );
 
-        let builder = composed::<Self>(&boot, base, env)?;
+        let builder = composed::<Self>(&mut boot, base, env)?;
         // ADR-0156 §4 (was ADR-0090 §4 e1): warn on any unknown `AETHER_*` env
         // var, sweeping against the composition-derived known-key set plus the
         // residual hand records. Runs here (not in `resolve_env`) because the
@@ -185,10 +185,17 @@ impl BootableChassis for HeadlessChassis {
         // ADR-0155: registering the sink here (Compose) is what puts
         // `aether.audio` in the claim-derived `--describe` roster — an
         // inline sink is a claim like any other.
+        //
+        // iamacoffeepot/aether#4171: the direct mutator is named through the
+        // boot's authority, borrowed for this call. `composed` spends the token
+        // the moment this delta returns, so the sink registration is inside the
+        // window and nothing after it — including the driver that ends up owning
+        // this `boot` — can reach the direct write path.
+        let authority = boot.authority().ok_or(BootError::AlreadyComposed)?;
         let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_inline(
-            &boot.authority,
+            authority,
             "aether.audio",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 if dispatch.kind == kind_set_master_gain {

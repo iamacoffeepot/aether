@@ -142,12 +142,12 @@ impl Chassis for BloomeryChassis {
     type Env = BloomeryEnv;
 
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         // Bloomery's base is the unit no-op — it stages no config sources — but it
         // still routes through `composed`, so it gets the framework-minted
         // `OutboundFatalAborter` by construction (previously the implicit
         // `PanicAborter`).
-        let builder = composed::<Self>(&boot, (), env)?;
+        let builder = composed::<Self>(&mut boot, (), env)?;
         // The driver owns the boot and drops it on the shutdown signal — it
         // moves in here, after `compose` finished borrowing it.
         let driver = BloomeryDriverCapability { boot };

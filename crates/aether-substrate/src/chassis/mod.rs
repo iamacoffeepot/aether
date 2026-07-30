@@ -170,19 +170,46 @@ impl<C: Chassis> ComposeBase<C> for () {
 /// propagates out as a [`BootError`] rather than being pre-resolved into a
 /// per-chassis env bag.
 ///
+/// The shared boot's [`BootAuthority`](crate::BootAuthority) is **spent here**
+/// (iamacoffeepot/aether#4171). A delta that needs the token borrows it off the
+/// boot handle for the length of its own call
+/// ([`SubstrateBoot::authority`](crate::SubstrateBoot::authority)); `composed`
+/// then takes it unconditionally once the delta returns, for every chassis,
+/// whether or not that chassis ever asked for it. So the token is gone before
+/// the builder reaches the caller, and therefore long before `build` installs
+/// the ADR-0165 seal.
+///
+/// That closes the residual the seal could not reach: the boot handle outlives
+/// the seal — every chassis moves it into its driver — so while a token sat on
+/// the handle a post-seal `register_inbox` still typechecked. It cannot be named
+/// once composition returns, which is what ADR-0165's "spent or dropped by then"
+/// already claimed of this mint site.
+///
+/// The spend is deliberately not conditioned on the delta succeeding: a failed
+/// composition aborts the chassis, and leaving a live token on the handle in
+/// that path would be the same residual under a rarer precondition.
+///
 /// # Errors
 ///
 /// Returns [`BootError`] when the chassis's `compose` delta fails (a seam config
-/// member fails to resolve).
+/// member fails to resolve, or the delta wanted an authority this handle had
+/// already spent — [`BootError::AlreadyComposed`]).
 #[cfg(feature = "wasm")]
-pub fn composed<C: BootableChassis>(boot: &SubstrateBoot, base: C::Base, env: C::Env) -> Result<Builder<C>, BootError> {
+pub fn composed<C: BootableChassis>(
+    boot: &mut SubstrateBoot,
+    base: C::Base,
+    env: C::Env,
+) -> Result<Builder<C>, BootError> {
     // The sole sanctioned `Builder::new` on the boot path: `composed` is the one
     // minting point the `clippy.toml` `disallowed-methods` entry funnels every
     // chassis through, so a `compose` delta can only extend a based builder.
     #[allow(clippy::disallowed_methods)]
     let builder = Builder::<C>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
         .with_aborter(Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound))));
-    C::compose(base.install(builder), boot, env)
+
+    let composed = C::compose(base.install(builder), boot, env);
+    let _spent = boot.take_authority();
+    composed
 }
 
 /// The boot-ceremony contract shared by every chassis binary that resolves
@@ -232,6 +259,15 @@ pub trait BootableChassis: Chassis {
     /// boots. Takes the boot handle by reference; `build` moves the same `boot`
     /// into the driver afterward, while the describe / config helpers drop it.
     ///
+    /// A delta that registers an inline sink or claims a mailbox with an explicit
+    /// lineage id borrows the boot's authority through
+    /// [`SubstrateBoot::authority`](crate::SubstrateBoot::authority) to name the
+    /// registry's direct mutators (iamacoffeepot/aether#4171); most deltas never
+    /// ask. The borrow is what bounds the token's reach — it cannot outlive the
+    /// `&SubstrateBoot` this call receives, and [`composed`] spends the token
+    /// outright the moment the delta returns, so the direct write path is
+    /// unnameable by the time `build` installs the ADR-0165 seal.
+    ///
     /// Fallible (ADR-0162 §config-at-its-seam): a chassis resolves the config
     /// members its own delta consumes — the hub's always-bind RPC port off the
     /// source stack — right here, so a parse fault propagates as a [`BootError`]
@@ -268,8 +304,8 @@ pub trait BootableChassis: Chassis {
 #[cfg(feature = "wasm")]
 pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError> {
     let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
-    let boot = SubstrateBoot::build()?;
-    composed::<C>(&boot, base, env)?.claim_namespaces()
+    let mut boot = SubstrateBoot::build()?;
+    composed::<C>(&mut boot, base, env)?.claim_namespaces()
 }
 
 /// The ADR-0156 §4 composition-derived config aggregate: resolve the env,
@@ -284,8 +320,8 @@ pub fn describe_caps<C: BootableChassis>() -> Result<BTreeSet<String>, BootError
 #[cfg(feature = "wasm")]
 pub fn config_manifest<C: BootableChassis>() -> Result<ConfigManifest, BootError> {
     let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
-    let boot = SubstrateBoot::build()?;
-    Ok(composed::<C>(&boot, base, env)?.config_manifest())
+    let mut boot = SubstrateBoot::build()?;
+    Ok(composed::<C>(&mut boot, base, env)?.config_manifest())
 }
 
 /// A chassis binary's build provenance — the `build.rs`-baked facts a
@@ -340,8 +376,8 @@ pub struct BuildProvenance {
 #[cfg(feature = "wasm")]
 pub fn describe_manifest<C: BootableChassis>(provenance: &BuildProvenance) -> Result<BinaryManifest, BootError> {
     let (base, env) = C::resolve_env().map_err(|e| BootError::Other(Box::new(e)))?;
-    let boot = SubstrateBoot::build()?;
-    let builder = composed::<C>(&boot, base, env)?;
+    let mut boot = SubstrateBoot::build()?;
+    let builder = composed::<C>(&mut boot, base, env)?;
 
     let config = builder.config_manifest();
     let mut env_keys: Vec<String> = config.known_keys(&C::residual_knobs()).iter().map(str::to_owned).collect();
@@ -445,7 +481,9 @@ pub fn run_chassis_prelude<C: BootableChassis>(
 
 #[cfg(all(test, feature = "wasm"))]
 mod prelude_tests {
-    use super::{BootableChassis, BuildProvenance, Chassis, PreludeAction, PreludeFlags, run_chassis_prelude};
+    use super::{
+        BootableChassis, BuildProvenance, Chassis, PreludeAction, PreludeFlags, composed, run_chassis_prelude,
+    };
     use crate::SubstrateBoot;
     use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
     use crate::chassis::error::BootError;
@@ -494,5 +532,89 @@ mod prelude_tests {
                 .expect("no-flag prelude is infallible — it touches no substrate");
         assert_eq!(action, PreludeAction::Boot);
         assert!(!action.is_handled(), "Boot is the not-handled action");
+    }
+
+    /// A chassis whose `compose` delta is a no-op — it never asks for the boot
+    /// authority. The case that matters for #4171: three of the four real
+    /// chassis look like this, and the spend has to reach them too.
+    struct InertChassis;
+
+    impl Chassis for InertChassis {
+        const PROFILE: &'static str = "inert-test";
+        type Driver = NeverDriver;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("InertChassis is a composition fixture, never built");
+        }
+    }
+
+    impl BootableChassis for InertChassis {
+        type Base = ();
+        fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
+            Ok(((), ()))
+        }
+        fn compose(builder: Builder<Self>, _boot: &SubstrateBoot, _env: Self::Env) -> Result<Builder<Self>, BootError> {
+            Ok(builder)
+        }
+    }
+
+    /// A chassis whose delta borrows the boot authority, the way headless does
+    /// to register its `aether.audio` inline sink.
+    struct AuthorityChassis;
+
+    impl Chassis for AuthorityChassis {
+        const PROFILE: &'static str = "authority-test";
+        type Driver = NeverDriver;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("AuthorityChassis is a composition fixture, never built");
+        }
+    }
+
+    impl BootableChassis for AuthorityChassis {
+        type Base = ();
+        fn resolve_env() -> Result<(Self::Base, Self::Env), ConfigError> {
+            Ok(((), ()))
+        }
+        fn compose(builder: Builder<Self>, boot: &SubstrateBoot, _env: Self::Env) -> Result<Builder<Self>, BootError> {
+            boot.authority().ok_or(BootError::AlreadyComposed)?;
+            Ok(builder)
+        }
+    }
+
+    #[test]
+    fn composing_spends_the_shared_boot_authority() {
+        // Tripwire: `composed` must spend the boot's `BootAuthority` for every
+        // chassis, including one whose delta never asks for it
+        // (iamacoffeepot/aether#4171). Every chassis moves its `SubstrateBoot`
+        // into the driver, so the handle outlives the ADR-0165 seal — a token
+        // still sitting on it would keep the registry's direct mutators nameable
+        // at steady state. Condition the spend on the delta wanting the token and
+        // this goes back to `Some`.
+        let mut boot = SubstrateBoot::build().expect("substrate boot");
+        composed::<InertChassis>(&mut boot, (), ()).expect("inert composition");
+        assert!(
+            boot.take_authority().is_none(),
+            "composing a delta that never reads the authority must still spend it",
+        );
+
+        // A later composition of the same handle is what a real double-compose
+        // looks like from the delta's side: a typed boot error, not a panic near
+        // the registry (#4154) and not a silent authority-less chain.
+        assert!(
+            matches!(composed::<AuthorityChassis>(&mut boot, (), ()), Err(BootError::AlreadyComposed)),
+            "recomposing a spent boot must report AlreadyComposed",
+        );
+    }
+
+    #[test]
+    fn a_delta_borrows_the_authority_only_while_it_composes() {
+        // Tripwire: the window a delta gets is exactly its own call. `compose`
+        // must see the token (headless registers its audio sink through it), and
+        // `composed` must have taken it back by the time the builder is returned
+        // — the builder goes on to `build`, which installs the seal.
+        let mut boot = SubstrateBoot::build().expect("substrate boot");
+        composed::<AuthorityChassis>(&mut boot, (), ()).expect("a delta must see the authority while it composes");
+        assert!(boot.take_authority().is_none(), "the authority must not survive the delta that borrowed it");
     }
 }

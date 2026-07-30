@@ -285,7 +285,7 @@ impl SubstrateHarnessChassis {
             teardown_budget,
         } = env;
 
-        let boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build()?;
         let _ = workers;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
@@ -341,10 +341,21 @@ impl SubstrateHarnessChassis {
         // arms leaked settlement; now that `Inline` participates in
         // ADR-0080 §6 we get the same correctness with one fewer
         // thread per SubstrateHarness.
+        //
+        // iamacoffeepot/aether#4171: the harness composes its own chain rather
+        // than routing through `aether_substrate::chassis::composed`, so it runs
+        // that function's borrow-then-spend itself — the observer names the direct
+        // mutator through a borrowed authority, and the token is then spent
+        // unconditionally (the observer is optional, the spend is not), well
+        // before `build_passive` installs the ADR-0165 seal. The `SubstrateBoot`
+        // the embedder receives therefore carries no authority, which is what
+        // keeps the registry's direct mutators unnameable once the owner has
+        // taken over.
+        let authority = boot.authority().ok_or(BootError::AlreadyComposed)?;
         if let Some(sink) = observed_kinds {
             let observed_for_handler = sink;
             boot.registry.register_inline(
-                &boot.authority,
+                authority,
                 SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
                 Arc::new(move |dispatch: MailDispatch<'_>| {
                     if dispatch.kind_name.is_empty() {
@@ -357,6 +368,7 @@ impl SubstrateHarnessChassis {
                 }),
             );
         }
+        let _spent = boot.take_authority();
 
         // ADR-0082 §1 / PR 3b: substrate-harness uses the shared frame
         // lifecycle graph. The embedder pushes `LifecycleAdvance` via

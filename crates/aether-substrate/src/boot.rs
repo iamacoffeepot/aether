@@ -48,10 +48,12 @@ use crate::runtime::panic_hook;
 use crate::{AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns};
 use aether_kinds::descriptors;
 
-/// Everything a chassis needs after shared boot setup. Fields are
-/// `pub` so chassis code destructures and takes ownership of the
-/// pieces it actually uses; anything unused stays on the struct and
-/// gets dropped when the chassis shuts down.
+/// Everything a chassis needs after shared boot setup. The handle
+/// fields are `pub` so chassis code destructures and takes ownership of
+/// the pieces it actually uses; anything unused stays on the struct and
+/// gets dropped when the chassis shuts down. The one exception is the
+/// [`BootAuthority`], which is private behind [`Self::take_authority`]
+/// because it is spent rather than shared (iamacoffeepot/aether#4171).
 ///
 /// Issue 603: `engine`, `linker`, `outbound` are the inputs
 /// `ComponentHostCapability` consumes through `ComponentHostConfig`
@@ -75,11 +77,14 @@ pub struct SubstrateBoot {
     /// `Registry`.
     pub boot_descriptors: Vec<KindDescriptor>,
     /// iamacoffeepot/aether#4156: the boot path's proof that it may write
-    /// the registry directly, ahead of the ADR-0165 owner. Retained so a
-    /// chassis main that registers its own kinds or claims a mailbox with
-    /// an explicit lineage id after `build()` can name those mutators; a
-    /// handler never receives one.
-    pub authority: BootAuthority,
+    /// the registry directly, ahead of the ADR-0165 owner. Private and
+    /// one-shot (iamacoffeepot/aether#4171): a composition delta borrows it
+    /// through [`Self::authority`], and the single composition point spends it
+    /// through [`Self::take_authority`] as soon as that delta returns — so the
+    /// token's reach is the composition rather than the whole life of the boot
+    /// handle, which every chassis moves into its driver and keeps well past
+    /// the seal. A handler never receives one.
+    authority: Option<BootAuthority>,
 }
 
 impl SubstrateBoot {
@@ -171,7 +176,47 @@ impl SubstrateBoot {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors, authority })
+        Ok(Self { engine, registry, linker, queue, outbound, boot_descriptors, authority: Some(authority) })
+    }
+
+    /// Borrow the boot path's [`BootAuthority`] — the proof a composition
+    /// delta needs to name the registry's direct mutators
+    /// (`register_inline`, `try_register_inbox_with_id`,
+    /// `register_kind_with_descriptor`) while the chassis is still composing.
+    /// `None` once the token has been spent.
+    ///
+    /// The borrow is the bound: it lives no longer than the `&SubstrateBoot`
+    /// it came from, so a delta can use the token but cannot stash it. The
+    /// sibling of [`ChassisCtx::boot_authority`], which lends the same proof
+    /// to a capability's own boot pass.
+    ///
+    /// [`ChassisCtx::boot_authority`]: crate::ChassisCtx::boot_authority
+    #[must_use]
+    pub fn authority(&self) -> Option<&BootAuthority> {
+        self.authority.as_ref()
+    }
+
+    /// Move the boot path's [`BootAuthority`] out of this handle, or `None`
+    /// if it was already spent.
+    ///
+    /// ADR-0165's seal argument rests on every `BootAuthority` mint being
+    /// "spent or dropped" before `Spawner::seal` runs. The shared boot's mint
+    /// was the one holder that did not honour that: the handle outlives the
+    /// seal (every chassis moves it into its driver), so a `pub` field made
+    /// the direct registry mutators nameable long after the owner took over
+    /// (iamacoffeepot/aether#4171). Taking the token is what spends it, and
+    /// [`composed`](crate::chassis::composed) does so unconditionally once a
+    /// chassis's composition delta has run — for every chassis, whether or not
+    /// its delta ever asked for the token.
+    ///
+    /// A second take is a genuine double-compose of the same boot, which the
+    /// composition point reports as [`BootError::AlreadyComposed`]. There is
+    /// no assertion and no panic here: #4154 is the standing reason a
+    /// diagnostic near this machinery is expensive.
+    ///
+    /// [`BootError::AlreadyComposed`]: crate::chassis::error::BootError::AlreadyComposed
+    pub fn take_authority(&mut self) -> Option<BootAuthority> {
+        self.authority.take()
     }
 }
 
@@ -195,7 +240,8 @@ mod tests {
         let boot = SubstrateBoot::build().expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
-        boot.registry.register_inbox(&boot.authority, "test_chassis_sink", Arc::new(|_dispatch| {}));
+        let authority = boot.authority().expect("a fresh boot still holds its authority");
+        boot.registry.register_inbox(authority, "test_chassis_sink", Arc::new(|_dispatch| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `RpcServerCapability`
         // themselves through their `Builder`.
