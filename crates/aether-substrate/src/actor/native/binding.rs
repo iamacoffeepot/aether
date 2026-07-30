@@ -294,10 +294,17 @@ pub struct NativeBinding {
     /// requirements — the buffer has a single logical producer (this
     /// actor's dispatcher thread, only during its own handler dispatch),
     /// so the lock is uncontended. Spawned-worker sends
-    /// ([`super::spawn_thread`]) and wasm-guest sends run on other
-    /// threads / a different path and stay on the eager [`Self::send_mail`]
-    /// route, preserving the ring's single-writer discipline.
+    /// ([`super::spawn_thread`]) stay on the eager [`Self::send_mail`] route.
+    /// Wasm-guest sends are also eager while Live; staged activation retains
+    /// their owned payload here without writing the native ring, preserving
+    /// its single-writer discipline.
     outbound: Mutex<OutboundBuffer>,
+    /// Lock-free rejection hint for component sends on the ordinary Live hot
+    /// path. `false` avoids touching [`Self::outbound`]; `true` enters the
+    /// mutex and rechecks its authoritative `activation_held` flag before
+    /// retaining mail. Lifecycle transitions update both while holding the
+    /// mutex, before guest code can run or the actor can become wakeable.
+    activation_held: AtomicBool,
     /// iamacoffeepot/aether#1137: this actor's single active cursor-shared
     /// blob + its recruitment. Built lazily on the first deferred flush
     /// from the spawner's [`WakeSink`](crate::scheduler::WakeSink), so a
@@ -362,6 +369,7 @@ impl NativeBinding {
             spawner,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             outbound: Mutex::new(OutboundBuffer::new()),
+            activation_held: AtomicBool::new(false),
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
             child_reservations: Mutex::new(ChildReservationTable::new()),
@@ -410,6 +418,7 @@ impl NativeBinding {
             spawner: None,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             outbound: Mutex::new(OutboundBuffer::new()),
+            activation_held: AtomicBool::new(false),
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
             child_reservations: Mutex::new(ChildReservationTable::new()),
@@ -882,6 +891,9 @@ impl NativeBinding {
     /// returns a rejected offer unchanged.
     #[cfg(feature = "wasm")]
     pub(crate) fn try_hold_component_mail(&self, mail: Mail, sender: MailboxId) -> Option<Mail> {
+        if !self.activation_held.load(Ordering::Acquire) {
+            return Some(mail);
+        }
         let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         if !buffer.activation_held {
             return Some(mail);
@@ -978,6 +990,7 @@ impl NativeBinding {
             "a prepared actor enters wire with an empty outbound window"
         );
         buffer.activation_held = true;
+        self.activation_held.store(true, Ordering::Release);
     }
 
     /// Publish the quarantined lifecycle suffix after the registry owner has
@@ -987,6 +1000,7 @@ impl NativeBinding {
         let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         assert!(buffer.activation_held, "only a staged activation can release the outbound hold");
         buffer.activation_held = false;
+        self.activation_held.store(false, Ordering::Release);
         drop(buffer);
         self.flush_outbound_inner();
     }
@@ -1000,6 +1014,7 @@ impl NativeBinding {
             let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
             assert!(buffer.activation_held, "only a staged activation can discard the outbound hold");
             buffer.activation_held = false;
+            self.activation_held.store(false, Ordering::Release);
             if buffer.blob_open {
                 if let Some(ring) = buffer.ring.as_ref() {
                     ring.seal();
