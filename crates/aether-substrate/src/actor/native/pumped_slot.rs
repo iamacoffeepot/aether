@@ -420,6 +420,7 @@ mod tests {
     fn caller_inbox(fx: &Fixtures, name: &str) -> (MailboxId, mpsc::Receiver<Envelope>) {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let id = fx.registry.register_inbox(
+            &boot_authority(),
             name.to_owned(),
             Arc::new(move |d: Envelope| {
                 d.discharge();

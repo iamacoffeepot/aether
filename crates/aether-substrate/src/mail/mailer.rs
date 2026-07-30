@@ -851,6 +851,7 @@ mod tests {
         let recorded: RecordedReplies = Arc::new(RwLock::new(Vec::new()));
         let recorded_for_handler = Arc::clone(&recorded);
         let recorder_id = registry.register_inline(
+            &boot_authority(),
             "test.rpc_server_reply",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 recorded_for_handler.write().unwrap().push((
@@ -1075,7 +1076,7 @@ mod tests {
     fn send_reply_cast_kind_delivers_cast_image() {
         let (registry, mailer) = make_mailer();
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
+        let sink_id = registry.register_inbox(&boot_authority(), "test.sink", sink.inbox_handler());
 
         let reply = CastReply { code: 0x1122_3344, flag: 0xABCD, _pad: 0 };
         let sent = mailer.send_reply_unchained(Source::with_correlation(SourceAddr::Component(sink_id), 1), &reply);
@@ -1105,6 +1106,7 @@ mod tests {
         let captured: CapturedLineage = Arc::new(RwLock::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
         let sink_id = registry.register_inbox(
+            &boot_authority(),
             "test.reply_lineage_sink",
             Arc::new(move |dispatch: OwnedDispatch| {
                 // Terminal test consumer — discharge the obligation, then
@@ -1162,7 +1164,7 @@ mod tests {
             )
             .unwrap();
         let sink = CapturingSink::new();
-        let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
+        let sink_id = registry.register_inbox(&boot_authority(), "test.sink", sink.inbox_handler());
 
         let note = Note { body: "verbatim".into(), seq: 1 };
         let bytes = wire::to_vec(&note).unwrap();
@@ -1252,7 +1254,7 @@ mod tests {
                     let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
-                    let id = registry.register_inline("test.meta.sink", sink.inline_handler());
+                    let id = registry.register_inline(&boot_authority(), "test.meta.sink", sink.inline_handler());
                     mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
                     rx.try_recv().is_ok()
                 }),
@@ -1268,7 +1270,7 @@ mod tests {
                     let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
-                    let id = registry.register_inbox("test.meta.closure", sink.inbox_handler());
+                    let id = registry.register_inbox(&boot_authority(), "test.meta.closure", sink.inbox_handler());
                     mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
                     rx.try_recv().is_ok()
                 }),
@@ -1282,8 +1284,8 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
-                    let id = registry.register_inbox("test.meta.dropped", Arc::new(|_| {}));
-                    let _ = registry.drop_mailbox(id).expect("drop");
+                    let id = registry.register_inbox(&boot_authority(), "test.meta.dropped", Arc::new(|_| {}));
+                    let _ = registry.drop_mailbox(&boot_authority(), id).expect("drop");
                     mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
                     rx.try_recv().is_ok()
                 }),

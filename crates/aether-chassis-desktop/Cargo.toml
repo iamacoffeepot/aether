@@ -48,6 +48,14 @@ winit = "0.30.13"
 # selects across (ADR-0161 §Decision 2).
 crossbeam-channel = "0.5"
 
+[dev-dependencies]
+# `test-support` exposes `aether_substrate::testing::boot_authority`, the
+# test-only mint for the `BootAuthority` the registry's eager mutators now
+# require (ADR-0165 / iamacoffeepot/aether#4161). The lifecycle driver's
+# reply-inbox test registers directly against a bare registry, so it needs
+# the token production boot holds.
+aether-substrate = { path = "../aether-substrate", features = ["render", "test-support"] }
+
 # The desktop signal-watcher thread mirrors the headless shutdown flag:
 # signal-hook on Unix, the `ctrlc` Ctrl-C fallback on Windows.
 [target.'cfg(unix)'.dependencies]

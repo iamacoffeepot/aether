@@ -166,11 +166,13 @@ impl<C: Chassis> PassiveChassis<C> {
         }
 
         let mailer = spawner.mailer();
-        let boot = register_relay_inbox(mailer.registry(), A::NAMESPACE).and_then(|(mailbox_id, rx, wake_slot)| {
-            let inbox = SettlingInbox::new(mailbox_id, rx, Arc::clone(mailer));
-            let slot = assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params)?;
-            Ok((slot, wake_slot))
-        });
+        let boot = register_relay_inbox(spawner.boot_authority(), mailer.registry(), A::NAMESPACE).and_then(
+            |(mailbox_id, rx, wake_slot)| {
+                let inbox = SettlingInbox::new(mailbox_id, rx, Arc::clone(mailer));
+                let slot = assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params)?;
+                Ok((slot, wake_slot))
+            },
+        );
         match boot {
             Ok(pair) => Ok(pair),
             Err(e) => {

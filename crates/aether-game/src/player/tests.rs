@@ -381,6 +381,7 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
     let PlayerTestSubstrate { registry, mailer, outbound_replies: _outbound_replies } = fresh_player_test_substrate();
     let (bind_tx, bind_rx) = mpsc::channel();
     registry.register_inline(
+        &boot_authority(),
         TcpCapability::NAMESPACE,
         Arc::new(move |dispatch: MailDispatch<'_>| {
             if dispatch.kind == BindListener::ID {
@@ -523,7 +524,7 @@ fn owner_rejected_player_birth_settles_without_a_live_session() {
     fanout_settled.recv_timeout(Duration::from_secs(2)).expect("post-rejection live fan-out probe settles");
     assert_eq!(deliveries.load(Ordering::Relaxed), 0, "rejected child never receives bootstrap or live fan-out mail");
 
-    registry.drop_mailbox(collision).expect("remove test-only player-session collision authority");
+    registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only player-session collision authority");
 }
 
 #[test]

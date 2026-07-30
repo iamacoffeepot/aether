@@ -57,6 +57,7 @@ mod tests {
     use aether_substrate::SettlingInbox;
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::mail::{Source, SourceAddr};
+    use aether_substrate::testing::boot_authority;
     use std::sync::Arc;
 
     /// iamacoffeepot/aether#1704: the lifecycle reply inbox is a
@@ -99,8 +100,9 @@ mod tests {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: Envelope| {
             let _ = tx.send(dispatch);
         });
-        let reply_mailbox =
-            registry.try_register_inbox("aether.lifecycle.advance_reply", handler).expect("register the reply inbox");
+        let reply_mailbox = registry
+            .try_register_inbox(&boot_authority(), "aether.lifecycle.advance_reply", handler)
+            .expect("register the reply inbox");
         let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
         let cap_mailbox = mailbox_id_from_name(<aether_lifecycle::LifecycleCapability as Addressable>::NAMESPACE);

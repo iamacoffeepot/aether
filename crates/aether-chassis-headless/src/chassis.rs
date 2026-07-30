@@ -188,6 +188,7 @@ impl BootableChassis for HeadlessChassis {
         let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_inline(
+            &boot.authority,
             "aether.audio",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 if dispatch.kind == kind_set_master_gain {

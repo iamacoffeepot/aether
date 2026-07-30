@@ -331,6 +331,7 @@ mod tests {
 
     use crate::mail::registry::{OwnedDispatch, Registry};
     use crate::mail::{Mail, Mailer};
+    use crate::testing::boot_authority;
 
     /// Stub actor used as the `A` phantom marker on [`InheritCtx`] /
     /// [`RootCtx`]. Must impl `Singleton` because the spawn helpers
@@ -364,6 +365,7 @@ mod tests {
         // no `to_vec()` clone on the lineage fields which are all
         // Copy).
         let _ = registry.try_register_inbox(
+            &boot_authority(),
             name.to_owned(),
             Arc::new(move |dispatch: OwnedDispatch| {
                 // ADR-0094: terminal test consumer — discharge the

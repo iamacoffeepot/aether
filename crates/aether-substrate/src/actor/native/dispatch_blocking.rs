@@ -643,7 +643,7 @@ mod tests {
     use crate::actor::native::NativeBinding;
     use crate::actor::native::ctx::NativeCtx;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
-    use crate::testing::bare_substrate;
+    use crate::testing::{bare_substrate, boot_authority};
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
     /// re-replies. Carries a `u64` so a test can assert the routed reply
@@ -705,7 +705,7 @@ mod tests {
         // The original caller: a registered inbox we observe the re-reply
         // landing on (the reply routes to SourceAddr::Component(caller)).
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox("test.dispatch_blocking.caller", forward_to(reply_tx));
+        let caller = registry.register_inbox(&boot_authority(), "test.dispatch_blocking.caller", forward_to(reply_tx));
 
         // The actor's own mailbox — name-derived so the worker's wake
         // push (recipient = self_mailbox) routes to a registered inbox we
@@ -713,7 +713,7 @@ mod tests {
         let actor_mailbox = mailbox_id_from_name("test.dispatch_blocking.actor");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.dispatch_blocking.actor", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.dispatch_blocking.actor", forward_to(wake_tx));
 
         let root = root_id(1);
         let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
@@ -769,12 +769,12 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox("test.dispatch_resumed.caller", forward_to(reply_tx));
+        let caller = registry.register_inbox(&boot_authority(), "test.dispatch_resumed.caller", forward_to(reply_tx));
 
         let actor_mailbox = mailbox_id_from_name("test.dispatch_resumed.actor");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.dispatch_resumed.actor", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.dispatch_resumed.actor", forward_to(wake_tx));
 
         let accept_root = root_id(1);
         let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
@@ -834,12 +834,12 @@ mod tests {
         let (registry, mailer) = bare_substrate();
 
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox("test.dispatch_blocking.caller2", forward_to(reply_tx));
+        let caller = registry.register_inbox(&boot_authority(), "test.dispatch_blocking.caller2", forward_to(reply_tx));
 
         let actor_mailbox = mailbox_id_from_name("test.dispatch_blocking.actor2");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.dispatch_blocking.actor2", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.dispatch_blocking.actor2", forward_to(wake_tx));
 
         let root = root_id(2);
         let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 5);
@@ -1023,7 +1023,7 @@ mod tests {
         let actor_mailbox = mailbox_id_from_name("test.deferred_completion.duplicate");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.deferred_completion.duplicate", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.deferred_completion.duplicate", forward_to(wake_tx));
 
         let completion =
             binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root_id(15)), Source::NONE, ());
@@ -1048,7 +1048,7 @@ mod tests {
         let actor_mailbox = mailbox_id_from_name("test.deferred_completion.parent_loss");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.deferred_completion.parent_loss", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.deferred_completion.parent_loss", forward_to(wake_tx));
 
         let completion = binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root), Source::NONE, ());
         assert_eq!(counter.held_open(root), 1, "arming parks the hold in the parent ledger");
@@ -1066,13 +1066,17 @@ mod tests {
         let root = root_id(17);
 
         let (caller_sink_tx, caller_sink_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller = registry.register_inbox("test.deferred_completion.ctx_caller", forward_to(caller_sink_tx));
+        let caller = registry.register_inbox(
+            &boot_authority(),
+            "test.deferred_completion.ctx_caller",
+            forward_to(caller_sink_tx),
+        );
         let reply_to = Source::with_correlation(SourceAddr::Component(caller), 77);
 
         let actor_mailbox = mailbox_id_from_name("test.deferred_completion.ctx_actor");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.deferred_completion.ctx_actor", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.deferred_completion.ctx_actor", forward_to(wake_tx));
 
         let completion = {
             let ctx = NativeCtx::new(&binding, reply_to, MailId::NONE, root);
@@ -1154,7 +1158,7 @@ mod tests {
         let actor_mailbox = mailbox_id_from_name("test.deferred_completion.handoff");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.deferred_completion.handoff", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.deferred_completion.handoff", forward_to(wake_tx));
 
         let first = binding.dispatch_arm::<Answer, _>(
             mailer.acquire_settlement_hold(root),
@@ -1189,7 +1193,7 @@ mod tests {
         let actor_mailbox = mailbox_id_from_name("test.deferred_completion.drop");
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
-        registry.register_inbox("test.deferred_completion.drop", forward_to(wake_tx));
+        registry.register_inbox(&boot_authority(), "test.deferred_completion.drop", forward_to(wake_tx));
 
         let completion = binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root), Source::NONE, ());
         let id = completion.dispatch_id();

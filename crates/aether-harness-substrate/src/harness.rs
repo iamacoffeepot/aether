@@ -1540,6 +1540,7 @@ mod tests {
         use aether_data::{Kind as DataKind, MailId};
         use aether_kinds::LifecycleSubscribe;
         use aether_substrate::mail::registry::MailDispatch;
+        use aether_substrate::testing::boot_authority;
         use std::sync::Mutex;
 
         type CapturedRow = (MailId, MailId, Option<MailId>);
@@ -1569,6 +1570,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_handler = Arc::clone(&captured);
         let subscriber_mbox = tb.registry.register_inline(
+            &boot_authority(),
             "issue_723_test_subscriber",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 captured_for_handler.lock().expect("test setup: captured mutex is never poisoned").push((
@@ -1644,6 +1646,7 @@ mod tests {
         use aether_data::Kind as DataKind;
         use aether_kinds::{LifecycleSubscribe, Quit, Shutdown};
         use aether_substrate::mail::registry::MailDispatch;
+        use aether_substrate::testing::boot_authority;
         use std::sync::Mutex;
 
         let mut tb = match SubstrateHarness::start_with_size(64, 48) {
@@ -1663,6 +1666,7 @@ mod tests {
         let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let observed_for_handler = Arc::clone(&observed);
         let observer_mailbox = tb.registry.register_inline(
+            &boot_authority(),
             "issue_1489_shutdown_observer",
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 observed_for_handler

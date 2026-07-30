@@ -1471,7 +1471,11 @@ mod tests {
             )
             .expect("register component sender");
         let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
-        let recipient = registry.register_inbox("test.activation.recipient", forward_to_envelope_sender(recipient_tx));
+        let recipient = registry.register_inbox(
+            &boot_authority(),
+            "test.activation.recipient",
+            forward_to_envelope_sender(recipient_tx),
+        );
         let (ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let parent = MailId::new(MailboxId(0x0041_4502), 7);
@@ -1511,7 +1515,11 @@ mod tests {
         let (registry, mailer) = bare_substrate();
         let sender = MailboxId(0x0041_4511);
         let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
-        let recipient = registry.register_inbox("test.activation.reject", forward_to_envelope_sender(recipient_tx));
+        let recipient = registry.register_inbox(
+            &boot_authority(),
+            "test.activation.reject",
+            forward_to_envelope_sender(recipient_tx),
+        );
         let (ctx, binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
@@ -1533,7 +1541,11 @@ mod tests {
         let (registry, mailer) = bare_substrate();
         let sender = MailboxId(0x0041_4521);
         let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
-        let recipient = registry.register_inbox("test.activation.live", forward_to_envelope_sender(recipient_tx));
+        let recipient = registry.register_inbox(
+            &boot_authority(),
+            "test.activation.live",
+            forward_to_envelope_sender(recipient_tx),
+        );
         let (ctx, _binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
@@ -1554,7 +1566,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         // Register a sink so push routes somewhere instead of
         // hitting the unknown-recipient warn.
-        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        registry.register_inbox(&boot_authority(), "test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
 
         let transport = NativeBinding::new_for_test(mailer, MailboxId(99));
@@ -1582,6 +1594,7 @@ mod tests {
         let observed = Arc::clone(&published);
         let (tx, rx) = mpsc::channel();
         let recipient = registry.register_inline(
+            &boot_authority(),
             "test.binding.before-push",
             Arc::new(move |_dispatch: MailDispatch<'_>| {
                 tx.send(*observed.lock().unwrap()).unwrap();
@@ -1613,7 +1626,8 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox("test.reply_chain.caller", forward_to_envelope_sender(reply_tx));
+        let caller =
+            registry.register_inbox(&boot_authority(), "test.reply_chain.caller", forward_to_envelope_sender(reply_tx));
 
         let actor_mailbox = MailboxId(0x00BE_EF01);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
@@ -1654,7 +1668,8 @@ mod tests {
 
         let (registry, mailer) = bare_substrate();
         let (reply_tx, _reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox("test.reply_corr.caller", forward_to_envelope_sender(reply_tx));
+        let caller =
+            registry.register_inbox(&boot_authority(), "test.reply_corr.caller", forward_to_envelope_sender(reply_tx));
 
         let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF02)));
         assert_eq!(binding.prev_correlation(), 0);
@@ -1813,7 +1828,11 @@ mod tests {
 
         let (registry, mailer) = bare_substrate();
         let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox("test.binding.reply_space.caller", forward_to_envelope_sender(reply_tx));
+        let caller = registry.register_inbox(
+            &boot_authority(),
+            "test.binding.reply_space.caller",
+            forward_to_envelope_sender(reply_tx),
+        );
 
         let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF03)));
         assert_eq!(binding.prev_correlation(), 0);
@@ -1841,7 +1860,7 @@ mod tests {
     fn buffered_sends_route_only_after_flush() {
         let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
-        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        registry.register_inbox(&boot_authority(), "test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(0x5151));
 
@@ -1868,7 +1887,7 @@ mod tests {
     fn buffered_oversized_payload_flushes_via_copy_out() {
         let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
-        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        registry.register_inbox(&boot_authority(), "test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(0x6262));
 
@@ -1906,7 +1925,7 @@ mod tests {
 
         let (registry, mailer) = bare_substrate();
         let (tx, rx) = mpsc::channel::<Envelope>();
-        registry.register_inbox("test.sink", forward_to_envelope_sender(tx));
+        registry.register_inbox(&boot_authority(), "test.sink", forward_to_envelope_sender(tx));
         let recipient = registry.lookup("test.sink").unwrap();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(0x9191));
 

@@ -33,7 +33,7 @@ use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
-use aether_substrate::testing::{TestChassis, bare_substrate};
+use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority};
 use aether_substrate::{
     Addressable, BootError, Builder, Dispatch, Manual, NativeActor, NativeBinding, NativeCtx, NativeInitCtx,
     PassiveChassis, Registry, mail::MailboxId,
@@ -307,7 +307,8 @@ fn macro_pending_request_borrow_completion_replies_once() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox("test.macro_native_actor.deferred_caller", forward_to(reply_tx));
+    let caller =
+        registry.register_inbox(&boot_authority(), "test.macro_native_actor.deferred_caller", forward_to(reply_tx));
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<DeferredReplyCap>(obs.clone())
@@ -346,7 +347,11 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox("test.macro_native_actor.deferred_silent_caller", forward_to(reply_tx));
+    let caller = registry.register_inbox(
+        &boot_authority(),
+        "test.macro_native_actor.deferred_silent_caller",
+        forward_to(reply_tx),
+    );
 
     let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<DeferredReplyCap>(obs.clone())
@@ -855,7 +860,8 @@ fn manual_handler_replies_through_ctx() {
     let (registry, mailer) = bare_substrate();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox("test.macro_native_actor.manual_caller", forward_to(reply_tx));
+    let caller =
+        registry.register_inbox(&boot_authority(), "test.macro_native_actor.manual_caller", forward_to(reply_tx));
 
     let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x1850_0001)));
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 91);

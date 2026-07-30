@@ -279,6 +279,7 @@ pub(crate) fn relay_or_transfer(
 /// receiver in a [`SettlingInbox`] and owns whatever bookkeeping
 /// (`claimed_actor_mailboxes`, the ctx-bound `MailboxClaim`) it needs.
 pub(crate) fn register_relay_inbox(
+    authority: &BootAuthority,
     registry: &Arc<Registry>,
     name: &str,
 ) -> Result<(MailboxId, mpsc::Receiver<Envelope>, Arc<MailboxWakeSlot>), BootError> {
@@ -291,6 +292,7 @@ pub(crate) fn register_relay_inbox(
     let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
     let wake_for_handler = Arc::clone(&wake_slot);
     let id = registry.try_register_inbox(
+        authority,
         name.to_owned(),
         Arc::new(move |dispatch: OwnedDispatch| {
             // The strong `tx` is captured for liveness; this keeps the
@@ -465,7 +467,7 @@ impl<'a> ChassisCtx<'a> {
     /// closure stored on the registry until the registry itself is
     /// dropped.
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
-        let (id, rx, wake_slot) = register_relay_inbox(self.registry, name)?;
+        let (id, rx, wake_slot) = register_relay_inbox(&self.authority, self.registry, name)?;
         self.claimed_actor_mailboxes.push(id);
         // iamacoffeepot/aether#1272: every claim returns its
         // per-actor [`ActorSlots`] wrapped in [`SharedActorSlots`]. The
@@ -552,6 +554,7 @@ impl<'a> ChassisCtx<'a> {
         let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_inbox(
+            &self.authority,
             name.to_owned(),
             // iamacoffeepot/aether#848 PR 3: routes through
             // [`relay_or_transfer`] (the shared upgrade → send → wake core

@@ -1004,7 +1004,7 @@ mod tests {
             d.discharge();
             let _ = tx.send(d.payload.bytes()[0]);
         });
-        registry.register_inbox(name, handler)
+        registry.register_inbox(&boot_authority(), name, handler)
     }
 
     fn mail_to(recipient: MailboxId, byte: u8) -> Mail {

@@ -645,6 +645,7 @@ mod tests {
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::OwnedDispatch;
     use crate::mail::registry::Registry;
+    use crate::testing::boot_authority;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
@@ -672,6 +673,7 @@ mod tests {
         let captured: Arc<StdMutex<Vec<CapturedDispatch>>> = Arc::new(StdMutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
         let target = registry.register_inbox(
+            &boot_authority(),
             sink_name,
             // iamacoffeepot/aether#848 PR 3: take `OwnedDispatch`
             // directly and move payload into the captured row

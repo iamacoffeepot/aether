@@ -401,7 +401,7 @@ mod tests {
         assert!(matches!(record.reason, DeathReason::SpawnFailed { .. }));
         assert_port_closes(record.rpc_port);
 
-        registry.drop_mailbox(collision).expect("remove test-only proxy collision authority");
+        registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only proxy collision authority");
         drop(chassis);
         let _ = fs::remove_dir_all(&store_dir);
         let _ = fs::remove_dir_all(&root);

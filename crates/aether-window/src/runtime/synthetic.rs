@@ -357,6 +357,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::MailDispatch;
     use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::boot_authority;
 
     use super::*;
 
@@ -396,10 +397,13 @@ mod tests {
         ));
         assert!(state.subscribers.recipients(WindowId(1), Key::ID).is_empty());
 
-        let dropped =
-            mailer.registry().register_inline("test.synthetic.dropped", Arc::new(|_dispatch: MailDispatch<'_>| {}));
+        let dropped = mailer.registry().register_inline(
+            &boot_authority(),
+            "test.synthetic.dropped",
+            Arc::new(|_dispatch: MailDispatch<'_>| {}),
+        );
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, dropped);
-        mailer.registry().drop_mailbox(dropped).expect("drop subscriber mailbox");
+        mailer.registry().drop_mailbox(&boot_authority(), dropped).expect("drop subscriber mailbox");
 
         assert!(matches!(
             SyntheticWindowCapability::on_unsubscribe(

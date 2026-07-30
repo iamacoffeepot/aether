@@ -307,7 +307,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     let rebound =
         TcpListener::bind(socket_addr).expect("the prepared listener socket is dropped before failure completion");
     drop(rebound);
-    registry.drop_mailbox(collision_id).expect("remove test-only collision route");
+    registry.drop_mailbox(&boot_authority(), collision_id).expect("remove test-only collision route");
 
     let retried: BindListenerResult = drive_and_decode(
         &registry,

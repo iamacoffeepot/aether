@@ -624,7 +624,7 @@ mod tests {
             d.discharge();
             let _ = reply_tx.send(d);
         });
-        let caller = registry.register_inbox("test.adr0109.caller", sink);
+        let caller = registry.register_inbox(&boot_authority(), "test.adr0109.caller", sink);
 
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x1803_0001)));
         let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 5);

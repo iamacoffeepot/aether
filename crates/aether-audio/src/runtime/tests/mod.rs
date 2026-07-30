@@ -20,8 +20,8 @@ use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_fs::FsError;
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::testing::{
-    assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
-    fs_reply_source, session_sender, test_mailer_and_rx,
+    assert_next_send_kind, boot_authority, decode_session_reply, decode_session_reply_with_session,
+    drive_task_completion, fs_reply_source, session_sender, test_mailer_and_rx,
 };
 use aether_substrate::{EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
 use crossbeam_queue::ArrayQueue;

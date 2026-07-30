@@ -709,7 +709,7 @@ mod tests {
         use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
 
         use crate::LifecycleMailboxExt;
-        use aether_substrate::testing::fresh_substrate;
+        use aether_substrate::testing::{boot_authority, fresh_substrate};
 
         let (registry, mailer) = fresh_substrate();
 
@@ -722,8 +722,11 @@ mod tests {
             dispatch.discharge();
             let _ = tx.send(captured);
         });
-        let lifecycle_id =
-            registry.register_inbox(<LifecycleCapability as aether_actor::Addressable>::NAMESPACE, handler);
+        let lifecycle_id = registry.register_inbox(
+            &boot_authority(),
+            <LifecycleCapability as aether_actor::Addressable>::NAMESPACE,
+            handler,
+        );
 
         // The calling actor: a transport stamped with SENDER as its
         // self-mailbox, so its sends carry `Source::Component(SENDER)`.
