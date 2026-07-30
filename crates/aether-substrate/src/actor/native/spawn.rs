@@ -41,7 +41,7 @@ use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnCommit};
-use crate::mail::registry::{NameConflict, Registry};
+use crate::mail::registry::{BootAuthority, NameConflict, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::Drainable;
@@ -163,6 +163,13 @@ pub struct Spawner {
     /// actors (and the wasm trampolines that spawn through this same
     /// funnel) without per-spawn plumbing.
     ring_capacities: RingCapacities,
+    /// iamacoffeepot/aether#4156: proof that the eager commit half may write
+    /// the registry directly. The `Spawner` is built once in `boot_passives`
+    /// and the eager path it serves is the documented boot / embedder
+    /// carve-out (`SpawnBuilder::finish`); the handler route through it was
+    /// severed by iamacoffeepot/aether#4070, and a staged child birth reaches
+    /// the registry through the ADR-0165 owner instead.
+    authority: BootAuthority,
 }
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
@@ -217,6 +224,7 @@ impl Spawner {
             wake_sink,
             instanced_slots: Mutex::new(HashMap::new()),
             ring_capacities,
+            authority: BootAuthority::new(),
         }
     }
 
@@ -639,6 +647,7 @@ impl Spawner {
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
         let registered = self.registry.try_register_inbox_with_id(
+            &self.authority,
             id,
             full_name.to_string(),
             Arc::new(move |dispatch: OwnedDispatch| {
@@ -690,7 +699,7 @@ impl Spawner {
             // a dangling sink that warn-drops mail. The actor itself
             // (init succeeded) drops naturally as `actor` falls out
             // of scope.
-            self.registry.remove_closure(id);
+            self.registry.remove_closure(&self.authority, id);
             return Err(SpawnError::SubnameInUse { full_name: full_name.to_string() });
         }
 
@@ -767,7 +776,11 @@ impl Spawner {
         // its fan-out in place (ADR-0087 §4). The registry holds the
         // strong slot ref via `instanced_slots` below; the demuxer's
         // `Weak` upgrade fails cleanly once the actor is torn down.
-        self.registry.install_seize_handle(id, SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)));
+        self.registry.install_seize_handle(
+            &self.authority,
+            id,
+            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+        );
         let wake = WakeHandle::new(Arc::clone(slot.state()), weak, self.wake_sink.clone());
         // Stash the slot's strong Arc so wakes can upgrade their `Weak`.
         // PR C dropped it here, which broke every wake after spawn (the
@@ -1220,6 +1233,7 @@ mod tests {
     use crate::mail::registry::{MailDispatch, Registry, RegistryOwnerLease, RouteRelayLease, noop_handler};
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::{BatchBudget, CycleResult, Pool, PoolConfig, PoolHandle, SlotState};
+    use crate::testing::boot_authority;
     use std::any::Any;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1462,10 +1476,13 @@ mod tests {
     fn prepared_bootstrap_mail_shares_the_registered_kind_name() {
         let (spawner, registry, _mailer, pool) = activation_fixture();
         registry
-            .register_kind_with_descriptor(aether_data::KindDescriptor {
-                name: ActivationPoke::NAME.to_owned(),
-                schema: <ActivationPoke as aether_data::Schema>::SCHEMA,
-            })
+            .register_kind_with_descriptor(
+                &boot_authority(),
+                aether_data::KindDescriptor {
+                    name: ActivationPoke::NAME.to_owned(),
+                    schema: <ActivationPoke as aether_data::Schema>::SCHEMA,
+                },
+            )
             .unwrap();
         let registered = registry.kind_name_shared(ActivationPoke::ID).expect("registered kind has a shared name");
         let (events_tx, _events_rx) = crossbeam_channel::unbounded();
@@ -1518,8 +1535,13 @@ mod tests {
     #[test]
     fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent_key() {
         let (spawner, registry, mailer, pool) = activation_fixture();
-        let owner =
-            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let owner = RegistryOwnerLease::attach(
+            boot_authority(),
+            &registry,
+            &mailer,
+            WakeSink::detached(),
+            RegistryQueueCapacities::default(),
+        );
         let caller = thread::current().id();
         let parent_id = MailboxId::from_name("test.activation.owner-close-parent");
         let parent = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), parent_id));
@@ -1579,8 +1601,13 @@ mod tests {
     fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rejected() {
         let (spawner, registry, mailer, pool) = activation_fixture();
         let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
-        let owner =
-            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let owner = RegistryOwnerLease::attach(
+            boot_authority(),
+            &registry,
+            &mailer,
+            WakeSink::detached(),
+            RegistryQueueCapacities::default(),
+        );
         let caller = thread::current().id();
         let parent = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
@@ -1595,7 +1622,14 @@ mod tests {
         let first_id = first.route.id;
         let middle_id = middle.route.id;
         let later_id = later.route.id;
-        registry.try_register_inbox_with_id(middle_id, middle.route.canonical_name.clone(), noop_handler()).unwrap();
+        registry
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                middle_id,
+                middle.route.canonical_name.clone(),
+                noop_handler(),
+            )
+            .unwrap();
         let completion = registry
             .submit(EffectBatch::new(vec![
                 RegistryEffect::PreparedSpawn(first),
@@ -1637,8 +1671,13 @@ mod tests {
     fn successful_prepared_activation_enters_ordinary_dispatch_once() {
         let (spawner, registry, mailer, pool) = activation_fixture();
         let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.live-effects");
-        let owner =
-            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let owner = RegistryOwnerLease::attach(
+            boot_authority(),
+            &registry,
+            &mailer,
+            WakeSink::detached(),
+            RegistryQueueCapacities::default(),
+        );
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
         let commit = prepared_probe_with_lifecycle_target(&spawner, "live", events_tx, lifecycle_target);
         let id = commit.route.id;
@@ -1683,8 +1722,13 @@ mod tests {
     fn closed_child_subname_restages_as_retired_not_in_use() {
         let (spawner, registry, mailer, pool) = activation_fixture();
         let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
-        let owner =
-            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let owner = RegistryOwnerLease::attach(
+            boot_authority(),
+            &registry,
+            &mailer,
+            WakeSink::detached(),
+            RegistryQueueCapacities::default(),
+        );
         let parent = Arc::new(NativeBinding::new_for_test(
             Arc::clone(&mailer),
             MailboxId::from_name("test.activation.self-close-parent"),
@@ -1744,8 +1788,13 @@ mod tests {
         let (spawner, registry, mailer, pool) = activation_fixture();
         let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
         let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.cancelled-effects");
-        let owner =
-            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let owner = RegistryOwnerLease::attach(
+            boot_authority(),
+            &registry,
+            &mailer,
+            WakeSink::detached(),
+            RegistryQueueCapacities::default(),
+        );
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
         let commit = prepared_probe_with_lifecycle_target(&spawner, "owner-close", events_tx, lifecycle_target);
         let id = commit.route.id;

@@ -288,8 +288,11 @@ where
         // inbox. Same `(state, weak)` pair the wake handle carries; the
         // registry owns the strong slot ref, so the demuxer's `Weak`
         // upgrade fails cleanly after teardown.
-        ctx.registry()
-            .install_seize_handle(mailbox_id, SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)));
+        ctx.registry().install_seize_handle(
+            ctx.boot_authority(),
+            mailbox_id,
+            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
+        );
         drop(slot_dyn);
         let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
         // Issue 697 multi-pass: mail addressed at this actor during the

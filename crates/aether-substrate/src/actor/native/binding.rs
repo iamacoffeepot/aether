@@ -1412,7 +1412,7 @@ impl NativeBinding {
 mod tests {
     use super::*;
     use crate::mail::registry::{InboxHandler, OwnedDispatch};
-    use crate::testing::bare_substrate;
+    use crate::testing::{bare_substrate, boot_authority};
     #[cfg(feature = "wasm")]
     use crate::{actor::wasm::component::ComponentCtx, mail::HubOutbound, mail::Registry};
     use std::sync::mpsc;
@@ -1463,7 +1463,12 @@ mod tests {
         let sender = MailboxId(0x0041_4501);
         let (sender_tx, _sender_rx) = mpsc::channel::<Envelope>();
         registry
-            .try_register_inbox_with_id(sender, "test.activation.sender", forward_to_envelope_sender(sender_tx))
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                sender,
+                "test.activation.sender",
+                forward_to_envelope_sender(sender_tx),
+            )
             .expect("register component sender");
         let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
         let recipient = registry.register_inbox("test.activation.recipient", forward_to_envelope_sender(recipient_tx));
@@ -1711,10 +1716,20 @@ mod tests {
         let (resolved_tx, resolved_rx) = mpsc::channel::<Envelope>();
         let (flat_tx, flat_rx) = mpsc::channel::<Envelope>();
         registry
-            .try_register_inbox_with_id(resolved, "test.send_fold.resolved", forward_to_envelope_sender(resolved_tx))
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                resolved,
+                "test.send_fold.resolved",
+                forward_to_envelope_sender(resolved_tx),
+            )
             .expect("register resolved sink");
         registry
-            .try_register_inbox_with_id(flat, "test.send_fold.flat", forward_to_envelope_sender(flat_tx))
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                flat,
+                "test.send_fold.flat",
+                forward_to_envelope_sender(flat_tx),
+            )
             .expect("register flat sink");
 
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));

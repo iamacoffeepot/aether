@@ -317,6 +317,7 @@ mod tests {
         use aether_data::name_inventory::{ParamKind, child_entries, template_entries};
         use aether_substrate::Registry;
         use aether_substrate::mail::registry::noop_handler;
+        use aether_substrate::testing::boot_authority;
 
         let inline = InlineRegistry::new();
         let manager_id = WindowCapability::resolve(0, ());
@@ -325,7 +326,7 @@ mod tests {
         let canonical = "aether.window/aether.window.instance:main";
         let registry = Registry::new();
         registry
-            .try_register_inbox_with_id(typed, canonical, noop_handler())
+            .try_register_inbox_with_id(&boot_authority(), typed, canonical, noop_handler())
             .expect("register canonical live window mailbox");
 
         for address in [canonical, "aether.window://main", "aether.window://aether.window.instance:main"] {

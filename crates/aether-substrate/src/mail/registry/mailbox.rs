@@ -13,6 +13,7 @@ use aether_data::{
 
 use crate::actor::native::dispatch_blocking::DeferredCompletion;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::authority::BootAuthority;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, ChangeSubscriber, EffectBatch, PreparedCostCells,
     PreparedMail, PreparedSpawnFailure, RegistryApplied, RegistryBatchCompletionSink, RegistryBatchError,
@@ -97,8 +98,7 @@ pub enum MailboxEntry {
     /// brackets this arm with `Received` and `Finished` so the
     /// chain's `in_flight` balances and settlement subscribers
     /// (`SettlementRegistry`) wake (ADR-0080 §2, issue 838).
-    /// Installed by [`Registry::register_inline`] /
-    /// [`Registry::try_register_inline`]. Distinct from `Inbox` so
+    /// Installed by [`Registry::register_inline`]. Distinct from `Inbox` so
     /// the bracket isn't double-counted when the closure was an
     /// actor-enqueue (which would fire settlement prematurely).
     /// Handler receives borrowed
@@ -1244,14 +1244,17 @@ impl Registry {
     /// to `Dropped` so dispatch-path readers can distinguish an
     /// intentional drop from an unknown id; the id itself (a function
     /// of the name per ADR-0029) stays addressable and a subsequent
-    /// `try_register_inbox` / `try_register_inline` with the same
+    /// `try_register_inbox` / `register_inline` with the same
     /// name reuses it. Returns the released name on success.
     ///
     /// Issue 634 Phase 4 retired the dedicated `Component` variant,
     /// so this now drops any live `Inbox` or `Inline` mailbox.
-    /// Production has exactly one caller — `WasmTrampoline`'s
-    /// shutdown path transitioning its own slot — chassis-cap
-    /// mailboxes never route here.
+    ///
+    /// No production caller (iamacoffeepot/aether#4152 audited every one:
+    /// all are tests). The `WasmTrampoline` shutdown path this comment
+    /// used to name reaches [`CostTable::drop_mailbox`](crate::mail::cost::CostTable::drop_mailbox)
+    /// now, which clears the per-handler cost cells and never touches a
+    /// registry route.
     ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
@@ -1333,8 +1336,14 @@ impl Registry {
     /// The spawn path uses this for hosted / nested actors, whose id is
     /// the fold over their lineage; `name` stays the rendered display /
     /// reverse-map string. The returned id is `id` on success.
+    ///
+    /// Direct write path — takes a [`BootAuthority`] so only the boot /
+    /// embedder eager spawn can name it (iamacoffeepot/aether#4156). A
+    /// handler stages a `RegistryEffect` through the ADR-0165 owner
+    /// instead.
     pub fn try_register_inbox_with_id(
         &self,
+        _authority: &BootAuthority,
         id: MailboxId,
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
@@ -1369,9 +1378,7 @@ impl Registry {
     /// # Panics
     /// Panics on a name collision (or if the inner `RwLock` is
     /// poisoned) — fail-fast per ADR-0063: substrate-internal
-    /// registrations should never collide; use
-    /// [`Self::try_register_inline`] when a collision is a recoverable
-    /// outcome rather than a bug.
+    /// registrations should never collide.
     pub fn register_inline(&self, name: impl Into<String>, handler: Arc<dyn InlineHandler>) -> MailboxId {
         match self.insert(name.into(), MailboxEntry::Inline(handler)) {
             Ok(id) => id,
@@ -1379,21 +1386,6 @@ impl Registry {
                 panic!("mailbox name already registered: {name}")
             }
         }
-    }
-
-    /// Non-panicking variant of [`Self::register_inline`], symmetric
-    /// with [`Self::try_register_inbox`].
-    ///
-    /// # Panics
-    /// Panics if the inner `RwLock` is poisoned — fail-fast per
-    /// ADR-0063: a poisoned lock means a prior holder panicked under
-    /// the guard.
-    pub fn try_register_inline(
-        &self,
-        name: impl Into<String>,
-        handler: Arc<dyn InlineHandler>,
-    ) -> Result<MailboxId, NameConflict> {
-        self.insert(name.into(), MailboxEntry::Inline(handler))
     }
 
     /// Issue 607 Phase 7: fully remove a registered mailbox. Used in
@@ -1408,7 +1400,11 @@ impl Registry {
     /// is intentional: components can re-register the same id after
     /// a drop, chassis-bound mailboxes are torn down on cap
     /// teardown and the id can be freshly recreated.
-    pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
+    ///
+    /// Direct write path — takes a [`BootAuthority`] so only the boot
+    /// unwind and the boot / embedder eager spawn can name it
+    /// (iamacoffeepot/aether#4156).
+    pub(crate) fn remove_closure(&self, _authority: &BootAuthority, id: MailboxId) -> bool {
         match self.apply_one(RegistryEffect::RemoveMailbox(id)) {
             Ok(RegistryApplied::Removed(removed)) => removed,
             Ok(_) | Err(_) => unreachable!("remove effect is infallible and returns a bool"),
@@ -1511,10 +1507,13 @@ impl Registry {
     /// `Inbox` entry or the cell was already populated (idempotent — one
     /// install per slot in production).
     ///
+    /// Direct write path — takes a [`BootAuthority`] so only the boot /
+    /// embedder eager spawn can name it (iamacoffeepot/aether#4156).
+    ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn install_seize_handle(&self, id: MailboxId, handle: SeizeHandle) -> bool {
+    pub(crate) fn install_seize_handle(&self, _authority: &BootAuthority, id: MailboxId, handle: SeizeHandle) -> bool {
         match self.apply_one(RegistryEffect::InstallSeize { id, handle }) {
             Ok(RegistryApplied::SeizeInstalled(installed)) => installed,
             Ok(_) | Err(_) => unreachable!("seize effect is infallible and returns a bool"),
@@ -1596,13 +1595,20 @@ impl Registry {
     ///   collision between two distinct kinds; loud failure rather
     ///   than silent data corruption.
     ///
-    /// Used by substrate boot (`descriptors::all()`) and `load_component`.
+    /// Used by substrate boot (`descriptors::all()`). Direct write path —
+    /// takes a [`BootAuthority`] so only boot can name it
+    /// (iamacoffeepot/aether#4156); `load_component` stages a
+    /// `RegistryBatch::register_kinds` through the ADR-0165 owner instead.
     ///
     /// # Panics
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
-    pub fn register_kind_with_descriptor(&self, descriptor: KindDescriptor) -> Result<KindId, KindConflict> {
+    pub fn register_kind_with_descriptor(
+        &self,
+        _authority: &BootAuthority,
+        descriptor: KindDescriptor,
+    ) -> Result<KindId, KindConflict> {
         self.register_kind_internal(descriptor, /*reject_conflict=*/ true)
     }
 

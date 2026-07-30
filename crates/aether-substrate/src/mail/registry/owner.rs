@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::authority::BootAuthority;
 use super::effect::{
     ACTIVATION_BARRIER_KIND, ActivationToken, EffectBatch, RegistryApplied, RegistryBatchCompletionSink,
     RegistryBatchResult, RegistryCompletion, RegistryEffectError,
@@ -202,7 +203,13 @@ impl RegistryOwnerLease {
     /// value rather than two loose numbers; the owner takes
     /// [`RegistryQueueCapacities::owner`]. A configured `0` clamps to one
     /// command so the queue can always hold the item it is about to drain.
+    ///
+    /// `authority` is taken **by value** (iamacoffeepot/aether#4156): the
+    /// proof boot hands the owner is spent here, so the same token can
+    /// never be turned around into a second writer against the registry
+    /// this owner now serializes.
     pub fn attach(
+        _authority: BootAuthority,
         registry: &Arc<Registry>,
         mailer: &Arc<Mailer>,
         sink: WakeSink,

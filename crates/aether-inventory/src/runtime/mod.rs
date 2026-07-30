@@ -243,6 +243,7 @@ mod tests {
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
+    use aether_substrate::testing::boot_authority;
     use std::sync::Arc;
 
     const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
@@ -422,7 +423,12 @@ mod tests {
         // that can reverse it.
         let component = mailbox_id_from_name("aether.inventory-test.lineage-fold");
         fix.registry
-            .try_register_inbox_with_id(component, "aether.component/aether.embedded:probe", noop_handler())
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                component,
+                "aether.component/aether.embedded:probe",
+                noop_handler(),
+            )
             .expect("fresh registry has no conflicting mailbox");
         let component_tag = tagged_id::encode(component.0).expect("MailboxId tag-encodes");
 
@@ -475,7 +481,7 @@ mod tests {
         let mailbox_id = aether_data::mailbox_id_from_path(&canonical);
         let mut fix = fixture();
         fix.registry
-            .try_register_inbox_with_id(mailbox_id, canonical.clone(), noop_handler())
+            .try_register_inbox_with_id(&boot_authority(), mailbox_id, canonical.clone(), noop_handler())
             .expect("register canonical child mailbox");
         let mut ctx = session_ctx(&fix.transport);
 

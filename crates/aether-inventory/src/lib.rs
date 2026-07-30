@@ -55,9 +55,9 @@
 //!
 //! The cap is stateless. `ResolveAddress` and `ListKinds` read the engine's `Registry`
 //! through the handler ctx (`NativeCtx::mailer().registry()`) — the same
-//! one the component-host cap registers into for `register_or_match_all`,
-//! so a `load_component`'s registrations are visible the moment they
-//! return; no event channel, no cache invalidation, and no `Arc` clone
+//! one the component-host cap stages its loaded kinds into, so a
+//! `load_component`'s registrations are visible the moment the owner
+//! publishes them; no event channel, no cache invalidation, and no `Arc` clone
 //! pinning one registry instance for the cap's lifetime. The manifest /
 //! resolve / handlers arms read process-global link-time tables.
 //! `#[actor(singleton)]` auto-submits its own `NameEntry` for

@@ -787,6 +787,7 @@ mod tests {
     use crate::mail::MailboxId;
     use crate::mail::outbound::EgressEvent;
     use crate::mail::registry::{InboxHandler, InlineHandler};
+    use crate::testing::boot_authority;
     use aether_data::Kind;
     use aether_data::wire;
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaType};
@@ -1155,7 +1156,10 @@ mod tests {
     fn registered_kind_passes_through_mailer() {
         let (registry, mailer) = make_mailer();
         let note_id = registry
-            .register_kind_with_descriptor(KindDescriptor { name: Note::NAME.into(), schema: note_schema() })
+            .register_kind_with_descriptor(
+                &boot_authority(),
+                KindDescriptor { name: Note::NAME.into(), schema: note_schema() },
+            )
             .unwrap();
         let sink = CapturingSink::new();
         let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());

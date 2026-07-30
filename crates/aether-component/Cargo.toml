@@ -106,8 +106,11 @@ aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures-state
 # `dispatch_decode_failure` drives the `Probe` fixture directly through
 # the pub `Component::instantiate` / `deliver` API, which needs the
 # substrate types and `wasmtime::{Engine, Linker, Module}` in test scope
-# (integration tests see only the lib + dev-deps).
-aether-substrate = { path = "../aether-substrate" }
+# (integration tests see only the lib + dev-deps). `test-support` exposes
+# `aether_substrate::testing::boot_authority`, the test-only mint for the
+# `BootAuthority` the registry's direct mutators now require (ADR-0165 /
+# iamacoffeepot/aether#4156).
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 wasmtime = { workspace = true }
 
 # cargo-machete's source-only scan cannot see the wasm-coupling dev-deps

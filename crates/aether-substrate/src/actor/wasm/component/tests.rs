@@ -28,6 +28,7 @@ use crate::mail::registry::RegistryOwnerLease;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
 use crate::mail::{Mail, MailId, MailboxId};
 use crate::scheduler::WakeSink;
+use crate::testing::boot_authority;
 use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -909,7 +910,10 @@ fn plane_ctx_for_reply() -> (ComponentCtx, Receiver<EgressEvent>, aether_data::K
     let (outbound, rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
     let pong_id = registry
-        .register_kind_with_descriptor(KindDescriptor { name: "test.pong".into(), schema: SchemaType::Unit })
+        .register_kind_with_descriptor(
+            &boot_authority(),
+            KindDescriptor { name: "test.pong".into(), schema: SchemaType::Unit },
+        )
         .expect("register kind");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let ctx = ComponentCtx::new(M(0), registry, mailer, outbound);
@@ -1001,7 +1005,10 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
     // The reply kind must be known so the Component arm's validation
     // guard (`kind_name(kind).is_some()`) passes.
     let pong_id = registry
-        .register_kind_with_descriptor(KindDescriptor { name: "test.pong".into(), schema: SchemaType::Unit })
+        .register_kind_with_descriptor(
+            &boot_authority(),
+            KindDescriptor { name: "test.pong".into(), schema: SchemaType::Unit },
+        )
         .expect("register kind");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
@@ -1201,10 +1208,15 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     let parent_name = "aether.component/aether.embedded:testparent".to_owned();
     let parent_id = aether_data::mailbox_id_from_path(&parent_name);
     registry
-        .try_register_inbox_with_id(parent_id, parent_name.clone(), capture_handler)
+        .try_register_inbox_with_id(&boot_authority(), parent_id, parent_name.clone(), capture_handler)
         .expect("parent registers under its lineage id");
-    let owner =
-        RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        boot_authority(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
 
     // Mirror the host/trampoline split: fold the alias id, then let the owner
     // publish only the logical alias-to-parent relation.
