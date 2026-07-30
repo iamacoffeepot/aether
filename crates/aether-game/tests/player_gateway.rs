@@ -92,9 +92,7 @@ fn load_turn_sim(harness: &mut SubstrateHarness, wasm: Vec<u8>) {
     }
 }
 
-fn hello(stream: &mut TcpStream, client_name: &str) -> (MailboxId, u64) {
-    write_frame(stream, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: client_name.into() })
-        .expect("write Hello");
+fn read_hello_ack(stream: &mut TcpStream) -> (MailboxId, u64) {
     let ack: PlayerFrame = read_frame(stream).expect("read HelloAck");
     let PlayerFrame::HelloAck { wire_version, session_identity, tick, interval_nanos } = ack else {
         panic!("expected HelloAck, got {ack:?}");
@@ -102,6 +100,21 @@ fn hello(stream: &mut TcpStream, client_name: &str) -> (MailboxId, u64) {
     assert_eq!(wire_version, WIRE_VERSION);
     assert_eq!(interval_nanos, INTERVAL_NANOS);
     (session_identity, tick)
+}
+
+fn hello(stream: &mut TcpStream, client_name: &str) -> (MailboxId, u64) {
+    write_frame(stream, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: client_name.into() })
+        .expect("write Hello");
+    read_hello_ack(stream)
+}
+
+fn hello_across_frame(harness: &mut SubstrateHarness, stream: &mut TcpStream, client_name: &str) -> MailboxId {
+    write_frame(stream, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: client_name.into() })
+        .expect("write Hello before staged activation");
+    advance(harness);
+    let (identity, tick) = read_hello_ack(stream);
+    assert!(tick <= 1, "the immediate Hello catches up from either side of the crossed TurnSim frame");
+    identity
 }
 
 fn read_bundle_and_beacon(stream: &mut TcpStream) -> TickBundle {
@@ -152,8 +165,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
 
     let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
     first.set_read_timeout(Some(TCP_TIMEOUT)).expect("set first client timeout");
-    let (identity, tick) = hello(&mut first, "first");
-    assert_eq!(tick, 0);
+    let identity = hello_across_frame(&mut harness, &mut first, "first");
     assert_eq!(identity, expected_player_session_mailbox("conn-0"));
 
     write_frame(
@@ -227,7 +239,10 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     second.set_read_timeout(Some(TCP_TIMEOUT)).expect("set second client timeout");
     let (second_identity, current_tick) = hello(&mut second, "second");
     assert_eq!(second_identity, expected_player_session_mailbox("conn-1"));
-    assert_eq!(current_tick, after_unknown.tick);
+    assert!(
+        current_tick >= after_unknown.tick,
+        "a newly admitted player cannot catch up behind a fact already streamed to the first player",
+    );
     for expected_tick in 1..=current_tick {
         assert_eq!(read_bundle_and_beacon(&mut second).tick, expected_tick);
     }
