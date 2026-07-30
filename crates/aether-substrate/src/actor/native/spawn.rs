@@ -144,7 +144,11 @@ pub struct Spawner {
     /// upgrade — every wake after spawn would silently no-op.
     /// Slots live until the Spawner itself drops (chassis teardown);
     /// self-closing actors leave their slot Arc here as a small
-    /// metadata leak (~80 B) that's reclaimed at teardown.
+    /// metadata leak (~80 B) that's reclaimed at teardown. Nothing an
+    /// actor holds on behalf of a *peer* may ride that retention: a
+    /// resource whose lifetime is the actor's own life is released on the
+    /// close path (cost rows, the parent-local child key — issue 4152),
+    /// never left for the teardown drain.
     ///
     /// Issue 685: each entry now also carries a [`WakeHandle`] clone
     /// so [`Self::shutdown_instanced`] can fire one wake per slot at
@@ -1213,6 +1217,13 @@ mod tests {
     #[kind(name = "test.activation.poke")]
     struct ActivationPoke;
 
+    /// Drives the probe down its ordinary self-close path — the handler flips
+    /// the shutdown flag its dispatcher slot polls, exactly as a production
+    /// actor that retires itself does.
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema)]
+    #[kind(name = "test.activation.close")]
+    struct ActivationClose;
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ActivationEvent {
         Wire(thread::ThreadId),
@@ -1269,6 +1280,12 @@ mod tests {
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {
             let _ = self.events.send(ActivationEvent::Dispatch(thread::current().id()));
+        }
+
+        #[handler::single]
+        fn on_close(&mut self, ctx: &mut NativeCtx<'_>, _close: ActivationClose) {
+            let _ = self.events.send(ActivationEvent::Dispatch(thread::current().id()));
+            ctx.shutdown();
         }
 
         fn unwire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
@@ -1586,6 +1603,78 @@ mod tests {
         mailer.push(Mail::new(id, ActivationPoke::ID, ActivationPoke.encode_into_bytes(), 1));
         assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Dispatch(home));
         assert!(events_rx.try_recv().is_err(), "one live mail performs one ordinary dispatcher drain");
+
+        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1));
+        drop(owner);
+        assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    }
+
+    /// Re-staging a self-closed child's subname reports the authoritative
+    /// `SubnameRetired`, and the parent's key comes back at the child's own
+    /// close path rather than at chassis teardown. Issue 4152's two
+    /// independent regressions, in the order a caller meets them: the live
+    /// key rode the child's binding inside [`Spawner::instanced_slots`],
+    /// which only `shutdown_instanced` ever empties, so the re-stage was
+    /// rejected locally as `SubnameInUse` and one table entry leaked per
+    /// dead child; and the owner then rejected the birth on its surviving
+    /// route — also as `SubnameInUse` — before
+    /// [`super::activation::LegacyPreparedActivation::reserve`] could
+    /// report the retirement. Either one alone turns the retired-name
+    /// diagnostic (ADR-0165) into a "name in use" lie.
+    #[test]
+    fn closed_child_subname_restages_as_retired_not_in_use() {
+        let (spawner, registry, mailer, pool) = activation_fixture();
+        let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+        let owner =
+            RegistryOwnerLease::attach(&registry, &mailer, WakeSink::detached(), RegistryQueueCapacities::default());
+        let parent = Arc::new(NativeBinding::new_for_test(
+            Arc::clone(&mailer),
+            MailboxId::from_name("test.activation.self-close-parent"),
+        ));
+        let (events_tx, _events_rx) = crossbeam_channel::unbounded();
+        let (commit, dispatch_id, key) = finalized_probe(&spawner, &parent, "self-close", events_tx, 1);
+        let child_id = commit.route.id;
+        let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+
+        owner.apply_once_then_observe_before_next_apply_for_test(|| {
+            assert!(parent.reserve_child(key).is_none(), "the staged key stays held while the child is Starting");
+        });
+        completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+
+        let done = await_spawn_done(&parent, dispatch_id);
+        assert!(matches!(done.output(), Ok(applied) if applied.mailbox_id == child_id));
+        done.release_no_reply();
+        assert!(parent.reserve_child(key).is_none(), "Live promotion carries the same key into the live-child set");
+
+        mailer.push(Mail::new(child_id, ActivationClose::ID, ActivationClose.encode_into_bytes(), 1));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let restaged = loop {
+            if let Some(restaged) = parent.reserve_child(key) {
+                break restaged;
+            }
+            assert!(Instant::now() < deadline, "the closed child's close path released its parent-local key");
+            thread::yield_now();
+        };
+        assert!(
+            spawner.instanced_slots.lock().expect("instanced_slots mutex poisoned").contains_key(&child_id),
+            "the key came back from the actor's close path — its slot is still parked for chassis teardown"
+        );
+        drop(restaged);
+
+        let (events_tx, _events_rx) = crossbeam_channel::unbounded();
+        let (reborn, reborn_dispatch, _) = finalized_probe(&spawner, &parent, "self-close", events_tx, 2);
+        let rejection = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(reborn)])).unwrap();
+        owner.run_once();
+
+        assert!(matches!(rejection.wait_timeout(Duration::from_secs(1)).unwrap(), Err(RegistryEffectError::Name(_))));
+        let reborn_done = await_spawn_done(&parent, reborn_dispatch);
+        assert!(
+            matches!(reborn_done.output(), Err(SpawnError::SubnameRetired { .. })),
+            "the owner classified the surviving route of a retired id, not a live occupant: {:?}",
+            reborn_done.output()
+        );
+        reborn_done.release_no_reply();
 
         spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1));
         drop(owner);

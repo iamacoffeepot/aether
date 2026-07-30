@@ -812,12 +812,25 @@ impl Registry {
                         return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
                     match staged_route(&staged_routes, inner, id) {
+                        // Same-name reuse of a `Dropped` route. Only
+                        // `Registry::drop_mailbox` produces that lifecycle, and
+                        // it is a public routing primitive no chassis or cap
+                        // calls today (issue 4152 audited every caller: all are
+                        // tests). Retiring an actor leaves its route in place
+                        // and tombstones the id in the `ActorRegistry` instead,
+                        // which is what the conflict arm below reads.
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
                                 && existing.canonical_name == commit.route.canonical_name => {}
+                        // A route already occupies this id. `reserve` — where
+                        // the authoritative retired-name answer lives — is
+                        // still two steps away and will never run for this
+                        // birth, so classify the conflict here instead of
+                        // reporting every one of them as a live occupant.
                         Some(_) => {
                             let name = commit.route.canonical_name.clone();
-                            drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
+                            let failure = commit.route_conflict_failure();
+                            drop(commit.reject_at_home(failure));
                             return Err(RegistryEffectError::Name(NameConflict { name }));
                         }
                         None => {}

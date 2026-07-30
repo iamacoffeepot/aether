@@ -10,7 +10,7 @@
 //!
 //! The per-envelope dispatch body and the Phase-4 registry close are the
 //! **same** free functions the pooled slot runs (`dispatch_envelope` and
-//! `finalize_registry_and_fan_out`), so `describe`, trace hops, and
+//! `finalize_close_and_fan_out`), so `describe`, trace hops, and
 //! `actor_cost` behave identically across the two homes — the drift a
 //! hand-rolled driver drain would accrue is structurally impossible.
 //!
@@ -20,7 +20,8 @@
 //! under the actor's stamped context without draining queued mail.
 //! [`PumpedSlot::shutdown`] runs the pooled Closed path's phases in order:
 //! residual drain, `unwire` under `with_stamped`, cost-row drop
-//! (iamacoffeepot/aether#3051), and the registry close + monitor fan-out.
+//! (iamacoffeepot/aether#3051), and the registry close + parent-key release
+//! + monitor fan-out.
 
 use core::marker::PhantomData;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use aether_actor::local::ActorSlots;
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
-use crate::actor::native::dispatcher_slot::{dispatch_envelope, finalize_registry_and_fan_out};
+use crate::actor::native::dispatcher_slot::{dispatch_envelope, finalize_close_and_fan_out};
 use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::{MailboxId, Source};
@@ -142,7 +143,8 @@ where
     /// in order: drain any residual inbox mail, run `A::unwire` under
     /// `with_stamped` (the hook a hand-rolled driver drain never had), drop
     /// the finalized mailbox's cost rows (iamacoffeepot/aether#3051), and
-    /// run the registry close + monitor fan-out. Idempotent — the actor is
+    /// run the registry close + parent-key release + monitor fan-out.
+    /// Idempotent — the actor is
     /// taken out on the first call, so a second `shutdown` (or any later
     /// `drain_available`) is a no-op.
     pub fn shutdown(&mut self) {
@@ -163,8 +165,8 @@ where
         // to observe this actor's handler costs; drop its global rows now so
         // native instance churn can't retain stale cells.
         self.binding.mailer().cost_table().drop_mailbox(self.self_id);
-        // Phase 4: registry close + monitor fan-out.
-        finalize_registry_and_fan_out(&self.actor_registry, self.binding.mailer(), self.self_id);
+        // Phase 4: registry close + parent-key release + monitor fan-out.
+        finalize_close_and_fan_out(&self.actor_registry, &self.binding, self.self_id);
         // `actor` drops here — the box was taken out of the `Option`, so the
         // slot is now spent.
     }

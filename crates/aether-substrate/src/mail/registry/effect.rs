@@ -123,6 +123,19 @@ pub trait PreparedSpawnActivation: Send {
     /// Remember one non-bootstrap same-flush mail obligation so native
     /// rejection can settle it after home-side state destruction.
     fn retain_mail(&mut self, _mail: &Mail) {}
+
+    /// Has this birth's id already been retired by a completed actor life?
+    ///
+    /// Read only from the owner's apply loop, to classify a route conflict
+    /// the owner observes before it can call [`Self::reserve`] — the very
+    /// place `reserve` performs the same authoritative check a few steps
+    /// later. Consulting global liveness here is exactly what ADR-0165
+    /// moved to owner time; the handler turn that staged the birth still
+    /// reads nothing global. Default `false`: a storage backend with no
+    /// liveness registry can never retire an id.
+    fn id_is_retired(&self) -> bool {
+        false
+    }
 }
 
 /// Storage-neutral reason supplied to the native finalizer. The registry
@@ -203,6 +216,10 @@ impl PreparedActivationGuard {
     fn retain_mail(&mut self, mail: &Mail) {
         self.0.as_mut().expect("prepared activation remains available while retaining mail").retain_mail(mail);
     }
+
+    fn id_is_retired(&self) -> bool {
+        self.0.as_ref().expect("prepared activation remains available while classifying a conflict").id_is_retired()
+    }
 }
 
 impl Drop for PreparedActivationGuard {
@@ -241,6 +258,21 @@ impl PreparedSpawnCommit {
 
     pub(super) fn reject_at_home(self, failure: PreparedSpawnFailure) -> crossbeam_channel::Receiver<()> {
         self.activation.discard(failure)
+    }
+
+    /// Why the owner is refusing a birth whose id already carries a route.
+    /// A retired id — one a completed actor life tombstoned — is
+    /// `SubnameRetired`; anything else is a live occupant, `SubnameInUse`.
+    /// The distinction has to be drawn here because the owner rejects the
+    /// conflict before [`PreparedSpawnActivation::reserve`], which is where
+    /// the retired-name answer would otherwise come from.
+    pub(super) fn route_conflict_failure(&self) -> PreparedSpawnFailure {
+        let full_name = self.route.canonical_name.clone();
+        if self.activation.id_is_retired() {
+            PreparedSpawnFailure::SubnameRetired { full_name }
+        } else {
+            PreparedSpawnFailure::SubnameInUse { full_name }
+        }
     }
 }
 

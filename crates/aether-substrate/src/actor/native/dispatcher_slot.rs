@@ -251,14 +251,15 @@ where
     }
 
     /// Phase 4 — a one-line delegation to the shared
-    /// [`finalize_registry_and_fan_out`] free function (drain
+    /// [`finalize_close_and_fan_out`] free function (drain
     /// `monitors_of[self_id]`, prune `monitoring[id]` from each target,
-    /// mark Dead, fan `MonitorNotice` mail out via the chassis mailer),
-    /// the close tail both this slot and
+    /// mark Dead, release the parent-local live child key, fan
+    /// `MonitorNotice` mail out via the chassis mailer), the close tail
+    /// both this slot and
     /// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run
     /// (ADR-0160 §1).
     fn finalize_registry(&self) {
-        finalize_registry_and_fan_out(&self.actor_registry, &self.mailer, self.self_id);
+        finalize_close_and_fan_out(&self.actor_registry, &self.binding, self.self_id);
     }
 
     /// Shared drain tail for [`Drainable::run_cycle`] (no seed) and
@@ -355,7 +356,7 @@ where
             // returns, remove the finalized mailbox's global rows so native
             // instance churn cannot retain stale cells.
             self.mailer.cost_table().drop_mailbox(self.self_id);
-            // Phase 4: registry close + monitor fan-out.
+            // Phase 4: registry close + parent-key release + monitor fan-out.
             self.finalize_registry();
             actor_guard.take();
             // Drop the actor mutex before signalling so the waiter (the
@@ -614,22 +615,31 @@ where
     }
 }
 
-/// The Phase 4 registry-close + monitor fan-out both the pooled
-/// [`DispatcherSlot`] and the externally-pumped
+/// The Phase 4 close tail both the pooled [`DispatcherSlot`] and the
+/// externally-pumped
 /// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run
 /// (ADR-0160 §1): drain `monitors_of[self_id]`, prune `monitoring[id]`
-/// from each target, mark the slot Dead, and fan one
+/// from each target, mark the slot Dead, release this actor's parent-local
+/// live child key, and fan one
 /// [`MonitorNotice`](aether_kinds::MonitorNotice) out to every watcher via
-/// `mailer`. A free function for the same reason as [`dispatch_envelope`]:
-/// one home, no drift.
-pub fn finalize_registry_and_fan_out(actor_registry: &ActorRegistry, mailer: &Mailer, self_id: MailboxId) {
+/// the binding's mailer. A free function for the same reason as
+/// [`dispatch_envelope`]: one home, no drift.
+///
+/// The key release sits between the registry close and the fan-out on
+/// purpose. A watcher that re-stages the dead child's subname the moment its
+/// notice lands then finds the key already free and the id already
+/// tombstoned, so owner-time activation answers `SubnameRetired` — the
+/// authoritative reason (ADR-0165) — rather than a stale parent-local
+/// `SubnameInUse`.
+pub fn finalize_close_and_fan_out(actor_registry: &ActorRegistry, binding: &NativeBinding, self_id: MailboxId) {
     let watchers = actor_registry.close_actor(self_id);
+    binding.release_parent_child_reservation();
     if !watchers.is_empty() {
         let notice = aether_kinds::MonitorNotice { target: self_id };
         let payload = <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(&notice);
         let kind = KindId(<aether_kinds::MonitorNotice as aether_data::Kind>::ID.0);
         for watcher in watchers {
-            mailer.push(Mail::new(watcher, kind, payload.clone(), 1));
+            binding.mailer().push(Mail::new(watcher, kind, payload.clone(), 1));
         }
     }
 }
