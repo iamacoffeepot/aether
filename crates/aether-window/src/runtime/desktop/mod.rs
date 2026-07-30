@@ -20,7 +20,7 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
 };
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{InboundMail, MonitorHandle as ActorMonitorHandle, Subname};
 use winit::dpi::PhysicalSize;
@@ -71,6 +71,29 @@ struct PendingCreate {
     spec: WindowSpec,
     reply: Option<Box<InboundMail>>,
     shutdown_on_failure: bool,
+    /// The reserved child, once [`DesktopWindowCapabilityState::finish_window_attachment`]
+    /// has staged its birth. `None` while the create is still waiting on the
+    /// native window and render attachment.
+    staged: Option<StagedWindowChild>,
+}
+
+/// A window child whose deterministic id is reserved but whose birth the
+/// registry owner has not applied yet. The window it belongs to stays
+/// `Attaching` — absent from `ListWindows`, the frame set, and every
+/// publication — until the authoritative `SpawnApplied` lands.
+struct StagedWindowChild {
+    child: MailboxId,
+    /// A reservation that is already doomed: the deterministic child id
+    /// disagreed with the addressable prediction. The completion retires the
+    /// applied child and rolls the create back with this error.
+    rejection: Option<String>,
+}
+
+/// Completion context carried from staging to authoritative application. The
+/// reserved [`WindowId`] is the pending-create key.
+#[derive(Clone, Copy)]
+struct WindowChildContinuation {
+    id: WindowId,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -179,9 +202,10 @@ impl DesktopWindowCapabilityState {
         Ok(WindowHostEffect::Created { id, window })
     }
 
-    /// Complete render attachment for a staged create. Success makes the
-    /// window live and publishes/replies with its final metadata; failure
-    /// rolls every mapping back before replying.
+    /// Complete render attachment for a staged create by staging the window's
+    /// child birth. The window stays `Attaching` and the create stays pending
+    /// until [`Self::finish_window_child_spawn`] observes the authoritative
+    /// `SpawnApplied`; a render failure still rolls back and replies here.
     pub fn finish_window_attachment(
         &mut self,
         id: WindowId,
@@ -194,11 +218,11 @@ impl DesktopWindowCapabilityState {
         match attachment {
             Ok(()) => {
                 let predicted = MailboxId(id.0);
-                let spawned = match ctx
+                let receipt = match ctx
                     .spawn_child::<WindowCapability, DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
-                    .finish()
+                    .stage_with(WindowChildContinuation { id })
                 {
-                    Ok(spawned) => spawned,
+                    Ok(receipt) => receipt,
                     Err(error) => {
                         return self.rollback_attached_create(
                             id,
@@ -207,41 +231,17 @@ impl DesktopWindowCapabilityState {
                         );
                     }
                 };
-                if spawned != predicted {
-                    ctx.actor_at::<DesktopWindowInstance>(spawned).send(&RetireWindow);
-                    return self.rollback_attached_create(
-                        id,
-                        &mut pending,
-                        format!("spawned window child {spawned:?} did not match predicted mailbox {predicted:?}"),
-                    );
-                }
-                let monitor = match ctx.monitor(spawned) {
-                    Ok(monitor) => monitor,
-                    Err(error) => {
-                        ctx.actor_at::<DesktopWindowInstance>(spawned).send(&RetireWindow);
-                        return self.rollback_attached_create(
-                            id,
-                            &mut pending,
-                            format!("failed to monitor window child: {error:?}"),
-                        );
-                    }
-                };
-                let Some(state) = self.windows.get_mut(&id) else {
-                    let error = format!("window {id:?} disappeared during attachment");
-                    ctx.actor_at::<DesktopWindowInstance>(spawned).send(&RetireWindow);
-                    return self.rollback_attached_create(id, &mut pending, error);
-                };
-                self.child_monitors.insert(id, monitor);
-                state.lifecycle = DesktopWindowLifecycle::Live;
-                self.shutdown_when_idle = false;
-                let info = state.info(id);
-                if let Some(reply) = pending.reply.take() {
-                    reply.reply(&CreateWindowResult::Ok { window: info.clone() });
-                }
-                self.publish(ctx, id, &WindowOpened { window: info.clone() });
-                if info.width != 0 && info.height != 0 {
-                    self.publish(ctx, id, &WindowSize { window: id, width: info.width, height: info.height });
-                }
+                // The reservation is keyed by the prediction consumers address,
+                // so a divergent deterministic id dooms it rather than
+                // publishing a window nobody can reach.
+                let rejection = (receipt.mailbox_id != predicted).then(|| {
+                    format!(
+                        "spawned window child {:?} did not match predicted mailbox {predicted:?}",
+                        receipt.mailbox_id
+                    )
+                });
+                pending.staged = Some(StagedWindowChild { child: receipt.mailbox_id, rejection });
+                self.pending_creates.insert(id, pending);
                 Vec::new()
             }
             Err(error) => {
@@ -252,6 +252,78 @@ impl DesktopWindowCapabilityState {
                 self.failed_create_effects(pending.shutdown_on_failure)
             }
         }
+    }
+
+    /// Apply the authoritative result of a staged window child. Success
+    /// installs the monitor, promotes the window to `Live`, replies, and
+    /// publishes; every failure retires the applied child and rolls the create
+    /// back. Rollback effects go to the host-effect queue because this runs on
+    /// an ordinary mail turn rather than inside a native callback.
+    fn finish_window_child_spawn(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        id: WindowId,
+        applied: &Result<SpawnApplied, SpawnError>,
+    ) {
+        let Some(mut pending) = self.pending_creates.remove(&id) else {
+            if let Ok(applied) = applied {
+                ctx.actor_at::<DesktopWindowInstance>(applied.mailbox_id).send(&RetireWindow);
+            }
+            return;
+        };
+        let rejection = pending.staged.as_mut().and_then(|staged| staged.rejection.take());
+        let effects = match applied {
+            Err(error) => {
+                self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
+            }
+            Ok(applied) => {
+                let child = applied.mailbox_id;
+                if let Some(error) = rejection {
+                    ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
+                    self.rollback_attached_create(id, &mut pending, error)
+                } else {
+                    match ctx.monitor(child) {
+                        Ok(monitor) => self.promote_attached_window(ctx, id, child, monitor, &mut pending),
+                        Err(error) => {
+                            ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
+                            self.rollback_attached_create(
+                                id,
+                                &mut pending,
+                                format!("failed to monitor window child: {error:?}"),
+                            )
+                        }
+                    }
+                }
+            }
+        };
+        self.pending_host_effects.extend(effects);
+    }
+
+    fn promote_attached_window(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        id: WindowId,
+        child: MailboxId,
+        monitor: ActorMonitorHandle,
+        pending: &mut PendingCreate,
+    ) -> Vec<WindowHostEffect> {
+        let Some(state) = self.windows.get_mut(&id) else {
+            let error = format!("window {id:?} disappeared during attachment");
+            ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
+            return self.rollback_attached_create(id, pending, error);
+        };
+        self.child_monitors.insert(id, monitor);
+        state.lifecycle = DesktopWindowLifecycle::Live;
+        self.shutdown_when_idle = false;
+        let info = state.info(id);
+        if let Some(reply) = pending.reply.take() {
+            reply.reply(&CreateWindowResult::Ok { window: info.clone() });
+        }
+        self.publish(ctx, id, &WindowOpened { window: info.clone() });
+        if info.width != 0 && info.height != 0 {
+            self.publish(ctx, id, &WindowSize { window: id, width: info.width, height: info.height });
+        }
+        Vec::new()
     }
 
     fn rollback_attached_create(
@@ -494,7 +566,7 @@ impl DesktopWindowCapabilityState {
         }
         let id = predicted_window_id(&spec.name);
         self.pending_host_actions.push_back(WindowHostAction::Create { id, spec: spec.clone() });
-        self.pending_creates.insert(id, PendingCreate { spec, reply, shutdown_on_failure });
+        self.pending_creates.insert(id, PendingCreate { spec, reply, shutdown_on_failure, staged: None });
         Ok(id)
     }
 
@@ -573,8 +645,13 @@ impl NativeActor for DesktopWindowCapability {
         })
     }
 
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         for (_, mut pending) in state.pending_creates.drain() {
+            // A staged child may not have been applied yet, so the retirement
+            // rides the ordered tail its reserved route already parks.
+            if let Some(staged) = &pending.staged {
+                ctx.actor_at::<DesktopWindowInstance>(staged.child).send(&RetireWindow);
+            }
             if let Some(reply) = pending.reply.take() {
                 reply.reply(&CreateWindowResult::Err { error: "window manager shutting down".to_owned() });
             }
@@ -598,6 +675,16 @@ impl NativeActor for DesktopWindowCapability {
                 .map(|(id, window)| window.info(*id))
                 .collect(),
         }
+    }
+
+    #[handler(task)]
+    fn on_window_child_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<Result<SpawnApplied, SpawnError>, WindowChildContinuation>,
+    ) {
+        state.finish_window_child_spawn(ctx, done.context().id, done.output());
+        done.release_no_reply();
     }
 
     #[handler::manual]
@@ -958,6 +1045,43 @@ mod tests {
         };
 
         assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [WindowId(2), WindowId(9)]);
+    }
+
+    /// Reducer-only: staging a real child needs a chassis-built binding this
+    /// fixture cannot supply, so the reservation is assembled directly. It
+    /// pins the two properties the staged path owes — a reserved child is not
+    /// enumerable, and an authoritative rejection rolls the window back and
+    /// answers the caller exactly once.
+    #[test]
+    fn a_reserved_window_child_is_not_enumerable_and_rolls_back_when_its_birth_fails() {
+        let mut state = test_state();
+        let (binding, _mailer) = test_ctx();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let id = predicted_window_id("tools");
+
+        assert!(state.queue_create(spec("tools", "Tools"), None, true).is_ok(), "reserve the create");
+        insert_window(&mut state, id, "tools", false);
+        state.windows.get_mut(&id).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
+        state.pending_creates.get_mut(&id).expect("pending create").staged =
+            Some(StagedWindowChild { child: MailboxId(id.0), rejection: None });
+
+        let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
+        else {
+            panic!("desktop manager list succeeds");
+        };
+        assert!(windows.is_empty(), "a reserved window child is absent from live enumeration");
+
+        state.finish_window_child_spawn(&mut ctx, id, &Err(SpawnError::OwnerClosed));
+
+        assert!(!state.windows.contains_key(&id), "a rejected birth rolls its window back");
+        assert!(state.pending_creates.is_empty(), "a rejected birth clears its reservation");
+        assert!(
+            state
+                .pending_host_effects
+                .iter()
+                .any(|effect| matches!(effect, WindowHostEffect::Closing { id: closing } if *closing == id)),
+            "rollback detaches the native window through the host-effect queue",
+        );
     }
 
     #[test]
