@@ -529,11 +529,14 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
         let wake = WakeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn), spawner.wake_sink().clone());
         spawner.retain_activated_slot(id, slot_dyn, wake.clone());
         let catch_up = Box::new(move || {
-            // The owner has published the Live route and released its apply
-            // lock before invoking this suffix. Flush buffered wire work
-            // while this actor is still unwakeable, then expose its wake/seize
-            // machinery. Self-mail and replies therefore queue behind the
-            // parked prefix without creating a second ring producer.
+            // The owner has published the Live route and released the
+            // registry publication lock before invoking this suffix. Owner
+            // serialization may remain held, so this flush must only submit
+            // or schedule work; it must never wait for owner application.
+            // Keep the actor unwakeable until that work is queued, then expose
+            // its wake/seize machinery. Self-mail and replies therefore queue
+            // behind the parked prefix without creating a second ring
+            // producer.
             binding.release_outbound_after_activation();
             wake_slot.set(Arc::new({
                 let wake = wake.clone();
