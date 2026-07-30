@@ -10,7 +10,7 @@ use super::binding::NativeBinding;
 use super::dispatch_blocking::DeferredCompletion;
 use super::dispatcher_slot::DispatcherSlot;
 use super::reservation::ParentReservation;
-use super::spawn::{SpawnApplied, SpawnError};
+use super::spawn::{SpawnError, SpawnOutcome};
 use super::{Envelope, NativeActor};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
@@ -46,21 +46,31 @@ pub(super) struct NativeSpawnFinalizer {
 
 struct NativeSpawnFinalizerState {
     parent_reservation: ParentReservation,
-    completion: DeferredCompletion<Result<SpawnApplied, SpawnError>>,
-    applied: SpawnApplied,
+    completion: DeferredCompletion<SpawnOutcome>,
+    /// The staged child's identity, carried onto **both** arms of the
+    /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
+    mailbox_id: MailboxId,
+    canonical_name: Arc<str>,
     child: Weak<NativeBinding>,
 }
 
 impl NativeSpawnFinalizer {
     pub(super) fn new(
         parent_reservation: ParentReservation,
-        completion: DeferredCompletion<Result<SpawnApplied, SpawnError>>,
-        applied: SpawnApplied,
+        completion: DeferredCompletion<SpawnOutcome>,
+        mailbox_id: MailboxId,
+        canonical_name: Arc<str>,
         child: Weak<NativeBinding>,
         mailer: Arc<Mailer>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(Some(NativeSpawnFinalizerState { parent_reservation, completion, applied, child })),
+            state: Mutex::new(Some(NativeSpawnFinalizerState {
+                parent_reservation,
+                completion,
+                mailbox_id,
+                canonical_name,
+                child,
+            })),
             retained: Mutex::new(Vec::new()),
             mailer,
         })
@@ -80,7 +90,7 @@ impl NativeSpawnFinalizer {
             self.mailer.record_finished(mail_id, root);
         }
         state.parent_reservation.reject();
-        state.completion.complete(Err(match failure {
+        let error = match failure {
             PreparedSpawnFailure::NamespaceOwnedByOtherType { namespace, owning_type } => {
                 SpawnError::NamespaceOwnedByOtherType { namespace, owning_type }
             }
@@ -88,7 +98,12 @@ impl NativeSpawnFinalizer {
             PreparedSpawnFailure::SubnameInUse { full_name } => SpawnError::SubnameInUse { full_name },
             PreparedSpawnFailure::ActivationRejected => SpawnError::ActivationRejected,
             PreparedSpawnFailure::OwnerClosed => SpawnError::OwnerClosed,
-        }));
+        };
+        state.completion.complete(SpawnOutcome {
+            mailbox_id: state.mailbox_id,
+            canonical_name: state.canonical_name,
+            result: Err(error),
+        });
     }
 
     fn promote(&self) {
@@ -99,7 +114,11 @@ impl NativeSpawnFinalizer {
         if let Some(child) = state.child.upgrade() {
             child.retain_parent_child_reservation(live);
         }
-        state.completion.complete(Ok(state.applied));
+        state.completion.complete(SpawnOutcome {
+            mailbox_id: state.mailbox_id,
+            canonical_name: state.canonical_name,
+            result: Ok(()),
+        });
     }
 }
 

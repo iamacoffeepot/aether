@@ -5,9 +5,7 @@ use std::sync::Arc;
 use aether_actor::Local as _;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{
-    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnApplied, SpawnError, TaskDone,
-};
+use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
@@ -30,12 +28,12 @@ impl WasmTrampolineState {
             let alias_id = alias.alias;
             let _ = ctx.stage_registry_batch(
                 RegistryBatch::publish_alias(alias),
-                InlineAliasContinuation { parent: self.mailbox, alias: alias_id },
+                InlineAliasContext { parent: self.mailbox, alias: alias_id },
             );
         }
     }
 
-    pub(super) fn finish_inline_aliases(done: TaskDone<RegistryBatchResult, InlineAliasContinuation>) {
+    pub(super) fn finish_inline_aliases(done: TaskDone<RegistryBatchResult, InlineAliasContext>) {
         if let Err(error) = done.output() {
             tracing::warn!(
                 target: "aether_component",
@@ -83,10 +81,9 @@ impl WasmTrampolineState {
             // it indexes its own asset load window from the same content.
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
-        if let Err(e) =
-            ctx.spawn_child::<WasmTrampoline, WasmTrampoline>(Subname::Named(&pending.subname), config, ()).stage_with(
-                SiblingSpawnContinuation { parent: self.mailbox, subname: pending.subname.clone(), capabilities },
-            )
+        if let Err(e) = ctx
+            .spawn_child::<WasmTrampoline, WasmTrampoline>(Subname::Named(&pending.subname), config, ())
+            .stage_with(SiblingSpawnContext { parent: self.mailbox, subname: pending.subname.clone(), capabilities })
         {
             tracing::warn!(
                 target: "aether_component",
@@ -97,13 +94,10 @@ impl WasmTrampolineState {
         }
     }
 
-    pub(super) fn finish_sibling_spawn(
-        &self,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, SiblingSpawnContinuation>,
-    ) {
-        match done.output() {
-            Ok(applied) => {
-                self.mailer.capability_registry().register(applied.mailbox_id, &done.context().capabilities);
+    pub(super) fn finish_sibling_spawn(&self, done: TaskDone<SpawnOutcome, SiblingSpawnContext>) {
+        match &done.output().result {
+            Ok(()) => {
+                self.mailer.capability_registry().register(done.output().mailbox_id, &done.context().capabilities);
             }
             Err(error) => {
                 tracing::warn!(
@@ -338,14 +332,14 @@ impl WasmTrampolineState {
 }
 
 #[derive(Clone)]
-pub(super) struct SiblingSpawnContinuation {
+pub(super) struct SiblingSpawnContext {
     parent: MailboxId,
     subname: String,
     capabilities: ComponentCapabilities,
 }
 
 #[derive(Clone)]
-pub(super) struct InlineAliasContinuation {
+pub(super) struct InlineAliasContext {
     parent: MailboxId,
     alias: MailboxId,
 }

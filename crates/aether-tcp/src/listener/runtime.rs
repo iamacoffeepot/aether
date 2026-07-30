@@ -15,7 +15,7 @@ pub use std::thread::{self, JoinHandle};
 pub use std::time::Duration;
 
 pub use aether_data::Kind;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::{KindId, Mail, Mailer};
 
@@ -46,8 +46,11 @@ pub struct TcpListenerState {
     pub next_subname: u64,
 }
 
+/// Completion context for a staged accepted-connection birth. The child's
+/// identity rides its `SpawnOutcome`; what this carries is the peer address the
+/// accept loop observed, which the spawn itself never learns.
 #[derive(Clone)]
-pub struct AcceptedSessionContinuation {
+pub struct AcceptedSessionContext {
     pub session_name: String,
     pub peer: String,
 }
@@ -236,7 +239,7 @@ impl NativeActor for TcpListenerActor {
                     session_config,
                     (),
                 )
-                .stage_with(AcceptedSessionContinuation { session_name: subname.clone(), peer: peer_str.clone() })
+                .stage_with(AcceptedSessionContext { session_name: subname.clone(), peer: peer_str.clone() })
             {
                 Ok(_) => {}
                 Err(e) => {
@@ -256,10 +259,10 @@ impl NativeActor for TcpListenerActor {
     fn on_session_spawn_done(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, AcceptedSessionContinuation>,
+        done: TaskDone<SpawnOutcome, AcceptedSessionContext>,
     ) {
-        match done.output() {
-            Ok(_) => {
+        match &done.output().result {
+            Ok(()) => {
                 tracing::debug!(
                     target: "aether_tcp",
                     session = %done.context().session_name,

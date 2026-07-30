@@ -15,10 +15,11 @@ pub struct PendingPeer {
     pub peer: SocketAddr,
 }
 
-/// Move-only context attached to one staged shard birth. The sender and wake
-/// flag remain supervisor-owned until authoritative activation identifies the
-/// child's real mailbox and completes the [`WakeSink`].
-pub struct ShardSpawnContinuation {
+/// Move-only context attached to one staged shard birth. The child's identity
+/// rides its `SpawnOutcome`; what stays supervisor-owned until authoritative
+/// activation is the half of the [`WakeSink`] no spawn result can supply — the
+/// shard's index in the round-robin set, its inbound sender, and its wake flag.
+pub struct ShardSpawnContext {
     pub index: usize,
     pub subname: String,
     pub inbound_tx: mpsc::Sender<InboundEvent>,
@@ -106,7 +107,7 @@ pub struct HttpSupervisorState {
     pub self_mailbox: MailboxId,
     /// Lazy dispatch-shard lifecycle. Accepted sockets remain here while
     /// child activation is pending and only enter a shard after its
-    /// `SpawnApplied` completion proves the route Live.
+    /// `SpawnOutcome` completion proves the route Live.
     pub shard_startup: ShardStartup,
     /// Cap-global stream-id source, cloned into every shard's seed
     /// (ADR-0135) — see [`HttpShardState::next_stream_id`].
@@ -290,10 +291,10 @@ impl HttpSupervisorState {
             next_stream_id: Arc::clone(&self.next_stream_id),
         };
         let subname = format!("shard-{index}");
-        let continuation = ShardSpawnContinuation { index, subname: subname.clone(), inbound_tx, wake_dirty };
+        let shard = ShardSpawnContext { index, subname: subname.clone(), inbound_tx, wake_dirty };
         if let Err(error) = ctx
             .spawn_child::<HttpServerCapability, HttpDispatchShard>(Subname::Named(&subname), seed, ())
-            .stage_with(continuation)
+            .stage_with(shard)
         {
             tracing::warn!(
                 target: "aether_http::server",

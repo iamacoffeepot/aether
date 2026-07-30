@@ -274,34 +274,42 @@ pub struct TaskDone<O, C = ()> {
     resolved: bool,
 }
 
-/// Move-only continuation for transferring an ADR-0093 completion across
+/// A move-only reply the actor still owes its caller, carried across
 /// successive owner-staged operations without releasing its settlement hold.
 ///
-/// A continuation owns the original caller's reply target and the exact hold
-/// acquired by the first stage. Successor staging consumes it only after all
-/// synchronous preparation succeeds; a preparation error must return it to the
-/// caller so the terminal error can still be replied exactly once.
-#[must_use = "stage a successor or resolve the original caller before dropping the continuation"]
-pub struct TaskContinuation {
+/// Two fields of substance: who is waiting ([`Source`]) and the obligation to
+/// answer them (the [`SettlementHold`] that keeps the caller's causal chain
+/// open). Erlang spells the same value `From`; JavaScript spells it `resolve`.
+/// It carries no code and reifies no rest-of-computation, so it is a deferred
+/// reply rather than a continuation.
+///
+/// Successor staging consumes it only after all synchronous preparation
+/// succeeds; a preparation error must return it to the caller so the terminal
+/// error can still be replied exactly once. Dropping one without replying
+/// strands the caller forever, which is why [`Drop`] releases the hold and then
+/// `debug_assert`s — the distinction from a plain context value, whose drop
+/// means nothing.
+#[must_use = "stage a successor or reply to the original caller before dropping the deferred reply"]
+pub struct DeferredReply {
     hold: Option<SettlementHold>,
     reply_to: Source,
     consumed: bool,
 }
 
-impl TaskContinuation {
+impl DeferredReply {
     pub(crate) fn new(hold: SettlementHold, reply_to: Source) -> Self {
         Self { hold: Some(hold), reply_to, consumed: false }
     }
 
     pub(crate) fn into_parts(mut self) -> (SettlementHold, Source) {
-        let hold = self.hold.take().expect("task continuation consumed exactly once");
+        let hold = self.hold.take().expect("deferred reply consumed exactly once");
         self.consumed = true;
         (hold, self.reply_to)
     }
 
     /// Send the terminal reply through the original target and then release
     /// the continuously-held settlement root.
-    pub fn resolve<M, R>(mut self, ctx: &mut NativeCtx<'_, M>, reply: &R)
+    pub fn reply<M, R>(mut self, ctx: &mut NativeCtx<'_, M>, reply: &R)
     where
         M: ReplyMode,
         R: Kind + serde::Serialize,
@@ -312,7 +320,7 @@ impl TaskContinuation {
         self.consumed = true;
     }
 
-    /// Release a continuation because the actor that owned its pending state
+    /// Release the obligation because the actor that owned its pending state
     /// is itself closing. This is the no-spurious-reply parent-disappearance
     /// path, not an ordinary business completion.
     #[doc(hidden)]
@@ -322,15 +330,45 @@ impl TaskContinuation {
     }
 }
 
-impl Drop for TaskContinuation {
+impl Drop for DeferredReply {
     fn drop(&mut self) {
         if self.hold.is_some() && !self.consumed {
             drop(self.hold.take());
             debug_assert!(
                 false,
-                "TaskContinuation dropped without successor staging or terminal reply (the hold was released, but the owed reply was lost)"
+                "DeferredReply dropped without successor staging or terminal reply (the hold was released, but the owed reply was lost)"
             );
         }
+    }
+}
+
+/// Surrender an owed reply as a bare [`DeferredReply`].
+///
+/// Implemented by [`DeferredReply`] itself (identity) and by [`TaskDone`],
+/// whose completion carries the same debt alongside a worker output and a
+/// context. Staging surfaces such as
+/// [`HandlerSpawnBuilder::continue_from`](super::spawn::HandlerSpawnBuilder::continue_from)
+/// take `impl IntoDeferredReply` so a handler can continue from either without
+/// an intermediate noun at the call site, and can be handed the value back
+/// unchanged when synchronous preparation fails.
+pub trait IntoDeferredReply {
+    /// Consume `self`, transferring its hold and original reply target into a
+    /// bare [`DeferredReply`]. No `Release` is emitted: the same move-only hold
+    /// stays continuously owned until the successor eventually replies or is
+    /// abandoned with its actor binding.
+    fn into_deferred_reply(self) -> DeferredReply;
+}
+
+impl IntoDeferredReply for DeferredReply {
+    fn into_deferred_reply(self) -> DeferredReply {
+        self
+    }
+}
+
+impl<O, C> IntoDeferredReply for TaskDone<O, C> {
+    fn into_deferred_reply(mut self) -> DeferredReply {
+        self.resolved = true;
+        DeferredReply { hold: self.hold.take(), reply_to: self.reply_to, consumed: false }
     }
 }
 
@@ -345,15 +383,6 @@ impl<O, C> TaskDone<O, C> {
     /// [`dispatch_blocking`](NativeCtx::dispatch_blocking)).
     pub fn context(&self) -> &C {
         &self.context
-    }
-
-    /// Transfer this completion's hold and original reply target into a
-    /// successor stage. No `Release` is emitted: the same move-only hold stays
-    /// continuously owned until the successor eventually resolves or is
-    /// abandoned with its actor binding.
-    pub fn handoff(mut self) -> TaskContinuation {
-        self.resolved = true;
-        TaskContinuation { hold: self.hold.take(), reply_to: self.reply_to, consumed: false }
     }
 
     /// Mark resolved and drop the hold **after** the caller has sent the
@@ -1069,8 +1098,56 @@ mod tests {
         assert_eq!(counter.held_open(root), 0, "TaskDone release closes the ctx-captured hold");
     }
 
+    /// Tripwire: an owed reply that is dropped without being replied to or
+    /// staged onto a successor releases its hold (so settlement isn't wedged)
+    /// and `debug_assert`s. The assert is what separates [`DeferredReply`] from
+    /// a plain context value — dropping a context means nothing, dropping a
+    /// debt strands the caller forever — so the reshape onto the new name must
+    /// keep it. Gated `#[should_panic]`: the assertion only fires in debug
+    /// builds, which is where tests run.
     #[test]
-    fn task_handoff_keeps_one_hold_across_successor_completion() {
+    #[should_panic(expected = "DeferredReply dropped without successor staging or terminal reply")]
+    #[cfg(debug_assertions)]
+    fn dropping_deferred_reply_without_replying_releases_and_asserts() {
+        let (_registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(19);
+
+        let owed = DeferredReply::new(mailer.acquire_settlement_hold(root), Source::NONE);
+        assert_eq!(counter.held_open(root), 1, "the debt holds the caller's chain open");
+        drop(owed);
+    }
+
+    /// Companion to the panic test: the dropped debt still releases its hold,
+    /// so a lost reply never wedges settlement. Catches the unwind so the
+    /// release half is observable on its own.
+    #[test]
+    fn dropping_deferred_reply_releases_its_hold() {
+        let (_registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(20);
+        let hold = mailer.acquire_settlement_hold(root);
+        assert_eq!(counter.held_open(root), 1);
+
+        let _ = catch_unwind(AssertUnwindSafe(|| drop(DeferredReply::new(hold, Source::NONE))));
+        assert_eq!(counter.held_open(root), 0, "an unreplied DeferredReply releases its hold on drop");
+    }
+
+    /// Abandoning for actor close is the sanctioned no-reply path: the hold
+    /// releases and the lost-reply assertion stays quiet, so a parent that
+    /// disappears with pending state doesn't panic every debug build.
+    #[test]
+    fn abandoning_a_deferred_reply_for_actor_close_releases_without_asserting() {
+        let (_registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(21);
+
+        DeferredReply::new(mailer.acquire_settlement_hold(root), Source::NONE).abandon_for_actor_close();
+        assert_eq!(counter.held_open(root), 0, "actor-close abandonment releases the chain");
+    }
+
+    #[test]
+    fn task_done_into_deferred_reply_keeps_one_hold_across_successor_completion() {
         let (registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let root = root_id(18);
@@ -1089,8 +1166,8 @@ mod tests {
         assert_eq!(await_wake(&wake_rx), first_id);
 
         let done = binding.dispatch_take::<Answer, String>(first_id).expect("first completion remains takeable");
-        let (hold, reply_to) = done.handoff().into_parts();
-        assert_eq!(counter.held_open(root), 1, "handoff moves the original hold without a release gap");
+        let (hold, reply_to) = done.into_deferred_reply().into_parts();
+        assert_eq!(counter.held_open(root), 1, "the transfer moves the original hold without a release gap");
 
         let second = binding.dispatch_arm::<Answer, _>(hold, reply_to, String::from("second"));
         let second_id = second.dispatch_id();

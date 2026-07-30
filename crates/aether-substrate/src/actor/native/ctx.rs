@@ -39,7 +39,9 @@ use crate::runtime::trace::SettlementHold;
 use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
-use crate::actor::native::dispatch_blocking::{DeferredCompletion, DispatchId, Pending, TaskContinuation, TaskDone};
+use crate::actor::native::dispatch_blocking::{
+    DeferredCompletion, DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskDone,
+};
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn_thread;
 use crate::chassis::inbox::InboundMail;
@@ -514,26 +516,24 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
 
     /// Continue an existing deferred chain through another registry batch
     /// without releasing or reacquiring its settlement hold.
-    pub fn continue_registry_batch<C>(
-        &mut self,
-        continuation: TaskContinuation,
-        batch: RegistryBatch,
-        context: C,
-    ) -> DispatchId
+    pub fn continue_registry_batch<R, C>(&mut self, owed: R, batch: RegistryBatch, context: C) -> DispatchId
     where
+        R: IntoDeferredReply,
         C: Send + 'static,
     {
-        let (hold, reply_to) = continuation.into_parts();
+        let (hold, reply_to) = owed.into_deferred_reply().into_parts();
         let completion = self.binding.dispatch_arm(hold, reply_to, context);
         let id = completion.dispatch_id();
         self.binding.stage_owner_batch(batch, completion);
         id
     }
 
-    /// Capture the current root for a later staged operation while directing
-    /// the eventual terminal reply to an explicitly carried target.
-    pub fn continuation_to(&self, reply_to: Source) -> TaskContinuation {
-        TaskContinuation::new(self.acquire_settlement_hold(), reply_to)
+    /// Capture the current root as a reply this actor still owes, directing
+    /// the eventual terminal reply to an explicitly carried target. The
+    /// returned [`DeferredReply`] keeps the caller's chain open until it is
+    /// replied to, staged onto a successor, or abandoned.
+    pub fn defer_reply_to(&self, reply_to: Source) -> DeferredReply {
+        DeferredReply::new(self.acquire_settlement_hold(), reply_to)
     }
 
     /// ADR-0093 completion-routing entry point: remove the in-flight
@@ -758,10 +758,9 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     ///
     /// Returns a [`HandlerSpawnBuilder`](crate::HandlerSpawnBuilder) the
     /// caller chains `after_init` and then `stage`, `stage_with`, or
-    /// `continue_with` against. Those staged terminals are the only ones it
+    /// `continue_from` against. Those staged terminals are the only ones it
     /// has, so a handler cannot commit the birth itself; the authoritative
-    /// result arrives later as
-    /// `TaskDone<Result<SpawnApplied, SpawnError>, C>`. Eager commit belongs
+    /// result arrives later as `TaskDone<SpawnOutcome, C>`. Eager commit belongs
     /// to the boot/embedder [`SpawnBuilder`](crate::SpawnBuilder) behind
     /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`; both
     /// builder shapes flow through the same [`crate::Spawner`].

@@ -36,7 +36,7 @@ pub use std::time::Duration;
 
 pub use aether_data::{Kind, KindId, MailboxId};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnApplied, SpawnError, TaskDone};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::MailId;
 pub use aether_substrate::mail::mailer::Mailer;
@@ -275,7 +275,7 @@ impl NativeActor for HttpServerCapability {
     }
 
     /// Settle one dispatch-shard birth. A successful child becomes
-    /// selectable only from its authoritative `SpawnApplied`; startup waits
+    /// selectable only from its authoritative `SpawnOutcome`; startup waits
     /// for every deterministic index so completion order cannot reorder the
     /// round-robin set. The task carries no application reply, so discharge
     /// its settlement hold explicitly after reading the typed result.
@@ -283,15 +283,15 @@ impl NativeActor for HttpServerCapability {
     fn on_shard_spawn_done(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, ShardSpawnContinuation>,
+        done: TaskDone<SpawnOutcome, ShardSpawnContext>,
     ) {
         let index = done.context().index;
         let subname = done.context().subname.clone();
-        let sink = match done.output() {
-            Ok(applied) => Some(WakeSink {
+        let sink = match &done.output().result {
+            Ok(()) => Some(WakeSink {
                 inbound_tx: done.context().inbound_tx.clone(),
                 mailer: Arc::clone(&state.mailer),
-                self_id: applied.mailbox_id,
+                self_id: done.output().mailbox_id,
                 wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
                 dirty: Arc::clone(&done.context().wake_dirty),
             }),

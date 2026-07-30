@@ -34,7 +34,7 @@ use aether_actor::runtime;
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
-    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnApplied, SpawnError, TaskDone,
+    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
@@ -221,7 +221,7 @@ impl NativeActor for WasmTrampoline {
     fn on_sibling_spawn_done(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<Result<SpawnApplied, SpawnError>, replace::SiblingSpawnContinuation>,
+        done: TaskDone<SpawnOutcome, replace::SiblingSpawnContext>,
     ) {
         state.finish_sibling_spawn(done);
     }
@@ -230,7 +230,7 @@ impl NativeActor for WasmTrampoline {
     fn on_inline_alias_done(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<RegistryBatchResult, replace::InlineAliasContinuation>,
+        done: TaskDone<RegistryBatchResult, replace::InlineAliasContext>,
     ) {
         WasmTrampolineState::finish_inline_aliases(done);
     }
