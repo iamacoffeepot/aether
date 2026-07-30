@@ -328,8 +328,9 @@ pub struct NativeBinding {
     /// child-lifetime cascade.
     child_reservations: Mutex<ChildReservationTable>,
     /// Live lease back into this actor's spawning parent's local key table.
-    /// The lease is weak and creates no parent/child lifetime cascade; dropping
-    /// this binding during ordinary teardown releases the parent's live key.
+    /// The lease is weak and creates no parent/child lifetime cascade; the
+    /// actor's own close path hands it back through
+    /// [`Self::release_parent_child_reservation`].
     parent_child_reservation: Mutex<Option<LiveChildReservation>>,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
     request_contexts: Mutex<RequestContextTable>,
@@ -1265,6 +1266,24 @@ impl NativeBinding {
             .expect("parent child reservation slot poisoned; fail-fast per ADR-0063")
             .replace(reservation);
         assert!(previous.is_none(), "a child binding retains exactly one parent-local live reservation");
+    }
+
+    /// Hand the retained live lease back to the spawning parent at ordinary
+    /// live teardown (ADR-0165: "live teardown releases the resulting
+    /// live-child key"). Taking the lease out of its slot is what makes the
+    /// release exactly-once — a second close-path call finds `None`, so
+    /// `ChildReservationTable::release_live`'s live-state assertion is
+    /// unreachable from here. A binding that was never spawned as a staged
+    /// child holds nothing and this is a no-op.
+    pub(crate) fn release_parent_child_reservation(&self) {
+        let retained = self
+            .parent_child_reservation
+            .lock()
+            .expect("parent child reservation slot poisoned; fail-fast per ADR-0063")
+            .take();
+        // Released outside the slot lock: the lease's `Drop` reaches into the
+        // *parent's* reservation table, so the two locks are never nested.
+        drop(retained);
     }
 }
 
