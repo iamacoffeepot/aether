@@ -498,16 +498,35 @@ impl HttpSupervisorState {
 
     /// Monitor `mailbox` on its first route claim so the cap purges
     /// the mailbox's routes itself when the occupant departs — vacate
-    /// or close, whichever comes first (ADR-0079 §8 amended). An `Err`
-    /// (an actor outside the registry, or a spawner-less test binding)
-    /// means "not monitorable": the routes then live until substrate
-    /// teardown, exactly as they would for a mailbox that never goes
-    /// away.
+    /// or close, whichever comes first (ADR-0079 §8 amended).
+    ///
+    /// An `Err` (an actor outside the registry, or a spawner-less test
+    /// binding) means "not monitorable", and the claim still stands: the
+    /// route lives until substrate teardown. That is harmless for a mailbox
+    /// that never goes away, and *not* harmless for a wasm trampoline, which
+    /// vacates on `DropComponent` while staying addressable — an unmonitored
+    /// route then keeps dispatching at an empty trampoline, which warn-drops
+    /// every request, so the cap answers `502` to that prefix for the rest of
+    /// the process. Nothing recovers it, because the notice that would have
+    /// purged the route is the one that never arrives.
+    ///
+    /// So the failure is logged rather than discarded (issue 4195): the
+    /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
+    /// and without this line neither branch leaves any trace to tell them
+    /// apart.
     pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
-        if !self.monitors.contains_key(&mailbox)
-            && let Ok(handle) = ctx.monitor(mailbox)
-        {
-            self.monitors.insert(mailbox, handle);
+        if !self.monitors.contains_key(&mailbox) {
+            match ctx.monitor(mailbox) {
+                Ok(handle) => {
+                    self.monitors.insert(mailbox, handle);
+                }
+                Err(error) => tracing::warn!(
+                    target: "aether_http::server",
+                    %mailbox,
+                    ?error,
+                    "route holder is not monitorable; its routes cannot be purged when it departs",
+                ),
+            }
         }
     }
 
