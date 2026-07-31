@@ -404,8 +404,9 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     {
         // ADR-0093 §1 / ADR-0080 §12: acquire the hold on the current root
         // and capture the reply target from *this* handler, then hand them
-        // to the resumed core. The `MailId::NONE` root skips the hold — no
-        // chain to keep open. A bounded `TaskQueue`
+        // to the resumed core. A handler turn with no in-flight root yields
+        // no hold, and the dispatch it starts is then outside settlement
+        // (ADR-0168 §2). A bounded `TaskQueue`
         // instead captures `(hold, reply_to)` at accept time and replays
         // them via `dispatch_blocking_resumed` when a slot frees, so a
         // deferred request keeps its own chain held and replies to its own
@@ -416,12 +417,19 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     }
 
     /// Acquire a [`SettlementHold`] on the current in-flight root
-    /// (ADR-0080 §12). `MailId::NONE` (no inbound chain) yields a no-op
-    /// hold. Use to keep a chain open across deferred work — e.g. a
-    /// `TaskQueue` buffering an over-limit request holds it until a slot
-    /// frees, then moves it into [`Self::dispatch_blocking_resumed`].
+    /// (ADR-0080 §12). Use to keep a chain open across deferred work —
+    /// e.g. a `TaskQueue` buffering an over-limit request holds it until
+    /// a slot frees, then moves it into
+    /// [`Self::dispatch_blocking_resumed`].
+    ///
+    /// `None` when this context carries no in-flight root
+    /// (`MailId::NONE`): the work has no causing chain, so there is
+    /// nothing to keep open and no guard to hand back (ADR-0168 §2).
+    /// Deferred work started from such a context is unobservable through
+    /// settlement, which is a property worth reading at the call site
+    /// rather than a guard that gates nothing.
     #[must_use]
-    pub fn acquire_settlement_hold(&self) -> SettlementHold {
+    pub fn acquire_settlement_hold(&self) -> Option<SettlementHold> {
         self.mailer().acquire_settlement_hold(self.in_flight_root)
     }
 
@@ -433,7 +441,12 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// replays them here when the request finally dispatches from a later
     /// handler turn — so the deferred work keeps its *own* chain held and
     /// replies to its *own* caller, not the completion handler's.
-    pub fn dispatch_blocking_resumed<O, F>(&mut self, hold: SettlementHold, reply_to: Source, f: F) -> DispatchId
+    pub fn dispatch_blocking_resumed<O, F>(
+        &mut self,
+        hold: Option<SettlementHold>,
+        reply_to: Source,
+        f: F,
+    ) -> DispatchId
     where
         O: Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -447,7 +460,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// worker that runs `f`, parks its output, and wakes the actor.
     pub fn dispatch_blocking_resumed_with<O, C, F>(
         &mut self,
-        hold: SettlementHold,
+        hold: Option<SettlementHold>,
         reply_to: Source,
         cx: C,
         f: F,
@@ -495,6 +508,11 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// tying completion to a blocking worker. Future staged effects can move
     /// this capability to their authoritative owner and retain no parent
     /// lifetime beyond a weak binding reference.
+    ///
+    /// The armed completion carries whatever hold this context can give it,
+    /// which is nothing when the context carries no in-flight root. Such a
+    /// staged effect is not covered by its causing chain's `Settled`
+    /// (ADR-0168 §1) — the activation path is the current instance.
     pub(crate) fn arm_deferred_completion<O, C>(&self, context: C) -> DeferredCompletion<O>
     where
         C: Send + 'static,

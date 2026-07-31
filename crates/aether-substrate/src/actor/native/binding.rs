@@ -1298,14 +1298,15 @@ impl NativeBinding {
     /// Insert a freshly-minted in-flight dispatch entry and return its
     /// [`DispatchId`](super::dispatch_blocking::DispatchId). Called on
     /// the actor thread at dispatch time, after the hold is acquired and
-    /// before the worker spawns.
+    /// before the worker spawns. `hold` is `None` when the dispatching
+    /// context carried no chain to hold (ADR-0168 §2).
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn dispatch_insert(
         &self,
-        hold: SettlementHold,
+        hold: Option<SettlementHold>,
         reply_to: Source,
         context: Box<dyn Any + Send>,
     ) -> super::dispatch_blocking::DispatchId {
@@ -1319,7 +1320,7 @@ impl NativeBinding {
     /// The returned move-only capability retains this binding only weakly.
     pub(crate) fn dispatch_arm<O, C>(
         self: &Arc<Self>,
-        hold: SettlementHold,
+        hold: Option<SettlementHold>,
         reply_to: Source,
         context: C,
     ) -> super::dispatch_blocking::DeferredCompletion<O>
@@ -1373,8 +1374,8 @@ impl NativeBinding {
     }
 
     /// Remove the named dispatch entry and hand back its parked
-    /// `(SettlementHold, Source)` without any downcast — the release path
-    /// for a worker that never armed. The spawn-error branch of
+    /// `(Option<SettlementHold>, Source)` without any downcast — the
+    /// release path for a worker that never armed. The spawn-error branch of
     /// [`dispatch_blocking_resumed_with`](super::ctx::NativeCtx::dispatch_blocking_resumed_with)
     /// calls this and drops the returned hold so the chain settles.
     ///
@@ -1384,7 +1385,7 @@ impl NativeBinding {
     pub(crate) fn dispatch_abandon(
         &self,
         id: super::dispatch_blocking::DispatchId,
-    ) -> Option<(SettlementHold, Source)> {
+    ) -> Option<(Option<SettlementHold>, Source)> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_abandon(id)
     }
 

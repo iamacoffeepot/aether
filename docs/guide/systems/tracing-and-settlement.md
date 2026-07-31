@@ -89,7 +89,12 @@ hand — the sanctioned offload primitives manage it for you. `ctx.dispatch_bloc
 the worker and release it when you `resolve`, reply-then-release in that order so
 the settle can't beat the reply; `spawn_inherit` holds for the worker's lifetime.
 `acquire_settlement_hold` is the explicit handle for the rare hand-rolled case,
-such as buffering a request to drain in a later turn. The full offload story —
+such as buffering a request to drain in a later turn. It hands back an
+`Option<SettlementHold>`, and `None` is a real answer: a context with no
+in-flight root has no chain, so there is nothing to keep open. Work deferred
+from such a context is outside settlement entirely — no waiter can be told when
+it finished — which is why the absence is a value you handle rather than a
+guard that quietly gates nothing. The full offload story —
 which primitive for which shape, and why a raw `std::thread::spawn` silently
 opts work *out* of settlement — lives on
 [Concurrency & blocking](concurrency.md); this page is the *why* behind the hold.

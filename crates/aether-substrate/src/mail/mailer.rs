@@ -242,8 +242,11 @@ impl Mailer {
     /// hold on `root`. The returned guard fires `Release` on drop;
     /// every `Mailer` carries a real handle so the contract is
     /// structural.
-    #[must_use = "SettlementHold gates root settlement; storing _ silently fires Release"]
-    pub fn acquire_settlement_hold(&self, root: aether_data::MailId) -> SettlementHold {
+    ///
+    /// `None` for `MailId::NONE` — no chain, therefore no hold (ADR-0168
+    /// §2). The caller decides what an effect with no causing chain does.
+    #[must_use = "a SettlementHold gates root settlement; storing _ silently fires Release"]
+    pub fn acquire_settlement_hold(&self, root: aether_data::MailId) -> Option<SettlementHold> {
         self.trace_handle.acquire_settlement_hold(root)
     }
 

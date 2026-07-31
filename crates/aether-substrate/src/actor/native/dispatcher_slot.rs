@@ -191,6 +191,13 @@ where
 
     /// Run the post-init wire hook while the activation job owns this slot.
     /// The slot is not routable or drainable yet.
+    ///
+    /// The context carries no in-flight root, so an effect this hook stages
+    /// acquires no settlement hold and is not covered by the `Settled` of the
+    /// chain whose `spawn_child` caused the birth. That is the ADR-0168 §1
+    /// violation, recorded here rather than repaired: the causing chain is
+    /// known at the spawn site, not here, so attaching it is a behaviour
+    /// change that lands on its own.
     pub(super) fn wire_activation(&self) {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
