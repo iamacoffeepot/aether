@@ -6,7 +6,10 @@
 //! Base and candidate run on the *same* runner, interleaved trial by
 //! trial, so shared run-to-run drift cancels in the per-trial paired
 //! delta (ADR-0085 §3). Each side is invoked as a subprocess so every
-//! trial is a fresh process (§1).
+//! trial is a fresh process (§1), and the two **alternate which runs
+//! first** ([`Side::order_for_trial`], iamacoffeepot/aether#4182) so a
+//! first-vs-second effect inside a pair cancels rather than accruing to
+//! one side.
 //!
 //! ```text
 //! # two checkouts (CI):
@@ -71,6 +74,44 @@ enum TrialErr {
     /// meaningless, so it is an informational skip, not a crash. Carries
     /// the trial's tag.
     Schema(String),
+}
+
+/// Which side of a trial pair a subprocess run belongs to
+/// (iamacoffeepot/aether#4182).
+#[derive(Clone, Copy)]
+enum Side {
+    Base,
+    Candidate,
+}
+
+impl Side {
+    /// The order the two sides run in for trial `t` — alternating, so each
+    /// side takes the first slot `k / 2` times.
+    ///
+    /// ADR-0085 §3 interleaves base and candidate so run-to-run drift cancels
+    /// in the per-trial paired delta. That handles drift *between* pairs but
+    /// leaves a bias *within* one: whatever the runner does between a trial's
+    /// first and second process — cache warming, frequency scaling, a
+    /// co-tenant arriving — lands on the same side every time under a fixed
+    /// order, and the paired statistic reports it as signal. A byte-identical
+    /// control run (iamacoffeepot/aether#4181) produced a "regressed" verdict
+    /// on exactly that signature: a consistent per-trial delta between two
+    /// copies of one program. Alternating cancels it the same way the
+    /// between-pair interleave already cancels its own.
+    fn order_for_trial(t: usize) -> [Self; 2] {
+        if t.is_multiple_of(2) {
+            [Self::Base, Self::Candidate]
+        } else {
+            [Self::Candidate, Self::Base]
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Candidate => "candidate",
+        }
+    }
 }
 
 struct Args {
@@ -252,20 +293,18 @@ fn main() -> ExitCode {
     let mut cand_reports = Vec::with_capacity(args.k);
     for t in 0..args.k {
         eprintln!("perf-compare: trial {}/{}", t + 1, args.k);
-        match run_trial(&args.base, &args.base_env) {
-            Ok(r) => base_reports.push(r),
-            Err(TrialErr::Schema(tag)) => return schema_skip("base", &tag),
-            Err(TrialErr::Op(e)) => {
-                eprintln!("perf-compare: base trial {t} failed: {e}");
-                return ExitCode::from(1);
-            }
-        }
-        match run_trial(&args.cand, &args.cand_env) {
-            Ok(r) => cand_reports.push(r),
-            Err(TrialErr::Schema(tag)) => return schema_skip("candidate", &tag),
-            Err(TrialErr::Op(e)) => {
-                eprintln!("perf-compare: candidate trial {t} failed: {e}");
-                return ExitCode::from(1);
+        for side in Side::order_for_trial(t) {
+            let (path, env, reports) = match side {
+                Side::Base => (&args.base, &args.base_env, &mut base_reports),
+                Side::Candidate => (&args.cand, &args.cand_env, &mut cand_reports),
+            };
+            match run_trial(path, env) {
+                Ok(r) => reports.push(r),
+                Err(TrialErr::Schema(tag)) => return schema_skip(side.label(), &tag),
+                Err(TrialErr::Op(e)) => {
+                    eprintln!("perf-compare: {} trial {t} failed: {e}", side.label());
+                    return ExitCode::from(1);
+                }
             }
         }
     }
@@ -301,11 +340,42 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::ingest_trial;
+    use super::{Side, ingest_trial};
     use aether_harness_substrate::perf::report::{
         CellJson, CompareConfig, ComparisonReport, LatencySection, Metric, RawSection, SectionReport, TRIAL_SCHEMA,
         TrialReport, Verdict, compare,
     };
+
+    /// Tripwire (iamacoffeepot/aether#4182): neither side may take the first
+    /// slot of a trial pair more often than the other, or a first-vs-second
+    /// runner effect lands on one side systematically and the paired delta
+    /// reports it as signal. The property is the balance, not the parity
+    /// expression that currently delivers it — an odd `k` may leave one extra,
+    /// never more.
+    #[test]
+    fn neither_side_runs_first_more_than_the_other() {
+        for k in 1..=32usize {
+            let base_first = (0..k).filter(|&t| matches!(Side::order_for_trial(t)[0], Side::Base)).count();
+            let cand_first = k - base_first;
+            assert!(
+                base_first.abs_diff(cand_first) <= 1,
+                "k={k}: base ran first {base_first}x, candidate {cand_first}x — the pair order is biased"
+            );
+        }
+    }
+
+    /// Both sides must run in every trial. A pair that drops one would silently
+    /// shorten that side's sample set and desynchronise the pairing.
+    #[test]
+    fn every_trial_runs_both_sides_once() {
+        for t in 0..8usize {
+            let order = Side::order_for_trial(t);
+            assert!(
+                matches!(order, [Side::Base, Side::Candidate] | [Side::Candidate, Side::Base]),
+                "trial {t} must run each side exactly once"
+            );
+        }
+    }
 
     /// Build a `v4` candidate side with a single `latency` cell whose p50
     /// follows `p50s` (one trial each).

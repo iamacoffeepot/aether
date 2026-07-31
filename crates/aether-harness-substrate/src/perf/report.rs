@@ -1052,6 +1052,26 @@ fn us(ns: f64) -> String {
     format!("{:.2}", ns / 1000.0)
 }
 
+/// A cell's paired delta, rendered so it cannot be mistaken for the
+/// difference of the two medians beside it (iamacoffeepot/aether#4182).
+///
+/// `delta_pct` is `median(per-trial deltas) / median(base values)` — the
+/// paired statistic ADR-0085 §3 is built on, and deliberately more sensitive
+/// than comparing marginals. But printed as a bare percentage next to a base
+/// and a candidate median it invites the wrong arithmetic: a cell reading
+/// `2.19 → 2.22` carried `+20%`, and the two disagree because they measure
+/// different things, not because either is wrong. Leading with the delta
+/// median in µs makes the paired quantity the one being read.
+fn paired_delta_us(delta_median_nanos: f64, delta_pct: f64) -> String {
+    format!("{:+.2} ({delta_pct:+.0}%)", delta_median_nanos / 1000.0)
+}
+
+/// [`paired_delta_us`]'s throughput sibling — same reasoning, thousands of
+/// mails/sec, matching [`kps`]'s precision.
+fn paired_delta_kps(delta_median_mps: f64, delta_pct: f64) -> String {
+    format!("{:+.1} ({delta_pct:+.0}%)", delta_median_mps / 1000.0)
+}
+
 /// Hidden marker so the CI poster (PR 2) can find-and-update its sticky
 /// comment in place rather than spamming new ones.
 pub const STICKY_MARKER: &str = "<!-- aether-perf-report -->";
@@ -1188,8 +1208,8 @@ pub const PLOT_ANCHOR_PREFIX: &str = "<!-- aether-perf-plots:";
 
 #[allow(clippy::format_push_string)]
 fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellComparison]) {
-    let header =
-        "| topology | w | metric | pct | base µs | this µs | Δ | verdict |\n|---|--:|---|---|--:|--:|--:|---|\n";
+    let header = "| topology | w | metric | pct | base µs | this µs | paired Δ µs | verdict |\n\
+         |---|--:|---|---|--:|--:|--:|---|\n";
     let row = |c: &CellComparison| -> String {
         let verdict = match c.verdict {
             Verdict::Improved => "improved",
@@ -1197,7 +1217,7 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
             Verdict::Regressed => "regressed",
         };
         format!(
-            "| {} | {} | {} | {} | {} ±{} | {} ±{} | {:+.0}% | {} |\n",
+            "| {} | {} | {} | {} | {} ±{} | {} ±{} | {} | {} |\n",
             c.topo,
             c.workers,
             c.metric.label(),
@@ -1206,7 +1226,7 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
             us(c.base_iqr),
             us(c.cand_median),
             us(c.cand_iqr),
-            c.delta_pct,
+            paired_delta_us(c.delta_median, c.delta_pct),
             verdict,
         )
     };
@@ -1221,7 +1241,8 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
 /// classification (ADR-0085 amendment).
 #[allow(clippy::format_push_string)]
 fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellComparison]) {
-    let header = "| topology | w | metric | pct | base µs | this µs | Δ |\n|---|--:|---|---|--:|--:|--:|\n";
+    let header = "| topology | w | metric | pct | base µs | this µs | paired Δ µs |\n\
+         |---|--:|---|---|--:|--:|--:|\n";
     // A plain trend label — cell count + an explicit "no verdict"
     // (iamacoffeepot/aether#1228). The improved/stable/regressed tally is
     // reserved for the verdict-carrying sections (light latency + throughput);
@@ -1230,7 +1251,7 @@ fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellCompariso
     s.push_str(header);
     for c in cells {
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} ±{} | {} ±{} | {:+.0}% |\n",
+            "| {} | {} | {} | {} | {} ±{} | {} ±{} | {} |\n",
             c.topo,
             c.workers,
             c.metric.label(),
@@ -1239,7 +1260,7 @@ fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellCompariso
             us(c.base_iqr),
             us(c.cand_median),
             us(c.cand_iqr),
-            c.delta_pct,
+            paired_delta_us(c.delta_median, c.delta_pct),
         ));
     }
     s.push_str("\n</details>\n\n");
@@ -1251,7 +1272,7 @@ fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellCompariso
 /// mails/sec.
 #[allow(clippy::format_push_string)]
 fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputComparison]) {
-    let header = "| topology | w | base k/s | this k/s | Δ | verdict |\n|---|--:|--:|--:|--:|---|\n";
+    let header = "| topology | w | base k/s | this k/s | paired Δ k/s | verdict |\n|---|--:|--:|--:|--:|---|\n";
     let row = |c: &ThroughputComparison| -> String {
         let verdict = match c.verdict {
             Verdict::Improved => "improved",
@@ -1259,14 +1280,14 @@ fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputCompar
             Verdict::Regressed => "regressed",
         };
         format!(
-            "| {} | {} | {} ±{} | {} ±{} | {:+.0}% | {} |\n",
+            "| {} | {} | {} ±{} | {} ±{} | {} | {} |\n",
             c.topo,
             c.workers,
             kps(c.base_median),
             kps(c.base_iqr),
             kps(c.cand_median),
             kps(c.cand_iqr),
-            c.delta_pct,
+            paired_delta_kps(c.delta_median, c.delta_pct),
             verdict,
         )
     };
@@ -1867,7 +1888,7 @@ mod tests {
             "the noise-band note is suppressed for a no-verdict tier"
         );
         // The trend grid's header omits the verdict column the light table has.
-        assert!(md.contains("| topology | w | metric | pct | base µs | this µs | Δ |\n"));
+        assert!(md.contains("| topology | w | metric | pct | base µs | this µs | paired Δ µs |\n"));
     }
 
     #[test]
