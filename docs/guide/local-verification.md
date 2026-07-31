@@ -48,6 +48,9 @@ additional consumer outside the graph (a runtime-read data file, fixture,
 golden file, or env contract in another crate). Pushes to `main` keep the
 unconditional full suite as the backstop, so a mis-attribution gap surfaces
 as a red full suite on `main` after the merged PR's narrowed CI was green.
+That suite runs as three parallel `Test (shard N of 3)` jobs, each executing a
+third of the tests, so the red lands on whichever shard drew the failing test
+and the other two shards are expected to stay green.
 
 When that happens, work the loop:
 
