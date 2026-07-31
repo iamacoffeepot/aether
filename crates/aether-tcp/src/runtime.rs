@@ -96,7 +96,10 @@ pub struct ListenerEntry {
 
 pub struct PendingUnbind {
     pub sender: aether_data::Source,
-    pub hold: SettlementHold,
+    /// The unbind caller's chain, kept open until the listener's close
+    /// notice drives the reply. Absent when the request arrived on no
+    /// chain, in which case nothing gates the reply (ADR-0168 §2).
+    pub hold: Option<SettlementHold>,
     pub listener_name: String,
 }
 
@@ -432,7 +435,8 @@ impl NativeActor for TcpCapability {
         let _entry = state.listeners.remove(&notice.target);
         // Fire the parked unbind reply if one was waiting.
         if let Some(PendingUnbind { sender, hold, listener_name }) = state.pending_unbinds.remove(&notice.target) {
-            ctx.reply_to_target(sender, &UnbindListenerResult::Ok { listener_name }, hold.root(), None);
+            let root = hold.as_ref().map_or(aether_data::MailId::NONE, SettlementHold::root);
+            ctx.reply_to_target(sender, &UnbindListenerResult::Ok { listener_name }, root, None);
             drop(hold);
         }
         // Else: notice came from a non-unbind close (chassis

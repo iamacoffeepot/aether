@@ -193,8 +193,10 @@ struct InflightEntry {
     /// The [`SettlementHold`] acquired eagerly in the dispatching
     /// handler (before it returned), keeping the chain root open across
     /// the async worker. Released only after the re-reply, via
-    /// [`TaskDone::resolve`].
-    hold: SettlementHold,
+    /// [`TaskDone::resolve`]. `None` when the dispatching context had no
+    /// chain to hold, in which case the dispatch is invisible to
+    /// settlement (ADR-0168 §2).
+    hold: Option<SettlementHold>,
     /// The originating caller's reply target, captured at dispatch. The
     /// re-reply routes through this.
     reply_to: Source,
@@ -262,10 +264,11 @@ pub(crate) enum FillOutcome {
 pub struct TaskDone<O, C = ()> {
     output: O,
     context: C,
-    /// `Option` so `resolve` can `take` the hold out and drop it
-    /// *after* the reply is sent, leaving `Drop` nothing to release. A
-    /// resolved `TaskDone` carries `None` here; an un-resolved one
-    /// carries `Some` and `Drop` trips the assertion.
+    /// The chain the dispatch keeps open, absent when the dispatching
+    /// context had none to give (ADR-0168 §2). Also `take`n out by
+    /// `resolve` so the release lands *after* the reply is sent, leaving
+    /// `Drop` nothing to do — `resolved` rather than this field is what
+    /// separates a resolved completion from a lost one.
     hold: Option<SettlementHold>,
     reply_to: Source,
     /// Set true by every `resolve*` path before it consumes `self`, so
@@ -279,7 +282,8 @@ pub struct TaskDone<O, C = ()> {
 ///
 /// Two fields of substance: who is waiting ([`Source`]) and the obligation to
 /// answer them (the [`SettlementHold`] that keeps the caller's causal chain
-/// open). Erlang spells the same value `From`; JavaScript spells it `resolve`.
+/// open, absent when the capturing context had no chain — ADR-0168 §2).
+/// Erlang spells the same value `From`; JavaScript spells it `resolve`.
 /// It carries no code and reifies no rest-of-computation, so it is a deferred
 /// reply rather than a continuation.
 ///
@@ -297,12 +301,12 @@ pub struct DeferredReply {
 }
 
 impl DeferredReply {
-    pub(crate) fn new(hold: SettlementHold, reply_to: Source) -> Self {
-        Self { hold: Some(hold), reply_to, consumed: false }
+    pub(crate) fn new(hold: Option<SettlementHold>, reply_to: Source) -> Self {
+        Self { hold, reply_to, consumed: false }
     }
 
-    pub(crate) fn into_parts(mut self) -> (SettlementHold, Source) {
-        let hold = self.hold.take().expect("deferred reply consumed exactly once");
+    pub(crate) fn into_parts(mut self) -> (Option<SettlementHold>, Source) {
+        let hold = self.hold.take();
         self.consumed = true;
         (hold, self.reply_to)
     }
@@ -332,7 +336,7 @@ impl DeferredReply {
 
 impl Drop for DeferredReply {
     fn drop(&mut self) {
-        if self.hold.is_some() && !self.consumed {
+        if !self.consumed {
             drop(self.hold.take());
             debug_assert!(
                 false,
@@ -400,7 +404,7 @@ impl<O, C> TaskDone<O, C> {
     /// chain the hold keeps open — replied to from a *later* handler turn
     /// whose own ctx has no relation to the originating chain.
     /// `MailId::NONE` once the hold is taken (post-`release`) or for a
-    /// `NONE`-root dispatch.
+    /// chainless dispatch that never held one.
     fn hold_root(&self) -> MailId {
         self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root)
     }
@@ -477,7 +481,7 @@ impl<O, C> Drop for TaskDone<O, C> {
     /// is loud in debug builds — the failure surface discipline misses
     /// today (ADR-0093 §4 / Consequences).
     fn drop(&mut self) {
-        if self.hold.is_some() {
+        if !self.resolved {
             drop(self.hold.take());
             debug_assert!(
                 false,
@@ -494,7 +498,7 @@ impl InflightTable {
     /// return its [`DispatchId`]. The actor thread calls this (under the
     /// table lock) right after acquiring the hold, before spawning the
     /// worker.
-    fn insert(&mut self, hold: SettlementHold, reply_to: Source, context: Box<dyn Any + Send>) -> DispatchId {
+    fn insert(&mut self, hold: Option<SettlementHold>, reply_to: Source, context: Box<dyn Any + Send>) -> DispatchId {
         let id = self.mint_id();
         self.entries.insert(id, InflightEntry { hold, reply_to, context, output: None });
         id
@@ -521,7 +525,7 @@ impl InflightTable {
     /// the eagerly-acquired hold when arming failed: the caller drops the
     /// returned hold, settling the chain the dispatch would otherwise wedge
     /// forever. A no-op (`None`) for an unknown id.
-    fn abandon(&mut self, id: DispatchId) -> Option<(SettlementHold, Source)> {
+    fn abandon(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
         let entry = self.entries.remove(&id)?;
         Some((entry.hold, entry.reply_to))
     }
@@ -557,7 +561,7 @@ impl InflightTable {
         let InflightEntry { hold, reply_to, context, output } = entry;
         let output = output?.downcast::<O>().ok()?;
         let context = context.downcast::<C>().ok()?;
-        Some(TaskDone { output: *output, context: *context, hold: Some(hold), reply_to, resolved: false })
+        Some(TaskDone { output: *output, context: *context, hold, reply_to, resolved: false })
     }
 
     /// Non-consuming peek-then-take (ADR-0093 §3, peek variant). Look the
@@ -596,7 +600,7 @@ impl InflightTable {
 impl InflightTable {
     pub(crate) fn dispatch_insert(
         &mut self,
-        hold: SettlementHold,
+        hold: Option<SettlementHold>,
         reply_to: Source,
         context: Box<dyn Any + Send>,
     ) -> DispatchId {
@@ -611,7 +615,7 @@ impl InflightTable {
         self.take(id)
     }
 
-    pub(crate) fn dispatch_abandon(&mut self, id: DispatchId) -> Option<(SettlementHold, Source)> {
+    pub(crate) fn dispatch_abandon(&mut self, id: DispatchId) -> Option<(Option<SettlementHold>, Source)> {
         self.abandon(id)
     }
 
@@ -884,7 +888,7 @@ mod tests {
         assert_eq!(counter.held_open(root), 1, "hold acquired");
 
         let done: TaskDone<u64, ()> =
-            TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
+            TaskDone { output: 1, context: (), hold, reply_to: Source::NONE, resolved: false };
         // The drop releases the hold (verified indirectly: the chain
         // returns to 0 even as the assertion unwinds) then debug_asserts.
         drop(done);
@@ -904,7 +908,7 @@ mod tests {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let done: TaskDone<u64, ()> =
-                TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
+                TaskDone { output: 1, context: (), hold, reply_to: Source::NONE, resolved: false };
             drop(done);
         }));
         // In debug the drop asserts (unwinds); in release it doesn't.

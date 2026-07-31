@@ -277,14 +277,10 @@ where
     // spawned closure via the `InheritCtx<A>` so release fires on
     // worker exit.
     //
-    // `MailId::NONE` skips the hold: a ctx without an in-flight root
-    // has no chain to keep open. Symmetric with the `outbound_root`
-    // / `outbound_parent` `None` cases.
-    let hold = if in_flight_root == MailId::NONE {
-        None
-    } else {
-        Some(binding.mailer().acquire_settlement_hold(in_flight_root))
-    };
+    // A ctx without an in-flight root has no chain to keep open, so the
+    // acquire hands back no hold. Symmetric with the `outbound_root` /
+    // `outbound_parent` `None` cases.
+    let hold = binding.mailer().acquire_settlement_hold(in_flight_root);
     thread::Builder::new()
         .name(format!("aether-inherit-{}", A::NAMESPACE))
         .spawn(move || {

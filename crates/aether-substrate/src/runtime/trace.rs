@@ -321,12 +321,18 @@ impl TraceHandle {
     /// the parent handler's `Finished` lands. Moving the guard into the
     /// worker thread (via the `InheritCtx<A>` ctor) ties release to the
     /// worker's lifetime.
-    #[must_use = "SettlementHold gates root settlement; storing _ silently releases it"]
-    pub fn acquire_settlement_hold(&self, root: MailId) -> SettlementHold {
-        if root != MailId::NONE {
-            self.settlement_counter.record_hold_open(root);
+    ///
+    /// `None` when `root` is [`MailId::NONE`] — there is no chain to hold,
+    /// so there is no hold to hand back (ADR-0168 §2). The caller states
+    /// what it does with that case instead of receiving a guard that
+    /// reads like a working hold and gates nothing.
+    #[must_use = "a SettlementHold gates root settlement; storing _ silently releases it"]
+    pub fn acquire_settlement_hold(&self, root: MailId) -> Option<SettlementHold> {
+        if root == MailId::NONE {
+            return None;
         }
-        SettlementHold { handle: self.clone(), root }
+        self.settlement_counter.record_hold_open(root);
+        Some(SettlementHold { handle: self.clone(), root })
     }
 }
 
@@ -342,6 +348,10 @@ impl Default for TraceHandle {
 /// drop decrements the root's `held_open` count and fires `Settled` on
 /// the zero-transition. The only public surface is the guard, so a
 /// paired `hold`/`release` mismatch is structurally impossible.
+///
+/// A `SettlementHold` always names a real root. The acquire is the sole
+/// constructor and answers [`MailId::NONE`] with `None`, so a hold that
+/// holds nothing is not a value this type can take (ADR-0168 §2).
 #[derive(Debug)]
 pub struct SettlementHold {
     handle: TraceHandle,
@@ -359,7 +369,9 @@ impl SettlementHold {
 
 impl Drop for SettlementHold {
     fn drop(&mut self) {
-        if self.root != MailId::NONE && self.handle.settlement_counter.record_release(self.root) {
+        // `root` is never `MailId::NONE` — the acquire returns `None`
+        // rather than building a guard over an absent chain.
+        if self.handle.settlement_counter.record_release(self.root) {
             self.handle.fire_settled(self.root);
         }
     }
