@@ -1375,6 +1375,25 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             // long wide fan-out and self-reports it (handled at harvest).
             let frames = cfg.frames;
 
+            // #4177 probe (throwaway): dump-and-reset the per-thread
+            // counters at the window boundary so the setup phase (spawn,
+            // subscribe — where the seal's owner round-trips live) and the
+            // measured drive window report separately.
+            let probe_cell = topo.name == "fanout-4";
+            let probe_tag = format!(
+                "{} w={} sealed={} drive={}",
+                topo.name,
+                workers,
+                aether_substrate::probe::seal_enabled(),
+                match drive {
+                    Drive::Latency { .. } => "latency",
+                    Drive::Saturate { .. } => "saturate",
+                },
+            );
+            if probe_cell {
+                aether_substrate::probe::dump(&format!("setup {probe_tag}"));
+            }
+
             // Drive via the real lifecycle (per-tier drive resolved above).
             // Bracket the loop so the real tier's keep-up metric can compare
             // elapsed wall-clock against the paced budget
@@ -1411,6 +1430,9 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 }
             }
             let drive_elapsed = drive_start.elapsed();
+            if probe_cell {
+                aether_substrate::probe::dump(&format!("window {probe_tag}"));
+            }
 
             // Harvest each participating actor's trace ring directly
             // (ADR-0086 Phase 3, decentralized trace): we built the
@@ -1527,6 +1549,19 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 None
             };
 
+            // #4177 probe (throwaway): print this cell's own span
+            // percentiles next to the decomposition dumps so the two read
+            // together in one log.
+            if probe_cell {
+                let d = summarize(drain.clone());
+                let q = summarize(queued.clone());
+                let h = summarize(handler.clone());
+                eprintln!(
+                    "PROBE-CELL {probe_tag}: drain p50/p90/p99/max={}/{}/{}/{} (n={}) queued p99={} handler p99={} boot_handoff={}",
+                    d.p50, d.p90, d.p99, d.max, d.n, q.p99, h.p99, boot_handoff_nanos,
+                );
+            }
+
             rows.push(CellSamples {
                 workers,
                 topo: topo.name.clone(),
@@ -1552,6 +1587,25 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
 #[must_use]
 pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
     run_sweep_samples(cfg).into_iter().map(CellSamples::summarize).collect()
+}
+
+/// #4177 probe (throwaway): replay the `fanout-4` cells with the registry
+/// seal disabled, in the same process, right after the normal (sealed)
+/// sweep — so one trial invocation yields the sealed and unsealed
+/// decompositions back-to-back on the same runner, with no cross-run
+/// drift. The replay's cells stay out of the trial's JSON report; their
+/// percentiles print to stderr (`PROBE-CELL … sealed=false`) alongside
+/// the per-thread dumps, and the seal is restored before returning.
+pub fn probe_replay_unsealed(frames: u32) {
+    aether_substrate::probe::set_seal_enabled(false);
+    let cfg = SweepConfig {
+        workers: parse_workers(),
+        topologies: vec![fanout(4)],
+        frames,
+        drive: Drive::Latency { pace_hz: None },
+    };
+    let _ = run_sweep_samples(&cfg);
+    aether_substrate::probe::set_seal_enabled(true);
 }
 
 #[cfg(test)]

@@ -254,6 +254,8 @@ fn worker_loop(
             // Shutdown signalled. Exit.
             return;
         };
+        // #4177 probe (throwaway): census what this worker's cycles ran.
+        crate::probe::count_slot_label(slot.label());
         let budget = template.build();
         let result = panic::catch_unwind(AssertUnwindSafe(|| slot.run_cycle(budget)));
         match result {
@@ -354,6 +356,7 @@ fn acquire_slot(
         return None;
     }
     if let Some(slot) = worker_deque::pop_local() {
+        crate::probe::on_own_pop();
         // Every-K chain backstop (iamacoffeepot/aether#1535): the depth-0
         // keep-local exemption means a serial chain oscillates the own
         // deque 0→1→0 and never reaches the steal below, so a

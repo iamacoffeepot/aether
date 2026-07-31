@@ -56,6 +56,7 @@ pub mod content_store;
 pub mod mail;
 pub mod net;
 pub mod pid_lock;
+pub mod probe;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod runtime;

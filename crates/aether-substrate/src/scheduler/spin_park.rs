@@ -185,6 +185,7 @@ impl SpinPark {
         if self.spinning.load(Ordering::Relaxed) != 0 {
             // A spinner is scanning; it will pick the slot up with no
             // futex wake. This is the win.
+            crate::probe::on_notify(&crate::probe::NotifyOutcome::SpinnerHit);
             return;
         }
         // No spinner — wake one parked worker, if any. If none are
@@ -193,6 +194,11 @@ impl SpinPark {
         // idle-list guard is released before the `unpark` (and isn't a
         // live temporary across the `if let`).
         let parked = self.idle().pop();
+        crate::probe::on_notify(if parked.is_some() {
+            &crate::probe::NotifyOutcome::Unparked
+        } else {
+            &crate::probe::NotifyOutcome::NoIdle
+        });
         if let Some(p) = parked {
             // Stamp the worker's wake-latency cell just before the unpark
             // so it can fold the `notify → wake` cost on resume (Part 2).
@@ -236,6 +242,7 @@ impl SpinPark {
                 }
             }
         }
+        crate::probe::on_wake_workers(n, woken.len());
         for p in woken {
             // Stamp each recruit's wake-latency cell before its unpark (see
             // `notify`); the woken worker folds the cost on resume (Part 2).
@@ -265,6 +272,7 @@ impl SpinPark {
             }
 
             // Spin phase: stay warm, scanning the ready queue.
+            crate::probe::on_spin_entry();
             self.spinning.fetch_add(1, Ordering::Relaxed);
             // Pair with the producer's notify fence: a producer that
             // pushed before our entry fence is visible to the scans
@@ -302,6 +310,7 @@ impl SpinPark {
             // raced ahead of this call returns immediately), so the
             // outer loop re-spins and rescans on every wake — no wakeup
             // is lost to a spurious return.
+            crate::probe::on_park();
             thread::park();
             self.remove_idle(me.id());
             // Part 2 (dark): if a waker stamped us before its `unpark`,
@@ -311,6 +320,7 @@ impl SpinPark {
             // or we were popped but self-served via the rescan above) is
             // skipped.
             let stamped = stamp.swap(0, Ordering::Relaxed);
+            crate::probe::on_wake(stamped != 0);
             if stamped != 0 {
                 let latency = self.now_nanos().saturating_sub(stamped);
                 super::calibrate::fold_handoff_sample(latency);

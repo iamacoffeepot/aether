@@ -257,7 +257,11 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // ADR-0165: a passive chassis seals immediately before it is returned.
         // Everything the embedder does from here — `spawn_actor`,
         // `boot_pumped_actor` — is post-seal and goes through the owner.
-        booted.seal_registry_authority();
+        // #4177 probe gate (throwaway): the perf-trial unsealed replay
+        // disables the seal to measure the pre-seal commit path in-process.
+        if crate::probe::seal_enabled() {
+            booted.seal_registry_authority();
+        }
         Ok(PassiveChassis { booted, _chassis: PhantomData })
     }
 }
@@ -581,7 +585,10 @@ impl<C: Chassis> Builder<C, HasDriver> {
         // The `?` above is what enforces the "successful" half — a driver that
         // fails to boot returns here, tears its passives down, and never
         // reaches this line, so the unwind still has boot's own writer.
-        booted.seal_registry_authority();
+        // #4177 probe gate (throwaway): see the passive-chassis seal site.
+        if crate::probe::seal_enabled() {
+            booted.seal_registry_authority();
+        }
         Ok(BuiltChassis { booted, driver: driver_running, _chassis: PhantomData })
     }
 }

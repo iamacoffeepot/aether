@@ -404,6 +404,7 @@ impl WakeSink {
     /// is infallible; shutdown is observed through the coordinator's flag.
     pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
         let kept = worker_deque::try_push_local_budgeted(slot, worker_deque::time_budget(), worker_deque::hard_cap());
+        crate::probe::on_schedule(kept.is_ok());
         if let Err(slot) = kept {
             self.injector.push(slot);
             self.spin.notify();

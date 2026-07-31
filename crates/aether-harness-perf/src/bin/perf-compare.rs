@@ -189,6 +189,15 @@ fn run_trial(path: &str, extra: &[(String, String)]) -> Result<TrialReport, Tria
         .envs(extra.iter().cloned())
         .output()
         .map_err(|e| TrialErr::Op(format!("spawn {path}: {e}")))?;
+    // #4177 probe (throwaway): forward the trial's captured stderr so the
+    // per-thread PROBE dumps land in the CI step log (the trial is run via
+    // `output()`, which otherwise swallows stderr on success).
+    let trial_stderr = String::from_utf8_lossy(&out.stderr);
+    if !trial_stderr.trim().is_empty() {
+        eprintln!("----- trial stderr [{path}] -----");
+        eprint!("{trial_stderr}");
+        eprintln!("----- end trial stderr -----");
+    }
     if !out.status.success() {
         return Err(TrialErr::Op(format!(
             "{path} exited {:?}: {}",

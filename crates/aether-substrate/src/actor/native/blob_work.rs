@@ -633,10 +633,10 @@ impl BlobWork {
     /// #1135 per-mail fast path. `received` is the blob-pickup stamp this
     /// worker took at `run_cycle` entry (iamacoffeepot/aether#1150),
     /// threaded onto each dispatched mail's `t_enqueue`.
-    fn dispatch_group(&self, group: &Group, budget: BatchBudget, received: Nanos) {
+    fn dispatch_group(&self, group: &Group, budget: BatchBudget, received: Nanos, rec: &mut crate::probe::CycleRec) {
         while let Some(batch) = group.take_or_close() {
             for mail in batch {
-                self.dispatch_one(group.recipient, mail, budget, received);
+                self.dispatch_one(group.recipient, mail, budget, received, rec);
             }
         }
     }
@@ -646,11 +646,23 @@ impl BlobWork {
     /// `received` is this worker's blob-pickup stamp
     /// (iamacoffeepot/aether#1150), carried onto the in-place seed's
     /// `t_enqueue`.
-    fn dispatch_one(&self, recipient: MailboxId, mail: Mail, budget: BatchBudget, received: Nanos) {
+    fn dispatch_one(
+        &self,
+        recipient: MailboxId,
+        mail: Mail,
+        budget: BatchBudget,
+        received: Nanos,
+        rec: &mut crate::probe::CycleRec,
+    ) {
+        // #4177 probe (throwaway): time the route+seize step and the
+        // seize_and_run / deposit step of this in-blob position.
+        let probe_t0 = std::time::Instant::now();
         let lookup = self.mailer.registry().route_lookup(mail.kind, recipient);
         // Direct-dispatch only a recipient that is a `Pooled` slot we win
         // the seize on; everything else deposits through `route_mail`.
         let seized = lookup.seize_handle().and_then(SeizeHandle::try_seize);
+        let probe_t1 = std::time::Instant::now();
+        let probe_won = seized.is_some();
         match seized {
             Some(slot) => {
                 // ADR-0094: the #1135 in-place demux seed is an
@@ -683,6 +695,9 @@ impl BlobWork {
             }
             None => self.mailer.push(mail),
         }
+        let route_ns = u64::try_from(probe_t1.duration_since(probe_t0).as_nanos()).unwrap_or(u64::MAX);
+        let run_ns = u64::try_from(probe_t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        rec.push(route_ns, run_ns, probe_won);
     }
 }
 
@@ -697,6 +712,9 @@ impl Drainable for BlobWork {
         // `run_cycle`, so a recruited sibling worker anchors its own
         // share of the groups against its own pickup instant.
         let received = self.mailer.now_nanos();
+        // #4177 probe (throwaway): per-cycle in-order decomposition.
+        let probe_start = std::time::Instant::now();
+        let mut probe_rec = crate::probe::CycleRec::default();
         // Drain to cursor exhaustion: a worker that picks up the blob runs
         // it in full, claiming and dispatching every group it wins off the
         // shared cursor until the cursor is drained. The parallelism is
@@ -712,9 +730,10 @@ impl Drainable for BlobWork {
             // the `publish` that wrote slot `g`; the slot is initialized and
             // never mutated after that write.
             let group = unsafe { self.groups[g].get() };
-            self.dispatch_group(group, budget, received);
+            self.dispatch_group(group, budget, received, &mut probe_rec);
             self.lifecycle.complete();
         }
+        crate::probe::record_cycle(probe_start.elapsed(), &probe_rec);
         CycleResult::Idle
     }
 
@@ -824,6 +843,7 @@ impl BlobProducer {
             // recruiter (iamacoffeepot/aether#1178).
             self.sink.schedule(Arc::clone(&blob_dyn));
             let extra = recruit_extra(&outcome, self.sink.workers());
+            crate::probe::on_flush(extra);
             if extra > 0 {
                 self.sink.recruit(&blob_dyn, extra);
             }

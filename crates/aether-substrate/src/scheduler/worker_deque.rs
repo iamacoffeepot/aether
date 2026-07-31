@@ -407,7 +407,10 @@ pub fn steal_into_local(
         loop {
             let mut retry = false;
             match injector.steal_batch_and_pop(worker) {
-                Steal::Success(slot) => return Some(slot),
+                Steal::Success(slot) => {
+                    crate::probe::on_injector_steal();
+                    return Some(slot);
+                }
                 Steal::Retry => retry = true,
                 Steal::Empty => {}
             }
@@ -415,7 +418,10 @@ pub fn steal_into_local(
                 for (i, stealer) in stealers.iter().enumerate() {
                     if i != my_idx {
                         match stealer.steal_batch_and_pop(worker) {
-                            Steal::Success(slot) => return Some(slot),
+                            Steal::Success(slot) => {
+                                crate::probe::on_peer_steal();
+                                return Some(slot);
+                            }
                             Steal::Retry => retry = true,
                             Steal::Empty => {}
                         }

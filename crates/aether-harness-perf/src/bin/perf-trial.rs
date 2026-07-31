@@ -47,7 +47,8 @@ use std::env;
 use std::process::{Command, ExitCode};
 
 use aether_harness_substrate::perf::harness::{
-    Drive, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep,
+    Drive, SweepConfig, Tier, drive_from_env, parse_topologies, parse_workers, probe_replay_unsealed, run_sweep,
+    tiers_from_env,
 };
 use aether_harness_substrate::perf::report::TrialReport;
 
@@ -79,6 +80,14 @@ fn main() -> ExitCode {
 
     let cfg = SweepConfig { workers: parse_workers(), topologies: parse_topologies(), frames, drive };
     let cells = run_sweep(&cfg);
+    // #4177 probe (throwaway): after the normal sealed sweep, replay the
+    // fanout-4 cells with the seal disabled in the same process — one run,
+    // both sides of the 2×2 (sealed/unsealed × 2w/3w). Gated to the light
+    // flat-out latency pass so the comparator's heavy/saturate passes do
+    // not repeat it.
+    if matches!(drive, Drive::Latency { pace_hz: None }) && tiers_from_env() == [Tier::Light] {
+        probe_replay_unsealed(frames);
+    }
     if cells.is_empty() {
         eprintln!("perf-trial: no cells measured (no wgpu adapter, or every cell boot failed)");
         return ExitCode::from(2);
