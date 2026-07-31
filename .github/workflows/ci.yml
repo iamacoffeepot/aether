@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     branches: [ main ]
+  # The full-suite lane runs only on a push to `main`, so without a
+  # manual trigger there is no way to exercise a change to it before
+  # merging it. A dispatch takes the same non-pull-request path: the
+  # GitHub-hosted runner, the sharded full suite, and no affected-package
+  # narrowing.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,11 +34,15 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      # A manual dispatch is an explicit request to run the suite, and it
+      # carries no diff base for the filter to reason from, so it bypasses
+      # the filter rather than being classified by it.
+      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
+        if: github.event_name != 'workflow_dispatch'
         with:
           filters: |
             code:
@@ -121,7 +131,7 @@ jobs:
   # triples CI time without catching anything new. See ADR-0035 § CI
   # matrix scope.
   test:
-    name: Test
+    name: Test (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     # PR runs on the fast spot runner, main pushes on GitHub-hosted —
@@ -132,15 +142,33 @@ jobs:
     # for the job so the size is effectively free. (The GitHub-hosted
     # side survives on the free-disk-space reclaim step instead.)
     runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
-    # Quota-gated single job: the account's 32-vCPU spot quota can't
-    # absorb two 8-vCPU shards alongside clippy when runs
+    # The two lanes shard differently because their scarce resource
+    # differs (iamacoffeepot/aether#4213).
+    #
+    # A pull request runs an affected subset (#3611) on one 8-vCPU spot
+    # runner and stays a single job: the account's 32-vCPU spot quota
+    # can't absorb parallel 8-vCPU shards alongside clippy when runs
     # overlap (MaxSpotInstanceCountExceeded -> on-demand fallback /
-    # queueing). The 2-way nextest name-hash shard split
-    # (iamacoffeepot/aether#2803) costs ~half the test execution in
-    # wall clock (~2 min) when collapsed, which sccache's member-crate
-    # caching more than buys back. Restore the split when the pending
-    # spot-quota increase lands: matrix partition [1, 2] + nextest
-    # --partition 'hash:N/2' + shard-qualified artifact name.
+    # queueing), so the split #2803 tried there was collapsed back.
+    #
+    # Every other event runs the whole suite, and `main` deliberately
+    # stays on free GitHub-hosted runners because it pays that cost on
+    # every squash-merge. Splitting is what buys the wall clock back
+    # there without a paid runner: three `ubuntu-latest` jobs each run a
+    # third of the tests, and GitHub-hosted concurrency on a public
+    # repository is the resource that is not scarce.
+    #
+    # One matrixed job rather than a second job definition: the lane's
+    # ~20 steps (disk reclaim, toolchain, deps, wasm pre-build, uploads)
+    # stay written once, and `strategy.job-total` feeds the shard count
+    # straight into the nextest partition below, so the matrix and the
+    # partition cannot drift apart.
+    strategy:
+      # A failing shard must not cancel its siblings: the other two thirds
+      # of the suite are exactly the signal a `main` red is missing.
+      fail-fast: false
+      matrix:
+        shard: ${{ github.event_name == 'pull_request' && fromJSON('[1]') || fromJSON('[1, 2, 3]') }}
     timeout-minutes: 30
     env:
       # Use mold to reduce peak link memory and speed up the test
@@ -191,6 +219,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
           mesa-vulkan-drivers mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # rust-cache keys on the job id, which the matrix does not vary,
+          # so every shard restores and would then write the same entry.
+          # Let one shard save it: the shards build an identical tree, and
+          # three uploads of the same multi-gigabyte entry would churn the
+          # repository's 10 GB cache budget for nothing.
+          save-if: ${{ matrix.shard == 1 }}
       # sccache caches individual rustc invocations content-keyed in
       # the RunsOn S3 cache bucket (in-VPC, instance-profile creds) —
       # covering the workspace-member crates that rust-cache
@@ -281,9 +316,40 @@ jobs:
       - name: Check affected-selection invariants (PR only)
         if: github.event_name == 'pull_request' && steps.affected.outputs.run_all == 'false'
         run: cargo nextest run -p xtask --profile ci
+      # `slice` rather than `count` or `hash` (iamacoffeepot/aether#4213).
+      # All three select a third of the tests and all three sum back to
+      # the whole suite; they differ in where the expensive ones land, and
+      # this suite's cost is concentrated in a few dozen GPU and
+      # fork-a-substrate integration tests.
+      #
+      # `count` partitions independently within each binary, so a binary
+      # holding a single test always yields it to shard 1. Thirty-five
+      # binaries have exactly one test, among them `world_case_atlas`,
+      # `terrain_workbench_scenario`, `fleetharness_logs` and
+      # `fleetharness_tcp_load` — four of the slowest in the suite, all
+      # piled onto one shard by construction (measured: 1139/1076/1028
+      # tests, with the heavy tail loaded onto the largest).
+      #
+      # `hash` scatters by test name, which is even in expectation but
+      # blind to where the heavy tests land: it splits `render_scenario`
+      # 4/6/8 and `widget_render_interaction` 3/8/4.
+      #
+      # `slice` deals the whole cross-binary list out round-robin, so
+      # shard sizes are even by construction (1081/1081/1081) and a
+      # multi-test binary's tests go to different shards rather than
+      # clumping — `render_scenario` 6/6/6, `widget_render_interaction`
+      # 5/5/5. A single-test binary still falls wherever its position in
+      # that list puts it, which no count-based mode can weigh; what
+      # changes is that the position varies instead of always being
+      # shard 1. `hash`'s one advantage, a test keeping its shard as the
+      # suite grows, buys nothing here: no cache or artifact is keyed by
+      # shard.
+      #
+      # `strategy.job-total` is 1 on the pull-request lane, and
+      # `slice:1/1` selects every test, so the flag is inert there.
       - name: Run tests (workspace, parallel)
         if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true'
-        run: cargo nextest run --all-features --profile ci
+        run: cargo nextest run --all-features --profile ci --partition slice:${{ matrix.shard }}/${{ strategy.job-total }}
         env:
           AETHER_REQUIRE_RUNTIME: "1"
       # `package_args` interpolates package names only (alphanumeric plus
@@ -305,7 +371,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: substrate-harness-artifacts
+          # Shard-qualified: upload-artifact v4 rejects a second upload
+          # under a name another job already claimed, so two failing
+          # shards would race and one would lose its diagnostics.
+          name: substrate-harness-artifacts-shard-${{ matrix.shard }}
           path: target/substrate-harness-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
@@ -313,7 +382,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fleetharness-tcp-load-metrics
+          # Shard-qualified for the same reason as the upload above: only
+          # the shard that drew the load test writes the file, but which
+          # shard that is follows from the partition, not from the name.
+          name: fleetharness-tcp-load-metrics-shard-${{ matrix.shard }}
           path: target/fleetharness-metrics/tcp-load.json
           if-no-files-found: ignore
           retention-days: 7
@@ -359,6 +431,13 @@ jobs:
       - run: cargo install cargo-machete --locked
       - run: cargo machete crates
 
+  # The one required check. Every job above must resolve to `success`
+  # here, or to `skipped` where the path filter is allowed to skip it —
+  # any other result (`failure`, `cancelled`, or a `skipped` the filter
+  # does not license) fails the gate. `needs.test.result` is the matrix
+  # aggregate across every shard: it reads `success` only when all of
+  # them succeeded, and reports `failure` or `cancelled` if any single
+  # shard did, so adding shards does not widen the gate.
   ci-pass:
     name: CI pass
     if: always()
