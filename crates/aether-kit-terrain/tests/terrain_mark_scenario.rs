@@ -22,9 +22,8 @@ use aether_kit_terrain::mark::{
 };
 use aether_kit_terrain::world::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, PickTerrain, PickTerrainResult, SUBCELLS_PER_CELL, SetCellHeights,
-    SetChunk, SetMarkOverlaySelection, SetMarkOverlaySelectionResult, SetMarkOverlayVisibility,
-    SetMarkOverlayVisibilityResult, TerrainRay, WaterPlane, World, WorldDirection, WorldLoad, WorldPoint,
-    WorldPositionMeters,
+    SetChunk, SetMarkOverlaySelection, SetMarkOverlaySelectionResult, SetMarkOverlayVisibility, TerrainRay, WaterPlane,
+    World, WorldDirection, WorldLoad, WorldPoint, WorldPositionMeters,
 };
 use aether_math::{Mat4, Vec3};
 use aether_render::ViewProjection;
@@ -301,31 +300,20 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         MarkGeometry::Area(vec![WorldPoint::new(1536, 768), WorldPoint::new(1792, 768), WorldPoint::new(1664, 1024)]),
     );
 
-    let enabled = harness
-        .execute(vec![("enable", HarnessOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
-        .expect("enable overlay");
-    assert_eq!(
-        enabled.reply::<SetMarkOverlayVisibilityResult>("enable").expect("decode visibility result"),
-        SetMarkOverlayVisibilityResult { visible: true, synchronized: false }
-    );
-    let mut synchronized_result = None;
-    for _ in 0..16 {
-        let synchronized = harness
-            .execute(vec![("sync", HarnessOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
-            .expect("poll synchronized overlay");
-        let result = synchronized
-            .reply::<SetMarkOverlayVisibilityResult>("sync")
-            .expect("decode synchronized visibility result");
-        if result.synchronized {
-            synchronized_result = Some(result);
-            break;
-        }
-    }
-    assert_eq!(
-        synchronized_result,
-        Some(SetMarkOverlayVisibilityResult { visible: true, synchronized: true }),
-        "the correlated MarkList reply settles within a bounded poll",
-    );
+    // Enabling the overlay sends one correlated `MarkList` request to the
+    // MarkBook and replies from that same handler, so the world's own reply is
+    // no barrier for the refresh: a `send_and_await` here returns while the
+    // round trip is still in flight, and a bounded poll for the settled
+    // projection races the runner (iamacoffeepot/aether#4164). The request
+    // inherits this chain and `send_mail` is settlement-gated (ADR-0080 §6),
+    // so it returns only once the reply has been folded into the projection.
+    harness
+        .execute(vec![("enable", HarnessOp::send_mail(&world, &SetMarkOverlayVisibility { visible: true }))])
+        .expect("enable the overlay and settle its correlated refresh");
+
+    // `Selected` is returned only for a visible, synchronized projection whose
+    // cached revision is exactly the requested one, so it pins the settled
+    // refresh more precisely than the visibility reply's `synchronized` flag.
     let selected = harness
         .execute(vec![(
             "select",
@@ -382,27 +370,21 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         MarkDeleteResult::Deleted { reference: area }
     );
 
+    // The mutation landed in the MarkBook, so the world's cached projection
+    // still holds the old revisions until another correlated refresh settles.
+    // Nothing is in flight to suppress this one: the enable above settled, the
+    // selection replies request no refresh, and the `before` capture only
+    // returns once the chains its `Render` pre-mail started have settled.
     harness
-        .execute(vec![("refresh", HarnessOp::send_and_await(&world, &SetMarkOverlayVisibility { visible: true }))])
-        .expect("refresh mutated MarkBook projection");
-    let mut stale_result = None;
-    for _ in 0..16 {
-        let stale = harness
-            .execute(vec![(
-                "stale",
-                HarnessOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }),
-            )])
-            .expect("poll old selected revision");
-        let result = stale.reply::<SetMarkOverlaySelectionResult>("stale").expect("decode stale selection result");
-        if matches!(result, SetMarkOverlaySelectionResult::Stale { .. }) {
-            stale_result = Some(result);
-            break;
-        }
-    }
+        .execute(vec![("refresh", HarnessOp::send_mail(&world, &SetMarkOverlayVisibility { visible: true }))])
+        .expect("refresh the mutated MarkBook projection and settle it");
+    let stale = harness
+        .execute(vec![("stale", HarnessOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }))])
+        .expect("classify the old selected revision");
     assert_eq!(
-        stale_result,
-        Some(SetMarkOverlaySelectionResult::Stale { requested: point, current: point_v2 }),
-        "the refreshed projection classifies the old revision within a bounded poll",
+        stale.reply::<SetMarkOverlaySelectionResult>("stale").expect("decode stale selection result"),
+        SetMarkOverlaySelectionResult::Stale { requested: point, current: point_v2 },
+        "the refreshed projection classifies the old revision",
     );
 
     let after_png = capture(&mut harness, &world, "after");
