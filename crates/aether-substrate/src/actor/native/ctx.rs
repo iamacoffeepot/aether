@@ -749,12 +749,26 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// mirroring the close fan-out. A transport with no spawner wired
     /// ([`NativeBinding::new_for_test`]) has no monitor index to
     /// drain, so the call is a no-op.
+    ///
+    /// The drained-watcher count is logged (issue 4195): a purge that
+    /// never happens is otherwise indistinguishable from one that
+    /// happened and was ignored, and the two sit on opposite sides of
+    /// this call. A count of zero says the watcher was never
+    /// registered — no notice was ever pushed, so nothing downstream
+    /// could have lost it — which is the fact the open investigation
+    /// currently reaches by elimination rather than by observation.
     pub fn vacate(&self) {
         let Some(spawner) = self.binding.spawner() else {
             return;
         };
         let target = self.binding.self_mailbox();
         let watchers = spawner.actor_registry().vacate_actor(target);
+        tracing::info!(
+            target: "aether_substrate::actor",
+            mailbox = %target,
+            watchers = watchers.len(),
+            "vacated mailbox; notifying the watchers drained from its monitor index",
+        );
         if watchers.is_empty() {
             return;
         }
