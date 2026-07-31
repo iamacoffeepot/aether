@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-31
+- **Last amended:** 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
 
 ## Context
 
@@ -90,9 +91,12 @@ The existing cases that do not hold remain correct and are not exceptions to thi
 | `send_detached` | the causal edge is cut at the call site by a distinct verb | conforms — declared |
 | an actor's post-`wire` activity | caused by later mail, not by the birth | conforms — not descended |
 | a chassis-boot birth | no causing mail exists; the chain is empty | conforms — rule over an empty chain |
-| a `wire`-staged registry effect | context carried `MailId::NONE` | **violates — silent** |
+| an effect staged behind a retained reply debt | the chain cannot settle because the inbound's `Finished` is un-recorded while the debt is held | conforms — ordered by another device |
+| a `wire`-staged registry effect on a runtime spawn | context carried `MailId::NONE` | **violates — silent** |
 
-The first three cut causality visibly or have none to cut. Only the fourth cuts it by accident.
+The first four cut causality visibly, have none to cut, or keep the chain open by another means. Only the last cuts it by accident.
+
+The fourth row is the one an auditor is most likely to misread. `DesktopWindowCapabilityState` stages its window child from a rootless `PumpedSlot::host_turn` and acquires no hold, yet the ordering holds: `PendingCreate.reply` retains the `create_window` request's `InboundMail` and answers it only in `finish_window_child_spawn`, so the inbound never records `Finished` across the staged birth. A retained reply debt and a settlement hold are different devices reaching the same guarantee. Requirement 3 asks such a site to say which one it is relying on, because the reasoning is not visible from the staging call alone.
 
 ## Consequences
 
@@ -106,7 +110,7 @@ The first three cut causality visibly or have none to cut. Only the fourth cuts 
 
 **Migration cost is bounded and mechanical.** Requirement 2 changes a signature used at a small number of staging sites; each becomes a place where the author states which case applies. New staging sites inherit the obligation from the type rather than from having read this document.
 
-**Diagnosis stops starting from a wrong prior.** Every instance of this class so far was first observed as a timing failure on an unrelated pull request, and triaged as a too-tight bound before the real mechanism was found. Under requirement 2, the same defect is a compile-time question at the staging site.
+**Diagnosis stops starting from a wrong prior.** Every instance of this class so far was first observed as a timing failure on an unrelated pull request, and triaged as a too-tight bound before the real mechanism was found. Requirement 2 does not make an existing violation a compile error — see the amendment — but it puts the question in front of the author of the next staging site, at that site's own signature, rather than leaving it to be discovered on a loaded runner months later.
 
 ## Alternatives considered
 
@@ -119,3 +123,15 @@ The first three cut causality visibly or have none to cut. Only the fourth cuts 
 **Give the activation context the birth's root.** Rejected as the general fix, though it would resolve the current instance. The activation context is used both for effects completing the birth (which the caller should await) and for the actor's own startup sends (which it should not); one root cannot distinguish them, so attaching the causing chain to the *effect* rather than to the *context* is the narrower and more durable change.
 
 **Add nextest retries so the class stops reddening CI.** Rejected: it suppresses the only signal that has surfaced this defect, and the flake corpus already contains real production bugs (#3730, #3797, and probably #4195) that a flaky test was the sole evidence for.
+
+## Amendment (2026-07-31, iamacoffeepot/aether#4199)
+
+Requirement 2 landed first, deliberately, as a signature change with no behaviour change. Implementing it corrected two claims made above.
+
+**Requirement 2 does not turn an existing violation into a compile error.** The original text said the defect becomes "a compile-time question at the staging site." It does not. `NativeCtx` learns its root at runtime, so the forwarding surface — `dispatch_blocking_with`, `arm_deferred_completion`, `defer_reply_to` — can only propagate the `Option`, never answer it. The known violation at `wire_activation` produced no compiler error; it simply received `None` and carried on. The site inventory that followed came from hand-tracing roots, not from the compiler.
+
+What requirement 2 does deliver is narrower and still worth the change: a hold that holds nothing cannot be constructed, since the acquire is `SettlementHold`'s sole constructor and answers `MailId::NONE` with `None`; every carrier's type now states that it may hold nothing; and the author of a *new* staging site meets the question at their own signature rather than inheriting a value that reads like a working hold. The claim to make for this requirement is unrepresentability, not detection.
+
+**There are four rootless `A::wire` sites, not one.** The conforming table named "a chassis-boot birth" as though it were the only place `wire` runs without a chain. The four are `chassis/builder/native_actor_boot.rs`, `chassis/builder/driver.rs`, `actor/native/dispatcher_slot.rs` (`wire_activation`, the known violation), and `actor/native/spawn.rs`. Only the first is chassis boot; the last two are runtime spawns with a real causing chain, and are rootless for the same reason `wire_activation` is. Requirement 1 must thread the causing chain through every entry point that has one, not only the one this ADR originally named.
+
+Neither correction changes the decision. Both narrow what the first requirement was claimed to accomplish and widen the surface the second must cover.
