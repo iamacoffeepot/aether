@@ -123,7 +123,9 @@ pub struct NativeCtx<'a, M: ReplyMode = Single, A = Erased> {
 /// Every ctx built where no actor is in scope — `wire` / `unwire`, the
 /// chassis root, a cap-side test fixture — is this form, and loses only a
 /// call it could not have made correctly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A type-position marker like [`Single`] / [`Manual`], never a value: it is
+/// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
 pub struct Erased;
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
