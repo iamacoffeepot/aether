@@ -1973,6 +1973,71 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
     assert_eq!(registry.owner_queue_metrics().unwrap().shed, 1, "draining does not retroactively shed");
 }
 
+/// Issue 4204: a departure notice addressed to a mailbox inside its birth
+/// window survives owner-queue saturation and still reaches the watcher.
+///
+/// The bug this catches: a `MonitorNotice` fired at a `Starting` watcher takes
+/// the same admission bound an ordinary route-view miss takes, and shedding it
+/// routes it to the unknown-recipient policy — `RouteLookup::into_captured`
+/// maps a `Starting` lookup to `CapturedDisposition::Unknown`, so the envelope
+/// the parked FIFO would have delivered on promotion is instead spent as an
+/// unresolved-mail terminal. Nothing re-sends a departure notice, so the
+/// watcher never learns its target is gone and holds state keyed by a departed
+/// peer for the rest of the process. Reachable because `wire` runs against a
+/// full `NativeCtx` while the actor's own route is still `Starting`, so an
+/// actor may register a monitor before its activation barrier promotes it.
+///
+/// Saturation is driven at the bound rather than asserted against the policy
+/// predicate: the claim under test is that the notice arrives, and only the
+/// admit-park-promote path can show that.
+#[test]
+fn owner_admits_a_departure_notice_to_a_starting_watcher_past_capacity() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let capacities = RegistryQueueCapacities { owner: 2, relay: 64 };
+    let _relay = RouteRelayLease::attach(&mailer, WakeSink::detached(), capacities);
+    let owner = RegistryOwnerLease::attach(auth(), &registry, &mailer, WakeSink::detached(), capacities);
+    let deliveries = Arc::new(Mutex::new(Vec::new()));
+    let watcher_name = "monitor-notice-starting-watcher";
+    let watcher_id = MailboxId::from_name(watcher_name);
+    let (_, _, _, birth) = prepared_test_spawn(
+        &registry,
+        &mailer,
+        watcher_name,
+        Arc::clone(&deliveries),
+        Arc::new(AtomicUsize::new(0)),
+        vec![watcher_id],
+        1,
+    );
+    let birth_completion = registry.submit(EffectBatch::new(vec![birth])).unwrap();
+    owner.run_once();
+    let token = starting_token(&birth_completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+
+    // Fill the bound with ordinary mail parked behind the same unpromoted birth.
+    for payload in [2u8, 3] {
+        mailer.push(Mail::new(watcher_id, KindId(7), vec![payload], 1));
+    }
+    assert_eq!(registry.owner_queue_metrics().unwrap().depth, 2, "ordinary parked mail reaches the bound");
+
+    // The departed target's notice is admitted past it rather than refused.
+    let notice = aether_kinds::MonitorNotice { target: MailboxId::from_name("monitor-notice-departed-target") };
+    let notice_payload = notice.encode_into_bytes();
+    mailer.push(Mail::new(watcher_id, aether_kinds::MonitorNotice::ID, notice_payload.clone(), 1));
+    let metrics = registry.owner_queue_metrics().unwrap();
+    assert_eq!(metrics.shed, 0, "a departure notice is never shed");
+    assert_eq!(metrics.over_capacity, 1, "it is admitted past the bound and counted as pressure");
+    assert_eq!(metrics.depth, 3);
+
+    // And it is delivered once the barrier promotes the watcher.
+    mailer.push(activation_barrier(watcher_id, token, 1));
+    owner.run_once();
+    assert_eq!(
+        *deliveries.lock().unwrap(),
+        [1, 2, 3, notice_payload[0]],
+        "the notice rides the parked tail into the promoted watcher, behind the mail that preceded it"
+    );
+}
+
 /// Issue 4122: the owner's drain accounting is per batch, not per command —
 /// ADR-0165's sharding trigger reads a ceiling (commands per busy nanosecond)
 /// and a duty cycle, and both collapse if one drain of `n` commands is booked
