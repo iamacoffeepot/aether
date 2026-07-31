@@ -2018,6 +2018,116 @@ fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
     }
 }
 
+// Tripwire: a handler panic must reach chassis teardown as the abort
+// reason it started as, never as an anonymous close-gate timeout.
+//
+// The panic escalates through the pool worker's `FatalAborter`, and under
+// `PanicAborter` that unwinds the worker mid-turn — so the close-done
+// signal teardown waits on has no thread left to fire it, and the gate
+// used to wait out its whole budget and report nothing but the wait
+// (iamacoffeepot/aether#4193). iamacoffeepot/aether#3752 was triaged as a
+// listener bring-up stall on exactly that evidence, for two CI cycles,
+// when the cause was a panicking capture closure. The teardown budget is
+// squeezed to two seconds here so a regression fails on the message in
+// seconds rather than hanging out the five-minute default.
+#[test]
+fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
+    use crate::actor::native::spawn::Subname;
+    use crate::mail::registry::MailboxEntry;
+    use crate::runtime::lifecycle::FatalAborter;
+    use aether_data::Kind;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    pod_kind!(Boom { tag: u32 }, "test.abort_attribution.boom", 0xB00B_0001_B00B_0001);
+
+    struct Exploder;
+
+    impl Addressable for Exploder {
+        const NAMESPACE: &'static str = "test.abort_attribution.exploder";
+        type Resolver = aether_actor::Many;
+    }
+    impl aether_actor::Root for Exploder {}
+    impl HandlesKind<Boom> for Exploder {}
+
+    impl aether_actor::Lifecycle<Self> for Exploder {
+        type Config = ();
+        type Params = ();
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+    }
+
+    impl NativeActor for Exploder {
+        type State = Self;
+    }
+
+    impl Dispatch<Self> for Exploder {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            assert!(kind != Boom::ID, "exploder handler detonated");
+            None
+        }
+    }
+
+    /// A `PanicAborter` that flags the abort before panicking, so the
+    /// test observes the escalation without racing it: the recorder runs
+    /// ahead of the aborter it wraps, so a set flag means the reason is
+    /// already on the chassis's record.
+    struct FlaggingAborter {
+        aborted: Arc<AtomicBool>,
+    }
+
+    impl FatalAborter for FlaggingAborter {
+        fn abort(&self, reason: String) -> ! {
+            self.aborted.store(true, Ordering::SeqCst);
+            panic!("aether-substrate fatal abort: {reason}");
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
+        .with_aborter(Arc::new(FlaggingAborter { aborted: Arc::clone(&aborted) }))
+        .with_teardown_budget(Duration::from_secs(2))
+        .build_passive()
+        .expect("empty chassis boots");
+
+    let id = chassis.spawn_actor::<Exploder>(Subname::Named("boom"), (), ()).finish().expect("spawn exploder");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("exploder inbox registered") else {
+        panic!("expected spawned actor inbox");
+    };
+    let boom = Boom { tag: 1 }.encode_into_bytes();
+    handler.enqueue(registry::test_owned_dispatch(Boom::ID, Boom::NAME, &boom, 1));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !aborted.load(Ordering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(aborted.load(Ordering::SeqCst), "the panicking handler must escalate through the chassis aborter");
+
+    let teardown = catch_unwind(AssertUnwindSafe(|| drop(chassis)));
+    let reported = *teardown
+        .expect_err("teardown must fail once the chassis has fatally aborted")
+        .downcast::<String>()
+        .expect("the teardown gate fails with a formatted reason");
+    assert!(
+        reported.contains("exploder handler detonated"),
+        "teardown must report the panic that aborted the chassis, got: {reported}",
+    );
+    assert!(
+        reported.contains("shutdown_instanced.close_done"),
+        "teardown must still name the gate it abandoned, got: {reported}",
+    );
+}
+
 /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
 /// `None` rather than a downcast that succeeds against the wrong
 /// type. Two instanced types live under different namespaces; a

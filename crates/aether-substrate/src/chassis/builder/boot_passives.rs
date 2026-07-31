@@ -12,7 +12,7 @@ use crate::config::{ConfigSources, RegistryQueueCapacities, RingCapacities, Sche
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::{BootAuthority, Registry, RegistryOwnerLease, RouteRelayLease};
-use crate::runtime::lifecycle::FatalAborter;
+use crate::runtime::lifecycle::{FatalAbortRecord, FatalAborter, RecordingAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle, install_tuning, log_handoff_calibration};
 
 pub(super) struct BootedPassives {
@@ -27,9 +27,16 @@ pub(super) struct BootedPassives {
     pub(super) handles: ExportedHandles,
     /// Cloned into every `ChassisCtx` and onto every booted
     /// [`NativeBinding`] so a wasm-guest trap can fatal-abort the
-    /// substrate cleanly. Inherited from the [`Builder`]'s configured
-    /// aborter.
+    /// substrate cleanly. The [`Builder`]'s configured aborter wrapped in
+    /// a [`RecordingAborter`], so every abort this chassis takes leaves
+    /// its reason in [`Self::abort_record`] on the way through.
     pub(super) aborter: Arc<dyn FatalAborter>,
+    /// Issue #4193: the first fatal abort reason seen on this chassis.
+    /// Written by the [`RecordingAborter`] on [`Self::aborter`] and read
+    /// by [`Self::shutdown_in_place`]'s close gate, which is otherwise
+    /// the place an attributed handler panic becomes an anonymous
+    /// teardown timeout.
+    abort_record: Arc<FatalAbortRecord>,
     /// Issue #601: every actor mailbox claimed during passive boot.
     /// `Builder::build` / `build_passive` reads this list to dispatch
     /// `ConfigureLogDrain` mail to each actor before the driver runs,
@@ -137,7 +144,11 @@ impl BootedPassives {
         // never false-fired — the same starvation-vs-wedge fix #2062
         // gave the settlement gates, on the gate it scoped out. The 2s
         // round budget (the warn cadence) is unchanged.
-        self.spawner.shutdown_instanced(Duration::from_secs(2), self.teardown_budget);
+        // Issue #4193: the gate watches the abort record, so a chassis
+        // that already fatally aborted reports *that* here instead of
+        // waiting the budget out for close cycles whose worker unwound
+        // with the abort.
+        self.spawner.shutdown_instanced(Duration::from_secs(2), self.teardown_budget, &self.abort_record);
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
@@ -184,6 +195,17 @@ pub(super) fn boot_passives(
     // nothing.
     driver_claim: impl FnOnce(&mut ChassisCtx<'_>) -> Result<(), BootError>,
 ) -> Result<BootedPassives, BootError> {
+    // Issue #4193: every abort this chassis takes goes through one
+    // recorder. The wrap happens here, before the aborter is cloned into
+    // the pool / spawner / each binding, so there is no abort path that
+    // reaches the configured aborter without leaving its reason behind —
+    // and the chassis keeps whatever aborter it was built with (a
+    // `PanicAborter` still panics, which is what lets a harness catch it).
+    let abort_record = Arc::new(FatalAbortRecord::new());
+    let recording: Arc<dyn FatalAborter> =
+        Arc::new(RecordingAborter::new(Arc::clone(aborter), Arc::clone(&abort_record)));
+    let aborter = &recording;
+
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut fallback: Option<FallbackRouter> = None;
     let mut handles = ExportedHandles::new();
@@ -476,6 +498,7 @@ pub(super) fn boot_passives(
         fallback,
         handles,
         aborter: Arc::clone(aborter),
+        abort_record,
         claimed_actor_mailboxes,
         reserved_driver_mailboxes,
         actor_registry,

@@ -25,9 +25,10 @@
 //! tests use [`PanicAborter`] so a misuse panics the test thread
 //! instead of `process::exit`-ing the test runner.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::mail::outbound::HubOutbound;
+use crossbeam_channel::{Receiver, Sender};
 use std::process;
 
 /// Process exit code on fatal abort. Distinct from `0` (clean exit)
@@ -111,5 +112,108 @@ pub struct PanicAborter;
 impl FatalAborter for PanicAborter {
     fn abort(&self, reason: String) -> ! {
         panic!("aether-substrate fatal abort: {reason}");
+    }
+}
+
+/// The first fatal abort reason seen on a chassis, plus a tripwire its
+/// internal gates watch.
+///
+/// [`FatalAborter::abort`] is diverging, so the thread that aborts never
+/// hands its reason to anyone: [`OutboundFatalAborter`] exits the process
+/// with it, and [`PanicAborter`] unwinds the thread it fired on — usually
+/// a scheduler pool worker, which is exactly the thread that would have
+/// run the actor close cycles chassis teardown then waits for. The wait
+/// is what converts a fully attributed handler panic into a bare timeout
+/// at whatever ceiling truncates it first (iamacoffeepot/aether#4193,
+/// mis-triaged as a bring-up stall on iamacoffeepot/aether#3752).
+///
+/// This record is the missing path from the aborting thread to the ones
+/// that outlive it: [`RecordingAborter`] writes the reason here on the
+/// way through, and a gate reads it instead of waiting out a budget for a
+/// signal nothing is left to fire. It changes nothing about what
+/// constitutes a fatal abort or when one fires — only what a later
+/// observer can say about it.
+///
+/// The tripwire is a channel that never carries a value. The record holds
+/// the only sender and drops it on the first abort, so every cloned
+/// receiver observes the abort as a disconnect and a gate parked in a
+/// `select!` wakes on it without polling.
+pub struct FatalAbortRecord {
+    reason: Mutex<Option<String>>,
+    tripwire_tx: Mutex<Option<Sender<()>>>,
+    tripwire_rx: Receiver<()>,
+}
+
+impl FatalAbortRecord {
+    #[must_use]
+    pub fn new() -> Self {
+        let (tripwire_tx, tripwire_rx) = crossbeam_channel::bounded(0);
+        Self { reason: Mutex::new(None), tripwire_tx: Mutex::new(Some(tripwire_tx)), tripwire_rx }
+    }
+
+    /// Record `reason` as the abort taking this chassis down and trip the
+    /// wire. First write wins: one abort can cascade into others (a second
+    /// worker picking up the same poisoned slot, the teardown gate routing
+    /// its own wedge through the aborter), and the reader wants the one
+    /// that started it, not the last echo.
+    pub fn record(&self, reason: &str) {
+        {
+            let mut recorded = self.reason.lock().unwrap_or_else(PoisonError::into_inner);
+            if recorded.is_some() {
+                return;
+            }
+            *recorded = Some(reason.to_owned());
+        }
+
+        // Only the thread that won the write above reaches here, so the
+        // sole sender drops exactly once. Dropping it disconnects every
+        // cloned tripwire, waking whatever gates are parked on one.
+        drop(self.tripwire_tx.lock().unwrap_or_else(PoisonError::into_inner).take());
+    }
+
+    /// The recorded abort reason, or `None` while the chassis is healthy.
+    #[must_use]
+    pub fn reason(&self) -> Option<String> {
+        self.reason.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// A receiver that never yields a value and disconnects on the first
+    /// abort — the wake a blocking gate selects on alongside its own
+    /// signal.
+    #[must_use]
+    pub fn tripwire(&self) -> Receiver<()> {
+        self.tripwire_rx.clone()
+    }
+}
+
+impl Default for FatalAbortRecord {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`FatalAborter`] decorator that writes the reason into a
+/// [`FatalAbortRecord`] before delegating to the chassis's real aborter.
+/// Boot installs one over whatever aborter the builder was configured
+/// with — [`OutboundFatalAborter`] in production, [`PanicAborter`] under
+/// test and the substrate harness — so every abort path a chassis owns
+/// (pool worker, capability dispatcher, wasm trap) leaves the same trace
+/// for teardown to read.
+pub struct RecordingAborter {
+    inner: Arc<dyn FatalAborter>,
+    record: Arc<FatalAbortRecord>,
+}
+
+impl RecordingAborter {
+    #[must_use]
+    pub fn new(inner: Arc<dyn FatalAborter>, record: Arc<FatalAbortRecord>) -> Self {
+        Self { inner, record }
+    }
+}
+
+impl FatalAborter for RecordingAborter {
+    fn abort(&self, reason: String) -> ! {
+        self.record.record(&reason);
+        self.inner.abort(reason);
     }
 }
