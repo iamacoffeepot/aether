@@ -357,3 +357,65 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
          (kept alias → membrane no resident child → parent dispatch tail)",
     );
 }
+
+/// ADR-0168 §1: a settlement-gated load covers the inline child's alias.
+///
+/// The alias route a `WasmTrampoline` publishes from its `wire` hook is a
+/// birth-completing effect of the trampoline's own birth, so it holds the
+/// chain that staged that birth — the `aether.component.load` chain. Settling
+/// that chain therefore means the child is addressable, and this sequence
+/// probes it in the very next op with no polling and no slack.
+///
+/// This is the sequence iamacoffeepot/aether#4186 measured failing: `wire` ran
+/// on a rootless ctx, the alias batch held nothing, and `Settled` fired while
+/// the route was still queued at the registry owner. The sibling scenarios
+/// above still poll — deliberately, since they assert something else and
+/// retiring their polls is separate work.
+///
+// Tripwire: the load chain's `Settled` covers the alias publication. Cutting
+// the causing chain out of the `wire` ctx — or reverting the staged effect to
+// the context's own root — puts the probe back in a race with the owner's
+// apply, which is the defect class ADR-0168 was written for.
+#[test]
+fn settled_load_covers_the_inline_child_alias_publication() {
+    use aether_actor::Addressable;
+
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+    const FIXTURE_NAME: &str = "inline_child_settled_load";
+
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+        return;
+    };
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
+    let child_addr = format!("{parent_addr}/aether.embedded:widget");
+
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    // `send_mail` is the settlement-gated op — it blocks on `Settled { root }`
+    // for the whole load chain, where `send_and_await` would resolve on the
+    // `LoadResult` correlation alone. The probe follows in the same sequence,
+    // so nothing but the hold orders it against the owner's alias apply.
+    let reached = harness
+        .execute(vec![
+            (
+                "load",
+                HarnessOp::send_mail(
+                    "aether.component",
+                    &LoadComponent {
+                        wasm,
+                        name: Some(FIXTURE_NAME.to_owned()),
+                        config: Vec::new(),
+                        export: Some("test.inline.despawn_parent".to_owned()),
+                    },
+                ),
+            ),
+            ("probe", HarnessOp::send_and_await(child_addr.as_str(), &InlineProbe)),
+        ])
+        .expect("a settled load must leave the inline child addressable");
+    assert_eq!(
+        reached.reply::<InlineEcho>("probe").expect("decode InlineEcho"),
+        InlineEcho { who: INLINE_WHO_CHILD },
+        "the probe reaches the live child, so the alias was published inside the load's settlement",
+    );
+}

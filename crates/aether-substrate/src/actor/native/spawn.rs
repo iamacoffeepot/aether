@@ -46,6 +46,7 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::{BootAuthority, NameConflict, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
 use crate::runtime::lifecycle::{FatalAbortRecord, FatalAborter};
+use crate::runtime::trace::SettlementHold;
 use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
@@ -607,10 +608,16 @@ impl Spawner {
     /// [`SpawnOutcome`] (a parent actor's `TaskDone`, or the channel a
     /// post-seal external caller is blocked on). `None` is for fixtures that
     /// exercise the owner path with nothing waiting on the answer.
+    ///
+    /// `causing_chain` is the chain of the work that staged this birth. It
+    /// rides to the activation home so the newborn's `wire` hook can hold it
+    /// across a birth-completing effect (ADR-0168 §1); a birth no chain
+    /// caused passes [`MailId::NONE`].
     fn prepare_commit<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,
         finalizer: Option<Arc<super::activation::NativeSpawnFinalizer>>,
+        causing_chain: MailId,
     ) -> PreparedSpawnCommit
     where
         A: Instanced + NativeActor,
@@ -647,7 +654,8 @@ impl Spawner {
             transport,
             slots,
             state,
-        );
+        )
+        .caused_by(causing_chain);
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
             None => activation,
@@ -725,7 +733,10 @@ impl Spawner {
             Arc::clone(&staged.identity.canonical_name),
             Arc::clone(&self.mailer),
         );
-        let commit = self.prepare_commit(staged, Some(finalizer));
+        // An embedder thread reaching in through `spawn_actor` carries no
+        // mail, so this birth has no causing chain to hand the newborn's
+        // `wire` hook (ADR-0168 §1).
+        let commit = self.prepare_commit(staged, Some(finalizer), MailId::NONE);
         if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
         }
@@ -880,8 +891,12 @@ impl Spawner {
         // already steady-state when `Spawner::spawn_actor` runs — the
         // child wire→dispatcher transition is sequential within this
         // ctx, peers are running, all mailboxes claimed.
+        //
+        // This is the pre-seal direct route, reachable only while the boot
+        // authority is unspent — so its caller is boot itself, holding no
+        // mail and offering the hook no causing chain (ADR-0168 §1).
         local::with_stamped(&slots, || {
-            let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut wire_ctx = NativeCtx::for_wire(&transport, MailId::NONE);
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
@@ -1114,7 +1129,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        let commit = spawner.prepare_commit(staged, Some(finalizer));
+        let commit = spawner.prepare_commit(staged, Some(finalizer), completion_root);
         parent_binding.stage_child_birth(commit);
         let _ = sender;
         Ok(receipt)
@@ -1190,6 +1205,10 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         // Every fallible step is behind us, so the debt can finally leave the
         // caller's hands: converting is what makes returning it impossible.
         let (hold, reply_to) = owed.into_deferred_reply().into_parts();
+        // The inherited debt names the chain that caused this birth — the
+        // successor's own ctx no longer holds it, and the newborn's `wire`
+        // hook needs it to cover a birth-completing effect (ADR-0168 §1).
+        let causing_chain = hold.as_ref().map_or(MailId::NONE, SettlementHold::root);
         let completion = parent_binding.dispatch_arm(hold, reply_to, context);
         let receipt = SpawnReceipt {
             mailbox_id: staged.identity.id,
@@ -1204,7 +1223,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer)));
+        parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer), causing_chain));
         let _ = sender;
         Ok(receipt)
     }
@@ -1530,7 +1549,7 @@ mod tests {
     ) -> PreparedSpawnCommit {
         let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
         let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
-        spawner.prepare_commit(staged, None)
+        spawner.prepare_commit(staged, None, MailId::NONE)
     }
 
     fn prepared_probe_with_lifecycle_target(
@@ -1548,7 +1567,7 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
-        spawner.prepare_commit(staged, None)
+        spawner.prepare_commit(staged, None, MailId::NONE)
     }
 
     fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, crossbeam_channel::Receiver<KindId>) {
@@ -1577,8 +1596,9 @@ mod tests {
         let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
         let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
         let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
+        let causing_chain = MailId::new(parent.self_mailbox(), correlation);
         let deferred = parent.dispatch_arm::<SpawnOutcome, _>(
-            spawner.mailer().acquire_settlement_hold(MailId::new(parent.self_mailbox(), correlation)),
+            spawner.mailer().acquire_settlement_hold(causing_chain),
             Source::NONE,
             (),
         );
@@ -1592,7 +1612,7 @@ mod tests {
             Arc::clone(spawner.mailer()),
         );
 
-        (spawner.prepare_commit(staged, Some(finalizer)), dispatch_id, key)
+        (spawner.prepare_commit(staged, Some(finalizer), causing_chain), dispatch_id, key)
     }
 
     fn await_spawn_done(parent: &NativeBinding, dispatch_id: DispatchId) -> TaskDone<SpawnOutcome, ()> {
@@ -1689,11 +1709,9 @@ mod tests {
             spawner.prepare_identity::<ActivationProbe>(Subname::Named("owner-close-before-apply"), None).unwrap();
         let staged =
             spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
-        let deferred = parent.dispatch_arm::<SpawnOutcome, _>(
-            mailer.acquire_settlement_hold(MailId::new(parent_id, 1)),
-            Source::NONE,
-            (),
-        );
+        let causing_chain = MailId::new(parent_id, 1);
+        let deferred =
+            parent.dispatch_arm::<SpawnOutcome, _>(mailer.acquire_settlement_hold(causing_chain), Source::NONE, ());
         let dispatch_id = deferred.dispatch_id();
         let finalizer = super::super::activation::NativeSpawnFinalizer::parented(
             parent_reservation,
@@ -1703,7 +1721,7 @@ mod tests {
             Arc::downgrade(&staged.transport),
             Arc::clone(&mailer),
         );
-        let commit = spawner.prepare_commit(staged, Some(finalizer));
+        let commit = spawner.prepare_commit(staged, Some(finalizer), causing_chain);
         let child_id = commit.route.id;
         let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
 

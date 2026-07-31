@@ -74,6 +74,20 @@ pub struct NativeCtx<'a, M: ReplyMode = Single> {
     /// an inbound — those sends mint a fresh root from their own
     /// `mail_id` in `NativeBinding::send_mail`.
     in_flight_root: MailId,
+    /// ADR-0168 §1: the chain of the work that *caused* this context to
+    /// exist, for a context that dispatches no inbound of its own. A
+    /// handler-staged birth threads the staging chain here so the newborn's
+    /// `wire` hook can attach a birth-completing effect to it; every other
+    /// ctx carries [`MailId::NONE`].
+    ///
+    /// Only [`Self::acquire_settlement_hold`] reads it. The outbound send
+    /// lineage ([`Self::outbound_lineage`]) deliberately does not, which is
+    /// the whole point: a `wire` ctx serves both the effects that complete
+    /// the birth (which the causing chain must cover) and the actor's own
+    /// startup sends (which it must not), and one *root* cannot tell those
+    /// apart. Attaching the causing chain to the effect rather than to the
+    /// context is what keeps the two separable.
+    causing_chain: MailId,
     /// #1757 / ADR-0094: the single dispatched [`Envelope`], owned here
     /// for the duration of the handler. The dispatcher moves it in at
     /// construction ([`Self::with_inbound`]) and takes it back at its
@@ -154,7 +168,39 @@ impl<'a> NativeCtx<'a, Single> {
         in_flight_mail_id: MailId,
         in_flight_root: MailId,
     ) -> Self {
-        Self { binding, source: sender, in_flight_mail_id, in_flight_root, inbound: None, _mode: PhantomData }
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            causing_chain: MailId::NONE,
+            inbound: None,
+            _mode: PhantomData,
+        }
+    }
+
+    /// The `wire`-hook context, built by every birth path that runs
+    /// `A::wire` (ADR-0079 amended). It dispatches no inbound, so it carries
+    /// no in-flight lineage; `causing_chain` names the chain of the work that
+    /// caused this birth, or [`MailId::NONE`] where no such chain exists — a
+    /// chassis-boot fragment, a pumped driver boot, and an embedder's
+    /// `spawn_actor` all reach `wire` with no mail in scope.
+    ///
+    /// ADR-0168 §1: a birth-completing effect this hook stages holds
+    /// `causing_chain`, so the staging caller's `Settled` covers it. The
+    /// actor's own `wire`-time sends still mint their own roots — see the
+    /// [`NativeCtx::causing_chain`] field docs for why the two must not share
+    /// one root.
+    pub(crate) fn for_wire(binding: &'a Arc<NativeBinding>, causing_chain: MailId) -> Self {
+        Self {
+            binding,
+            source: Source::NONE,
+            in_flight_mail_id: MailId::NONE,
+            in_flight_root: MailId::NONE,
+            causing_chain,
+            inbound: None,
+            _mode: PhantomData,
+        }
     }
 }
 
@@ -171,7 +217,15 @@ impl<'a> NativeCtx<'a, Manual> {
         in_flight_mail_id: MailId,
         in_flight_root: MailId,
     ) -> Self {
-        Self { binding, source: sender, in_flight_mail_id, in_flight_root, inbound: None, _mode: PhantomData }
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            causing_chain: MailId::NONE,
+            inbound: None,
+            _mode: PhantomData,
+        }
     }
 
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -220,7 +274,15 @@ impl<'a> NativeCtx<'a, Manual> {
         in_flight_root: MailId,
         inbound: Envelope,
     ) -> Self {
-        Self { binding, source: sender, in_flight_mail_id, in_flight_root, inbound: Some(inbound), _mode: PhantomData }
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            causing_chain: MailId::NONE,
+            inbound: Some(inbound),
+            _mode: PhantomData,
+        }
     }
 }
 
@@ -422,15 +484,32 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// a slot frees, then moves it into
     /// [`Self::dispatch_blocking_resumed`].
     ///
-    /// `None` when this context carries no in-flight root
-    /// (`MailId::NONE`): the work has no causing chain, so there is
-    /// nothing to keep open and no guard to hand back (ADR-0168 §2).
+    /// A `wire` ctx dispatches no inbound, so it has no in-flight root; it
+    /// holds the chain that caused the birth instead (ADR-0168 §1), which is
+    /// what puts a birth-completing effect inside the staging caller's
+    /// `Settled`.
+    ///
+    /// `None` when neither is present: the work has no causing chain, so
+    /// there is nothing to keep open and no guard to hand back (ADR-0168 §2).
     /// Deferred work started from such a context is unobservable through
     /// settlement, which is a property worth reading at the call site
     /// rather than a guard that gates nothing.
     #[must_use]
     pub fn acquire_settlement_hold(&self) -> Option<SettlementHold> {
-        self.mailer().acquire_settlement_hold(self.in_flight_root)
+        self.mailer().acquire_settlement_hold(self.held_chain())
+    }
+
+    /// The chain a hold taken from this context gates: the in-flight root
+    /// while a handler is dispatching, and otherwise whatever caused this
+    /// context to exist. Exactly one of the two is ever set — a ctx with an
+    /// inbound is never a `wire` ctx — so the precedence is a formality that
+    /// keeps the rule readable rather than a real disambiguation.
+    fn held_chain(&self) -> MailId {
+        if self.in_flight_root == MailId::NONE {
+            self.causing_chain
+        } else {
+            self.in_flight_root
+        }
     }
 
     /// ADR-0093: dispatch a blocking closure with an externally-supplied
@@ -509,10 +588,10 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// this capability to their authoritative owner and retain no parent
     /// lifetime beyond a weak binding reference.
     ///
-    /// The armed completion carries whatever hold this context can give it,
-    /// which is nothing when the context carries no in-flight root. Such a
-    /// staged effect is not covered by its causing chain's `Settled`
-    /// (ADR-0168 §1) — the activation path is the current instance.
+    /// The armed completion carries whatever hold this context can give it —
+    /// the in-flight root of a dispatching handler, or the causing chain of a
+    /// `wire` hook (ADR-0168 §1). It carries none where the context has
+    /// neither, and the staged effect is then outside settlement entirely.
     pub(crate) fn arm_deferred_completion<O, C>(&self, context: C) -> DeferredCompletion<O>
     where
         C: Send + 'static,

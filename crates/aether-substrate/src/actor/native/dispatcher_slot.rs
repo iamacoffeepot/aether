@@ -192,18 +192,19 @@ where
     /// Run the post-init wire hook while the activation job owns this slot.
     /// The slot is not routable or drainable yet.
     ///
-    /// The context carries no in-flight root, so an effect this hook stages
-    /// acquires no settlement hold and is not covered by the `Settled` of the
-    /// chain whose `spawn_child` caused the birth. That is the ADR-0168 §1
-    /// violation, recorded here rather than repaired: the causing chain is
-    /// known at the spawn site, not here, so attaching it is a behaviour
-    /// change that lands on its own.
-    pub(super) fn wire_activation(&self) {
+    /// `causing_chain` is the chain of the work that staged this birth,
+    /// threaded from the spawn site through the prepared activation because
+    /// it is not otherwise in scope here. An effect the hook stages holds it
+    /// (ADR-0168 §1), so the staging caller's `Settled` covers the newborn's
+    /// birth-completing work — the inline-child alias a `WasmTrampoline`
+    /// publishes from `wire` is the motivating case. [`MailId::NONE`] for a
+    /// birth with no causing chain: an embedder's post-seal `spawn_actor`
+    /// reaches this path from a thread that holds no mail.
+    pub(super) fn wire_activation(&self, causing_chain: aether_data::MailId) {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
         local::with_stamped(&self.slots, || {
-            let mut ctx =
-                NativeCtx::new(&self.binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+            let mut ctx = NativeCtx::for_wire(&self.binding, causing_chain);
             A::wire(actor.as_mut(), &mut ctx);
         });
         drop(actor_guard);

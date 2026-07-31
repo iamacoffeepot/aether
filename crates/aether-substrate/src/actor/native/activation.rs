@@ -36,6 +36,10 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     slots: Box<ActorSlots>,
     state: A::State,
     finalizer: Option<Arc<NativeSpawnFinalizer>>,
+    /// ADR-0168 §1: the chain of the work that staged this birth, carried to
+    /// the activation home so `wire` can attach a birth-completing effect to
+    /// it. [`MailId::NONE`] for a birth no chain caused.
+    causing_chain: MailId,
 }
 
 pub(super) struct NativeSpawnFinalizer {
@@ -190,7 +194,15 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         slots: Box<ActorSlots>,
         state: A::State,
     ) -> Self {
-        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None }
+        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, causing_chain: MailId::NONE }
+    }
+
+    /// Carry the chain of the work that staged this birth to the activation
+    /// home, so `wire` can attach a birth-completing effect to it (ADR-0168
+    /// §1). Left at [`MailId::NONE`] for a birth no chain caused.
+    pub(super) fn caused_by(mut self, causing_chain: MailId) -> Self {
+        self.causing_chain = causing_chain;
+        self
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer>) -> Self {
@@ -502,7 +514,8 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     ) -> Self {
-        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer } = prepared;
+        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer, causing_chain } =
+            prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
             Arc::clone(&binding),
@@ -512,7 +525,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             id,
         );
         binding.hold_outbound_for_activation();
-        slot.wire_activation();
+        slot.wire_activation(causing_chain);
 
         Self {
             spawner,

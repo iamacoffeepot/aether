@@ -20,7 +20,7 @@ use crate::chassis::inbox::SettlingInbox;
 use crate::config::ConfigMemberRecord;
 use crate::mail::cost::CostCells;
 use crate::mail::mailer::Mailer;
-use crate::mail::{MailId, MailboxId, Source};
+use crate::mail::{MailId, MailboxId};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -351,8 +351,10 @@ where
     });
 
     // `wire` under `with_stamped` — mail-allowed, so subscriptions land.
+    // A pumped root cap is booted by the chassis or by an embedder holding
+    // no mail, so the hook has no causing chain (ADR-0168 §1).
     local::with_stamped(&slots, || {
-        let mut wire_ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut wire_ctx = NativeCtx::for_wire(&transport, MailId::NONE);
         A::wire(actor.as_mut(), &mut wire_ctx);
     });
 
