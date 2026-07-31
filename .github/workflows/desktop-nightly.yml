@@ -25,9 +25,11 @@ jobs:
     permissions:
       contents: read
       issues: write
-    # Normal run is ≤ 2 min; cap at 15 so a runner stall doesn't eat the
-    # default 6h quota.
-    timeout-minutes: 15
+    # A cold run compiles the four chassis packages plus the `cargo xtask
+    # dist` artifact tree below, so the cap sits well above the observed
+    # wall-clock rather than near it — the point is to stop a runner stall
+    # eating the default 6h quota, not to police build time.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -38,12 +40,36 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test -p aether-chassis-desktop -p aether-chassis-headless -p aether-chassis-hub -p aether-chassis-harness --all-targets
+      # `aether-chassis-hub`'s FleetHarness suites fork a real chassis
+      # binary resolved through `dist/manifest.json`, and the harness
+      # panics with a `cargo xtask dist` hint when that manifest is
+      # absent rather than skipping (issue 3843). ci.yml's `test` job
+      # provisions the same tree the same way ahead of its test step;
+      # this lane never did, so the hub package failed every night on an
+      # environment gap rather than on a real per-OS regression. The
+      # `--describe` fork the store test uploads needs the chassis bins,
+      # which `AETHER_HARNESS_FLEET_HEADLESS_BIN` cannot stand in for —
+      # that override only reaches `headless_bin_path`, while the test
+      # also resolves the desktop bin through `chassis_bin_path`.
+      - name: Pre-build the chassis bins + dist manifest
+        run: cargo xtask dist
+      # --no-fail-fast: `aether-chassis-hub` sorts last of the four
+      # packages and owned the only failing target, so one
+      # environment-dependent failure masked every target ordered after
+      # it. A nightly wants the complete per-OS signal, not the
+      # first-failure one.
+      - run: cargo test -p aether-chassis-desktop -p aether-chassis-headless -p aether-chassis-hub -p aether-chassis-harness --all-targets --no-fail-fast
 
       # File one triage issue per OS and comment subsequent failures on it
       # rather than filing duplicates — mirrors fuzz-nightly.yml's idiom.
       - name: File or update failure issue
         if: failure()
+        # The step body is POSIX shell, but this job's matrix includes
+        # `windows-latest`, where the default shell is PowerShell — it
+        # parsed `if [ -n "$existing" ]` as a malformed `if` statement and
+        # died, so a Windows nightly failure never reached an issue and the
+        # lane looked macOS-only. Pin the shell to bash on every leg.
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
