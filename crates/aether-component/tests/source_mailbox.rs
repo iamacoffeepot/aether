@@ -8,7 +8,7 @@
 //! Two invariants are checked:
 //!
 //! 1. **Session source returns `None`**: the harness sends `SourceQuery`
-//!    directly (as a Session origin) via `send_and_await`; the decoded reply
+//!    directly (as a Session origin) via `send_and_await_reply`; the decoded reply
 //!    must carry `mailbox_id: 0`.
 //!
 //! 2. **Component source returns the sender's `MailboxId`**: a second
@@ -44,7 +44,7 @@ fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &st
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent {
                     wasm,
@@ -75,8 +75,8 @@ fn session_source_returns_none() {
     let (_, reader_addr) = load_source_observer(&mut harness, wasm, "reader");
 
     let result = harness
-        .execute(vec![("query", HarnessOp::send_and_await(&reader_addr, &SourceQuery))])
-        .expect("send_and_await SourceQuery");
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&reader_addr, &SourceQuery))])
+        .expect("send_and_await_reply SourceQuery");
 
     let report = result.reply::<SourceReport>("query").expect("decode SourceReport");
 
@@ -101,10 +101,10 @@ fn component_source_returns_sender_mailbox() {
     let (reader_mailbox, reader_addr) = load_source_observer(&mut harness, wasm.clone(), "reader");
     let (sender_mailbox, sender_addr) = load_source_observer(&mut harness, wasm, "sender");
 
-    // Fire-and-settle: the whole chain (sender → reader handler) settles
+    // `send_and_settle`: the whole chain (sender → reader handler) settles
     // before `execute` returns, so the log entry is already in the ring.
     harness
-        .execute(vec![("trigger", HarnessOp::send_mail(&sender_addr, &SendSourceQuery { to: reader_mailbox.0 }))])
+        .execute(vec![("trigger", HarnessOp::send_and_settle(&sender_addr, &SendSourceQuery { to: reader_mailbox.0 }))])
         .expect("SendSourceQuery to sender");
 
     // Read the reader's log ring — the handler logs

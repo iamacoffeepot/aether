@@ -58,7 +58,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -86,7 +86,7 @@ fn list_components_reports_loaded_probe_lineage() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -105,7 +105,7 @@ fn list_components_reports_loaded_probe_lineage() {
     assert_ne!(name, format!("aether.embedded:{PROBE_NAME}"));
 
     let listed = harness
-        .execute(vec![("list", HarnessOp::send_and_await("aether.component", &ListComponents {}))])
+        .execute(vec![("list", HarnessOp::send_and_await_reply("aether.component", &ListComponents {}))])
         .expect("list sequence");
     let result = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult");
     assert!(
@@ -154,7 +154,7 @@ fn multi_actor_module_loads_entry_export() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -201,7 +201,7 @@ fn multi_actor_module_loads_selected_export() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -242,7 +242,7 @@ fn multi_actor_unknown_export_errors() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("ui.does_not_exist".to_owned()) },
             ),
@@ -280,7 +280,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
     let bare = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
             ),
@@ -302,7 +302,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
     let named = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -333,7 +333,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
 /// `aether.embedded:0` (Counter discriminator — a flat segment, no type
 /// prefix), and pinging *it* makes it broadcast a `TickObserved` to the
 /// harness observer — proving the spawned sibling is addressable and
-/// dispatches. The fire-and-settle send blocks until the whole tree
+/// dispatches. The `send_and_settle` send blocks until the whole tree
 /// (including the spawned trampoline's init) drains, so the panel is
 /// registered before the second send routes.
 #[test]
@@ -346,7 +346,7 @@ fn multi_actor_sibling_spawn() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -374,9 +374,9 @@ fn multi_actor_sibling_spawn() {
     harness
         .execute(vec![
             // RootManager spawns a Panel sibling (Counter → 0).
-            ("spawn", HarnessOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 })),
+            ("spawn", HarnessOp::send_and_settle::<Ping>(root_name.as_str(), &Ping { seq: 0 })),
             // The spawned Panel broadcasts TickObserved when pinged.
-            ("ping_panel", HarnessOp::send_mail::<Ping>(panel_name.as_str(), &Ping { seq: 1 })),
+            ("ping_panel", HarnessOp::send_and_settle::<Ping>(panel_name.as_str(), &Ping { seq: 1 })),
         ])
         .expect("spawn + ping sequence");
 
@@ -408,7 +408,7 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.ui.root".to_owned()) },
             ),
@@ -428,9 +428,9 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
         .execute(vec![
             // RootManager spawns two Panel siblings (Counter 0 and 1)
             // from this one Ping receive.
-            ("spawn_two", HarnessOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 2 })),
-            ("ping_panel_0", HarnessOp::send_mail::<Ping>(panel_0.as_str(), &Ping { seq: 1 })),
-            ("ping_panel_1", HarnessOp::send_mail::<Ping>(panel_1.as_str(), &Ping { seq: 1 })),
+            ("spawn_two", HarnessOp::send_and_settle::<Ping>(root_name.as_str(), &Ping { seq: 2 })),
+            ("ping_panel_0", HarnessOp::send_and_settle::<Ping>(panel_0.as_str(), &Ping { seq: 1 })),
+            ("ping_panel_1", HarnessOp::send_and_settle::<Ping>(panel_1.as_str(), &Ping { seq: 1 })),
         ])
         .expect("spawn-twice + ping-both sequence");
 
@@ -465,12 +465,12 @@ fn drop_component_silences_tick_echoes() {
 
     // Phase 4 split advance off `aether.component` (formerly
     // `aether.control`), so the drop mail no longer naturally orders
-    // ahead of the next advance. `SendAndAwait` blocks on `DropResult`
+    // ahead of the next advance. `SendAndAwaitReply` blocks on `DropResult`
     // so the probe's mailbox is fully gone before the next advance.
     let dropped = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await("aether.component", &DropComponent { mailbox_id: probe_mbox }),
+            HarnessOp::send_and_await_reply("aether.component", &DropComponent { mailbox_id: probe_mbox }),
         )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -513,13 +513,13 @@ fn replace_component_preserves_mailbox_identity() {
     );
 
     // Replace the wasm at the same mailbox id with the same fixture
-    // binary. `SendAndAwait` blocks on `ReplaceResult` so the splice
+    // binary. `SendAndAwaitReply` blocks on `ReplaceResult` so the splice
     // completes before the post-replace baseline is sampled.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id: probe_mbox,
@@ -577,7 +577,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -593,14 +593,14 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
         LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
     };
 
-    // Bump the counter to 3, then read it back. `send_mail` is
-    // fire-and-settle, so the three bumps land before the query.
+    // Bump the counter to 3, then read it back. `send_and_settle` waits out
+    // each bump's whole chain, so all three land before the query.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
@@ -613,7 +613,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -627,7 +627,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // The new instance booted fresh (init count = 0) and then rehydrated
     // from the saved bundle. Query it: the count must still be 3.
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -663,7 +663,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -677,10 +677,10 @@ fn replace_preserves_state_via_typed_state_kind() {
     // Bump the counter to 3, then read it back.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -694,7 +694,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -706,7 +706,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -747,7 +747,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: typed_wasm,
@@ -765,10 +765,10 @@ fn typed_state_decode_miss_boots_fresh() {
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_c", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -783,7 +783,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id,
@@ -801,7 +801,7 @@ fn typed_state_decode_miss_boots_fresh() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -836,7 +836,7 @@ fn childless_component_hot_reloads_unchanged() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -855,9 +855,9 @@ fn childless_component_hot_reloads_unchanged() {
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_mail::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -870,7 +870,7 @@ fn childless_component_hot_reloads_unchanged() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -882,7 +882,7 @@ fn childless_component_hot_reloads_unchanged() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     assert_eq!(
         post.reply::<CountReport>("query").expect("decode post-replace CountReport"),

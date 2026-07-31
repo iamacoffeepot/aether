@@ -100,7 +100,7 @@ fn load_font(harness: &mut SubstrateHarness) -> u32 {
     let loaded = harness
         .execute(vec![(
             "font",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
@@ -130,7 +130,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -257,8 +257,8 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // frame it reads back.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
-            ("prime", HarnessOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");
@@ -268,7 +268,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     let captured = harness
         .execute(vec![(
             "snap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     window: None,

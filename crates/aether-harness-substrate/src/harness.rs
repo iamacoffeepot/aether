@@ -86,7 +86,7 @@ pub const DEFAULT_HEIGHT: u32 = 600;
 /// covers replies that never arrive (chassis hung or wrong target);
 /// `Advance` and `Capture` pass through `Err` variants from the
 /// substrate's reply. `SettlementTimeout` surfaces when a
-/// `send_mail` / `send_bytes` chain didn't settle before the
+/// `send_and_settle` / `send_bytes` chain didn't settle before the
 /// settlement-patience backstop (issue 834: the harness waits on each
 /// pushed chain's `Settled { root }` so the next observation —
 /// `capture()`, the next typed send, an assertion — is causally
@@ -724,10 +724,10 @@ impl SubstrateHarness {
         self.queue.cost_table()
     }
 
-    /// Bytes-level fire-and-settle send: resolve `recipient_name` in
+    /// Bytes-level settlement-gated send: resolve `recipient_name` in
     /// the registry, push `(kind, bytes)` as a chassis-root mail, and
     /// block until the dispatched chain settles (ADR-0080 §6). Backs
-    /// the `SendMail` op of [`Self::execute`].
+    /// the `SendAndSettle` op of [`Self::execute`].
     ///
     /// Issue 834: synchronous-on-settle. The mail is minted as a
     /// chassis-root via [`Mailer::push_chassis_root_mail`] so the trace
@@ -756,7 +756,7 @@ impl SubstrateHarness {
     /// doesn't drain within the settlement cap.
     ///
     /// ADR-0161 slice R4: this is a settlement wait that can include a
-    /// render-recipient chain (a `send_mail(DrawTriangle / DestroyTexture /
+    /// render-recipient chain (a `send_and_settle(DrawTriangle / DestroyTexture /
     /// …)` addressed to `aether.render`, or one whose descendants reach it),
     /// so it must drain the pumped render slot while waiting — the chain
     /// settles only because this pump runs (the ADR deadlock). It polls the
@@ -959,7 +959,7 @@ impl SubstrateHarness {
     /// Bytes-level request/reply: push `(kind, payload)` to
     /// `recipient_name` with this harness's session as the reply
     /// target, pump until the matching reply arrives, and return its
-    /// raw payload bytes. Backs the `SendAndAwait` op of
+    /// raw payload bytes. Backs the `SendAndAwaitReply` op of
     /// [`Self::execute`], where the reply type isn't known statically
     /// and the caller decodes on demand via
     /// [`super::ExecutionResult::reply`]. Used for the
@@ -985,7 +985,7 @@ impl SubstrateHarness {
     /// Enqueue a typed request with this harness's session as the reply target,
     /// but do not pump the chassis or wait for the reply yet.
     ///
-    /// This is the asynchronous counterpart to `send_and_await` for tests that
+    /// This is the asynchronous counterpart to `send_and_await_reply` for tests that
     /// need several requests in flight at once to validate correlation.
     pub fn send_deferred<K>(&self, recipient_name: &str, mail: &K) -> Result<PendingBenchReply, SubstrateHarnessError>
     where
@@ -1085,7 +1085,7 @@ impl SubstrateHarness {
                 // The `SubstrateHarness::capture` API returns the PNG only; the
                 // substrate-side verdict path (iamacoffeepot/aether#1777)
                 // and similarity path (iamacoffeepot/aether#1780) are
-                // exercised through `HarnessOp::send_and_await` scenarios.
+                // exercised through `HarnessOp::send_and_await_reply` scenarios.
                 checks: Vec::new(),
                 similarity: None,
             },
@@ -1141,7 +1141,7 @@ impl SubstrateHarness {
 
     /// Pump until the reply with `cid` arrives, returning the raw
     /// reply payload bytes instead of decoding. Backs
-    /// [`Self::send_bytes_and_await`] and the `SendAndAwait` op of
+    /// [`Self::send_bytes_and_await`] and the `SendAndAwaitReply` op of
     /// [`Self::execute`], where the reply type is decoded on demand.
     fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, SubstrateHarnessError> {
         let event = self.pump_until_event(cid, expected)?;
@@ -1592,7 +1592,7 @@ mod tests {
         tb.execute(vec![
             (
                 "subscribe",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     "aether.lifecycle",
                     &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.0 },
                 ),
@@ -1683,12 +1683,12 @@ mod tests {
         tb.execute(vec![
             (
                 "subscribe_shutdown",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     "aether.lifecycle",
                     &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.0 },
                 ),
             ),
-            ("quit", HarnessOp::send_mail("aether.lifecycle", &Quit {})),
+            ("quit", HarnessOp::send_and_settle("aether.lifecycle", &Quit {})),
             ("advance", HarnessOp::advance(1)),
         ])
         .expect("subscribe + quit + advance");

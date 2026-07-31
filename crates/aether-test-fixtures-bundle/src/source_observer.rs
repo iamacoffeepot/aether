@@ -13,10 +13,10 @@
 //!   is `0` when `source_mailbox()` returns `None` (Session / no-sender origin).
 //!
 //! Integration test pattern:
-//! - Session case: the harness sends `SourceQuery` via `send_and_await`; the
+//! - Session case: the harness sends `SourceQuery` via `send_and_await_reply`; the
 //!   reply is `SourceReport { mailbox_id: 0 }` (Session source → None).
 //! - Component case: load two instances ("sender" + "reader"). Harness sends
-//!   `SendSourceQuery { to: reader_mailbox.0 }` (fire-and-settle) to sender.
+//!   `SendSourceQuery { to: reader_mailbox.0 }` (via `send_and_settle`) to sender.
 //!   Sender forwards `SourceQuery` to reader (component-origin mail). Reader
 //!   reads `source_mailbox()` → `Some(sender_mailbox)` → logs
 //!   `"source_mailbox={sender_mailbox.0}"`. Test uses `log_tail` on the reader's

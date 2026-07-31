@@ -62,7 +62,7 @@ fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, export: &str, n
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -117,7 +117,10 @@ fn capture(harness: &mut SubstrateHarness, world: &str, label: &str) -> Vec<u8> 
 
 fn create_mark(harness: &mut SubstrateHarness, marks: &str, label: &str, geometry: MarkGeometry) -> MarkRef {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await(marks, &MarkCreate { geometry, label: label.to_owned() }))])
+        .execute(vec![(
+            label,
+            HarnessOp::send_and_await_reply(marks, &MarkCreate { geometry, label: label.to_owned() }),
+        )])
         .expect("create mark");
     match created.reply::<MarkCreateResult>(label).expect("decode MarkCreateResult") {
         MarkCreateResult::Created { reference } => reference,
@@ -170,7 +173,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     harness
         .execute(vec![(
             "load-water-world",
-            HarnessOp::send_mail(
+            HarnessOp::send_and_settle(
                 &world,
                 &WorldLoad { namespace: "save".to_owned(), path: water_world_path.to_owned() },
             ),
@@ -184,7 +187,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     let mut water_hit = None;
     for _ in 0..16 {
         let picked = harness
-            .execute(vec![("pick-water", HarnessOp::send_and_await(&world, &PickTerrain { ray: water_ray }))])
+            .execute(vec![("pick-water", HarnessOp::send_and_await_reply(&world, &PickTerrain { ray: water_ray }))])
             .expect("pick authored water plane");
         if let PickTerrainResult::Hit { hit } =
             picked.reply::<PickTerrainResult>("pick-water").expect("decode water PickTerrainResult")
@@ -205,7 +208,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     let described = harness
         .execute(vec![(
             "describe-world",
-            HarnessOp::send_and_await("aether.component", &DescribeComponent { name: world.clone() }),
+            HarnessOp::send_and_await_reply("aether.component", &DescribeComponent { name: world.clone() }),
         )])
         .expect("describe loaded world component");
     let capabilities =
@@ -242,7 +245,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         .execute(vec![
             (
                 "chunk",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     &world,
                     &SetChunk {
                         chunk_x: 0,
@@ -261,7 +264,10 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
             ),
             (
                 "relief",
-                HarnessOp::send_mail(&world, &SetCellHeights { x: 2, z: 2, deltas: vec![128; SUBCELLS_PER_CELL] }),
+                HarnessOp::send_and_settle(
+                    &world,
+                    &SetCellHeights { x: 2, z: 2, deltas: vec![128; SUBCELLS_PER_CELL] },
+                ),
             ),
         ])
         .expect("author non-flat terrain");
@@ -271,7 +277,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     let picked = harness
         .execute(vec![(
             "pick",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 &world,
                 &PickTerrain {
                     ray: terrain_ray_from_screen_pixel(pick_eye, pick_target, WIDTH_F32 * 0.5, HEIGHT_F32 * 0.5),
@@ -302,13 +308,13 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
 
     // Enabling the overlay sends one correlated `MarkList` request to the
     // MarkBook and replies from that same handler, so the world's own reply is
-    // no barrier for the refresh: a `send_and_await` here returns while the
+    // no barrier for the refresh: a `send_and_await_reply` here returns while the
     // round trip is still in flight, and a bounded poll for the settled
     // projection races the runner (iamacoffeepot/aether#4164). The request
-    // inherits this chain and `send_mail` is settlement-gated (ADR-0080 §6),
+    // inherits this chain and `send_and_settle` is settlement-gated (ADR-0080 §6),
     // so it returns only once the reply has been folded into the projection.
     harness
-        .execute(vec![("enable", HarnessOp::send_mail(&world, &SetMarkOverlayVisibility { visible: true }))])
+        .execute(vec![("enable", HarnessOp::send_and_settle(&world, &SetMarkOverlayVisibility { visible: true }))])
         .expect("enable the overlay and settle its correlated refresh");
 
     // `Selected` is returned only for a visible, synchronized projection whose
@@ -317,7 +323,7 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     let selected = harness
         .execute(vec![(
             "select",
-            HarnessOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }),
+            HarnessOp::send_and_await_reply(&world, &SetMarkOverlaySelection { selected: Some(point) }),
         )])
         .expect("select exact point revision");
     assert_eq!(
@@ -352,12 +358,12 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
         .execute(vec![
             (
                 "update",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     &marks,
                     &MarkUpdate { id: point.id, geometry: None, label: Some("updated".to_owned()) },
                 ),
             ),
-            ("delete", HarnessOp::send_and_await(&marks, &MarkDelete { id: area.id })),
+            ("delete", HarnessOp::send_and_await_reply(&marks, &MarkDelete { id: area.id })),
         ])
         .expect("update point and delete area");
     let point_v2 = MarkRef { id: point.id, revision: 2 };
@@ -376,10 +382,13 @@ fn terrain_pick_and_revisioned_mark_overlays_render_through_real_wasm() {
     // selection replies request no refresh, and the `before` capture only
     // returns once the chains its `Render` pre-mail started have settled.
     harness
-        .execute(vec![("refresh", HarnessOp::send_mail(&world, &SetMarkOverlayVisibility { visible: true }))])
+        .execute(vec![("refresh", HarnessOp::send_and_settle(&world, &SetMarkOverlayVisibility { visible: true }))])
         .expect("refresh the mutated MarkBook projection and settle it");
     let stale = harness
-        .execute(vec![("stale", HarnessOp::send_and_await(&world, &SetMarkOverlaySelection { selected: Some(point) }))])
+        .execute(vec![(
+            "stale",
+            HarnessOp::send_and_await_reply(&world, &SetMarkOverlaySelection { selected: Some(point) }),
+        )])
         .expect("classify the old selected revision");
     assert_eq!(
         stale.reply::<SetMarkOverlaySelectionResult>("stale").expect("decode stale selection result"),

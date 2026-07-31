@@ -55,8 +55,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// [`SubstrateHarness`]; the sequencer waits for the op's causal chain to
 /// drain before proceeding to the next step.
 ///
-/// Build ops with the typed constructors ([`HarnessOp::send_mail`],
-/// [`HarnessOp::send_and_await`], [`HarnessOp::poll_until`],
+/// Build ops with the typed constructors ([`HarnessOp::send_and_settle`],
+/// [`HarnessOp::send_and_await_reply`], [`HarnessOp::poll_until`],
 /// [`HarnessOp::advance`], [`HarnessOp::capture`]) — they encode the
 /// payload from a typed kind via [`Kind::encode_into_bytes`], so callers
 /// never hand-encode.
@@ -72,7 +72,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///
 /// - **The effect is on the caller's causal chain** — the recipient's
 ///   handler does it, or a descendant mail it sent does. Use
-///   [`HarnessOp::send_mail`]: it blocks on `Settled { root }`, so the
+///   [`HarnessOp::send_and_settle`]: it blocks on `Settled { root }`, so the
 ///   handler and every descendant have run by the time the next op
 ///   starts (ADR-0080 §6). This is the strongest barrier and the
 ///   default; prefer it whenever lineage carries the effect.
@@ -83,7 +83,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///   which re-probes to a wall-clock budget and reports the last value it
 ///   saw when the observation never holds.
 /// - **A reply correlates the request, and that is all** — use
-///   [`HarnessOp::send_and_await`], and assert only on the reply itself.
+///   [`HarnessOp::send_and_await_reply`], and assert only on the reply itself.
 ///   It resolves on the matching correlation id and waits for nothing
 ///   else, so anything the handler kicked off may still be in flight;
 ///   asserting past the reply is asserting on the runner's speed.
@@ -94,15 +94,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub enum HarnessOp {
     /// Run `ticks` complete frames. Build with [`HarnessOp::advance`].
     Advance { ticks: u32 },
-    /// Fire-and-settle a mail; no reply is awaited. Build with the
-    /// typed [`HarnessOp::send_mail`].
-    SendMail { recipient: String, kind: KindId, payload: Vec<u8> },
-    /// Send a mail and block until a reply arrives, stashing the raw
-    /// reply bytes. Build with the typed [`HarnessOp::send_and_await`].
-    /// Covers component load / replace / drop and the `aether.fs`
+    /// Send a mail and wait for its whole causal chain to settle — the
+    /// recipient's handler and every mail descended from it have run
+    /// (`Settled { root }`, ADR-0080 §6). No reply is stored. Build with
+    /// the typed [`HarnessOp::send_and_settle`].
+    SendAndSettle { recipient: String, kind: KindId, payload: Vec<u8> },
+    /// Send a mail and wait for the reply carrying its correlation id,
+    /// stashing the raw reply bytes — and wait for nothing else, so
+    /// anything else the handler started may still be in flight. Build
+    /// with the typed [`HarnessOp::send_and_await_reply`]. Covers
+    /// component load / replace / drop and the `aether.fs`
     /// read / write / delete / list round trips uniformly — decode
     /// the stored bytes downstream with [`ExecutionResult::reply`].
-    SendAndAwait { recipient: String, kind: KindId, payload: Vec<u8> },
+    SendAndAwaitReply { recipient: String, kind: KindId, payload: Vec<u8> },
     /// Capture the current frame as PNG bytes. Build with
     /// [`HarnessOp::capture`]. Does not dispatch a tick — sequence a
     /// [`HarnessOp::Advance`] before it if the world must move first.
@@ -112,7 +116,7 @@ pub enum HarnessOp {
     /// lands *before* the readback so its effects appear in the PNG,
     /// `after` runs *after* (cleanup). Build with
     /// [`HarnessOp::capture_with_mails`]. Use this rather than
-    /// decomposing into separate `SendMail` + `Capture` ops when the
+    /// decomposing into separate `SendAndSettle` + `Capture` ops when the
     /// pre-mail's geometry must land in the same frame as the
     /// readback.
     CaptureWithMails { pre: Vec<NamedMail>, after: Vec<NamedMail> },
@@ -122,7 +126,7 @@ pub enum HarnessOp {
     /// [`HarnessOp::poll_until`] / [`HarnessOp::poll_until_within`] —
     /// `observe` is opaque, so this variant is not hand-constructible.
     ///
-    /// The satisfying reply is stored like a [`HarnessOp::SendAndAwait`]
+    /// The satisfying reply is stored like a [`HarnessOp::SendAndAwaitReply`]
     /// one, so [`ExecutionResult::reply`] decodes the observation that
     /// ended the wait rather than a re-read of it.
     PollUntil {
@@ -168,14 +172,15 @@ impl<R> HarnessActor<R>
 where
     R: Addressable<Resolver = One>,
 {
-    /// Build a fire-and-settle operation for a kind handled by `R`.
+    /// Build a settlement-gated send for a kind handled by `R` — the
+    /// [`HarnessOp::send_and_settle`] wait, addressed by actor identity.
     #[must_use]
     pub fn send<K>(&self, mail: &K) -> HarnessOp
     where
         K: Kind,
         R: HandlesKind<K>,
     {
-        HarnessOp::send_mail(R::NAMESPACE, mail)
+        HarnessOp::send_and_settle(R::NAMESPACE, mail)
     }
 }
 
@@ -232,31 +237,45 @@ impl HarnessOp {
         Self::actor::<SyntheticWindowCapability>().send(&injection)
     }
 
-    /// Fire-and-settle a typed mail (no reply awaited). Encodes `mail`
-    /// via [`Kind::encode_into_bytes`] — works for both cast and
-    /// structured kinds.
+    /// Send a typed mail and wait for its whole causal chain to settle:
+    /// the recipient's handler has run, and so has every mail descended
+    /// from it (`Settled { root }`, ADR-0080 §6). No reply is stored —
+    /// the wait is on the effect having happened, not on an answer.
+    ///
+    /// This is the strongest barrier of the three waits and the right
+    /// default whenever lineage carries the effect being asserted on;
+    /// see the rule on [`HarnessOp`]. Encodes `mail` via
+    /// [`Kind::encode_into_bytes`] — works for both cast and structured
+    /// kinds.
     #[must_use]
-    pub fn send_mail<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
-        Self::SendMail { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
+    pub fn send_and_settle<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
+        Self::SendAndSettle { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
 
-    /// Send a typed mail and block until a reply arrives. Decode the
-    /// reply downstream with [`ExecutionResult::reply`]. Encodes
-    /// `mail` via [`Kind::encode_into_bytes`].
+    /// Send a typed mail and wait for the reply carrying its correlation
+    /// id — and for nothing else. Decode the reply downstream with
+    /// [`ExecutionResult::reply`]. Encodes `mail` via
+    /// [`Kind::encode_into_bytes`].
+    ///
+    /// The weakest of the three waits: whatever the handler kicked off
+    /// beyond answering may still be in flight when this returns, so
+    /// assert on the reply and never past it. When the effect under test
+    /// rides the caller's chain, [`HarnessOp::send_and_settle`] is the
+    /// barrier that orders it; see the rule on [`HarnessOp`].
     #[must_use]
-    pub fn send_and_await<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
-        Self::SendAndAwait { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
+    pub fn send_and_await_reply<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
+        Self::SendAndAwaitReply { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
 
     /// Re-send `probe` to `recipient` until its reply satisfies
     /// `observed`, then store that reply the way
-    /// [`HarnessOp::send_and_await`] would. Waits up to
+    /// [`HarnessOp::send_and_await_reply`] would. Waits up to
     /// [`DEFAULT_POLL_BUDGET`].
     ///
     /// Reach for this only in the detached case — an effect that lands
     /// on a chain the caller never joins, so no settlement here can
     /// order it (see the rule on [`HarnessOp`]). When lineage does carry
-    /// the effect, [`HarnessOp::send_mail`] is the stronger and cheaper
+    /// the effect, [`HarnessOp::send_and_settle`] is the stronger and cheaper
     /// barrier.
     ///
     /// The budget is wall clock rather than an iteration count, so the
@@ -370,13 +389,13 @@ impl ExecutionResult {
         }
     }
 
-    /// Decode the reply from a [`HarnessOp::SendAndAwait`] step — or the
+    /// Decode the reply from a [`HarnessOp::SendAndAwaitReply`] step — or the
     /// satisfying observation from a [`HarnessOp::PollUntil`] step — as
     /// `R`. `R` is any reply kind (`LoadResult`, `ReplaceResult`,
     /// `WriteResult`, …); the bytes decode through the kind's declared
     /// codec (cast or structured) via `Kind::decode_from_bytes`
     /// (ADR-0100). Errors with [`ExecutionError::NoSuchReply`] if
-    /// `label` didn't run a `SendAndAwait` (or didn't run at all), or
+    /// `label` didn't run a `SendAndAwaitReply` (or didn't run at all), or
     /// [`ExecutionError::ReplyDecode`] if the bytes don't decode as
     /// `R`.
     pub fn reply<R>(&self, label: &str) -> Result<R, ExecutionError>
@@ -405,7 +424,7 @@ pub enum ExecutionError {
     /// failure, unknown mailbox, …). Aborts the sequence.
     OpFailed { label: String, error: SubstrateHarnessError },
     /// [`ExecutionResult::reply`] was asked for a label that didn't
-    /// run a [`HarnessOp::SendAndAwait`] (or didn't run at all).
+    /// run a [`HarnessOp::SendAndAwaitReply`] (or didn't run at all).
     NoSuchReply(String),
     /// [`ExecutionResult::reply`] couldn't decode the stashed reply
     /// bytes as the requested type.
@@ -438,7 +457,7 @@ impl fmt::Display for ExecutionError {
                 write!(f, "execute() step {label:?} failed: {error}")
             }
             Self::NoSuchReply(label) => {
-                write!(f, "no SendAndAwait reply stored under label {label:?}")
+                write!(f, "no SendAndAwaitReply output stored under label {label:?}")
             }
             Self::ReplyDecode { label, error } => {
                 write!(f, "decode reply for label {label:?}: {error}")
@@ -481,10 +500,10 @@ impl SubstrateHarness {
 
             let output = match op {
                 HarnessOp::Advance { ticks } => self.advance(ticks).map(|_| HarnessOutput::Advanced).map_err(failed),
-                HarnessOp::SendMail { recipient, kind, payload } => {
+                HarnessOp::SendAndSettle { recipient, kind, payload } => {
                     self.send_bytes(&recipient, kind, payload).map(|()| HarnessOutput::Mailed).map_err(failed)
                 }
-                HarnessOp::SendAndAwait { recipient, kind, payload } => {
+                HarnessOp::SendAndAwaitReply { recipient, kind, payload } => {
                     self.send_bytes_and_await(&recipient, kind, payload).map(HarnessOutput::Replied).map_err(failed)
                 }
                 HarnessOp::Capture => self.capture().map(HarnessOutput::Captured).map_err(failed),
@@ -659,7 +678,7 @@ mod tests {
         );
     }
 
-    /// ADR-0100: the `SendAndAwait` reply accessor decodes the recorded
+    /// ADR-0100: the `SendAndAwaitReply` reply accessor decodes the recorded
     /// bytes through `Kind::decode_from_bytes`, so a cast reply kind
     /// round-trips uncorrupted (its `u32` / `u16` fields survive). A
     /// structured decode would have misread the raw cast image.

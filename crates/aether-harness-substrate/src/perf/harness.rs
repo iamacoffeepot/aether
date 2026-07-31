@@ -1489,7 +1489,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
 
             // iamacoffeepot/aether#1233: the real tier reports keep-up, not
             // span percentiles. Harvest each actor's plain-field `Ping`
-            // counters out-of-band (the same name-addressed `send_and_await`
+            // counters out-of-band (the same name-addressed `send_and_await_reply`
             // flow as the trace harvest above) and sum them: `offered =
             // Σ sent`, `completed = Σ received`. Sidesteps the trace ring
             // entirely, which the real tier's fan-out laps. Only the real

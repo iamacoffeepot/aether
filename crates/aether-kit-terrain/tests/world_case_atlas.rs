@@ -230,14 +230,14 @@ impl AtlasFixture {
             for mutation in &self.cases[case_index].mutations {
                 if let AtlasMutation::Region(region) = mutation {
                     harness
-                        .execute(vec![("set_region", HarnessOp::send_mail(world, region))])
+                        .execute(vec![("set_region", HarnessOp::send_and_settle(world, region))])
                         .expect("register atlas region");
                 }
             }
         }
         for chunk in chunks.into_values() {
             harness
-                .execute(vec![("set_chunk", HarnessOp::send_mail(world, &chunk.into_mail()))])
+                .execute(vec![("set_chunk", HarnessOp::send_and_settle(world, &chunk.into_mail()))])
                 .expect("author atlas base chunk");
         }
 
@@ -250,7 +250,7 @@ impl AtlasFixture {
                         harness
                             .execute(vec![(
                                 "set_cell_points",
-                                HarnessOp::send_mail(
+                                HarnessOp::send_and_settle(
                                     world,
                                     &SetCellPoints { x: cell.x, z: cell.z, points: points.clone() },
                                 ),
@@ -262,7 +262,7 @@ impl AtlasFixture {
                         harness
                             .execute(vec![(
                                 "set_cell_heights",
-                                HarnessOp::send_mail(
+                                HarnessOp::send_and_settle(
                                     world,
                                     &SetCellHeights { x: cell.x, z: cell.z, deltas: deltas.clone() },
                                 ),
@@ -345,7 +345,7 @@ fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, na
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -503,7 +503,7 @@ fn capture_guarded(
     let captured = harness
         .execute(vec![(
             "capture",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     window: None,

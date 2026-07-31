@@ -96,7 +96,7 @@ fn load_kit_export_with_config(
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -189,7 +189,7 @@ fn capture_scene(harness: &mut SubstrateHarness, mover: &str, world: &str, label
     let captured = harness
         .execute(vec![(
             label,
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CaptureFrame {
                     window: None,
@@ -283,7 +283,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
         .execute(vec![
             (
                 "region",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     world.as_str(),
                     &SetRegion {
                         region_id: REGION_ID,
@@ -293,7 +293,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
                     },
                 ),
             ),
-            ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
+            ("chunk", HarnessOp::send_and_settle(world.as_str(), &height_break_chunk())),
             (
                 "retained-window-size",
                 HarnessOp::window_event(
@@ -301,7 +301,7 @@ fn mover_opts_out_of_interactive_fanout_but_moves_when_the_editor_routes_input()
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
             ),
-            ("place", HarnessOp::send_mail(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
+            ("place", HarnessOp::send_and_settle(mover_address.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("author world and settle opted-out mover");
@@ -365,7 +365,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
         .execute(vec![
             (
                 "region",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     world.as_str(),
                     &SetRegion {
                         region_id: REGION_ID,
@@ -375,7 +375,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
                     },
                 ),
             ),
-            ("chunk", HarnessOp::send_mail(world.as_str(), &height_break_chunk())),
+            ("chunk", HarnessOp::send_and_settle(world.as_str(), &height_break_chunk())),
             (
                 "aspect",
                 HarnessOp::window_event(
@@ -383,7 +383,7 @@ fn held_w_walks_the_mover_past_the_flat_world_cliff_and_release_stops_it() {
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
             ),
-            ("place", HarnessOp::send_mail(mover.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
+            ("place", HarnessOp::send_and_settle(mover.as_str(), &MoverTeleport { cell_x: 8, cell_z: 12 })),
             // Let both actors finish wiring before input begins.
             ("settle", HarnessOp::advance(2)),
         ])

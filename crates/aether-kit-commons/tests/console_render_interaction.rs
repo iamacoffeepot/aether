@@ -92,7 +92,7 @@ fn load_console_with_config(harness: &mut SubstrateHarness, wasm: &[u8], config:
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -132,7 +132,7 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], target: Mailbo
     let loaded = harness
         .execute(vec![(
             "load-editor",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -170,7 +170,7 @@ fn coverage_in_region(
     let captured = harness
         .execute(vec![(
             label,
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     window: None,
@@ -204,7 +204,7 @@ fn history_text_differs_from_panel(harness: &mut SubstrateHarness, label: &'stat
     let captured = harness
         .execute(vec![(
             label,
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     window: None,
@@ -246,7 +246,7 @@ fn backquote_key_opens_console_overlay() {
     harness
         .execute(vec![(
             "size",
-            HarnessOp::send_mail(
+            HarnessOp::send_and_settle(
                 console_address(),
                 &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
             ),
@@ -259,7 +259,7 @@ fn backquote_key_opens_console_overlay() {
     harness
         .execute(vec![(
             "toggle",
-            HarnessOp::send_mail(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+            HarnessOp::send_and_settle(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
         )])
         .expect("toggle key");
 
@@ -325,13 +325,16 @@ fn markdown_command_output_renders_into_history_band() {
         .execute(vec![
             (
                 "size",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     console_address(),
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
             ),
             ("settle", HarnessOp::advance(8)),
-            ("toggle", HarnessOp::send_mail(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
+            (
+                "toggle",
+                HarnessOp::send_and_settle(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+            ),
         ])
         .expect("open console");
 
@@ -341,7 +344,7 @@ fn markdown_command_output_renders_into_history_band() {
     harness
         .execute(vec![(
             "markdown-output",
-            HarnessOp::send_mail(
+            HarnessOp::send_and_settle(
                 console_address(),
                 &ConsoleCommandOutput {
                     command: String::from("diagnostics"),
@@ -374,16 +377,19 @@ fn configured_font_override_renders_into_history_band() {
         .execute(vec![
             (
                 "size",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     console_address(),
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
             ),
             ("settle", HarnessOp::advance(8)),
-            ("toggle", HarnessOp::send_mail(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
+            (
+                "toggle",
+                HarnessOp::send_and_settle(console_address(), &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE }),
+            ),
             (
                 "output",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     console_address(),
                     &ConsoleCommandOutput {
                         command: String::from("override"),

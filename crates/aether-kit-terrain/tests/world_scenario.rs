@@ -77,7 +77,7 @@ fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -144,7 +144,7 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
     harness
         .execute(vec![(
             "stamp",
-            HarnessOp::send_mail(
+            HarnessOp::send_and_settle(
                 world.as_str(),
                 &StampHexagon {
                     center: WorldPoint::new(2048, 2048),
@@ -227,7 +227,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
         .execute(vec![
             (
                 "edge_brush",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     world.as_str(),
                     &ApplyBrush {
                         source: edge_brush_source,
@@ -243,7 +243,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
             ),
             (
                 "huge_automaton",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     world.as_str(),
                     &RunAutomaton {
                         source: huge_automaton_source,
@@ -272,7 +272,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let brushed = harness
         .execute(vec![(
             "brush",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 world.as_str(),
                 &ApplyBrush {
                     source: brush_source,
@@ -327,7 +327,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let grown = harness
         .execute(vec![(
             "automaton",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 world.as_str(),
                 &RunAutomaton {
                     source: automaton_source,
@@ -378,7 +378,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let limited = harness
         .execute(vec![(
             "limited",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 world.as_str(),
                 &RunAutomaton {
                     source: limited_source,
@@ -466,7 +466,7 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
     harness
         .execute(vec![(
             "plateau",
-            HarnessOp::send_mail(
+            HarnessOp::send_and_settle(
                 world.as_str(),
                 &SetChunk {
                     chunk_x: 0,

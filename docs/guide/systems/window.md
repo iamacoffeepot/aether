@@ -244,7 +244,7 @@ let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
 );
 
 let main = format!("{}://main", WindowCapability::NAMESPACE);
-let title = HarnessOp::send_and_await(
+let title = HarnessOp::send_and_await_reply(
     main,
     &SetWindowTitle { title: "Inspector".to_owned() },
 );

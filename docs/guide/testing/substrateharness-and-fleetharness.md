@@ -50,9 +50,10 @@ is itself the contract.
 
 ## Settlement-gated operations
 
-`send_mail` and related primitives wait for the pushed causal chain to settle
-before the next observation. A slow-chain heartbeat can extend patience; the
-cumulative cap identifies a genuine wedge and reports pending roots/hold counts.
+`send_and_settle` and related primitives wait for the pushed causal chain to
+settle before the next observation. A slow-chain heartbeat can extend patience;
+the cumulative cap identifies a genuine wedge and reports pending roots/hold
+counts.
 
 This gate prevents a common flaky pattern:
 
@@ -68,7 +69,7 @@ Three operations wait, and they are not interchangeable. Pick by where the
 effect being asserted on actually lands.
 
 **The effect is on the caller's chain** — the recipient's handler produces it,
-or a descendant mail it sent does. Use `send_mail`. It blocks on
+or a descendant mail it sent does. Use `send_and_settle`. It blocks on
 `Settled { root }`, so the handler and everything it spawned have run before the
 next step starts. This is the strongest barrier and the right default: whenever
 lineage carries the effect, preserve the lineage and let settlement order it.
@@ -95,16 +96,16 @@ so the red names the state reached rather than only that the wait ran out.
 under the step's label, so `ExecutionResult::reply` decodes the observation that
 ended the wait.
 
-**A reply correlates the request, and that is all** — use `send_and_await`, and
-assert only on the reply itself. It resolves on the matching correlation id and
-waits for nothing else, so work the handler kicked off may still be in flight.
-Asserting past that reply is asserting on the runner's speed.
+**A reply correlates the request, and that is all** — use `send_and_await_reply`,
+and assert only on the reply itself. It resolves on the matching correlation id
+and waits for nothing else, so work the handler kicked off may still be in
+flight. Asserting past that reply is asserting on the runner's speed.
 
 What none of them license is an arbitrary sleep, or an extra round trip added
 until the assertion passes. Both hold only while the box is fast enough, and a
-label like `"process child monitor notice"` on a spare `send_and_await` is the
-tell that a round-trip count is standing in for an ordering the test could not
-express. Reach for `poll_until` there instead.
+label like `"process child monitor notice"` on a spare `send_and_await_reply` is
+the tell that a round-trip count is standing in for an ordering the test could
+not express. Reach for `poll_until` there instead.
 
 ## Declarative operation sequences
 
@@ -112,10 +113,10 @@ express. Reach for `poll_until` there instead.
 discipline:
 
 - `Advance` drives complete frames;
-- `SendMail` fires typed mail and waits for its whole causal chain to settle —
-  the strongest barrier;
-- `SendAndAwait` stores a typed reply for later decode, and waits for nothing
-  beyond that correlation — the weakest;
+- `SendAndSettle` sends typed mail and waits for its whole causal chain to
+  settle — the strongest barrier;
+- `SendAndAwaitReply` stores a typed reply for later decode, and waits for
+  nothing beyond that correlation — the weakest;
 - `PollUntil` re-probes to a wall-clock budget for an effect no chain here can
   settle;
 - `Capture` reads the current frame;
@@ -152,7 +153,7 @@ use aether_actor::Addressable;
 
 let main = format!("{}://main", WindowCapability::NAMESPACE);
 
-HarnessOp::send_and_await(
+HarnessOp::send_and_await_reply(
     main,
     &SetWindowTitle { title: "Inspector".to_owned() },
 );

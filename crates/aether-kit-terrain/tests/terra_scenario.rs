@@ -30,7 +30,7 @@ fn load_mark_book(harness: &mut SubstrateHarness, wasm_path: &Path) -> aether_da
     let loaded = harness
         .execute(vec![(
             "load_mark_book",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm for mark book"),
@@ -55,7 +55,7 @@ fn load_terra(harness: &mut SubstrateHarness, wasm_path: &Path, mark_book_mailbo
     let loaded = harness
         .execute(vec![(
             "load_terra",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm for terra"),
@@ -78,7 +78,7 @@ fn create_mark(harness: &mut SubstrateHarness, address: &str, geometry: MarkGeom
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(address, &MarkCreate { geometry, label: label.to_owned() }),
+            HarnessOp::send_and_await_reply(address, &MarkCreate { geometry, label: label.to_owned() }),
         )])
         .expect("create mark sequence");
     match created.reply::<MarkCreateResult>("create").expect("decode MarkCreateResult") {
@@ -89,7 +89,7 @@ fn create_mark(harness: &mut SubstrateHarness, address: &str, geometry: MarkGeom
 
 fn get_mark(harness: &mut SubstrateHarness, address: &str, reference: MarkRef) -> Mark {
     let fetched = harness
-        .execute(vec![("get", HarnessOp::send_and_await(address, &MarkGet { id: reference.id }))])
+        .execute(vec![("get", HarnessOp::send_and_await_reply(address, &MarkGet { id: reference.id }))])
         .expect("get mark sequence");
     fetched.reply::<MarkGetResult>("get").expect("decode MarkGetResult").mark.expect("mark exists")
 }
@@ -122,7 +122,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let created_point = harness
         .execute(vec![(
             "terra_create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 &terra_address,
                 &CreateTerraMark { geometry: MarkGeometry::Point(WorldPoint::new(10, 20)), label: "camp".to_owned() },
             ),
@@ -159,8 +159,11 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let ordered = vec![area, point, path];
     let selected = harness
         .execute(vec![
-            ("set", HarnessOp::send_and_await(&terra_address, &SetTerraSelection { references: ordered.clone() })),
-            ("query", HarnessOp::send_and_await(&terra_address, &TerraQuery)),
+            (
+                "set",
+                HarnessOp::send_and_await_reply(&terra_address, &SetTerraSelection { references: ordered.clone() }),
+            ),
+            ("query", HarnessOp::send_and_await_reply(&terra_address, &TerraQuery)),
         ])
         .expect("set and query sequence");
     let set = expect_applied(selected.reply::<TerraCommandResult>("set").expect("decode set result"));
@@ -175,7 +178,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let moved = harness
         .execute(vec![(
             "move",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 &terra_address,
                 &MoveTerraSelection { delta: WorldDelta { x_octimeters: 3, z_octimeters: -2 } },
             ),
@@ -216,7 +219,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let relabeled = harness
         .execute(vec![(
             "relabel",
-            HarnessOp::send_and_await(&terra_address, &RelabelTerraSelection { label: "ridge".to_owned() }),
+            HarnessOp::send_and_await_reply(&terra_address, &RelabelTerraSelection { label: "ridge".to_owned() }),
         )])
         .expect("relabel sequence");
     let relabeled = expect_applied(relabeled.reply::<TerraCommandResult>("relabel").expect("decode relabel result"));
@@ -234,7 +237,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let externally_changed = harness
         .execute(vec![(
             "external_update",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 &mark_address,
                 &MarkUpdate {
                     id: relabeled.selection[stale_index].id,
@@ -255,7 +258,7 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
     let stale_move = harness
         .execute(vec![(
             "stale_move",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 &terra_address,
                 &MoveTerraSelection { delta: WorldDelta { x_octimeters: 100, z_octimeters: 100 } },
             ),
@@ -288,10 +291,13 @@ fn terra_selection_semantics_and_preflight_run_through_real_wasm() {
         .execute(vec![
             (
                 "set_fresh",
-                HarnessOp::send_and_await(&terra_address, &SetTerraSelection { references: fresh_selection.clone() }),
+                HarnessOp::send_and_await_reply(
+                    &terra_address,
+                    &SetTerraSelection { references: fresh_selection.clone() },
+                ),
             ),
-            ("delete", HarnessOp::send_and_await(&terra_address, &DeleteTerraSelection)),
-            ("query", HarnessOp::send_and_await(&terra_address, &TerraQuery)),
+            ("delete", HarnessOp::send_and_await_reply(&terra_address, &DeleteTerraSelection)),
+            ("query", HarnessOp::send_and_await_reply(&terra_address, &TerraQuery)),
         ])
         .expect("fresh selection and delete sequence");
     assert_eq!(

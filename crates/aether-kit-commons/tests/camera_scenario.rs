@@ -33,7 +33,7 @@ use aether_render::ViewProjection;
 // separate crates that link against the test target's host rlib, but
 // the linker strips inventory submits for kinds the test code doesn't
 // statically reference. Without this anchor, `count_observed` against
-// the camera-published kinds (and `send_mail::<CameraDestroy>`) would
+// the camera-published kinds (and `send_and_settle::<CameraDestroy>`) would
 // still resolve, but other inventory-collected metadata wouldn't —
 // keep the anchor for parity with the other component scenario files.
 #[allow(unused_imports)]
@@ -66,7 +66,7 @@ fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -171,7 +171,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
     // all-black.
     let result = harness
         .execute(vec![
-            ("destroy", HarnessOp::send_mail(component_address(), &CameraDestroy { name: "main".to_owned() })),
+            ("destroy", HarnessOp::send_and_settle(component_address(), &CameraDestroy { name: "main".to_owned() })),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])

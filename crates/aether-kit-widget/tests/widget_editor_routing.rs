@@ -33,7 +33,7 @@ fn load_actor<K: Kind>(
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read wasm component"),
@@ -71,7 +71,7 @@ fn load_shell(harness: &mut SubstrateHarness, wasm_path: &Path, regions: Vec<Reg
 
 fn drain(harness: &mut SubstrateHarness, actor: &LoadedActor, label: &'static str) -> DrainEditorInputsResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await(actor.address.as_str(), &DrainEditorInputs))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(actor.address.as_str(), &DrainEditorInputs))])
         .expect("drain sequence")
         .reply::<DrainEditorInputsResult>(label)
         .expect("decode DrainEditorInputsResult")

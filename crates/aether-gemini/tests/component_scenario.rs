@@ -63,7 +63,7 @@ fn boot_and_load(config: &GeminiComponentConfig) -> SubstrateHarness {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -109,7 +109,7 @@ fn allowlist_refusal_surfaces_typed_error() {
     let mut harness = boot_and_load(&config);
 
     let result = harness
-        .execute(vec![("gen", HarnessOp::send_and_await(component_address(), &nanobanana_request()))])
+        .execute(vec![("gen", HarnessOp::send_and_await_reply(component_address(), &nanobanana_request()))])
         .expect("generate + reply");
 
     match result.reply::<NanobananaGenerateResult>("gen").expect("decode NanobananaGenerateResult") {
@@ -135,7 +135,7 @@ fn disabled_config_replies_unauthorized() {
     let mut harness = boot_and_load(&GeminiComponentConfig::default());
 
     let result = harness
-        .execute(vec![("gen", HarnessOp::send_and_await(component_address(), &nanobanana_request()))])
+        .execute(vec![("gen", HarnessOp::send_and_await_reply(component_address(), &nanobanana_request()))])
         .expect("generate + reply");
 
     match result.reply::<NanobananaGenerateResult>("gen").expect("decode NanobananaGenerateResult") {
@@ -166,7 +166,7 @@ fn unknown_lyria_model_rejected() {
         sample_count: None,
     };
     let result = harness
-        .execute(vec![("gen", HarnessOp::send_and_await(component_address(), &request))])
+        .execute(vec![("gen", HarnessOp::send_and_await_reply(component_address(), &request))])
         .expect("generate + reply");
 
     match result.reply::<LyriaGenerateResult>("gen").expect("decode LyriaGenerateResult") {

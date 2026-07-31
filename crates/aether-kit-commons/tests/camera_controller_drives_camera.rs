@@ -71,7 +71,7 @@ fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, na
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -180,10 +180,10 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // settle the seed + subscriptions before the first capture.
     harness
         .execute(vec![
-            ("paint", HarnessOp::send_mail(world.as_str(), &split_chunk())),
+            ("paint", HarnessOp::send_and_settle(world.as_str(), &split_chunk())),
             (
                 "aspect",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     camera.as_str(),
                     &WindowSize { window: TEST_WINDOW_ID, width: WINDOW_WIDTH, height: WINDOW_HEIGHT },
                 ),
@@ -199,7 +199,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // 0.15 m/tick pan walks the target ~7 m across the 16 m chunk.
     harness
         .execute(vec![
-            ("press_d", HarnessOp::send_mail(controller.as_str(), &Key { window: TEST_WINDOW_ID, code: KEY_D })),
+            ("press_d", HarnessOp::send_and_settle(controller.as_str(), &Key { window: TEST_WINDOW_ID, code: KEY_D })),
             ("pan", HarnessOp::advance(48)),
         ])
         .expect("hold D + pan");
@@ -212,7 +212,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         .execute(vec![
             (
                 "release_d",
-                HarnessOp::send_mail(controller.as_str(), &KeyRelease { window: TEST_WINDOW_ID, code: KEY_D }),
+                HarnessOp::send_and_settle(controller.as_str(), &KeyRelease { window: TEST_WINDOW_ID, code: KEY_D }),
             ),
             ("idle", HarnessOp::advance(48)),
         ])

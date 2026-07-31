@@ -45,7 +45,7 @@ use aether_test_fixtures_kinds as _;
 fn probe_child_alias<K: Kind>(harness: &mut SubstrateHarness, child_addr: &str, probe: &K) -> ExecutionResult {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match harness.execute(vec![("probe", HarnessOp::send_and_await(child_addr, probe))]) {
+        match harness.execute(vec![("probe", HarnessOp::send_and_await_reply(child_addr, probe))]) {
             Ok(reached) => return reached,
             Err(ExecutionError::OpFailed { error: SubstrateHarnessError::UnknownMailbox(_), .. })
                 if Instant::now() < deadline =>
@@ -96,7 +96,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -113,15 +113,15 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     };
 
     // Bump the *child's* counter to 2 (mail demuxed to the child's alias),
-    // then read it back. `send_mail` is fire-and-settle, so the bumps land
-    // before the query — but the alias itself only resolves once its own
+    // then read it back. `send_and_settle` waits out each bump's whole chain,
+    // so the bumps land before the query — but the alias itself only resolves once its own
     // owner batch applies, which the load reply does not order.
     probe_child_alias(&mut harness, &child_addr, &CountQuery);
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -137,7 +137,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -152,7 +152,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // A 0 here means the child vanished across the reload (its state lost,
     // or it booted fresh) — the regression ADR-0114 §5 closes.
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -201,7 +201,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -224,10 +224,10 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     probe_child_alias(&mut harness, &child_addr, &CountQuery);
     let pre = harness
         .execute(vec![
-            ("tag_report", HarnessOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery)),
-            ("bump_a", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery)),
+            ("tag_report", HarnessOp::send_and_await_reply(parent_addr.as_str(), &TagSpawnQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery)),
         ])
         .expect("tag report + bump + query sequence");
     assert_eq!(
@@ -253,7 +253,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
@@ -265,7 +265,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await(child_addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -318,7 +318,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -346,8 +346,8 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // here would be the leak this verb prevents) and the *parent* answers.
     let post = harness
         .execute(vec![
-            ("despawn", HarnessOp::send_mail::<DespawnChild>(parent_addr.as_str(), &DespawnChild)),
-            ("probe", HarnessOp::send_and_await(child_addr.as_str(), &InlineProbe)),
+            ("despawn", HarnessOp::send_and_settle::<DespawnChild>(parent_addr.as_str(), &DespawnChild)),
+            ("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &InlineProbe)),
         ])
         .expect("despawn + post-teardown probe must settle, not SettlementTimeout");
     assert_eq!(
@@ -392,15 +392,15 @@ fn settled_load_covers_the_inline_child_alias_publication() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // `send_mail` is the settlement-gated op — it blocks on `Settled { root }`
-    // for the whole load chain, where `send_and_await` would resolve on the
+    // `send_and_settle` is the settlement-gated op — it blocks on `Settled { root }`
+    // for the whole load chain, where `send_and_await_reply` would resolve on the
     // `LoadResult` correlation alone. The probe follows in the same sequence,
     // so nothing but the hold orders it against the owner's alias apply.
     let reached = harness
         .execute(vec![
             (
                 "load",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     "aether.component",
                     &LoadComponent {
                         wasm,
@@ -410,7 +410,7 @@ fn settled_load_covers_the_inline_child_alias_publication() {
                     },
                 ),
             ),
-            ("probe", HarnessOp::send_and_await(child_addr.as_str(), &InlineProbe)),
+            ("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &InlineProbe)),
         ])
         .expect("a settled load must leave the inline child addressable");
     assert_eq!(

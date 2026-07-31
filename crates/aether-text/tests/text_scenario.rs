@@ -126,7 +126,7 @@ fn require_wgpu_only() -> bool {
 /// thing that can light a pixel.
 ///
 /// The first `draw` lazily creates the atlas texture (and draws nothing
-/// that turn); `send_and_await` settles that `create_texture` round trip,
+/// that turn); `send_and_await_reply` settles that `create_texture` round trip,
 /// so the texture id is live before the capture's pre-mail `draw`
 /// rasterizes glyphs and emits the quad batch.
 #[test]
@@ -149,7 +149,7 @@ fn text_draws_a_screen_space_string() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -176,7 +176,7 @@ fn text_draws_a_screen_space_string() {
     // this turn.
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &draw)),
+            ("prime", HarnessOp::send_and_settle::<DrawText>("aether.text", &draw)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
@@ -274,7 +274,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -302,7 +302,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
     };
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &prime_draw)),
+            ("prime", HarnessOp::send_and_settle::<DrawText>("aether.text", &prime_draw)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime atlas");
@@ -404,7 +404,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -426,7 +426,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
     };
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &unclipped)),
+            ("prime", HarnessOp::send_and_settle::<DrawText>("aether.text", &unclipped)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
@@ -501,7 +501,7 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     let grabbed = harness
         .execute(vec![(
             "grab",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &FontMetricsRequest {
                     font: FontRef::Path { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
@@ -565,7 +565,7 @@ fn text_screen_origin_shifts_centroid() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -589,7 +589,7 @@ fn text_screen_origin_shifts_centroid() {
     // Prime pass: lazily creates the atlas texture; nothing draws yet.
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &draw_zero)),
+            ("prime", HarnessOp::send_and_settle::<DrawText>("aether.text", &draw_zero)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
@@ -667,7 +667,7 @@ fn text_draws_world_space_label() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFont { namespace: "assets".to_owned(), path: FONT_PATH.to_owned() },
             ),
@@ -719,8 +719,11 @@ fn text_draws_world_space_label() {
     // settle it so subsequent captures can render immediately.
     harness
         .execute(vec![
-            ("cam", HarnessOp::send_mail::<ViewProjection>("aether.render", &ViewProjection { view_proj: vp_near })),
-            ("prime", HarnessOp::send_mail::<DrawText>("aether.text", &draw_dist)),
+            (
+                "cam",
+                HarnessOp::send_and_settle::<ViewProjection>("aether.render", &ViewProjection { view_proj: vp_near }),
+            ),
+            ("prime", HarnessOp::send_and_settle::<DrawText>("aether.text", &draw_dist)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");

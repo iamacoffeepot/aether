@@ -116,7 +116,7 @@ fn create_four_color_texture(harness: &mut SubstrateHarness) -> u32 {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture {
                     width: size,
@@ -152,7 +152,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -185,7 +185,7 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),

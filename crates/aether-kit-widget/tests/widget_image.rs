@@ -49,7 +49,7 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, pixels: V
     let created = harness
         .execute(vec![(
             label,
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels },
             ),
@@ -97,7 +97,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -209,7 +209,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         harness
             .execute(vec![(
                 "reconfigure_fit",
-                HarnessOp::send_mail(&image, &image_config(first_texture_id, fit, WidgetControlState::default())),
+                HarnessOp::send_and_settle(&image, &image_config(first_texture_id, fit, WidgetControlState::default())),
             )])
             .expect("reconfigure image fit");
         let _ = capture(&mut harness, &panel);
@@ -223,7 +223,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         ..image_config(first_texture_id, ImageFit::Natural, WidgetControlState::default())
     };
     harness
-        .execute(vec![("reconfigure_natural", HarnessOp::send_mail(&image, &natural))])
+        .execute(vec![("reconfigure_natural", HarnessOp::send_and_settle(&image, &natural))])
         .expect("configure oversized natural image");
     let _ = capture(&mut harness, &panel);
     assert_image_batch(
@@ -244,7 +244,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
 
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
     harness
-        .execute(vec![("hide", HarnessOp::send_mail(&image, &SetWidgetState { state: hidden }))])
+        .execute(vec![("hide", HarnessOp::send_and_settle(&image, &SetWidgetState { state: hidden }))])
         .expect("hide image");
     let _ = capture(&mut harness, &panel);
     let hidden_snapshot = harness.committed_overlay_snapshot();
@@ -253,7 +253,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     harness
-        .execute(vec![("disable", HarnessOp::send_mail(&image, &SetWidgetState { state: disabled }))])
+        .execute(vec![("disable", HarnessOp::send_and_settle(&image, &SetWidgetState { state: disabled }))])
         .expect("disable image");
     let _ = capture(&mut harness, &panel);
     assert_image_batch(
@@ -282,7 +282,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         state: WidgetControlState::default(),
     };
     harness
-        .execute(vec![("replace", HarnessOp::send_mail(&image, &replacement))])
+        .execute(vec![("replace", HarnessOp::send_and_settle(&image, &replacement))])
         .expect("replace image config in place");
     let _ = capture(&mut harness, &panel);
     let replacement_snapshot = harness.committed_overlay_snapshot();
@@ -308,10 +308,13 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
 
     harness
         .execute(vec![
-            ("destroy_first", HarnessOp::send_mail("aether.render", &DestroyTexture { texture_id: first_texture_id })),
+            (
+                "destroy_first",
+                HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id: first_texture_id }),
+            ),
             (
                 "destroy_second",
-                HarnessOp::send_mail("aether.render", &DestroyTexture { texture_id: second_texture_id }),
+                HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id: second_texture_id }),
             ),
         ])
         .expect("consumer destroys borrowed image textures after the last capture");
