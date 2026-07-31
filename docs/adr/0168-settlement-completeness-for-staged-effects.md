@@ -1,7 +1,8 @@
 # ADR-0168: Settlement Completeness for Staged Effects
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-31
+- **Accepted:** 2026-07-31 — all three requirements implemented: #4200 (requirement 2), #4211 (requirement 1), #4214 (requirement 3).
 - **Last amended:** 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
 
 ## Context
@@ -132,6 +133,29 @@ Requirement 2 landed first, deliberately, as a signature change with no behaviou
 
 What requirement 2 does deliver is narrower and still worth the change: a hold that holds nothing cannot be constructed, since the acquire is `SettlementHold`'s sole constructor and answers `MailId::NONE` with `None`; every carrier's type now states that it may hold nothing; and the author of a *new* staging site meets the question at their own signature rather than inheriting a value that reads like a working hold. The claim to make for this requirement is unrepresentability, not detection.
 
-**There are four rootless `A::wire` sites, not one.** The conforming table named "a chassis-boot birth" as though it were the only place `wire` runs without a chain. The four are `chassis/builder/native_actor_boot.rs`, `chassis/builder/driver.rs`, `actor/native/dispatcher_slot.rs` (`wire_activation`, the known violation), and `actor/native/spawn.rs`. Only the first is chassis boot; the last two are runtime spawns with a real causing chain, and are rootless for the same reason `wire_activation` is. Requirement 1 must thread the causing chain through every entry point that has one, not only the one this ADR originally named.
+**There are four rootless `A::wire` sites, not one.** The conforming table named "a chassis-boot birth" as though it were the only place `wire` runs without a chain. The four are `chassis/builder/native_actor_boot.rs`, `chassis/builder/driver.rs`, `actor/native/dispatcher_slot.rs` (`wire_activation`, the known violation), and `actor/native/spawn.rs`. Requirement 3 therefore covers four sites that must each state their case, not one.
+
+Only `wire_activation` has a causing chain to thread — see the second amendment below, which corrects this paragraph's original claim that two of the others did.
 
 Neither correction changes the decision. Both narrow what the first requirement was claimed to accomplish and widen the surface the second must cover.
+
+## Second amendment (2026-07-31, iamacoffeepot/aether#4207)
+
+Implementing requirement 1 corrected the first amendment's classification of the four rootless `A::wire` sites. The count of four is right; the claim that two of them are runtime spawns carrying a real causing chain is not.
+
+Traced rather than inferred:
+
+| site | reached from | causing chain |
+| --- | --- | --- |
+| `actor/native/dispatcher_slot.rs` (`wire_activation`) | the staged owner path, post-seal | **yes** — the chain that staged the birth |
+| `actor/native/spawn.rs` | `commit_directly`, the **pre-seal** branch of `Spawner::commit`, whose only caller is `SpawnBuilder::finish()` on an embedder thread | no — no dispatch, no mail |
+| `chassis/builder/driver.rs` (`assemble_pumped_slot`) | chassis boot, and an embedder's `boot_pumped_actor` | no |
+| `chassis/builder/native_actor_boot.rs` | chassis boot | no |
+
+Post-seal, `spawn.rs`'s entry point takes `commit_through_owner` and routes to `wire_activation` instead, so the chain-carrying case is already the first row. The live violation count is one, as the requirement-2 inventory recorded.
+
+What the first amendment actually widened is the number of sites that must **declare** their case, which is requirement 3's scope, not requirement 1's. Requirement 1 threads one site; requirement 3 covers all four.
+
+A related correction to requirement 1's framing: staging does not uniformly carry a chain. `HandlerSpawnBuilder::stage_with` receives `completion_root == MailId::NONE` when the calling context is a `host_turn` — the desktop-window case — which is why requirement 3's declaration belongs on the builder rather than being derived unconditionally from a root.
+
+Both of this ADR's amendments correct claims about which code paths carry a chain, asserted without tracing them. The decision has held under implementation; its supporting factual claims needed the implementation to check them.
