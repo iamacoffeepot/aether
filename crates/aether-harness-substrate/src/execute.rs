@@ -23,6 +23,8 @@ use std::collections::HashMap;
 use std::error;
 use std::fmt;
 use std::marker::PhantomData;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use aether_actor::{Addressable, HandlesKind, One};
 use aether_data::{Kind, KindId};
@@ -31,19 +33,64 @@ use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
 
 use super::harness::{SubstrateHarness, SubstrateHarnessError};
 
+/// Wall-clock budget a [`HarnessOp::poll_until`] step gives an
+/// observation before it is called a failure. Generous against the
+/// in-process observations this harness makes — a capability applying a
+/// `MonitorNotice`, a teardown turn retiring an id — under a saturated
+/// `nextest --workspace` run, so a starved-but-healthy substrate that
+/// gets there late still passes while a genuinely broken one still
+/// fails within the bound. Reach for
+/// [`HarnessOp::poll_until_within`] when a test wants a different one.
+pub const DEFAULT_POLL_BUDGET: Duration = Duration::from_secs(10);
+
+/// Pause between [`HarnessOp::poll_until`] probes. Each probe is itself
+/// a full request/reply round trip whose wait already backs off and
+/// yields the CPU, so this only stops a fast in-process reply from
+/// hot-looping the mail queue and starving the very chain being waited
+/// on. Matches the pump's own quiet-poll ceiling.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 /// One atomic step in a [`SubstrateHarness::execute`] sequence. Each variant
 /// resolves via an existing settlement-gated primitive on
 /// [`SubstrateHarness`]; the sequencer waits for the op's causal chain to
 /// drain before proceeding to the next step.
 ///
 /// Build ops with the typed constructors ([`HarnessOp::send_mail`],
-/// [`HarnessOp::send_and_await`], [`HarnessOp::advance`],
-/// [`HarnessOp::capture`]) — they encode the payload from a typed kind
-/// via [`Kind::encode_into_bytes`], so callers never hand-encode.
+/// [`HarnessOp::send_and_await`], [`HarnessOp::poll_until`],
+/// [`HarnessOp::advance`], [`HarnessOp::capture`]) — they encode the
+/// payload from a typed kind via [`Kind::encode_into_bytes`], so callers
+/// never hand-encode.
 ///
 /// Recipients are mailbox *names* (`"aether.fs"`, `"aether.component"`,
 /// a loaded component's trampoline address) — mailbox ids are
 /// one-way name hashes, so every send resolves by name.
+///
+/// # Which wait to reach for
+///
+/// Three ops wait, and they are not interchangeable. Pick by where the
+/// effect being asserted on actually lands:
+///
+/// - **The effect is on the caller's causal chain** — the recipient's
+///   handler does it, or a descendant mail it sent does. Use
+///   [`HarnessOp::send_mail`]: it blocks on `Settled { root }`, so the
+///   handler and every descendant have run by the time the next op
+///   starts (ADR-0080 §6). This is the strongest barrier and the
+///   default; prefer it whenever lineage carries the effect.
+/// - **The effect is genuinely detached** — it lands on a chain the
+///   caller never joins, so nothing here can settle it: a `MonitorNotice`
+///   pruning a parent's view after a child departs (ADR-0079 §8), a slot's
+///   own teardown turn retiring an id. Use [`HarnessOp::poll_until`],
+///   which re-probes to a wall-clock budget and reports the last value it
+///   saw when the observation never holds.
+/// - **A reply correlates the request, and that is all** — use
+///   [`HarnessOp::send_and_await`], and assert only on the reply itself.
+///   It resolves on the matching correlation id and waits for nothing
+///   else, so anything the handler kicked off may still be in flight;
+///   asserting past the reply is asserting on the runner's speed.
+///
+/// What none of them license is an arbitrary sleep or a fixed round-trip
+/// count standing in for an ordering. Both hold only while the box is
+/// fast enough, and both measure the runner rather than the outcome.
 pub enum HarnessOp {
     /// Run `ticks` complete frames. Build with [`HarnessOp::advance`].
     Advance { ticks: u32 },
@@ -69,7 +116,46 @@ pub enum HarnessOp {
     /// pre-mail's geometry must land in the same frame as the
     /// readback.
     CaptureWithMails { pre: Vec<NamedMail>, after: Vec<NamedMail> },
+    /// Re-send a probe mail until its reply satisfies the observation,
+    /// or `budget` elapses. The sanctioned wait for an effect that is
+    /// genuinely off the caller's chain. Build with
+    /// [`HarnessOp::poll_until`] / [`HarnessOp::poll_until_within`] —
+    /// `observe` is opaque, so this variant is not hand-constructible.
+    ///
+    /// The satisfying reply is stored like a [`HarnessOp::SendAndAwait`]
+    /// one, so [`ExecutionResult::reply`] decodes the observation that
+    /// ended the wait rather than a re-read of it.
+    PollUntil {
+        recipient: String,
+        kind: KindId,
+        payload: Vec<u8>,
+        budget: Duration,
+        observed_kind: &'static str,
+        observe: PollObserver,
+    },
 }
+
+/// What one probe reply told a [`HarnessOp::PollUntil`] step.
+enum Observation {
+    /// The predicate held — stop, and keep these bytes as the result.
+    Satisfied,
+    /// Decoded, predicate did not hold. Carries the reply's `Debug`
+    /// image so a timeout can report what was actually last seen
+    /// instead of only that the wait ran out.
+    Pending(String),
+    /// The reply did not decode as the observed kind — the probe is
+    /// answering with something else entirely, which no amount of
+    /// further waiting fixes.
+    Undecodable,
+}
+
+/// The decode-and-test half of a [`HarnessOp::PollUntil`] step, erased
+/// over the observed reply kind so the op stays a single non-generic
+/// variant. Built by [`HarnessOp::poll_until`]; opaque to callers.
+pub struct PollObserver(ObserveFn);
+
+/// The erased decode-and-test closure a [`PollObserver`] wraps.
+type ObserveFn = Box<dyn FnMut(&[u8]) -> Observation>;
 
 /// Typed root-actor sender for declarative harness operations.
 ///
@@ -161,6 +247,85 @@ impl HarnessOp {
     pub fn send_and_await<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
         Self::SendAndAwait { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
+
+    /// Re-send `probe` to `recipient` until its reply satisfies
+    /// `observed`, then store that reply the way
+    /// [`HarnessOp::send_and_await`] would. Waits up to
+    /// [`DEFAULT_POLL_BUDGET`].
+    ///
+    /// Reach for this only in the detached case — an effect that lands
+    /// on a chain the caller never joins, so no settlement here can
+    /// order it (see the rule on [`HarnessOp`]). When lineage does carry
+    /// the effect, [`HarnessOp::send_mail`] is the stronger and cheaper
+    /// barrier.
+    ///
+    /// The budget is wall clock rather than an iteration count, so the
+    /// wait is invariant to how fast the box is: a starved runner takes
+    /// more probes and still passes, and a genuine regression still
+    /// fails within the bound. `observed` is `FnMut`, so a predicate may
+    /// count its own probes or carry state out.
+    ///
+    /// Annotate the closure's parameter to name the reply kind:
+    ///
+    /// ```no_run
+    /// # use aether_harness_substrate::HarnessOp;
+    /// # use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
+    /// # use aether_actor::Addressable;
+    /// # let surviving = aether_window::WindowId(0);
+    /// HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |reply: &ListWindowsResult| {
+    ///     matches!(reply, ListWindowsResult::Ok { windows }
+    ///         if windows.iter().map(|window| window.id).eq([surviving]))
+    /// });
+    /// ```
+    ///
+    /// On timeout the step fails with [`ExecutionError::PollTimeout`],
+    /// which reports the last reply the probe actually got — a red that
+    /// names the state reached, not only that the wait ran out.
+    #[must_use]
+    pub fn poll_until<K, R>(recipient: impl Into<String>, probe: &K, observed: impl FnMut(&R) -> bool + 'static) -> Self
+    where
+        K: Kind,
+        R: Kind + fmt::Debug,
+    {
+        Self::poll_until_within(DEFAULT_POLL_BUDGET, recipient, probe, observed)
+    }
+
+    /// [`HarnessOp::poll_until`] with an explicit wall-clock budget, for
+    /// a test whose observation is known to resolve far inside
+    /// [`DEFAULT_POLL_BUDGET`] or needs longer than it.
+    ///
+    /// One probe always runs before the budget is consulted, so a zero
+    /// budget is a single-shot observation rather than an immediate
+    /// failure.
+    #[must_use]
+    pub fn poll_until_within<K, R>(
+        budget: Duration,
+        recipient: impl Into<String>,
+        probe: &K,
+        mut observed: impl FnMut(&R) -> bool + 'static,
+    ) -> Self
+    where
+        K: Kind,
+        R: Kind + fmt::Debug,
+    {
+        Self::PollUntil {
+            recipient: recipient.into(),
+            kind: K::ID,
+            payload: probe.encode_into_bytes(),
+            budget,
+            observed_kind: R::NAME,
+            observe: PollObserver(Box::new(move |bytes| {
+                let Some(reply) = R::decode_from_bytes(bytes) else {
+                    return Observation::Undecodable;
+                };
+                if observed(&reply) {
+                    Observation::Satisfied
+                } else {
+                    Observation::Pending(format!("{reply:?}"))
+                }
+            })),
+        }
+    }
 }
 
 /// One output per executed op, keyed by the op's label in
@@ -205,8 +370,9 @@ impl ExecutionResult {
         }
     }
 
-    /// Decode the reply from a [`HarnessOp::SendAndAwait`] step as `R`.
-    /// `R` is any reply kind (`LoadResult`, `ReplaceResult`,
+    /// Decode the reply from a [`HarnessOp::SendAndAwait`] step — or the
+    /// satisfying observation from a [`HarnessOp::PollUntil`] step — as
+    /// `R`. `R` is any reply kind (`LoadResult`, `ReplaceResult`,
     /// `WriteResult`, …); the bytes decode through the kind's declared
     /// codec (cast or structured) via `Kind::decode_from_bytes`
     /// (ADR-0100). Errors with [`ExecutionError::NoSuchReply`] if
@@ -244,6 +410,22 @@ pub enum ExecutionError {
     /// [`ExecutionResult::reply`] couldn't decode the stashed reply
     /// bytes as the requested type.
     ReplyDecode { label: String, error: String },
+    /// A [`HarnessOp::PollUntil`] step's observation never held within
+    /// its wall-clock budget. Aborts the sequence.
+    ///
+    /// `observed` is the `Debug` image of the last reply the probe
+    /// actually got, which is the point: a bounded wait that reports
+    /// only "condition not met in 10s" is barely better than the sleep
+    /// it replaced, while one that names the state reached turns the red
+    /// into a diagnosis.
+    PollTimeout {
+        label: String,
+        recipient: String,
+        observed_kind: &'static str,
+        budget: Duration,
+        probes: u32,
+        observed: String,
+    },
 }
 
 impl fmt::Display for ExecutionError {
@@ -260,6 +442,13 @@ impl fmt::Display for ExecutionError {
             }
             Self::ReplyDecode { label, error } => {
                 write!(f, "decode reply for label {label:?}: {error}")
+            }
+            Self::PollTimeout { label, recipient, observed_kind, budget, probes, observed } => {
+                write!(
+                    f,
+                    "execute() step {label:?} polled {recipient:?} for {budget:?} across {probes} probes \
+                     and the observation never held; last {observed_kind} seen: {observed}",
+                )
             }
         }
     }
@@ -288,34 +477,103 @@ impl SubstrateHarness {
             if out.contains(label) {
                 return Err(ExecutionError::DuplicateLabel(label.to_owned()));
             }
-            let result = match op {
-                HarnessOp::Advance { ticks } => self.advance(ticks).map(|_| HarnessOutput::Advanced),
+            let failed = |error| ExecutionError::OpFailed { label: label.to_owned(), error };
+
+            let output = match op {
+                HarnessOp::Advance { ticks } => self.advance(ticks).map(|_| HarnessOutput::Advanced).map_err(failed),
                 HarnessOp::SendMail { recipient, kind, payload } => {
-                    self.send_bytes(&recipient, kind, payload).map(|()| HarnessOutput::Mailed)
+                    self.send_bytes(&recipient, kind, payload).map(|()| HarnessOutput::Mailed).map_err(failed)
                 }
                 HarnessOp::SendAndAwait { recipient, kind, payload } => {
-                    self.send_bytes_and_await(&recipient, kind, payload).map(HarnessOutput::Replied)
+                    self.send_bytes_and_await(&recipient, kind, payload).map(HarnessOutput::Replied).map_err(failed)
                 }
-                HarnessOp::Capture => self.capture().map(HarnessOutput::Captured),
+                HarnessOp::Capture => self.capture().map(HarnessOutput::Captured).map_err(failed),
                 HarnessOp::CaptureWithMails { pre, after } => {
-                    self.capture_with_mails(pre, after).map(HarnessOutput::Captured)
+                    self.capture_with_mails(pre, after).map(HarnessOutput::Captured).map_err(failed)
                 }
-            };
-            match result {
-                Ok(output) => {
-                    out.inner.insert(label.to_owned(), output);
-                }
-                Err(error) => {
-                    return Err(ExecutionError::OpFailed { label: label.to_owned(), error });
-                }
-            }
+                HarnessOp::PollUntil { recipient, kind, payload, budget, observed_kind, observe } => self
+                    .poll_until_observed(
+                        PollStep { label, recipient: &recipient, kind, payload: &payload, budget, observed_kind },
+                        observe,
+                    ),
+            }?;
+
+            out.inner.insert(label.to_owned(), output);
         }
         Ok(out)
     }
+
+    /// Body of the [`HarnessOp::PollUntil`] step: re-send the probe
+    /// until `observe` is satisfied or `budget` elapses.
+    ///
+    /// The probe rides [`Self::send_bytes_and_await`] — the correlation-only
+    /// wait — deliberately. This op exists precisely because the effect
+    /// under observation is not on the probe's chain, so the probe needs
+    /// only to fetch the current answer; what orders the wait is the
+    /// repetition against a wall clock, not any barrier the probe itself
+    /// carries.
+    fn poll_until_observed(
+        &mut self,
+        step: PollStep<'_>,
+        mut observe: PollObserver,
+    ) -> Result<HarnessOutput, ExecutionError> {
+        let PollStep { label, recipient, kind, payload, budget, observed_kind } = step;
+        let start = Instant::now();
+        let mut probes = 0u32;
+
+        loop {
+            let bytes = self
+                .send_bytes_and_await(recipient, kind, payload.to_vec())
+                .map_err(|error| ExecutionError::OpFailed { label: label.to_owned(), error })?;
+            probes = probes.saturating_add(1);
+
+            match (observe.0)(&bytes) {
+                Observation::Satisfied => return Ok(HarnessOutput::Replied(bytes)),
+                Observation::Undecodable => {
+                    return Err(ExecutionError::ReplyDecode {
+                        label: label.to_owned(),
+                        error: format!(
+                            "probe reply from {recipient:?} ({} bytes) does not decode as the observed kind \
+                             {observed_kind}",
+                            bytes.len()
+                        ),
+                    });
+                }
+                // The budget is consulted only here, so the value that
+                // reaches the failure is always the one the last probe
+                // actually saw.
+                Observation::Pending(rendered) if start.elapsed() >= budget => {
+                    return Err(ExecutionError::PollTimeout {
+                        label: label.to_owned(),
+                        recipient: recipient.to_owned(),
+                        observed_kind,
+                        budget,
+                        probes,
+                        observed: rendered,
+                    });
+                }
+                Observation::Pending(_) => thread::sleep(POLL_INTERVAL),
+            }
+        }
+    }
+}
+
+/// The non-closure half of a [`HarnessOp::PollUntil`] step, borrowed out
+/// of the variant for the runner.
+#[derive(Clone, Copy)]
+struct PollStep<'a> {
+    label: &'a str,
+    recipient: &'a str,
+    kind: KindId,
+    payload: &'a [u8],
+    budget: Duration,
+    observed_kind: &'static str,
 }
 
 #[cfg(test)]
 mod tests {
+    use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
+
     use super::*;
 
     /// Cast reply kind with a non-`f32` field — its wire image is the
@@ -339,6 +597,66 @@ mod tests {
         fn encode_into_bytes(&self) -> Vec<u8> {
             bytemuck::bytes_of(self).to_vec()
         }
+    }
+
+    /// `PollUntil` fails with the value its last probe actually saw
+    /// rather than a bare "condition not met" — the property that makes
+    /// the op worth having over the sleep it replaces (issue 4196). The
+    /// predicate never holds, so the run is the timeout path end to end:
+    /// the budget is respected, at least one probe ran, and the recorded
+    /// `ListWindowsResult` — an empty list, since nothing created a
+    /// window — reaches the message.
+    #[test]
+    fn poll_until_timeout_reports_the_last_observed_value() {
+        let mut harness = SubstrateHarness::start().expect("boot harness");
+        let budget = Duration::from_millis(200);
+
+        let never =
+            HarnessOp::poll_until_within(budget, WindowCapability::NAMESPACE, &ListWindows, |_: &ListWindowsResult| {
+                false
+            });
+
+        let Err(error) = harness.execute(vec![("never", never)]) else {
+            panic!("an observation that never holds fails the step");
+        };
+
+        let ExecutionError::PollTimeout { label, probes, observed, .. } = &error else {
+            panic!("expected a poll timeout, got {error}");
+        };
+        assert_eq!(label, "never");
+        assert!(*probes >= 1, "the budget is checked after a probe, so one always runs");
+        assert_eq!(observed, &format!("{:?}", ListWindowsResult::Ok { windows: Vec::new() }));
+        assert!(
+            error.to_string().contains(&format!("{:?}", ListWindowsResult::Ok { windows: Vec::new() })),
+            "the rendered failure must carry the observed value: {error}",
+        );
+    }
+
+    /// `PollUntil` re-probes until the observation holds and then stores
+    /// *that* reply, so `ExecutionResult::reply` decodes the observation
+    /// that ended the wait rather than a stale or re-read one. The
+    /// predicate is satisfied only on its third probe, so a run that
+    /// returned after one — or that dropped the satisfying bytes —
+    /// fails here.
+    #[test]
+    fn poll_until_returns_the_reply_that_satisfied_the_observation() {
+        let mut harness = SubstrateHarness::start().expect("boot harness");
+        let mut seen = 0u32;
+
+        let result = harness
+            .execute(vec![(
+                "settles",
+                HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |_: &ListWindowsResult| {
+                    seen += 1;
+                    seen >= 3
+                }),
+            )])
+            .expect("an observation that comes true inside the budget succeeds");
+
+        assert_eq!(
+            result.reply::<ListWindowsResult>("settles").expect("the satisfying observation is stored"),
+            ListWindowsResult::Ok { windows: Vec::new() },
+        );
     }
 
     /// ADR-0100: the `SendAndAwait` reply accessor decodes the recorded
