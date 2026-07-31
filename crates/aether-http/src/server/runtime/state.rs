@@ -6,6 +6,7 @@ use super::*;
 
 use crate::server::shard::HttpDispatchShard;
 use aether_substrate::Subname;
+use std::collections::hash_map::Entry;
 
 /// One socket retained by the supervisor while its dispatch shards are
 /// `Starting`. It is not charged to `live_connections` until a Live shard
@@ -515,18 +516,19 @@ impl HttpSupervisorState {
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
     pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
-        if !self.monitors.contains_key(&mailbox) {
-            match ctx.monitor(mailbox) {
-                Ok(handle) => {
-                    self.monitors.insert(mailbox, handle);
-                }
-                Err(error) => tracing::warn!(
-                    target: "aether_http::server",
-                    %mailbox,
-                    ?error,
-                    "route holder is not monitorable; its routes cannot be purged when it departs",
-                ),
+        let Entry::Vacant(slot) = self.monitors.entry(mailbox) else {
+            return;
+        };
+        match ctx.monitor(mailbox) {
+            Ok(handle) => {
+                slot.insert(handle);
             }
+            Err(error) => tracing::warn!(
+                target: "aether_http::server",
+                %mailbox,
+                ?error,
+                "route holder is not monitorable; its routes cannot be purged when it departs",
+            ),
         }
     }
 
