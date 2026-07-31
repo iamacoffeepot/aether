@@ -1,7 +1,8 @@
 # ADR-0168: Settlement Completeness for Staged Effects
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-31
+- **Accepted:** 2026-07-31 — all three requirements implemented: #4200 (requirement 2), #4211 (requirement 1), #4214 (requirement 3).
 - **Last amended:** 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
 
 ## Context
