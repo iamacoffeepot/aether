@@ -90,12 +90,13 @@ impl Deref for PooledSlots {
     }
 }
 
+use crate::actor::monitor::{notify_alias_departures, notify_departure};
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, Mail, MailboxId, Source};
+use crate::mail::{MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{
     BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail, time_budget,
@@ -639,6 +640,12 @@ where
 /// the binding's mailer. A free function for the same reason as
 /// [`dispatch_envelope`]: one home, no drift.
 ///
+/// The closing actor's inline-child aliases (ADR-0114 §2) depart with it, so
+/// each of those addresses fans out under its own name too — see
+/// [`notify_alias_departures`]. Only `self_id` is tombstoned: an alias is
+/// served by this slot rather than owning one, and the retired name is the
+/// actor's.
+///
 /// The key release sits between the registry close and the fan-out on
 /// purpose. A watcher that re-stages the dead child's subname the moment its
 /// notice lands then finds the key already free and the id already
@@ -666,12 +673,6 @@ pub fn finalize_close_and_fan_out(
     );
     let watchers = actor_registry.close_actor(self_id);
     binding.release_parent_child_reservation();
-    if !watchers.is_empty() {
-        let notice = aether_kinds::MonitorNotice { target: self_id };
-        let payload = <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(&notice);
-        let kind = KindId(<aether_kinds::MonitorNotice as aether_data::Kind>::ID.0);
-        for watcher in watchers {
-            binding.mailer().push(Mail::new(watcher, kind, payload.clone(), 1));
-        }
-    }
+    notify_departure(binding, self_id, watchers);
+    notify_alias_departures(actor_registry, binding, self_id);
 }
