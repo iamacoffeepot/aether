@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::{ExecutionResult, HarnessOp, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SubstrateHarness};
@@ -95,10 +97,56 @@ fn assert_window_lifecycle(result: &ExecutionResult, first_id: WindowId, second_
     };
     assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [second_id]);
     assert_eq!(windows[0].title, "survivor");
-    assert!(matches!(
-        result.reply::<CreateWindowResult>("retired-name").expect("retired create reply"),
-        CreateWindowResult::Err { error } if error.contains("SubnameRetired")
-    ));
+}
+
+/// A closed window's subname must end up retired: re-creating it answers
+/// `SubnameRetired`, the authoritative reason, rather than handing the name back.
+///
+/// `CloseWindowResult::Ok` leaves the instance's handler before the teardown is
+/// even requested, and the retirement lands much later — on the slot's own
+/// teardown turn, on a chain no caller joins — where
+/// `finalize_close_and_fan_out` tombstones the id and then releases the parent's
+/// live-child key. Both pieces gate the answer: while either is outstanding the
+/// parent still holds the subname locally and refuses with the stale
+/// `SubnameInUse`. Production promises the authoritative reason only to a
+/// watcher acting on the `MonitorNotice` that fan-out sends, and a test cannot
+/// register one, so this polls to a deadline rather than counting round-trips —
+/// the same shape iamacoffeepot/aether#4184 needed for the sibling prune.
+///
+/// Retrying the create is safe because it cannot succeed: retiring an actor
+/// leaves its route in place and tombstones the id instead, so every re-birth at
+/// a lived-in id hits the registry owner's route-conflict arm and the race
+/// decides only which refusal comes back. An `Ok` would mean that invariant
+/// broke, so it fails here instead of being retried away — the loop can never go
+/// green having leaked a live window.
+fn assert_closed_subname_retires(harness: &mut SubstrateHarness) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let reply = harness
+            .execute(vec![(
+                "retired-name",
+                HarnessOp::send_and_await(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
+            )])
+            .expect("retired-subname create settles")
+            .reply::<CreateWindowResult>("retired-name")
+            .expect("retired create reply");
+
+        let error = match reply {
+            CreateWindowResult::Err { error } => error,
+            granted @ CreateWindowResult::Ok { .. } => {
+                panic!("re-creating a closed window's subname must be refused, got {granted:?}")
+            }
+        };
+        if error.contains("SubnameRetired") {
+            return;
+        }
+
+        assert!(error.contains("SubnameInUse"), "unexpected refusal for a closed window's subname: {error}");
+        assert!(
+            Instant::now() < deadline,
+            "the closed window's subname still answers the parent-local SubnameInUse after 5s: {error}",
+        );
+    }
 }
 
 #[test]
@@ -140,14 +188,11 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
                 ),
             ),
             ("remaining", HarnessOp::send_and_await(window_mailbox(), &ListWindows)),
-            (
-                "retired-name",
-                HarnessOp::send_and_await(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
-            ),
         ])
         .expect("synthetic window operations settle");
 
     assert_window_lifecycle(&result, first_id, second_id);
+    assert_closed_subname_retires(&mut harness);
 }
 
 #[test]
