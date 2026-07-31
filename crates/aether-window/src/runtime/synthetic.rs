@@ -347,6 +347,7 @@ impl NativeActor for SyntheticWindowCapability {
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use aether_actor::Addressable;
     use aether_data::Kind;
@@ -563,14 +564,34 @@ mod tests {
             .expect("unexpected child departure settles");
 
         let second = WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "second").0);
-        let ListWindowsResult::Ok { windows } = harness
-            .execute(vec![("listed", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows))])
-            .expect("process child monitor notice")
-            .reply::<ListWindowsResult>("listed")
-            .expect("surviving sibling list reply")
-        else {
-            panic!("synthetic list succeeds");
+
+        // The departure's own chain settles with `RetireWindow`, but the
+        // `MonitorNotice` that prunes the capability's list (ADR-0079 §8)
+        // reaches the parent on a chain the caller never joins — so there is
+        // nothing here to await, only a state to observe becoming true
+        // (iamacoffeepot/aether#4184). A fixed round-trip count stood in for
+        // that wait and held only while the box was fast enough; poll to a
+        // deadline instead, so the test measures the outcome rather than the
+        // runner.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let listed = loop {
+            let ListWindowsResult::Ok { windows } = harness
+                .execute(vec![("listed", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows))])
+                .expect("process child monitor notice")
+                .reply::<ListWindowsResult>("listed")
+                .expect("surviving sibling list reply")
+            else {
+                panic!("synthetic list succeeds");
+            };
+            let ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
+            if ids == [second] {
+                break ids;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the retired child's window is still listed after 5s: {ids:?}, expected only {second:?}"
+            );
         };
-        assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [second]);
+        assert_eq!(listed, [second]);
     }
 }
