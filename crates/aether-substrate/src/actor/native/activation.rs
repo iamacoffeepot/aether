@@ -193,9 +193,16 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         state: A::State,
-        causing_chain: MailId,
     ) -> Self {
-        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, causing_chain }
+        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, causing_chain: MailId::NONE }
+    }
+
+    /// Carry the chain of the work that staged this birth to the activation
+    /// home, so `wire` can attach a birth-completing effect to it (ADR-0168
+    /// §1). Left at [`MailId::NONE`] for a birth no chain caused.
+    pub(super) fn caused_by(mut self, causing_chain: MailId) -> Self {
+        self.causing_chain = causing_chain;
+        self
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer>) -> Self {

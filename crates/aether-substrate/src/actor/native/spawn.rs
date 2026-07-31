@@ -654,8 +654,8 @@ impl Spawner {
             transport,
             slots,
             state,
-            causing_chain,
-        );
+        )
+        .caused_by(causing_chain);
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
             None => activation,
