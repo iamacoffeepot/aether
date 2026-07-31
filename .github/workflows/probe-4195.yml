@@ -1,0 +1,92 @@
+# TEMPORARY diagnostic probe for issue 4195. Not a change to the repo —
+# this workflow exists only on the probe branch, runs only for its own
+# pull request, and is deleted with it. Do not merge.
+name: Probe 4195
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  probe:
+    name: Probe 4195 route purge
+    # Built on the 8 vCPU spot runner so the compile is fast, then the
+    # probe loop itself is pinned to four CPUs with taskset — the vCPU
+    # budget the two captured failing logs ran on. Local repro attempts
+    # could not do this: macOS has no taskset and far more cores.
+    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Clink-arg=-fuse-ld=mold
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      AETHER_REQUIRE_RUNTIME: "1"
+    steps:
+      - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install Linux deps (ALSA for cpal, mold linker)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev mold
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Configure sccache (S3 backend)
+        run: |
+          echo "SCCACHE_BUCKET=$RUNS_ON_S3_BUCKET_CACHE" >> "$GITHUB_ENV"
+          echo "SCCACHE_REGION=$RUNS_ON_AWS_REGION" >> "$GITHUB_ENV"
+          echo "SCCACHE_S3_KEY_PREFIX=cache/sccache" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      # The one wasm the test autoloads. `cargo xtask dist` builds the
+      # whole component inventory; this package is discovered by that same
+      # structural rule and carries no features, so its own invocation is
+      # the identical build with none of the rest.
+      - name: Build the fixture bundle wasm
+        run: cargo build --target wasm32-unknown-unknown -p aether-test-fixtures-bundle
+      - name: Build the http_serving test binary
+        run: cargo test -p aether-http --all-features --test http_serving --no-run
+      - name: Locate the test binary
+        id: bin
+        run: |
+          path=$(cargo test -p aether-http --all-features --test http_serving --no-run \
+            --message-format=json 2>/dev/null \
+            | grep -o '"executable":"[^"]*http_serving[^"]*"' \
+            | tail -1 | cut -d'"' -f4)
+          test -x "$path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+      # Phase 1 is CI's shape: four compile-heavy processes on four CPUs,
+      # the same ratio the failing runs had (the target test plus three
+      # other heavyweight tests co-scheduled).
+      - name: Loop the test at CI's concurrency
+        env:
+          LOGDIR: probe-logs/matched
+          ROUNDS: "20"
+          CONCURRENCY: "4"
+          CPUS: "0-3"
+          BUDGET_SECONDS: "1800"
+        run: bash .github/probe-4195.sh "${{ steps.bin.outputs.path }}"
+      # Phase 2 oversubscribes 2:1 on the same four CPUs. That lengthens
+      # each copy's compile stall and widens the window in which one
+      # copy's activation burst lands inside another's stall — the exact
+      # coincidence the surviving mechanism needs.
+      - name: Loop the test oversubscribed
+        env:
+          LOGDIR: probe-logs/oversubscribed
+          ROUNDS: "15"
+          CONCURRENCY: "8"
+          CPUS: "0-3"
+          BUDGET_SECONDS: "1800"
+        run: bash .github/probe-4195.sh "${{ steps.bin.outputs.path }}"
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: probe-4195-logs
+          path: probe-logs/**
+          if-no-files-found: ignore
+          retention-days: 7
