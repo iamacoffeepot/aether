@@ -182,6 +182,9 @@ impl SpinPark {
         // and its rescan), this guarantees at least one side observes
         // the other.
         fence(Ordering::SeqCst);
+        // #4177 probe (throwaway): record the notifier's vCPU so the
+        // embedder's residency shows up next to the workers'.
+        crate::probe::note_cpu();
         if self.spinning.load(Ordering::Relaxed) != 0 {
             // A spinner is scanning; it will pick the slot up with no
             // futex wake. This is the win.

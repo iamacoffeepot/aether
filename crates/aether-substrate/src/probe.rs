@@ -38,6 +38,64 @@ pub fn set_seal_enabled(v: bool) {
     SEAL_ENABLED.store(v, Relaxed);
 }
 
+/// Current CPU id (Linux `sched_getcpu`; 255 where unavailable).
+#[must_use]
+pub fn current_cpu() -> u8 {
+    #[cfg(target_os = "linux")]
+    {
+        let cpu = unsafe { libc::sched_getcpu() };
+        if cpu < 0 {
+            255
+        } else {
+            cpu.min(254) as u8
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        255
+    }
+}
+
+/// This thread's kernel tid (Linux; 0 elsewhere).
+fn current_tid() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe { libc::syscall(libc::SYS_gettid) as u64 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
+/// Read `voluntary_ctxt_switches` / `nonvoluntary_ctxt_switches` for a tid
+/// from `/proc/self/task/<tid>/status`. `None` off Linux or if the thread
+/// is gone.
+fn ctxt_switches(tid: u64) -> Option<(u64, u64)> {
+    if tid == 0 {
+        return None;
+    }
+    let text = std::fs::read_to_string(format!("/proc/self/task/{tid}/status")).ok()?;
+    let mut vol = None;
+    let mut nonvol = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("voluntary_ctxt_switches:") {
+            vol = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("nonvoluntary_ctxt_switches:") {
+            nonvol = v.trim().parse::<u64>().ok();
+        }
+    }
+    Some((vol?, nonvol?))
+}
+
+/// Process thread count from `/proc/self/status` (0 off Linux).
+fn process_threads() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("Threads:").and_then(|v| v.trim().parse::<u64>().ok())))
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Part {
     pub route_ns: u32,
@@ -71,6 +129,8 @@ struct SlowCycle {
     total_ns: u64,
     n: usize,
     parts: [Part; 16],
+    cpu_start: u8,
+    cpu_end: u8,
 }
 
 #[derive(Default)]
@@ -107,10 +167,18 @@ pub struct Acc {
     recruit_fires: AtomicU64,
     keep_local: AtomicU64,
     spills: AtomicU64,
+    // CPU residency: which vCPU this thread's blob cycles start on (and,
+    // for the embedder, which vCPU its notifies run on).
+    cpu_hist: [AtomicU64; 16],
+    cpu_migrations: AtomicU64,
+    // Last-dumped cumulative context-switch counts, so each dump prints
+    // the per-window delta.
+    vol_last: AtomicU64,
+    nonvol_last: AtomicU64,
 }
 
-fn registry() -> &'static Mutex<Vec<(String, Arc<Acc>)>> {
-    static R: OnceLock<Mutex<Vec<(String, Arc<Acc>)>>> = OnceLock::new();
+fn registry() -> &'static Mutex<Vec<(String, u64, Arc<Acc>)>> {
+    static R: OnceLock<Mutex<Vec<(String, u64, Arc<Acc>)>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -125,7 +193,10 @@ thread_local! {
             .name()
             .map_or_else(|| format!("{:?}", std::thread::current().id()), str::to_owned);
         let acc = Arc::new(Acc::default());
-        registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((name, Arc::clone(&acc)));
+        registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((name, current_tid(), Arc::clone(&acc)));
         acc
     };
 }
@@ -136,7 +207,7 @@ fn with<R>(f: impl FnOnce(&Acc) -> R) -> R {
 }
 
 #[inline]
-pub fn record_cycle(elapsed: Duration, rec: &CycleRec) {
+pub fn record_cycle(elapsed: Duration, rec: &CycleRec, cpu_start: u8, cpu_end: u8) {
     if rec.n == 0 {
         return;
     }
@@ -144,6 +215,10 @@ pub fn record_cycle(elapsed: Duration, rec: &CycleRec) {
     with(|a| {
         a.blob_cycles.fetch_add(1, Relaxed);
         a.blob_cycle_ns.fetch_add(total_ns, Relaxed);
+        a.cpu_hist[usize::from(cpu_start.min(15))].fetch_add(1, Relaxed);
+        if cpu_start != cpu_end {
+            a.cpu_migrations.fetch_add(1, Relaxed);
+        }
         for (i, p) in rec.parts.iter().take(rec.n.min(POSITIONS)).enumerate() {
             a.pos_count[i].fetch_add(1, Relaxed);
             a.pos_route_ns[i].fetch_add(u64::from(p.route_ns), Relaxed);
@@ -160,13 +235,22 @@ pub fn record_cycle(elapsed: Duration, rec: &CycleRec) {
             std::thread::current().name().map_or_else(|| format!("{:?}", std::thread::current().id()), str::to_owned);
         let mut store = slow_store().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if store.len() < SLOW_CAP {
-            store.push(SlowCycle { thread, total_ns, n: rec.n, parts: rec.parts });
+            store.push(SlowCycle { thread, total_ns, n: rec.n, parts: rec.parts, cpu_start, cpu_end });
         } else if let Some(min_idx) = store.iter().enumerate().min_by_key(|(_, s)| s.total_ns).map(|(i, _)| i)
             && store[min_idx].total_ns < total_ns
         {
-            store[min_idx] = SlowCycle { thread, total_ns, n: rec.n, parts: rec.parts };
+            store[min_idx] = SlowCycle { thread, total_ns, n: rec.n, parts: rec.parts, cpu_start, cpu_end };
         }
     }
+}
+
+/// Fold the calling thread's current CPU into its residency histogram —
+/// used by the embedder's per-frame notify so its vCPU shows up next to
+/// the workers'.
+#[inline]
+pub fn note_cpu() {
+    let cpu = current_cpu();
+    with(|a| a.cpu_hist[usize::from(cpu.min(15))].fetch_add(1, Relaxed));
 }
 
 #[inline]
@@ -275,8 +359,9 @@ fn mean(sum: u64, n: u64) -> u64 {
 /// the captured slow cycles, then reset everything. Called at the probe
 /// cell boundaries, so each dump covers exactly one phase.
 pub fn dump(label: &str) {
+    eprintln!("PROBE[{label}] process threads={}", process_threads());
     let reg = registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (name, a) in reg.iter() {
+    for (name, tid, a) in reg.iter() {
         let cycles = a.blob_cycles.load(Relaxed);
         let scheduler_activity = a.own_pops.load(Relaxed)
             + a.injector_steals.load(Relaxed)
@@ -290,6 +375,22 @@ pub fn dump(label: &str) {
         if cycles == 0 && scheduler_activity == 0 {
             continue;
         }
+        // CPU residency histogram + per-window context-switch deltas.
+        let mut cpus = String::new();
+        for c in 0..16 {
+            let n = a.cpu_hist[c].load(Relaxed);
+            if n > 0 {
+                cpus.push_str(&format!(" c{c}={n}"));
+            }
+        }
+        let ctxt = match ctxt_switches(*tid) {
+            Some((vol, nonvol)) => {
+                let dv = vol.saturating_sub(a.vol_last.swap(vol, Relaxed));
+                let dn = nonvol.saturating_sub(a.nonvol_last.swap(nonvol, Relaxed));
+                format!(" ctxt v/nv=+{dv}/+{dn}")
+            }
+            None => String::new(),
+        };
         let mut pos = String::new();
         for i in 0..POSITIONS {
             let n = a.pos_count[i].load(Relaxed);
@@ -308,9 +409,10 @@ pub fn dump(label: &str) {
             ));
         }
         eprintln!(
-            "PROBE[{label}] {name}: blob_cyc={} cyc_ns_me={}{pos} | slots b/o/a/x={}/{}/{}/{} | pops o/i/p={}/{}/{} parks={} wake s/u={}/{} spin={} | ntfy s/u/n={}/{}/{} wkw {}/{} flush={} recruit={} keep/spill={}/{}",
+            "PROBE[{label}] {name}: blob_cyc={} cyc_ns_me={}{pos} | cpu[{cpus} mig={}]{ctxt} | slots b/o/a/x={}/{}/{}/{} | pops o/i/p={}/{}/{} parks={} wake s/u={}/{} spin={} | ntfy s/u/n={}/{}/{} wkw {}/{} flush={} recruit={} keep/spill={}/{}",
             cycles,
             mean(a.blob_cycle_ns.load(Relaxed), cycles),
+            a.cpu_migrations.load(Relaxed),
             a.cyc_blob.load(Relaxed),
             a.cyc_owner.load(Relaxed),
             a.cyc_activation.load(Relaxed),
@@ -363,6 +465,10 @@ pub fn dump(label: &str) {
         a.recruit_fires.store(0, Relaxed);
         a.keep_local.store(0, Relaxed);
         a.spills.store(0, Relaxed);
+        for c in 0..16 {
+            a.cpu_hist[c].store(0, Relaxed);
+        }
+        a.cpu_migrations.store(0, Relaxed);
     }
     drop(reg);
     let mut slow = slow_store().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -385,7 +491,15 @@ pub fn dump(label: &str) {
                 )
             })
             .collect();
-        eprintln!("PROBE[{label}] SLOW {} total={}ns n={} [{}]", s.thread, s.total_ns, s.n, parts.join(", "));
+        eprintln!(
+            "PROBE[{label}] SLOW {} total={}ns n={} cpu={}->{} [{}]",
+            s.thread,
+            s.total_ns,
+            s.n,
+            s.cpu_start,
+            s.cpu_end,
+            parts.join(", ")
+        );
     }
     slow.clear();
 }

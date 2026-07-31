@@ -714,6 +714,7 @@ impl Drainable for BlobWork {
         let received = self.mailer.now_nanos();
         // #4177 probe (throwaway): per-cycle in-order decomposition.
         let probe_start = std::time::Instant::now();
+        let probe_cpu_start = crate::probe::current_cpu();
         let mut probe_rec = crate::probe::CycleRec::default();
         // Drain to cursor exhaustion: a worker that picks up the blob runs
         // it in full, claiming and dispatching every group it wins off the
@@ -733,7 +734,7 @@ impl Drainable for BlobWork {
             self.dispatch_group(group, budget, received, &mut probe_rec);
             self.lifecycle.complete();
         }
-        crate::probe::record_cycle(probe_start.elapsed(), &probe_rec);
+        crate::probe::record_cycle(probe_start.elapsed(), &probe_rec, probe_cpu_start, crate::probe::current_cpu());
         CycleResult::Idle
     }
 
