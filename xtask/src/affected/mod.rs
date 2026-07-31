@@ -24,8 +24,8 @@
 //! integration-test binary nothing links against, so it selects that
 //! package and stops there rather than dragging in a reverse-dependency
 //! closure it cannot reach (#4197). The structural properties that
-//! narrowing rests on are recomputed on every push by [`invariants`]
-//! rather than recorded in a comment (#4215).
+//! narrowing rests on are recomputed on every push by the test-only
+//! `invariants` module rather than recorded in a comment (#4215).
 
 #[cfg(test)]
 mod invariants;
