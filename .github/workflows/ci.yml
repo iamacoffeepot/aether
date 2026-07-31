@@ -252,6 +252,20 @@ jobs:
         id: affected
         if: github.event_name == 'pull_request'
         run: cargo xtask affected --base HEAD^1 --github-output
+      # Issue #4215: xtask's own suite carries the checks that keep the
+      # selection above honest — that a `tests/` tree feeds nothing but
+      # its own test binaries, and that every package resolving a dist
+      # artifact by path is classified as a dist consumer. Those scan the
+      # whole workspace, so a violation is introduced by a PR touching any
+      # crate, while the affected set for such a PR contains that crate
+      # and not xtask. Running them unconditionally is what makes the
+      # guard fire on the PR that breaks a property rather than on the
+      # `main` push after it lands. The step is nearly free here: the
+      # affected step just built xtask, so only its test binary is new.
+      # Skipped when the whole suite runs below, which already covers it.
+      - name: Check affected-selection invariants (PR only)
+        if: github.event_name == 'pull_request' && steps.affected.outputs.run_all == 'false'
+        run: cargo nextest run -p xtask --profile ci
       - name: Pre-build component wasm for scenario tests
         if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true' || steps.affected.outputs.wasm_needed == 'true'
         run: cargo xtask dist
