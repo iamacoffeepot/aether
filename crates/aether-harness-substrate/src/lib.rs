@@ -37,7 +37,9 @@ pub use chassis::{
     CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
 };
-pub use execute::{ExecutionError, ExecutionResult, HarnessActor, HarnessOp, HarnessOutput};
+pub use execute::{
+    DEFAULT_POLL_BUDGET, ExecutionError, ExecutionResult, HarnessActor, HarnessOp, HarnessOutput, PollObserver,
+};
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,
 };

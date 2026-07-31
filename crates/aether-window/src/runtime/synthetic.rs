@@ -347,7 +347,6 @@ impl NativeActor for SyntheticWindowCapability {
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     use aether_actor::Addressable;
     use aether_data::Kind;
@@ -569,29 +568,23 @@ mod tests {
         // `MonitorNotice` that prunes the capability's list (ADR-0079 §8)
         // reaches the parent on a chain the caller never joins — so there is
         // nothing here to await, only a state to observe becoming true
-        // (iamacoffeepot/aether#4184). A fixed round-trip count stood in for
-        // that wait and held only while the box was fast enough; poll to a
-        // deadline instead, so the test measures the outcome rather than the
-        // runner.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let listed = loop {
-            let ListWindowsResult::Ok { windows } = harness
-                .execute(vec![("listed", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows))])
-                .expect("process child monitor notice")
-                .reply::<ListWindowsResult>("listed")
-                .expect("surviving sibling list reply")
-            else {
-                panic!("synthetic list succeeds");
-            };
-            let ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
-            if ids == [second] {
-                break ids;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the retired child's window is still listed after 5s: {ids:?}, expected only {second:?}"
-            );
+        // (iamacoffeepot/aether#4184). That is what `poll_until` is for: a
+        // wall-clock budget rather than a round-trip count, so the test
+        // measures the outcome rather than the runner, and a timeout names
+        // the list it actually last saw.
+        let listed = harness
+            .execute(vec![(
+                "listed",
+                HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |reply: &ListWindowsResult| {
+                    matches!(reply, ListWindowsResult::Ok { windows }
+                        if windows.iter().map(|window| window.id).eq([second]))
+                }),
+            )])
+            .expect("the retired child's window is pruned from the capability's list");
+
+        let Ok(ListWindowsResult::Ok { windows }) = listed.reply::<ListWindowsResult>("listed") else {
+            panic!("synthetic list succeeds");
         };
-        assert_eq!(listed, [second]);
+        assert_eq!(windows.iter().map(|window| window.id).collect::<Vec<_>>(), [second]);
     }
 }

@@ -62,9 +62,49 @@ capture/assert immediately
 descendant work arrives after the assertion
 ```
 
-Do not add arbitrary sleeps. If the chain should cause the observation, preserve
-lineage and let settlement order it. If it is intentionally detached, expose a
-real readiness/result signal.
+## Choosing a wait
+
+Three operations wait, and they are not interchangeable. Pick by where the
+effect being asserted on actually lands.
+
+**The effect is on the caller's chain** — the recipient's handler produces it,
+or a descendant mail it sent does. Use `send_mail`. It blocks on
+`Settled { root }`, so the handler and everything it spawned have run before the
+next step starts. This is the strongest barrier and the right default: whenever
+lineage carries the effect, preserve the lineage and let settlement order it.
+
+**The effect is genuinely detached** — it lands on a chain the caller never
+joins, so no settlement here can order it. A `MonitorNotice` pruning a parent's
+view after a child departs is the canonical case; so is a slot's own teardown
+turn retiring an id. Use `poll_until`, which re-sends a probe mail until its
+reply satisfies an observation or a wall-clock budget elapses:
+
+```rust
+HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |reply: &ListWindowsResult| {
+    matches!(reply, ListWindowsResult::Ok { windows }
+        if windows.iter().map(|window| window.id).eq([surviving]))
+});
+```
+
+The budget is wall clock rather than an iteration count, so a starved runner
+takes more probes and still passes while a real regression still fails inside
+the bound. When the observation never holds, the step fails with the value its
+last probe actually saw — `last aether.window.list_result seen: Ok { windows: [] }` —
+so the red names the state reached rather than only that the wait ran out.
+`poll_until_within` takes an explicit budget; the satisfying reply is stored
+under the step's label, so `ExecutionResult::reply` decodes the observation that
+ended the wait.
+
+**A reply correlates the request, and that is all** — use `send_and_await`, and
+assert only on the reply itself. It resolves on the matching correlation id and
+waits for nothing else, so work the handler kicked off may still be in flight.
+Asserting past that reply is asserting on the runner's speed.
+
+What none of them license is an arbitrary sleep, or an extra round trip added
+until the assertion passes. Both hold only while the box is fast enough, and a
+label like `"process child monitor notice"` on a spare `send_and_await` is the
+tell that a round-trip count is standing in for an ordering the test could not
+express. Reach for `poll_until` there instead.
 
 ## Declarative operation sequences
 
@@ -72,11 +112,17 @@ real readiness/result signal.
 discipline:
 
 - `Advance` drives complete frames;
-- `SendMail` fires typed mail and waits for settlement;
-- `SendAndAwait` stores a typed reply for later decode;
+- `SendMail` fires typed mail and waits for its whole causal chain to settle —
+  the strongest barrier;
+- `SendAndAwait` stores a typed reply for later decode, and waits for nothing
+  beyond that correlation — the weakest;
+- `PollUntil` re-probes to a wall-clock budget for an effect no chain here can
+  settle;
 - `Capture` reads the current frame;
 - `CaptureWithMails` atomically applies pre-mail, captures, and performs
   after-mail cleanup.
+
+The three that wait are covered above under [Choosing a wait](#choosing-a-wait).
 
 `ExecutionResult` retrieves output by label. This is the typed-Rust successor to
 the retired YAML scenario runner: the compiler checks kind construction, while
