@@ -631,9 +631,10 @@ mod tests {
 
         let mut cap = ReplyProbe;
         {
-            // ADR-0112: drive the macro dispatch seam, which carries the
-            // `Manual` ctx — build it via `new_dispatching`, not `new`.
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+            // ADR-0112 / issue 4158: drive the macro dispatch seam, which
+            // carries the `Manual` ctx typed by the dispatching actor — build
+            // it via `new_for_actor`, not the actor-less `new_dispatching`.
+            let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
             let handled = <ReplyProbe as Dispatch<ReplyProbe>>::dispatch(
                 &mut cap,
                 &mut ctx,
@@ -664,7 +665,13 @@ mod tests {
         let id = MailboxId(0x1757_0001);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let env = armed_env(id, MailId::NONE, MailId::NONE, Source::NONE);
-        let mut ctx = NativeCtx::with_inbound(&binding, Source::NONE, MailId::NONE, MailId::NONE, env);
+        let mut ctx = NativeCtx::<'_, crate::Manual, crate::Erased>::with_inbound(
+            &binding,
+            Source::NONE,
+            MailId::NONE,
+            MailId::NONE,
+            env,
+        );
 
         let guard = ctx.take_inbound();
         assert!(
@@ -691,7 +698,8 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let mail_id = MailId::new(id, 7);
         let env = armed_env(id, mail_id, mail_id, Source::NONE);
-        let ctx = NativeCtx::with_inbound(&binding, Source::NONE, mail_id, mail_id, env);
+        let ctx =
+            NativeCtx::<'_, crate::Manual, crate::Erased>::with_inbound(&binding, Source::NONE, mail_id, mail_id, env);
         // Drop the ctx without taking the inbound — the single armed
         // envelope is dropped *inside* the ctx, so its ADR-0094 guard
         // panics rather than leaking.
@@ -731,7 +739,13 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
         let env = armed_env(id, MailId::new(id, 21), root, sender);
-        let mut ctx = NativeCtx::with_inbound(&binding, sender, MailId::new(id, 21), root, env);
+        let mut ctx = NativeCtx::<'_, crate::Manual, crate::Erased>::with_inbound(
+            &binding,
+            sender,
+            MailId::new(id, 21),
+            root,
+            env,
+        );
 
         // Handler defers: retain the guard, then the dispatcher tail
         // observes the inbound was taken (single ownership).

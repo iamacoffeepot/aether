@@ -25,7 +25,7 @@
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
 use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use aether_actor::runtime;
+use aether_actor::{Single, runtime};
 
 pub use std::collections::{HashMap, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -246,7 +246,7 @@ impl NativeActor for HttpServerCapability {
     /// accept sidecar fires this; the handler drains the mpsc and assigns
     /// per item.
     #[handler::single]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
+    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         // One deterministic child per handler turn keeps each birth in its
         // own transactional owner batch. A canonical-name conflict can then

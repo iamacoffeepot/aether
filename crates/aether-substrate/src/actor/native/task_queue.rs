@@ -29,6 +29,8 @@
 
 use std::collections::VecDeque;
 
+use aether_actor::Single;
+
 use crate::actor::native::NativeCtx;
 use aether_data::Kind;
 
@@ -87,7 +89,7 @@ impl TaskQueue {
     /// [`NativeCtx::dispatch_blocking_resumed`] when a slot later frees,
     /// so the deferred dispatch keeps *this* chain held and replies to
     /// *this* caller (iamacoffeepot/aether#1031).
-    pub fn submit<O, F, M>(&mut self, ctx: &mut NativeCtx<'_, M>, work: F)
+    pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, work: F)
     where
         O: Kind + serde::Serialize + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -118,9 +120,11 @@ impl TaskQueue {
     /// completed slot, handing it straight to the next buffered task if
     /// there is one (so `in_flight` is unchanged on a drain) or
     /// decrementing the count when the queue is empty.
-    pub fn on_complete(&mut self, ctx: &mut NativeCtx<'_>) {
+    // The buffered thunks are stored erased (they only re-dispatch, never
+    // spawn), so a typed caller's ctx erases on the way in — issue 4158.
+    pub fn on_complete<A>(&mut self, ctx: &mut NativeCtx<'_, Single, A>) {
         match self.pending.pop_front() {
-            Some(next) => next(ctx),
+            Some(next) => next(ctx.erase()),
             None => self.in_flight = self.in_flight.saturating_sub(1),
         }
     }

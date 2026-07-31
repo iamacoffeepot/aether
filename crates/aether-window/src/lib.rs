@@ -63,7 +63,7 @@ pub struct DesktopWindowCapability;
 
 /// Desktop runtime identity for one named window endpoint.
 #[cfg(feature = "desktop")]
-#[actor(instanced, child_of(WindowCapability), runtime::desktop::instance)]
+#[actor(instanced, child_of(DesktopWindowCapability), runtime::desktop::instance)]
 pub struct DesktopWindowInstance;
 
 /// Deterministic in-memory implementation identity for the `aether.window`
@@ -74,7 +74,7 @@ pub struct SyntheticWindowCapability;
 
 /// Deterministic in-memory runtime identity for one named window endpoint.
 #[cfg(feature = "synthetic")]
-#[actor(instanced, child_of(WindowCapability), runtime::synthetic::instance)]
+#[actor(instanced, child_of(SyntheticWindowCapability), runtime::synthetic::instance)]
 pub struct SyntheticWindowInstance;
 
 trait WindowManagerMailboxForward {

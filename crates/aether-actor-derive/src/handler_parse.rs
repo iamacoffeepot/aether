@@ -157,6 +157,46 @@ pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Re
     Ok(class)
 }
 
+/// The ctx parameter's angle-bracketed **type** arguments in declaration
+/// order, lifetimes skipped: `[]` for `NativeCtx<'_>`, `[Manual]` for
+/// `NativeCtx<'_, Manual>`, `[Manual, Self]` for `NativeCtx<'_, Manual, Self>`.
+/// `None` when the second parameter is not a reference to a path type at all —
+/// each caller phrases that failure in its own vocabulary.
+fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
+    let FnArg::Typed(pt) = sig.inputs.get(1)? else {
+        return None;
+    };
+    // Peel the leading `&mut` / `&` off the ctx reference, then read the
+    // last path segment — the ctx type itself (`WasmCtx` / `NativeCtx`).
+    let Type::Reference(ctx_ref) = &*pt.ty else {
+        return None;
+    };
+    let Type::Path(ctx_path) = &*ctx_ref.elem else {
+        return None;
+    };
+    let PathArguments::AngleBracketed(args) = &ctx_path.path.segments.last()?.arguments else {
+        return Some(Vec::new());
+    };
+    Some(
+        args.args
+            .iter()
+            .filter_map(|a| match a {
+                GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Issue 4158: whether a native handler's ctx signature names the actor it
+/// dispatches for — the *second* type argument, as in
+/// `NativeCtx<'_, Manual, Self>`. Only a handler that asks receives the typed
+/// ctx `spawn_child` lives on; every other arm is handed an `erase()`d view,
+/// so a spawn cannot name a parent other than the actor being dispatched.
+pub fn ctx_names_actor(sig: &Signature) -> bool {
+    ctx_type_args(sig).is_some_and(|args| args.len() >= 2)
+}
+
 /// Extract the element kind `K` from a `#[handler::multi]` method's ctx
 /// parameter (ADR-0134). The ctx is the second parameter and must be
 /// `ctx: &mut WasmCtx<'_, Multi<K>>` (wasm) or
@@ -177,31 +217,11 @@ fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
         )
     }
     let ctx_param = sig.inputs.get(1).ok_or_else(|| shape_err(sig))?;
-    let FnArg::Typed(pt) = ctx_param else {
-        return Err(shape_err(ctx_param));
-    };
-    // Peel the leading `&mut` / `&` off the ctx reference.
-    let Type::Reference(ctx_ref) = &*pt.ty else {
-        return Err(shape_err(&*pt.ty));
-    };
-    let Type::Path(ctx_path) = &*ctx_ref.elem else {
-        return Err(shape_err(&*pt.ty));
-    };
-    // The last segment is the ctx type (`WasmCtx` / `NativeCtx`); its final
-    // angle-bracketed type argument is the `Multi<K>` marker.
-    let ctx_seg = ctx_path.path.segments.last().ok_or_else(|| shape_err(&*pt.ty))?;
-    let PathArguments::AngleBracketed(ctx_args) = &ctx_seg.arguments else {
-        return Err(shape_err(&*pt.ty));
-    };
-    let marker_ty = ctx_args
-        .args
-        .iter()
-        .filter_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-        .next_back()
-        .ok_or_else(|| shape_err(&*pt.ty))?;
+    // The reply mode is the ctx's *first* type argument; an optional second
+    // one names the actor (`NativeCtx<'_, Multi<K>, Self>`, issue 4158), so
+    // reading positionally is what keeps the two apart.
+    let marker_ty =
+        *ctx_type_args(sig).ok_or_else(|| shape_err(ctx_param))?.first().ok_or_else(|| shape_err(ctx_param))?;
     let Type::Path(marker_path) = marker_ty else {
         return Err(shape_err(marker_ty));
     };

@@ -82,7 +82,7 @@ pub mod task_queue;
 
 pub use crate::mail::registry::effect::{RegistryBatch, RegistryBatchError, RegistryBatchResult};
 pub use binding::NativeBinding;
-pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
+pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
 pub use dispatch_blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use envelope::Envelope;
 pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
@@ -117,15 +117,28 @@ pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapabil
 pub trait Dispatch<S> {
     // ADR-0112: the dispatch seam carries the most-permissive `Manual` ctx so a
     // `#[handler::manual]` arm reaches the reply surface; the macro downgrades
-    // to `Single` per single-class handler.
+    // to `Single` per single-class handler. Issue 4158: it is also typed by
+    // `Self`, the actor being dispatched, so a handler that opts into the typed
+    // form parents its children under the actor the runtime is actually
+    // running; each arm `erase()`s for a handler whose signature names no actor.
     /// Route one inbound envelope to the matching `#[handler]` over the state.
     /// `Some(())` on a handled kind + decode success, `None` otherwise.
-    fn dispatch(state: &mut S, ctx: &mut NativeCtx<'_, crate::Manual>, kind: KindId, payload: &[u8]) -> Option<()>;
+    fn dispatch(
+        state: &mut S,
+        ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+        kind: KindId,
+        payload: &[u8],
+    ) -> Option<()>
+    where
+        Self: Sized;
 
     /// Catch-all for envelopes no `#[handler]` matched (issue 576). Default
     /// returns `false` so the trampoline warn-logs the miss; the macro
     /// overrides it when a `#[fallback]` is present.
-    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, crate::Manual>, _envelope: &Envelope) -> bool {
+    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, crate::Manual, Self>, _envelope: &Envelope) -> bool
+    where
+        Self: Sized,
+    {
         false
     }
 

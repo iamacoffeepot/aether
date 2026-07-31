@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use aether_actor::runtime;
+use aether_actor::{Single, runtime};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::spawn::Subname;
@@ -208,7 +208,7 @@ impl NativeActor for GameGatewayCapability {
     }
 
     #[handler::single]
-    fn on_session_data(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SessionData) {
+    fn on_session_data(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, mail: SessionData) {
         if !state.is_trusted_tcp_session(ctx, &mail.session_name) {
             tracing::warn!(
                 target: "aether_game",
@@ -247,7 +247,7 @@ impl NativeActor for GameGatewayCapability {
         let session_name = mail.session_name.clone();
         let session = PlayerSessionContext { session_name: session_name.clone(), peer: mail.peer.clone() };
         let receipt = match ctx
-            .spawn_child::<GameGatewayCapability, PlayerSessionActor>(
+            .spawn_child::<PlayerSessionActor>(
                 Subname::Named(&session_name),
                 PlayerSessionConfig {
                     listener_name: state.listener_name.clone(),
@@ -398,7 +398,7 @@ impl GameGatewayState {
         ctx.actor::<TcpCapability>().session_close(&self.listener_name, &session.session_name);
     }
 
-    fn is_trusted_tcp_session(&self, ctx: &NativeCtx<'_>, session_name: &str) -> bool {
+    fn is_trusted_tcp_session<A>(&self, ctx: &NativeCtx<'_, Single, A>, session_name: &str) -> bool {
         let session =
             ctx.actor::<TcpCapability>().session::<TcpSessionActor>(&self.listener_name, session_name).mailbox_id();
         ctx.source_mailbox() == Some(session)

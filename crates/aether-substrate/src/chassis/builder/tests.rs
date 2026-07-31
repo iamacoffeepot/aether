@@ -99,7 +99,7 @@ macro_rules! close_observed_actor {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 _state: &mut Self,
-                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
                 _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -124,7 +124,7 @@ macro_rules! shutdown_dispatch {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 _state: &mut Self,
-                ctx: &mut NativeCtx<'_, crate::Manual>,
+                ctx: &mut NativeCtx<'_, crate::Manual, Self>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -201,7 +201,7 @@ impl NativeActor for StubLog {
 impl Dispatch<Self> for StubLog {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, crate::Manual>,
+        _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
@@ -341,7 +341,7 @@ mod seal {
     impl Dispatch<Self> for Spawned {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -445,7 +445,7 @@ mod seal {
         impl Dispatch<Self> for Pumped {
             fn dispatch(
                 state: &mut Self,
-                _ctx: &mut NativeCtx<'_, crate::Manual>,
+                _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -587,7 +587,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
     impl Dispatch<Self> for InitTripwireCap {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -796,7 +796,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
     impl Dispatch<Self> for FailingCap {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -911,7 +911,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     impl Dispatch<Self> for ProbeCap {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -1022,7 +1022,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     impl Dispatch<Self> for LocalProbe {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -1116,7 +1116,7 @@ fn ctx_spawn_child_routes_through_handler() {
     impl Dispatch<Self> for ChildCap {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -1160,7 +1160,7 @@ fn ctx_spawn_child_routes_through_handler() {
     impl Dispatch<Self> for ParentCap {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -1168,11 +1168,7 @@ fn ctx_spawn_child_routes_through_handler() {
                 let hatch = Hatch::decode_from_bytes(payload)?;
                 if hatch.tag == 2 {
                     let receipt = ctx
-                        .spawn_child::<Self, ChildCap>(
-                            Subname::Named("conflict"),
-                            (),
-                            Arc::clone(&state.child_received),
-                        )
+                        .spawn_child::<ChildCap>(Subname::Named("conflict"), (), Arc::clone(&state.child_received))
                         .stage()
                         .expect("the conflict is authoritative owner state, not a local preparation failure");
                     let _ =
@@ -1180,7 +1176,7 @@ fn ctx_spawn_child_routes_through_handler() {
                     return Some(());
                 }
                 let receipt = ctx
-                    .spawn_child::<Self, ChildCap>(Subname::Counter, (), Arc::clone(&state.child_received))
+                    .spawn_child::<ChildCap>(Subname::Counter, (), Arc::clone(&state.child_received))
                     .after_init(Ping { tag: 42 })
                     .stage()
                     .expect("spawn_child local preparation must succeed");
@@ -1189,7 +1185,7 @@ fn ctx_spawn_child_routes_through_handler() {
                     "staging performs no global route write before handler flush"
                 );
                 let duplicate = ctx
-                    .spawn_child::<Self, ChildCap>(Subname::Named("0"), (), Arc::clone(&state.child_received))
+                    .spawn_child::<ChildCap>(Subname::Named("0"), (), Arc::clone(&state.child_received))
                     .stage()
                     .expect_err("the parent-local staged key rejects a duplicate synchronously");
                 assert!(matches!(duplicate, crate::SpawnError::SubnameInUse { .. }));
@@ -1226,7 +1222,7 @@ fn ctx_spawn_child_routes_through_handler() {
         .expect("ParentCap boots");
 
     // Push Hatch at the parent's mailbox; the parent's handler
-    // calls `ctx.spawn_child::<ParentCap, ChildCap>` which in turn pushes a
+    // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
     // Ping at the new child via the after_init bootstrap.
     let parent_id = registry.lookup(<ParentCap as Addressable>::NAMESPACE).expect("ParentCap claimed");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
@@ -1326,7 +1322,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     impl Dispatch<Self> for FailingChild {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -1362,7 +1358,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     impl Dispatch<Self> for ParentCap {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -1372,7 +1368,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
             let _ = Hatch::decode_from_bytes(payload)?;
             for _ in 0..2 {
                 let error = ctx
-                    .spawn_child::<Self, FailingChild>(Subname::Named("retry"), (), Arc::clone(&state.attempts))
+                    .spawn_child::<FailingChild>(Subname::Named("retry"), (), Arc::clone(&state.attempts))
                     .stage()
                     .expect_err("the child fixture always fails initialization");
                 assert!(matches!(error, SpawnError::InitFailed(_)));
@@ -1412,7 +1408,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
 }
 
 #[test]
-fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
+fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration() {
     use crate::actor::native::spawn::{SpawnError, Subname};
     use crate::mail::registry::MailboxEntry;
     use aether_data::Kind;
@@ -1420,18 +1416,12 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
 
     pod_kind!(Hatch { tag: u32 }, "test.checked_spawn.hatch", 0x4058_0000_0000_0001);
 
-    struct DeclaredParent;
-    impl Addressable for DeclaredParent {
-        const NAMESPACE: &'static str = "test.checked_spawn.declared";
-        type Resolver = aether_actor::One;
-    }
-
     struct Child;
     impl Addressable for Child {
         const NAMESPACE: &'static str = "test.checked_spawn.child";
         type Resolver = aether_actor::Many;
     }
-    impl ChildOf<DeclaredParent> for Child {}
+    impl ChildOf<ActualParent> for Child {}
     impl aether_actor::Lifecycle<Self> for Child {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -1450,7 +1440,7 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     impl Dispatch<Self> for Child {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -1460,7 +1450,6 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
 
     struct ActualParent {
         init_count: Arc<AtomicU32>,
-        mismatch_observed: Arc<AtomicBool>,
         invalid_subname_observed: Arc<AtomicBool>,
     }
     impl Addressable for ActualParent {
@@ -1471,17 +1460,17 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     impl HandlesKind<Hatch> for ActualParent {}
     impl aether_actor::Lifecycle<Self> for ActualParent {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<AtomicBool>, Arc<AtomicBool>);
+        type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
 
         fn init(
             (): (),
-            (init_count, mismatch_observed, invalid_subname_observed): Self::Params,
+            (init_count, invalid_subname_observed): Self::Params,
             _ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
-            Ok(Self { init_count, mismatch_observed, invalid_subname_observed })
+            Ok(Self { init_count, invalid_subname_observed })
         }
     }
     impl NativeActor for ActualParent {
@@ -1490,38 +1479,20 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     impl Dispatch<Self> for ActualParent {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
             if kind.0 != Hatch::ID.0 {
                 return None;
             }
-            let mail = Hatch::decode_from_bytes(payload)?;
-            if mail.tag == 2 {
-                let error = ctx
-                    .spawn_child::<DeclaredParent, Child>(
-                        Subname::Named("invalid:name"),
-                        (),
-                        Arc::clone(&state.init_count),
-                    )
-                    .stage()
-                    .expect_err("the invalid subname must be rejected");
-                if matches!(error, SpawnError::SubnameInvalid(_)) {
-                    state.invalid_subname_observed.store(true, AtomicOrdering::SeqCst);
-                }
-                return Some(());
-            }
+            let _ = Hatch::decode_from_bytes(payload)?;
             let error = ctx
-                .spawn_child::<DeclaredParent, Child>(Subname::Counter, (), Arc::clone(&state.init_count))
+                .spawn_child::<Child>(Subname::Named("invalid:name"), (), Arc::clone(&state.init_count))
                 .stage()
-                .expect_err("the executing binding is not DeclaredParent");
-            if let SpawnError::ParentTypeMismatch { declared_namespace, actual_logical, actual_canonical_name } = error
-                && declared_namespace == DeclaredParent::NAMESPACE
-                && actual_logical == aether_data::ActorId::singleton(Self::NAMESPACE)
-                && &*actual_canonical_name == Self::NAMESPACE
-            {
-                state.mismatch_observed.store(true, AtomicOrdering::SeqCst);
+                .expect_err("the invalid subname must be rejected");
+            if matches!(error, SpawnError::SubnameInvalid(_)) {
+                state.invalid_subname_observed.store(true, AtomicOrdering::SeqCst);
             }
             Some(())
         }
@@ -1529,14 +1500,9 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
 
     let (registry, mailer) = bare_substrate();
     let init_count = Arc::new(AtomicU32::new(0));
-    let mismatch_observed = Arc::new(AtomicBool::new(false));
     let invalid_subname_observed = Arc::new(AtomicBool::new(false));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<ActualParent>((
-            Arc::clone(&init_count),
-            Arc::clone(&mismatch_observed),
-            Arc::clone(&invalid_subname_observed),
-        ))
+        .with_actor::<ActualParent>((Arc::clone(&init_count), Arc::clone(&invalid_subname_observed)))
         .build_passive()
         .expect("ActualParent boots");
 
@@ -1548,160 +1514,29 @@ fn ctx_spawn_child_rejects_a_false_parent_before_child_init_or_registration() {
     handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
-    while !mismatch_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(mismatch_observed.load(AtomicOrdering::SeqCst), "mismatch facts should name both parent identities");
-    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "a false parent must not construct or init the child");
-    assert_eq!(chassis.booted.spawner.next_counter(), 0, "a false parent must be rejected before allocating a counter");
-    assert!(
-        chassis.actor_registry().namespace_owner(Child::NAMESPACE).is_none(),
-        "a false parent must be rejected before claiming the child namespace",
-    );
-    assert!(
-        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:0").is_none(),
-        "a false parent must not mutate the mailbox registry",
-    );
-
-    let bytes = (Hatch { tag: 2 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
-    let deadline = Instant::now() + Duration::from_millis(500);
     while !invalid_subname_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        invalid_subname_observed.load(AtomicOrdering::SeqCst),
-        "named subname validation must precede runtime parent comparison",
+
+    // Tripwire: `HandlerSpawnBuilder::stage` validates the named subname
+    // *first*, before anything the birth cannot cheaply undo. Every assertion
+    // below names one such effect, so moving the check later — behind
+    // `A::init`, the counter, the namespace claim, or the registry write —
+    // fails here rather than leaking a half-born actor on a typo.
+    assert!(invalid_subname_observed.load(AtomicOrdering::SeqCst), "an invalid named subname must be rejected locally");
+    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "an invalid subname must not construct or init the child");
+    assert_eq!(
+        chassis.booted.spawner.next_counter(),
+        0,
+        "an invalid subname must be rejected before allocating a counter"
     );
-    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 0, "invalid subname and false parent must not init the child");
-
-    drop(chassis);
-}
-
-#[test]
-fn ctx_spawn_child_accepts_a_distinct_parent_type_with_the_same_logical_namespace() {
-    use crate::actor::native::spawn::Subname;
-    use crate::mail::registry::MailboxEntry;
-    use aether_data::Kind;
-    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-
-    pod_kind!(Hatch { tag: u32 }, "test.shared_parent.hatch", 0x4058_0000_0000_0002);
-
-    struct DeclaredParent;
-    impl Addressable for DeclaredParent {
-        const NAMESPACE: &'static str = "test.shared_parent";
-        type Resolver = aether_actor::One;
-    }
-
-    struct OtherPermittedParent;
-    impl Addressable for OtherPermittedParent {
-        const NAMESPACE: &'static str = "test.other_permitted_parent";
-        type Resolver = aether_actor::One;
-    }
-
-    struct Child;
-    impl Addressable for Child {
-        const NAMESPACE: &'static str = "test.shared_parent.child";
-        type Resolver = aether_actor::Many;
-    }
-    impl ChildOf<DeclaredParent> for Child {}
-    impl ChildOf<OtherPermittedParent> for Child {}
-    impl aether_actor::Lifecycle<Self> for Child {
-        type Config = ();
-        type Params = Arc<AtomicU32>;
-        type InitError = BootError;
-        type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
-
-        fn init((): (), init_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            init_count.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(Self)
-        }
-    }
-    impl NativeActor for Child {
-        type State = Self;
-    }
-    impl Dispatch<Self> for Child {
-        fn dispatch(
-            _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
-            _kind: KindId,
-            _payload: &[u8],
-        ) -> Option<()> {
-            None
-        }
-    }
-
-    struct RuntimeParent {
-        init_count: Arc<AtomicU32>,
-    }
-    impl Addressable for RuntimeParent {
-        const NAMESPACE: &'static str = DeclaredParent::NAMESPACE;
-        type Resolver = aether_actor::One;
-    }
-    impl aether_actor::Root for RuntimeParent {}
-    impl HandlesKind<Hatch> for RuntimeParent {}
-    impl aether_actor::Lifecycle<Self> for RuntimeParent {
-        type Config = ();
-        type Params = Arc<AtomicU32>;
-        type InitError = BootError;
-        type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
-
-        fn init((): (), init_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { init_count })
-        }
-    }
-    impl NativeActor for RuntimeParent {
-        type State = Self;
-    }
-    impl Dispatch<Self> for RuntimeParent {
-        fn dispatch(
-            state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
-            kind: KindId,
-            payload: &[u8],
-        ) -> Option<()> {
-            if kind.0 != Hatch::ID.0 {
-                return None;
-            }
-            let _ = Hatch::decode_from_bytes(payload)?;
-            ctx.spawn_child::<DeclaredParent, Child>(Subname::Named("accepted"), (), Arc::clone(&state.init_count))
-                .stage()
-                .expect("logical namespace equality, not Rust type identity, authorizes the parent");
-            Some(())
-        }
-    }
-
-    fn assert_permitted<P: Addressable, C: ChildOf<P>>() {}
-    assert_permitted::<DeclaredParent, Child>();
-    assert_permitted::<OtherPermittedParent, Child>();
-
-    let (registry, mailer) = bare_substrate();
-    let init_count = Arc::new(AtomicU32::new(0));
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<RuntimeParent>(Arc::clone(&init_count))
-        .build_passive()
-        .expect("RuntimeParent boots");
-
-    let parent_id = registry.lookup(RuntimeParent::NAMESPACE).expect("RuntimeParent claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("parent sink") else {
-        panic!("expected parent inbox");
-    };
-    let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
-
-    // The staged birth's route lands when the owner applies it, so wait on
-    // the authoritative registration rather than on the handler-local `init`.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while registry.lookup("test.shared_parent/test.shared_parent.child:accepted").is_none() && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert_eq!(init_count.load(AtomicOrdering::SeqCst), 1);
     assert!(
-        registry.lookup("test.shared_parent/test.shared_parent.child:accepted").is_some(),
-        "the canonical child name must derive from the captured runtime parent identity",
+        chassis.actor_registry().namespace_owner(Child::NAMESPACE).is_none(),
+        "an invalid subname must be rejected before claiming the child namespace",
+    );
+    assert!(
+        registry.lookup("test.checked_spawn.actual/test.checked_spawn.child:invalid:name").is_none(),
+        "an invalid subname must not mutate the mailbox registry",
     );
 
     drop(chassis);
@@ -1825,7 +1660,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     impl Dispatch<Self> for SpawnCostProbe {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2068,7 +1903,7 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
     impl Dispatch<Self> for Exploder {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -2159,7 +1994,7 @@ fn resolve_actor_returns_none_on_type_mismatch() {
     impl Dispatch<Self> for Foo {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -2188,7 +2023,7 @@ fn resolve_actor_returns_none_on_type_mismatch() {
     impl Dispatch<Self> for Bar {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -2275,7 +2110,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     impl Dispatch<Self> for Watcher {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2423,7 +2258,7 @@ fn watcher_close_prunes_targets_forward_index() {
     impl Dispatch<Self> for Target {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -2461,7 +2296,7 @@ fn watcher_close_prunes_targets_forward_index() {
     impl Dispatch<Self> for Watcher {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2595,7 +2430,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     impl Dispatch<Self> for Member {
         fn dispatch(
             _state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2671,7 +2506,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
 }
 
 /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
-/// `ctx.spawn_child::<Parent, Grandchild>(...)` to launch an instanced
+/// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
 /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
 /// every spawned actor's transport precisely so this works; this
 /// test is the first end-to-end coverage of the instanced→instanced
@@ -2728,7 +2563,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Grandchild {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2773,7 +2608,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Parent {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2784,7 +2619,7 @@ fn instanced_can_spawn_grandchild() {
                 // first envelope dispatches without an external
                 // mail step.
                 let receipt = ctx
-                    .spawn_child::<Self, Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
+                    .spawn_child::<Grandchild>(Subname::Named("only"), (), Arc::clone(&state.grandchild_received))
                     .after_init(Ping { tag: 0xCAFE })
                     .stage()
                     .expect("recursive spawn must succeed");
@@ -2963,7 +2798,7 @@ fn spawn_actor_runs_wire_once_after_init() {
     impl Dispatch<Self> for WireSpawnProbe {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -3015,7 +2850,7 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
     impl Dispatch<Self> for NamedReturn {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -3076,7 +2911,7 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
     impl Dispatch<Self> for WireProbe {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -3135,7 +2970,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     impl Dispatch<Self> for Pinger {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -3168,7 +3003,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     impl Dispatch<Self> for Ponger {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

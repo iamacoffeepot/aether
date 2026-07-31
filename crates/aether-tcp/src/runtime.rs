@@ -120,7 +120,7 @@ pub enum TcpSpawnContext {
     Listener { addr: String, listener_name: String, local_port: u16 },
 }
 
-fn reply_to_pending_connect(ctx: &mut NativeCtx<'_, Manual>, owed: DeferredReply, result: &ConnectResult) {
+fn reply_to_pending_connect<A>(ctx: &mut NativeCtx<'_, Manual, A>, owed: DeferredReply, result: &ConnectResult) {
     owed.reply(ctx, result);
 }
 
@@ -206,7 +206,7 @@ impl NativeActor for TcpCapability {
     /// connected stream. The task completion sends each parked
     /// `ConnectResult` only after authoritative activation.
     #[handler::manual]
-    fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: ConnectReady) {
+    fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, _mail: ConnectReady) {
         while let Ok((id, result)) = state.connect_rx.try_recv() {
             let Some(PendingConnect { owed, addr, name, consumer }) = state.pending_connects.remove(&id) else {
                 continue;
@@ -228,7 +228,7 @@ impl NativeActor for TcpCapability {
                         }
                     };
                     match ctx
-                        .spawn_child::<TcpCapability, TcpSessionActor>(
+                        .spawn_child::<TcpSessionActor>(
                             Subname::Named(&session_name),
                             TcpSessionConfig {
                                 stream: Some(stream),
@@ -274,7 +274,7 @@ impl NativeActor for TcpCapability {
     /// Reply: `BindListenerResult`. `Ok` on successful bind +
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
     #[handler::manual]
-    fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: BindListener) {
+    fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, mail: BindListener) {
         let listener = match TcpListener::bind(&mail.addr) {
             Ok(l) => l,
             Err(e) => {
@@ -294,7 +294,7 @@ impl NativeActor for TcpCapability {
         let owed = ctx.defer_reply_to(ctx.reply_target());
 
         if let Err((error, owed)) = ctx
-            .spawn_child::<TcpCapability, TcpListenerActor>(
+            .spawn_child::<TcpListenerActor>(
                 Subname::Named(&subname_str),
                 TcpListenerConfig {
                     listener: Some(listener),

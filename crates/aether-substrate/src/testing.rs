@@ -186,9 +186,9 @@ where
         }
     };
     // ADR-0112: route through the macro dispatch seam, which carries the
-    // `Manual` ctx — build it via `new_dispatching`, not `new`.
-    let mut ctx =
-        NativeCtx::new_dispatching(binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+    // `Manual` ctx. Issue 4158: that seam is also typed by the actor, so build
+    // it via `new_for_actor` — `new_dispatching` names none.
+    let mut ctx = NativeCtx::new_for_actor(binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
     A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }

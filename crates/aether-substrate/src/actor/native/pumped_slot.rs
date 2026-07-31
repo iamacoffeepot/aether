@@ -26,6 +26,7 @@
 use core::marker::PhantomData;
 use std::sync::Arc;
 
+use aether_actor::Single;
 use aether_actor::local::ActorSlots;
 
 use crate::actor::native::NativeActor;
@@ -118,12 +119,14 @@ where
     ///
     /// Returns `None` without invoking `turn` once [`Self::shutdown`] has
     /// consumed the actor.
-    pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_>) -> R) -> Option<R> {
+    // Issue 4158: the ctx is typed by `A`, so a host turn can stage a child
+    // under the pumped actor — the desktop window cap's create path does.
+    pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, Single, A>) -> R) -> Option<R> {
         let actor = self.actor.as_deref_mut()?;
         let binding = &self.binding;
         let slots = &self.slots;
         Some(local::with_stamped(slots, || {
-            let mut ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::<'_, Single, A>::new_for_actor(binding, Source::NONE, MailId::NONE, MailId::NONE);
             turn(actor, &mut ctx)
         }))
     }

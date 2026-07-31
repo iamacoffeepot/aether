@@ -174,7 +174,10 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
 
     fn drain_and_take_work(
         &mut self,
-        host_turn: impl FnOnce(&mut DesktopWindowCapabilityState, &mut aether_substrate::NativeCtx<'_>),
+        host_turn: impl FnOnce(
+            &mut DesktopWindowCapabilityState,
+            &mut aether_substrate::NativeCtx<'_, aether_actor::Single, DesktopWindowCapability>,
+        ),
     ) -> (Vec<WindowHostAction>, Vec<WindowHostEffect>) {
         self.window_slot.drain_available();
         self.window_slot
@@ -190,7 +193,10 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         event_loop: &ActiveEventLoop,
         request_shutdown: bool,
         flush_frame: bool,
-        host_turn: impl FnOnce(&mut DesktopWindowCapabilityState, &mut aether_substrate::NativeCtx<'_>),
+        host_turn: impl FnOnce(
+            &mut DesktopWindowCapabilityState,
+            &mut aether_substrate::NativeCtx<'_, aether_actor::Single, DesktopWindowCapability>,
+        ),
     ) {
         self.integration.drain_available();
         let (actions, effects) = self.drain_and_take_work(host_turn);

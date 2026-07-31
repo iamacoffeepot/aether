@@ -149,16 +149,14 @@ impl NativeActor for SyntheticWindowCapability {
     }
 
     #[handler::manual]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CreateWindow) {
+    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, mail: CreateWindow) {
         let reply = ctx.take_inbound();
         if let Err(error) = state.check_create(&mail.spec) {
             reply.reply(&CreateWindowResult::Err { error });
             return;
         }
         let predicted = ctx.actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
-        let receipt = match ctx
-            .spawn_child::<WindowCapability, SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
-            .stage()
+        let receipt = match ctx.spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ()).stage()
         {
             Ok(receipt) => receipt,
             Err(error) => {

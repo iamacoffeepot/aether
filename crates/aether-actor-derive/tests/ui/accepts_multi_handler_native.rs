@@ -69,4 +69,42 @@ impl aether_substrate::actor::native::NativeActor for MultiCap {
     }
 }
 
+pub struct MultiSpawnCap;
+
+#[allow(dead_code)]
+struct MultiSpawnCapState {
+    seen: u32,
+}
+
+// Issue 4158: a multi handler may also name the actor it dispatches for, to
+// reach `spawn_child`. The reply mode is then the *first* ctx type argument
+// and the actor the second, so a macro that reads the marker off the last
+// argument sees `Self` here and rejects the signature.
+#[actor(singleton)]
+impl aether_substrate::actor::native::NativeActor for MultiSpawnCap {
+    type State = MultiSpawnCapState;
+    type Config = ();
+
+    const NAMESPACE: &'static str = "test.multi_spawn_cap";
+
+    fn init(
+        _config: (),
+        _ctx: &mut aether_substrate::actor::native::NativeInitCtx<'_>,
+    ) -> Result<MultiSpawnCapState, aether_substrate::chassis::error::BootError> {
+        Ok(MultiSpawnCapState { seen: 0 })
+    }
+
+    #[handler::multi]
+    fn on_ping(
+        state: &mut Self::State,
+        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, aether_substrate::Multi<Frame>, Self>,
+        ping: Ping,
+    ) {
+        state.seen += 1;
+        for n in 0..ping.seq {
+            aether_substrate::Emit::emit(ctx, &Frame { n });
+        }
+    }
+}
+
 fn main() {}

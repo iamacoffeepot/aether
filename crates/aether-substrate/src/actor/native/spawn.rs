@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{Addressable, HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
+use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
@@ -79,9 +79,6 @@ pub use aether_actor::Subname;
 /// [`SpawnBuilder::finish`] path returns all of its failures directly.
 #[derive(Debug)]
 pub enum SpawnError {
-    /// The handler named a declared parent type whose logical namespace does
-    /// not match the actor actually executing the handler.
-    ParentTypeMismatch { declared_namespace: &'static str, actual_logical: ActorId, actual_canonical_name: Arc<str> },
     /// Subname is empty, contains `:`, has control / whitespace
     /// chars, or exceeds the byte cap. See
     /// [`NamespaceError`].
@@ -1004,9 +1001,6 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
     /// is the depth-1 case: the child is the root of its own lineage and
     /// keeps the flat `{NAMESPACE}:{subname}` id it has today.
     parent: Option<ActorRuntimeIdentity>,
-    /// The parent namespace named by the native handler call. `None` for a
-    /// top-level chassis spawn.
-    declared_parent_namespace: Option<&'static str>,
     after_init: Vec<Envelope>,
     _marker: PhantomData<fn() -> A>,
     /// Carries the `'ctx` lifetime even though `spawner` is `Arc`
@@ -1095,31 +1089,13 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         C: Send + 'static,
     {
         let Self { inner, parent_binding, completion_root, completion_reply_to, chain } = self;
-        let SpawnBuilder {
-            spawner,
-            subname,
-            config,
-            params,
-            sender,
-            parent,
-            declared_parent_namespace,
-            after_init,
-            ..
-        } = inner;
+        let SpawnBuilder { spawner, subname, config, params, sender, parent, after_init, .. } = inner;
         let config = config.expect("HandlerSpawnBuilder::stage consumed exactly once");
         let params = params.expect("HandlerSpawnBuilder::stage consumed exactly once");
         if let Subname::Named(subname) = subname {
             validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)?;
         }
         let parent = parent.expect("handler child builder always carries a typed parent identity");
-        let declared_namespace = declared_parent_namespace.expect("handler child builder names its declared parent");
-        if parent.logical() != ActorId::singleton(declared_namespace) {
-            return Err(SpawnError::ParentTypeMismatch {
-                declared_namespace,
-                actual_logical: parent.logical(),
-                actual_canonical_name: Arc::clone(parent.canonical_name()),
-            });
-        }
 
         let identity = spawner.prepare_identity::<A>(subname, Some(&parent))?;
         let key = ChildReservationKey::new(
@@ -1175,17 +1151,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         C: Send + 'static,
     {
         let Self { inner, parent_binding, .. } = self;
-        let SpawnBuilder {
-            spawner,
-            subname,
-            config,
-            params,
-            sender,
-            parent,
-            declared_parent_namespace,
-            after_init,
-            ..
-        } = inner;
+        let SpawnBuilder { spawner, subname, config, params, sender, parent, after_init, .. } = inner;
         let config = config.expect("HandlerSpawnBuilder::continue_from consumed exactly once");
         let params = params.expect("HandlerSpawnBuilder::continue_from consumed exactly once");
         if let Subname::Named(subname) = subname
@@ -1194,17 +1160,6 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             return Err((error, owed));
         }
         let parent = parent.expect("handler child builder always carries a typed parent identity");
-        let declared_namespace = declared_parent_namespace.expect("handler child builder names its declared parent");
-        if parent.logical() != ActorId::singleton(declared_namespace) {
-            return Err((
-                SpawnError::ParentTypeMismatch {
-                    declared_namespace,
-                    actual_logical: parent.logical(),
-                    actual_canonical_name: Arc::clone(parent.canonical_name()),
-                },
-                owed,
-            ));
-        }
 
         let identity = match spawner.prepare_identity::<A>(subname, Some(&parent)) {
             Ok(identity) => identity,
@@ -1249,18 +1204,21 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
 }
 
 impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
-    /// Internal constructor. Public only because chassis-level
-    /// `spawn_actor` entry points (on `BuiltChassis` / `PassiveChassis`)
-    /// build these too.
+    /// Internal constructor for the top-level chassis spawn. Public only
+    /// because chassis-level `spawn_actor` entry points (on `BuiltChassis` /
+    /// `PassiveChassis`) build these too.
+    ///
+    /// It takes no parent: this is the depth-1 placement, so the child is the
+    /// root of its own lineage and keeps the flat `{NAMESPACE}:{subname}` id
+    /// (ADR-0099 §3). A birth under a parent goes through
+    /// [`Self::new_child`] instead (issue 4135).
     pub(crate) fn new(
         spawner: Arc<Spawner>,
         subname: Subname<'ctx>,
         config: A::Config,
         params: A::Params,
         sender: Source,
-        parent: Option<(u64, MailboxId)>,
     ) -> Self {
-        debug_assert!(parent.is_none(), "SpawnBuilder::new is reserved for top-level chassis spawns");
         Self {
             spawner,
             subname,
@@ -1268,14 +1226,18 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
             params: Some(params),
             sender,
             parent: None,
-            declared_parent_namespace: None,
             after_init: Vec::new(),
             _marker: PhantomData,
             _ctx: PhantomData,
         }
     }
 
-    pub(super) fn new_child<P: Addressable>(
+    /// Internal constructor for a birth under a parent actor.
+    ///
+    /// `parent` is the spawning actor's own runtime identity, read off the
+    /// staging ctx — never a caller-declared type — so there is nothing here
+    /// to disagree with the executing binding (issue 4158).
+    pub(super) fn new_child(
         spawner: Arc<Spawner>,
         subname: Subname<'ctx>,
         config: A::Config,
@@ -1290,7 +1252,6 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
             params: Some(params),
             sender,
             parent: Some(parent),
-            declared_parent_namespace: Some(P::NAMESPACE),
             after_init: Vec::new(),
             _marker: PhantomData,
             _ctx: PhantomData,
@@ -1345,30 +1306,11 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
 
     /// Consume the builder through the one shared terminal path.
     fn finish_internal(self) -> Result<SpawnCommit, SpawnError> {
-        let SpawnBuilder {
-            spawner,
-            subname,
-            config,
-            params,
-            sender,
-            parent,
-            declared_parent_namespace,
-            after_init,
-            ..
-        } = self;
+        let SpawnBuilder { spawner, subname, config, params, sender, parent, after_init, .. } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
         let params = params.expect("SpawnBuilder::finish consumed exactly once");
         if let Subname::Named(subname) = subname {
             validate_namespace_segment(subname).map_err(SpawnError::SubnameInvalid)?;
-        }
-        if let (Some(parent), Some(declared_namespace)) = (&parent, declared_parent_namespace)
-            && parent.logical() != ActorId::singleton(declared_namespace)
-        {
-            return Err(SpawnError::ParentTypeMismatch {
-                declared_namespace,
-                actual_logical: parent.logical(),
-                actual_canonical_name: Arc::clone(parent.canonical_name()),
-            });
         }
         let _ = sender;
         let identity = spawner.preflight::<A>(subname, parent.as_ref())?;
@@ -1401,6 +1343,8 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "activation lifecycle tests use bounded channels and fixture-only setup")]
 
     use super::*;
+    use aether_actor::Addressable;
+
     use crate::actor::native::{DispatchId, TaskDone};
     use crate::config::RegistryQueueCapacities;
     use crate::mail::mailer::Mailer;
@@ -1665,7 +1609,6 @@ mod tests {
             ActivationConfig::new(events_tx),
             (),
             Source::NONE,
-            None,
         )
         .after_init(ActivationPoke);
 

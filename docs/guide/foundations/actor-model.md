@@ -428,12 +428,16 @@ connection with `ctx.spawn_child`
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
 
-`ctx.spawn_child` works on both hosts. A native capability names its executing
-parent and child types, and can spawn an `Instanced` native actor only when the
-child declares `ChildOf<Parent>`:
-`ctx.spawn_child::<TcpListenerActor, TcpSessionActor>(subname, config, params)`.
-The runtime also verifies that the binding executing the handler has the
-declared parent's logical namespace before constructing the child.
+`ctx.spawn_child` works on both hosts. A native capability names only the child
+type, and can spawn an `Instanced` native actor when that child declares
+`ChildOf<Parent>` for the actor doing the spawning:
+`ctx.spawn_child::<TcpSessionActor>(subname, config, params)`. The parent comes
+from the ctx. A handler opts into the call by naming its own actor in its ctx
+signature — `ctx: &mut NativeCtx<'_, Single, Self>`, or
+`NativeCtx<'_, Manual, Self>` for a manual-reply handler — and the `#[actor]`
+macro hands such a handler a ctx typed by the actor being dispatched. Every
+other handler keeps the plain `NativeCtx<'_>` and reaches no spawn surface, so
+a birth cannot be placed under a parent other than the one running.
 
 A native birth **stages** during the handler turn and commits afterward. The
 handler chains any
@@ -449,7 +453,7 @@ immediately as a send target, plus a `completion` `DispatchId`.
 
 ```rust
 let Ok(receipt) = ctx
-    .spawn_child::<TcpListenerActor, TcpSessionActor>(Subname::Counter, config, params)
+    .spawn_child::<TcpSessionActor>(Subname::Counter, config, params)
     .after_init(Hello)
     .stage()
 else {
@@ -510,7 +514,7 @@ reopening it. Every synchronous failure in
 out exactly once:
 
 ```rust
-match ctx.spawn_child::<Host, Worker>(Subname::Named(&name), config, ()).continue_from(done, plan) {
+match ctx.spawn_child::<Worker>(Subname::Named(&name), config, ()).continue_from(done, plan) {
     Ok(receipt) => { /* the successor now owns the reply */ }
     Err((error, done)) => done.resolve_err(ctx, &Failed { error: format!("{error:?}") }),
 }
@@ -522,18 +526,19 @@ and passes that to `continue_from` instead. Dropping a `DeferredReply` without
 replying releases its hold (settlement is never wedged) and trips a
 `debug_assert`, because a lost reply strands the caller forever.
 
-Wasm uses
-the same two-type permission: a component spawns its own **sibling** types —
-`Instanced` actors its module also exports
+Wasm enforces
+the same `ChildOf` permission, and names both types to do it: a component spawns
+its own **sibling** types — `Instanced` actors its module also exports
 ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)) — only when the child declares the exact
 `child_of(Parent)` relationship or is an instanced `composable` module child.
 One wasm crate can export several
 actor types (`export!(RootManager, Panel, …)`), and a running instance stands up a
 sibling just as the listener stands up a session:
-`ctx.spawn_child::<RootManager, Panel>(Subname::Counter, &config)`. The SDK
-checks the ctx's actual registry-backed actor tag against `RootManager` before
-encoding config or calling the host, so writing a different parent type cannot
-bypass the declared edge. A component spawns within the
+`ctx.spawn_child::<RootManager, Panel>(Subname::Counter, &config)`. `WasmCtx` is
+addressed by tag rather than by Rust type, so the parent is named at the call
+and the SDK checks it against the ctx's registry-backed actor tag before
+encoding config or calling the host; writing a different parent type earns an
+error rather than bypassing the declared edge. A component spawns within the
 module it was built from; a foreign module comes in through `load_component`, which
 carries its own code and kinds — the boundary is covered in
 [Components & lifecycle](../systems/components.md).

@@ -51,7 +51,7 @@ use crate::mail::KindId;
 /// call borrows `&mut ctx`), so no borrow conflict.
 pub fn typed_then_fallback_or_warn<A>(
     actor: &mut Box<A::State>,
-    ctx: &mut NativeCtx<'_, crate::Manual>,
+    ctx: &mut NativeCtx<'_, crate::Manual, A>,
     kind: KindId,
     payload: &[u8],
 ) where

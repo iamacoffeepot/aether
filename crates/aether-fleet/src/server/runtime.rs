@@ -346,7 +346,7 @@ impl NativeActor for FleetServer {
     /// replied only after the registry owner authoritatively activates the
     /// staged proxy.
     #[handler::manual]
-    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SpawnEngine) {
+    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, mail: SpawnEngine) {
         let mut owed: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
 
         // Resolve the registry selector to stored content bytes before
@@ -462,7 +462,7 @@ impl NativeActor for FleetServer {
             // transfers the original caller obligation into the staged
             // birth; only its later task completion may commit the engine.
             let result = ctx
-                .spawn_child::<FleetServer, FleetProxy>(
+                .spawn_child::<FleetProxy>(
                     Subname::Named(&subname),
                     FleetProxyConfig {
                         engine_id,

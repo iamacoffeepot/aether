@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use aether_actor::Local as _;
+use aether_actor::Single;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
@@ -23,7 +24,7 @@ impl WasmTrampolineState {
     /// Publish the logical inline-child routes a guest call staged. The
     /// owner batch is reserved admission; completion is a later no-reply
     /// actor turn so rejection cannot silently lose the originating chain.
-    pub fn stage_inline_aliases(&self, ctx: &mut NativeCtx<'_>, aliases: Vec<PreparedAliasRoute>) {
+    pub fn stage_inline_aliases<A>(&self, ctx: &mut NativeCtx<'_, Single, A>, aliases: Vec<PreparedAliasRoute>) {
         for alias in aliases {
             let alias_id = alias.alias;
             let _ = ctx.stage_registry_batch(
@@ -54,7 +55,7 @@ impl WasmTrampolineState {
     /// own capability group (looked up by actor-type tag). A
     /// spawn-time failure surfaces here, asynchronously to the guest
     /// (which already received the `MailboxId`): logged, not fatal.
-    pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_>, pending: PendingSpawn) {
+    pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_, Single, WasmTrampoline>, pending: PendingSpawn) {
         let capabilities = self
             .actor_caps
             .iter()
@@ -82,7 +83,7 @@ impl WasmTrampolineState {
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
         if let Err(e) = ctx
-            .spawn_child::<WasmTrampoline, WasmTrampoline>(Subname::Named(&pending.subname), config, ())
+            .spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config, ())
             .stage_with(SiblingSpawnContext { parent: self.mailbox, subname: pending.subname.clone(), capabilities })
         {
             tracing::warn!(

@@ -1750,7 +1750,7 @@ mod tests {
         impl Dispatch<Self> for Child {
             fn dispatch(
                 state: &mut Self,
-                _ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
+                _ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {

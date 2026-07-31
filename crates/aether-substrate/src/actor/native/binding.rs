@@ -362,7 +362,7 @@ impl NativeBinding {
     ) -> Self {
         Self {
             mailer,
-            identity: BindingIdentity::Typed(ActorRuntimeIdentity::new::<A>(self_mailbox, carry, canonical_name)),
+            identity: BindingIdentity::Typed(ActorRuntimeIdentity::new(self_mailbox, carry, canonical_name)),
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
