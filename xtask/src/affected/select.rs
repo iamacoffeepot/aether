@@ -10,13 +10,26 @@ use determinator::rules::DeterminatorRules;
 use guppy::graph::{DependencyDirection, PackageGraph};
 
 use crate::affected::rules::PATH_RULES_TOML;
+use crate::affected::test_targets;
 
-/// The real-process fleet harness (issue #3767): any package that
-/// dev-deps it forks the dist-resolved headless chassis binary at test
-/// time, so its tests need the `cargo xtask dist` pre-build even when
-/// they load no wasm at all (the aether-fleet fleet tests are the
-/// canonical case).
-const HARNESS_FLEET_PACKAGE: &str = "aether-harness-fleet";
+/// The harness crates that resolve a `dist`-produced artifact by
+/// filesystem path rather than through a cargo dependency edge, so a
+/// dev-dep on one is the structural signal that a package's tests need the
+/// `cargo xtask dist` pre-build:
+///
+/// - `aether-harness-fleet` forks the dist-resolved headless chassis
+///   binary (issue #3767) — the aether-fleet tests are the canonical case,
+///   and they load no wasm at all.
+/// - `aether-harness-substrate` owns `test_helpers::locate_component_wasm`,
+///   which probes `target/wasm32-unknown-unknown/` for a component the
+///   pre-build put there; `aether-harness-substrate-capture` re-exports it
+///   and is how every current caller reaches it.
+///
+/// Over-inclusion here costs a wasm build and never correctness, so the
+/// rule keys on the harness dep rather than on which of its helpers a given
+/// test happens to call.
+const DIST_RESOLVING_HARNESSES: &[&str] =
+    &["aether-harness-fleet", "aether-harness-substrate", "aether-harness-substrate-capture"];
 
 /// The computed test selection.
 pub(super) struct Selection {
@@ -38,23 +51,32 @@ pub(super) struct Selection {
 /// that could reshape the graph is already screened to `run_all` by
 /// [`crate::affected::rules::global_screen`] (a member-crate dependency edit
 /// always touches `Cargo.lock`).
+///
+/// Paths confined to a package's own integration-test targets bypass the
+/// determinator and select their owner directly — a test binary has no
+/// dependents, so its closure is empty (issue #4197, see
+/// [`crate::affected::test_targets`]).
 pub(super) fn select(
     graph: &PackageGraph,
     changed: &[String],
     wasm_sources: &BTreeSet<String>,
     wasm_consumers: &BTreeSet<String>,
 ) -> Result<Selection> {
+    let split = test_targets::partition(graph, changed);
+
     let rules = DeterminatorRules::parse(PATH_RULES_TOML).context("parse built-in determinator path rules")?;
     let mut determinator = Determinator::new(graph, graph);
     determinator.set_rules(&rules).context("apply determinator path rules")?;
-    determinator.add_changed_paths(changed.iter().map(String::as_str));
+    determinator.add_changed_paths(split.graph_paths.iter().copied());
 
     let affected = determinator.compute().affected_set;
-    let packages: BTreeSet<String> = affected
+    let mut packages: BTreeSet<String> = affected
         .packages(DependencyDirection::Forward)
         .filter(guppy::graph::PackageMetadata::in_workspace)
         .map(|package| package.name().to_string())
         .collect();
+    packages.extend(split.test_target_packages);
+
     if packages.len() == graph.workspace().iter().count() {
         return Ok(Selection {
             run_all: Some("every workspace package is affected".to_string()),
@@ -69,13 +91,22 @@ pub(super) fn select(
 
 /// Whether a package's dependency list makes its tests need the
 /// `cargo xtask dist` pre-build: a dep on a wasm source means the tests
-/// execute that crate's wasm; a dep on [`HARNESS_FLEET_PACKAGE`] means the
-/// tests fork the dist-resolved headless chassis binary (issue #3766).
+/// execute that crate's wasm; a dep on one of
+/// [`DIST_RESOLVING_HARNESSES`] means the tests reach a dist artifact by
+/// path instead (issue #3766).
+///
+/// The harness half of that predicate is load-bearing once the affected set
+/// narrows (#4197). `aether-chassis-headless`'s autoload test locates
+/// `probe.wasm` through the capture harness and hard-fails under
+/// `AETHER_REQUIRE_RUNTIME` without the pre-build, yet the package deps no
+/// wasm source — under the old closure it got its `wasm_needed` by
+/// accident, from an unrelated dependent that happened to be selected
+/// alongside it.
 pub(super) fn is_dist_consumer<'a>(
     mut dependency_names: impl Iterator<Item = &'a str>,
     wasm_sources: &BTreeSet<String>,
 ) -> bool {
-    dependency_names.any(|name| wasm_sources.contains(name) || name == HARNESS_FLEET_PACKAGE)
+    dependency_names.any(|name| wasm_sources.contains(name) || DIST_RESOLVING_HARNESSES.contains(&name))
 }
 
 /// Whether the `cargo xtask dist` wasm pre-build must run before the
@@ -135,17 +166,24 @@ mod tests {
     }
 
     #[test]
-    fn harness_fleet_dependents_are_dist_consumers() {
+    fn harness_dependents_are_dist_consumers() {
         // Issue #3766: a fleet-test host (aether-fleet is the canonical
         // case) loads no wasm, but its tests fork the dist-resolved
         // headless chassis binary through aether-harness-fleet — the
         // consumer predicate must catch the harness dep on its own,
         // else the tests hard-fail in CI with no `dist/bin` to fork.
+        // Issue #4197 extends that to the substrate harnesses, whose
+        // `locate_component_wasm` probes the pre-build's wasm output by
+        // path: aether-chassis-headless reaches it that way and deps no
+        // wasm source, so a dep-on-a-source rule alone leaves its autoload
+        // test with nothing to load.
         let wasm_sources = string_set(&["aether-test-fixtures-bundle"]);
-        assert!(
-            is_dist_consumer(["aether-harness-fleet"].into_iter(), &wasm_sources),
-            "a harness-fleet dependent needs the dist pre-build without any wasm dep"
-        );
+        for harness in ["aether-harness-fleet", "aether-harness-substrate", "aether-harness-substrate-capture"] {
+            assert!(
+                is_dist_consumer([harness].into_iter(), &wasm_sources),
+                "a {harness} dependent needs the dist pre-build without any wasm dep"
+            );
+        }
         assert!(
             is_dist_consumer(["aether-test-fixtures-bundle"].into_iter(), &wasm_sources),
             "a wasm-source dependent stays a dist consumer"
@@ -181,6 +219,33 @@ mod tests {
         let unknown = select(&graph, &strings(&["mystery-toplevel-input.txt"]), &no_wasm_sources, &no_wasm_consumers)
             .expect("select over unknown path");
         assert!(unknown.run_all.is_some(), "unknown path must run everything");
+
+        // Issue #4197: an integration test compiles into its own binary
+        // that nothing links against, so a change confined to one selects
+        // its own package and no dependent — while the same package's
+        // library source keeps the full closure. A regression either way
+        // (a closure that survives the narrowing, or a src change that
+        // loses it) shows up as these two sets converging.
+        let test_only = select(
+            &graph,
+            &strings(&["crates/aether-component/tests/inline_child.rs"]),
+            &no_wasm_sources,
+            &no_wasm_consumers,
+        )
+        .expect("select over test-only change");
+        assert_eq!(
+            test_only.packages,
+            string_set(&["aether-component"]),
+            "a test-only change selects its own package alone"
+        );
+
+        let library =
+            select(&graph, &strings(&["crates/aether-component/src/lib.rs"]), &no_wasm_sources, &no_wasm_consumers)
+                .expect("select over library change");
+        assert!(
+            library.packages.len() > test_only.packages.len(),
+            "a library change in the same package keeps its reverse-dependency closure"
+        );
 
         // The bloomery/** rule maps the cross-boundary test input to its
         // reader instead of falling back to run-everything.
