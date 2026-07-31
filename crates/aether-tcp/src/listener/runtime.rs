@@ -22,7 +22,7 @@ pub use aether_substrate::{KindId, Mail, Mailer};
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
-use aether_actor::runtime;
+use aether_actor::{Single, runtime};
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
 use crate::kinds::{Close, ConnectionReady};
@@ -222,7 +222,7 @@ impl NativeActor for TcpListenerActor {
     /// we'll see the queue already drained on the second handler
     /// call and exit fast.
     #[handler::single]
-    fn on_connection_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ConnectionReady) {
+    fn on_connection_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, _mail: ConnectionReady) {
         while let Ok((stream, peer)) = state.connection_rx.try_recv() {
             let subname = format!("conn-{}", state.next_subname);
             state.next_subname += 1;
@@ -234,11 +234,7 @@ impl NativeActor for TcpListenerActor {
                 consumer: state.consumer,
             };
             match ctx
-                .spawn_child::<TcpListenerActor, TcpSessionActor>(
-                    aether_substrate::Subname::Named(&subname),
-                    session_config,
-                    (),
-                )
+                .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config, ())
                 .stage_with(AcceptedSessionContext { session_name: subname.clone(), peer: peer_str.clone() })
             {
                 Ok(_) => {}

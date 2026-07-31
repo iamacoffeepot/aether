@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Mutex, Weak};
 
-use aether_actor::ReplyMode;
+use aether_actor::{ReplyMode, Single};
 use aether_data::{Kind, KindId, MailId};
 
 use crate::mail::Source;
@@ -313,7 +313,7 @@ impl DeferredReply {
 
     /// Send the terminal reply through the original target and then release
     /// the continuously-held settlement root.
-    pub fn reply<M, R>(mut self, ctx: &mut NativeCtx<'_, M>, reply: &R)
+    pub fn reply<M, R, A>(mut self, ctx: &mut NativeCtx<'_, M, A>, reply: &R)
     where
         M: ReplyMode,
         R: Kind + serde::Serialize,
@@ -412,7 +412,7 @@ impl<O, C> TaskDone<O, C> {
     /// Re-reply the carried `output` through the carried `reply_to`,
     /// then release the hold (ADR-0093 §4). The worker already shaped
     /// `output` into the reply value, so this is the common one-liner.
-    pub fn resolve(mut self, ctx: &mut NativeCtx<'_>)
+    pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, Single, A>)
     where
         O: Kind + serde::Serialize,
     {
@@ -424,7 +424,7 @@ impl<O, C> TaskDone<O, C> {
     /// through the carried `reply_to`, then release the hold. For
     /// completion handlers that shape a different reply from the carried
     /// output (and context, when present) than the raw `output`.
-    pub fn resolve_with<R, F>(mut self, ctx: &mut NativeCtx<'_>, f: F)
+    pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, f: F)
     where
         R: Kind + serde::Serialize,
         F: FnOnce(&O, &C) -> R,
@@ -442,7 +442,7 @@ impl<O, C> TaskDone<O, C> {
     /// computed by the handler rather than built in a ctx-less closure.
     /// Re-replies **first**, then releases the hold (`Sent` before
     /// `Release`, ADR-0080 §12), like the rest of the `resolve*` family.
-    pub fn resolve_value<R>(mut self, ctx: &mut NativeCtx<'_>, reply: &R)
+    pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, reply: &R)
     where
         R: Kind + serde::Serialize,
     {
@@ -464,7 +464,7 @@ impl<O, C> TaskDone<O, C> {
     /// through the carried `reply_to`, then release the hold. The
     /// carried `output` is discarded — used when the completion is a
     /// failure rather than a result.
-    pub fn resolve_err<E>(mut self, ctx: &mut NativeCtx<'_>, err: &E)
+    pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, err: &E)
     where
         E: Kind + serde::Serialize,
     {

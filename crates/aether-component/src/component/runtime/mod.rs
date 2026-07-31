@@ -40,7 +40,7 @@ pub use aether_actor::Manual;
 // imports: drop-time cleanup rides the ADR-0079 vacate/close
 // `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{OutboundReply, ReplyMode};
+use aether_actor::{OutboundReply, ReplyMode, Single};
 use aether_data::{Kind, MailboxCategory, Source};
 
 use std::collections::HashMap;
@@ -245,7 +245,7 @@ impl NativeActor for ComponentHostCapability {
     #[handler(task)]
     fn on_kind_registration_done(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, Single, Self>,
         done: TaskDone<RegistryBatchResult, load::KindRegistration>,
     ) {
         state.finish_kind_registration(ctx, done);
@@ -254,7 +254,7 @@ impl NativeActor for ComponentHostCapability {
     #[handler(task)]
     fn on_component_spawn_done(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, Single, Self>,
         done: TaskDone<SpawnOutcome, load::SpawnContext>,
     ) {
         state.finish_spawn(ctx, done);
@@ -343,7 +343,7 @@ impl NativeActor for ComponentHostCapability {
     /// `finish_replace` commits it on `Ok`, then re-replies the verdict to the
     /// original caller.
     #[handler::manual]
-    fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: ReplaceResult) {
+    fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, payload: ReplaceResult) {
         state.finish_replace(ctx, payload);
     }
 

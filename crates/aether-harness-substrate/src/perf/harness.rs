@@ -181,7 +181,7 @@ impl NativeActor for Relay {
 impl Dispatch<Self> for Relay {
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -273,7 +273,7 @@ impl NativeActor for TickSource {
 impl Dispatch<Self> for TickSource {
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

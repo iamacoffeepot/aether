@@ -60,7 +60,7 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 /// the stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
-pub struct NativeCtx<'a, M: ReplyMode = Single> {
+pub struct NativeCtx<'a, M: ReplyMode = Single, A = Erased> {
     binding: &'a Arc<NativeBinding>,
     source: Source,
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
@@ -105,7 +105,28 @@ pub struct NativeCtx<'a, M: ReplyMode = Single> {
     /// selects which reply surface this ctx exposes. Defaults to
     /// [`Single`], so the common `NativeCtx<'_>` signature is unchanged.
     _mode: PhantomData<M>,
+    /// Phantom marker naming the actor this ctx dispatches *for* — the
+    /// parent any [`Self::spawn_child`] call places its child under. The
+    /// dispatcher builds the typed form because it knows the actor;
+    /// [`Self::erase`] downgrades to [`Erased`] for a handler that never
+    /// spawns, which is why the default keeps the common `NativeCtx<'_>`
+    /// signature unchanged.
+    _actor: PhantomData<fn() -> A>,
 }
+
+/// The actor marker of a ctx that names no actor, and so cannot parent a
+/// child (issue 4158).
+///
+/// [`NativeCtx::spawn_child`] lives only on the typed form, so the parent of
+/// a staged birth is read off the ctx rather than declared beside it — a
+/// caller has no way to name a parent the runtime will then contradict.
+/// Every ctx built where no actor is in scope — `wire` / `unwire`, the
+/// chassis root, a cap-side test fixture — is this form, and loses only a
+/// call it could not have made correctly.
+///
+/// A type-position marker like [`Single`] / [`Manual`], never a value: it is
+/// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
+pub struct Erased;
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
 /// [`NativeInitCtx`]: both hold the same `binding`, so `actor` /
@@ -163,6 +184,10 @@ impl<'a> NativeCtx<'a, Single> {
     /// handler methods directly keep their single-mode ctx unchanged.
     /// Build a `<Manual>` ctx for driving the macro dispatch trampoline
     /// with [`Self::new_dispatching`].
+    ///
+    /// It also stays [`Erased`], for the same reason: a `wire` hook and the
+    /// fixtures that call a handler directly name no actor, so nothing here
+    /// could parent a child. [`Self::new_for_actor`] is the one that does.
     pub fn new(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
@@ -177,6 +202,7 @@ impl<'a> NativeCtx<'a, Single> {
             causing_chain: MailId::NONE,
             inbound: None,
             _mode: PhantomData,
+            _actor: PhantomData,
         }
     }
 
@@ -204,7 +230,57 @@ impl<'a> NativeCtx<'a, Single> {
             causing_chain: chain.held_root(),
             inbound: None,
             _mode: PhantomData,
+            _actor: PhantomData,
         }
+    }
+}
+
+impl<'a, M: ReplyMode, A> NativeCtx<'a, M, A> {
+    /// The actor-naming counterpart of [`Self::new`] / [`Self::new_dispatching`]
+    /// (issue 4158): the same inbound-less ctx, typed by the actor it
+    /// dispatches for, so the handler it drives reaches [`Self::spawn_child`].
+    /// The reply mode comes from the use site rather than from a second
+    /// constructor.
+    ///
+    /// `binding` must be that actor's own binding — the birth lands under
+    /// whatever identity the binding carries, and `A` is what the child's
+    /// `ChildOf<A>` permission is checked against. The pumped host turn
+    /// ([`PumpedSlot::host_turn`](super::pumped_slot::PumpedSlot::host_turn))
+    /// is the production caller and derives both from the same slot; a
+    /// cap-side fixture driving a spawning handler names its own actor here.
+    pub fn new_for_actor(
+        binding: &'a Arc<NativeBinding>,
+        sender: Source,
+        in_flight_mail_id: MailId,
+        in_flight_root: MailId,
+    ) -> Self {
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            causing_chain: MailId::NONE,
+            inbound: None,
+            _mode: PhantomData,
+            _actor: PhantomData,
+        }
+    }
+
+    /// Issue 4158 downgrade-only coercion: view this ctx as one that names
+    /// no actor, dropping [`Self::spawn_child`]. The `#[actor]` macro hands
+    /// this view to every handler whose signature declares the plain
+    /// `NativeCtx<'_, …>` form, so only a handler that asks for the typed
+    /// ctx can parent a child. Like [`Self::as_single`] the coercion only
+    /// removes capability — there is deliberately no way back up, because
+    /// re-naming an actor is exactly the misstatement this replaced.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn erase(&mut self) -> &mut NativeCtx<'a, M, Erased> {
+        // SAFETY: `A` appears only in `PhantomData`, so `NativeCtx<'a, M, A>`
+        // and `NativeCtx<'a, M, Erased>` are layout-identical for every `A`
+        // (see `native_ctx_layout_identical_across_modes`). The reborrow swaps
+        // the marker without touching any real field.
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, M, Erased>>() }
     }
 }
 
@@ -229,9 +305,12 @@ impl<'a> NativeCtx<'a, Manual> {
             causing_chain: MailId::NONE,
             inbound: None,
             _mode: PhantomData,
+            _actor: PhantomData,
         }
     }
+}
 
+impl<'a, A> NativeCtx<'a, Manual, A> {
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
@@ -240,13 +319,13 @@ impl<'a> NativeCtx<'a, Manual> {
     /// downgrades.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_single(&mut self) -> &mut NativeCtx<'a, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, Manual>` and
-        // `NativeCtx<'a, Single>` are layout-identical (the marker field is
+    pub fn as_single(&mut self) -> &mut NativeCtx<'a, Single, A> {
+        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, Manual, A>` and
+        // `NativeCtx<'a, Single, A>` are layout-identical (the marker field is
         // a ZST for every `M` — see `native_ctx_layout_identical_across_modes`).
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Single>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Single, A>>() }
     }
 
     /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -256,12 +335,12 @@ impl<'a> NativeCtx<'a, Manual> {
     /// handler whose marker disagrees with its class fails to unify.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_multi<K: Kind>(&mut self) -> &mut NativeCtx<'a, Multi<K>> {
+    pub fn as_multi<K: Kind>(&mut self) -> &mut NativeCtx<'a, Multi<K>, A> {
         // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
-        // `K`, so `NativeCtx<'a, Manual>` and `NativeCtx<'a, Multi<K>>` are
-        // layout-identical (see `native_ctx_layout_identical_across_modes`).
+        // `K`, so `NativeCtx<'a, Manual, A>` and `NativeCtx<'a, Multi<K>, A>`
+        // are layout-identical (see `native_ctx_layout_identical_across_modes`).
         // The reborrow swaps the marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Multi<K>>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Multi<K>, A>>() }
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched
@@ -286,11 +365,12 @@ impl<'a> NativeCtx<'a, Manual> {
             causing_chain: MailId::NONE,
             inbound: Some(inbound),
             _mode: PhantomData,
+            _actor: PhantomData,
         }
     }
 }
 
-impl<M: ReplyMode> NativeCtx<'_, M> {
+impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     /// #1757 / ADR-0106: retain this handler's inbound mail as an
     /// [`InboundMail`] guard to defer its reply past the handler's return
     /// — the by-construction replacement for a hand-rolled
@@ -374,7 +454,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`
-    /// receives a [`InheritCtx<A>`] — sends
+    /// receives a [`InheritCtx<W>`] — sends
     /// from inside `f` carry `parent_mail = self.in_flight_mail_id()`
     /// and `root = self.in_flight_root()` automatically.
     ///
@@ -389,33 +469,33 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// arrives; callers gate-sensitive to settlement should not
     /// rely on the parent chain staying open for the worker's
     /// lifetime today.
-    pub fn spawn_inherit<A, F>(&self, f: F) -> JoinHandle<()>
+    pub fn spawn_inherit<W, F>(&self, f: F) -> JoinHandle<()>
     where
-        // ADR-0119: `A` only supplies `A::NAMESPACE` (thread name) and
-        // parameterizes `InheritCtx<A>` (Addressable-only). The former
+        // ADR-0119: `W` only supplies `W::NAMESPACE` (thread name) and
+        // parameterizes `InheritCtx<W>` (Addressable-only). The former
         // `Singleton` bound was incidental, and single-cardinality
         // enforcement made it block instanced workers — relaxed to Addressable.
-        A: Addressable + 'static,
-        F: FnOnce(InheritCtx<A>) + Send + 'static,
+        W: Addressable + 'static,
+        F: FnOnce(InheritCtx<W>) + Send + 'static,
     {
-        spawn_thread::spawn_inherit::<A, F>(Arc::clone(self.binding), self.in_flight_mail_id, self.in_flight_root, f)
+        spawn_thread::spawn_inherit::<W, F>(Arc::clone(self.binding), self.in_flight_mail_id, self.in_flight_root, f)
     }
 
     /// ADR-0080 §12 spawn primitive: launch a worker thread with no
     /// in-flight inheritance. The closure `f` receives a
-    /// [`RootCtx<A>`] — each send mints a
-    /// fresh root chain with `A`'s mailbox as the producer.
+    /// [`RootCtx<W>`] — each send mints a
+    /// fresh root chain with `W`'s mailbox as the producer.
     ///
     /// Use for long-lived workers that respond to external events
     /// (TCP per-connection workers, pollers). For short-burst CPU
     /// offload that is part of the current handler's causal closure,
     /// use [`Self::spawn_inherit`].
-    pub fn spawn_detached<A, F>(&self, f: F) -> JoinHandle<()>
+    pub fn spawn_detached<W, F>(&self, f: F) -> JoinHandle<()>
     where
-        A: Addressable + Singleton + 'static,
-        F: FnOnce(RootCtx<A>) + Send + 'static,
+        W: Addressable + Singleton + 'static,
+        F: FnOnce(RootCtx<W>) + Send + 'static,
     {
-        spawn_thread::spawn_detached::<A, F>(Arc::clone(self.binding), f)
+        spawn_thread::spawn_detached::<W, F>(Arc::clone(self.binding), f)
     }
 
     /// ADR-0093 hold-until-resolve dispatch: run the blocking closure
@@ -862,16 +942,29 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         notify_departure(self.binding, occupant, registry.vacate_actor(occupant));
         notify_alias_departures(registry, self.binding, occupant);
     }
+}
 
-    /// Spawn an instanced `A` as a child of declared parent `P`. The
-    /// `A: ChildOf<P>` bound enforces the ADR-0166 permission, and
-    /// [`HandlerSpawnBuilder::stage`](crate::HandlerSpawnBuilder::stage) and
+/// The one surface that needs the ctx to name its actor: a birth's parent is
+/// the actor being dispatched, so the call exists only where that actor is in
+/// scope. An [`Erased`] ctx reaches none of this (issue 4158).
+impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, M, A> {
+    /// Spawn an instanced `C` as a child of `A`, the actor this ctx
+    /// dispatches for. The `C: ChildOf<A>` bound enforces the ADR-0166
+    /// permission, and
+    /// [`HandlerSpawnBuilder::stage`](crate::HandlerSpawnBuilder::stage) /
     /// [`HandlerSpawnBuilder::stage_with`](crate::HandlerSpawnBuilder::stage_with)
-    /// verify that `P` matches the executing binding's logical identity,
-    /// prepare the child locally, and stage its authoritative owner-time
+    /// prepare the child locally and stage its authoritative owner-time
     /// activation. The new actor's [`Source`]
     /// stamps the calling actor's mailbox so any reply addressed to
     /// `SourceAddr::Component` routes back here.
+    ///
+    /// The parent is the ctx's own actor, never a caller-supplied one
+    /// (issue 4158): a handler opts into this call by naming the actor in
+    /// its ctx signature — `ctx: &mut NativeCtx<'_, Single, Self>` or
+    /// `NativeCtx<'_, Manual, Self>` — and the `#[actor]` macro hands it a
+    /// ctx typed by the actor it is dispatching for. A parent that
+    /// disagrees with the executing binding is therefore not a runtime
+    /// error to check but a state with no spelling.
     ///
     /// Returns a [`HandlerSpawnBuilder`](crate::HandlerSpawnBuilder) the
     /// caller chains `after_init` and then `stage`, `stage_with`, or
@@ -887,15 +980,14 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// [`NativeBinding::new_for_test`] (which doesn't wire a
     /// spawner) — fail-fast per ADR-0063: production transports always
     /// carry one, so handler code never reaches the panic.
-    pub fn spawn_child<'b, P, A>(
+    pub fn spawn_child<'b, C>(
         &'b self,
         subname: super::spawn::Subname<'b>,
-        config: A::Config,
-        params: A::Params,
-    ) -> super::spawn::HandlerSpawnBuilder<'b, A>
+        config: C::Config,
+        params: C::Params,
+    ) -> super::spawn::HandlerSpawnBuilder<'b, C>
     where
-        P: Addressable,
-        A: aether_actor::ChildOf<P> + aether_actor::Instanced + NativeActor,
+        C: aether_actor::ChildOf<A> + aether_actor::Instanced + NativeActor,
     {
         let spawner = self
             .binding
@@ -904,15 +996,15 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         let sender =
             Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
         // ADR-0165: the child builder captures the complete typed parent
-        // identity so it can validate the declared parent and derive both
-        // lineage and canonical name without a registry lookup.
+        // identity so it can derive both lineage and canonical name without
+        // a registry lookup.
         let parent = self
             .binding
             .runtime_identity()
             .expect("NativeCtx::spawn_child requires a typed production binding")
             .clone();
         let builder =
-            super::spawn::SpawnBuilder::new_child::<P>(Arc::clone(spawner), subname, config, params, sender, parent);
+            super::spawn::SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
         super::spawn::HandlerSpawnBuilder::new(
             builder,
             Arc::clone(self.binding),
@@ -922,7 +1014,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     }
 }
 
-impl<M: ReplyMode> NativeCtx<'_, M> {
+impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
@@ -956,7 +1048,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     }
 }
 
-impl<M: ReplyMode> NativeCtx<'_, M> {
+impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     /// Lineage-aware multicast: encode `payload` once, then push one copy
     /// to every `recipient`. The inbound `(mail_id, root)` from this ctx
     /// propagate as `parent_mail` + `inherited_root`, so each fanned-out
@@ -1082,7 +1174,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     }
 }
 
-impl<M: ReplyMode> Drop for NativeCtx<'_, M> {
+impl<M: ReplyMode, A> Drop for NativeCtx<'_, M, A> {
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): handler-end flush. One
     /// `NativeCtx` is built per dispatched envelope (and one for
     /// `unwire`), so its scope *is* the handler's lifetime — dropping it
@@ -1196,7 +1288,7 @@ impl<'a> NativeInitCtx<'a> {
 // `NativeCtx` that reach into the substrate-internal spawner + actor
 // registry.
 
-impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
+impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -1288,7 +1380,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
 // manual-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl OutboundReply for NativeCtx<'_, Manual> {
+impl<A> OutboundReply for NativeCtx<'_, Manual, A> {
     type ReplyHandle = Source;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher
@@ -1328,7 +1420,7 @@ impl OutboundReply for NativeCtx<'_, Manual> {
 // not hold the request chain open. A sourceless dispatch (broadcast /
 // substrate-generated mail, no `SourceAddr::Component`) has no routable
 // target, so the emission warn-drops.
-impl<K: Kind> Emit<K> for NativeCtx<'_, Multi<K>> {
+impl<K: Kind, A> Emit<K> for NativeCtx<'_, Multi<K>, A> {
     fn emit(&mut self, payload: &K) {
         let Some(source) = self.source_mailbox() else {
             tracing::warn!(
@@ -1427,7 +1519,12 @@ mod tests {
     }
 
     impl Dispatch<Self> for StubActor {
-        fn dispatch(_state: &mut Self, _ctx: &mut NativeCtx<'_, Manual>, _kind: KindId, _payload: &[u8]) -> Option<()> {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, Manual, Self>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
             None
         }
     }

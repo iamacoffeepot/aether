@@ -74,7 +74,7 @@ impl NativeActor for RingRelay {
 impl Dispatch<Self> for RingRelay {
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -134,7 +134,7 @@ impl NativeActor for HoldRelay {
 impl Dispatch<Self> for HoldRelay {
     fn dispatch(
         _state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

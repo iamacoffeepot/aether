@@ -5,6 +5,7 @@
 use super::*;
 
 use crate::server::shard::HttpDispatchShard;
+use aether_actor::Single;
 use aether_substrate::Subname;
 use std::collections::hash_map::Entry;
 
@@ -248,7 +249,7 @@ impl HttpSupervisorState {
         }
     }
 
-    fn schedule_shard_wake(&self, ctx: &NativeCtx<'_>) {
+    fn schedule_shard_wake<A>(&self, ctx: &NativeCtx<'_, Single, A>) {
         let _ = ctx.send_envelope_tracked(
             self.self_mailbox,
             KindId(<HttpInboundReady as Kind>::ID.0),
@@ -265,7 +266,7 @@ impl HttpSupervisorState {
     /// caller then ends the handler so its birth flushes as an independent
     /// batch. A follow-up wake is always scheduled: it stages the next index,
     /// or resumes ordinary accepted-peer draining after the last index.
-    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_>) -> bool {
+    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, Single, HttpServerCapability>) -> bool {
         let index = match &mut self.shard_startup {
             ShardStartup::Starting { next_to_stage, .. } => next_to_stage.take(),
             ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => None,
@@ -293,10 +294,7 @@ impl HttpSupervisorState {
         };
         let subname = format!("shard-{index}");
         let shard = ShardSpawnContext { index, subname: subname.clone(), inbound_tx, wake_dirty };
-        if let Err(error) = ctx
-            .spawn_child::<HttpServerCapability, HttpDispatchShard>(Subname::Named(&subname), seed, ())
-            .stage_with(shard)
-        {
+        if let Err(error) = ctx.spawn_child::<HttpDispatchShard>(Subname::Named(&subname), seed, ()).stage_with(shard) {
             tracing::warn!(
                 target: "aether_http::server",
                 shard = %subname,
@@ -422,7 +420,7 @@ impl HttpSupervisorState {
     /// sockets and supervisor-owned pending sockets. The first peer starts
     /// lazy staging; later peers stay FIFO in `Starting`; only `Ready` may
     /// post into a child sink.
-    pub fn assign_peer(&mut self, ctx: &mut NativeCtx<'_>, stream: TcpStream, peer: SocketAddr) {
+    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, Single, A>, stream: TcpStream, peer: SocketAddr) {
         let live = self.live_connections.load(Ordering::Acquire);
         let pending = self.pending_peer_count();
         if live.saturating_add(pending) >= self.config.max_connections {

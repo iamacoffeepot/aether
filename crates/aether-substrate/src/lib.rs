@@ -66,7 +66,7 @@ pub mod transform;
 
 pub use actor::monitor::MonitorHandle;
 pub use actor::native::binding::NativeBinding;
-pub use actor::native::ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
+pub use actor::native::ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
 // ADR-0112: the per-handler ctx reply-mode markers, re-exported next to
 // `NativeCtx` so chassis / harness code naming `NativeCtx<'_, Manual>`
 // reaches them without an `aether_actor` import.

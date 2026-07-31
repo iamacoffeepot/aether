@@ -868,9 +868,10 @@ fn manual_handler_replies_through_ctx() {
 
     let mut cap = ManualReplyCap;
     {
-        // ADR-0112: the dispatch seam carries the `Manual` ctx — build it
-        // via `new_dispatching`.
-        let mut ctx = NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+        // ADR-0112: the dispatch seam carries the `Manual` ctx, and issue 4158
+        // types it by the dispatching actor — `new_for_actor` builds both,
+        // with the mode read off `dispatch`'s own signature.
+        let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
         let handled = <ManualReplyCap as Dispatch<ManualReplyCap>>::dispatch(
             &mut cap,
             &mut ctx,

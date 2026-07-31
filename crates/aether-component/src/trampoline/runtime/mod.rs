@@ -30,7 +30,7 @@ pub use std::sync::Arc;
 
 use super::WasmTrampoline;
 pub use aether_actor::Local;
-use aether_actor::runtime;
+use aether_actor::{Single, runtime};
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
@@ -244,7 +244,7 @@ impl NativeActor for WasmTrampoline {
     /// to `Component::deliver`, and let the guest's `receive_p32`
     /// dispatch shim do the rest.
     #[fallback]
-    fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
+    fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, env: &Envelope) -> bool {
         // ADR-0097: deliver the inbound, then drain every sibling spawn
         // the guest staged during `deliver`. The block scopes the
         // `&mut component` borrow so `spawn_sibling` can read the

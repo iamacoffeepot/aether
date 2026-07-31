@@ -14,7 +14,7 @@ mod instance;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{Addressable, Manual, runtime};
+use aether_actor::{Addressable, Manual, Single, runtime};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
@@ -194,7 +194,7 @@ impl DesktopWindowCapabilityState {
         &mut self,
         id: WindowId,
         attachment: Result<(), String>,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, Single, DesktopWindowCapability>,
     ) -> Vec<WindowHostEffect> {
         let Some(mut pending) = self.pending_creates.remove(&id) else {
             return Vec::new();
@@ -211,7 +211,7 @@ impl DesktopWindowCapabilityState {
                 // settle through it. Declared here because that reasoning is
                 // three call frames away from this line.
                 let receipt = match ctx
-                    .spawn_child::<WindowCapability, DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
+                    .spawn_child::<DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
                     .ordered_by(OrderingDevice::RetainedReplyDebt)
                     .stage()
                 {
@@ -340,7 +340,11 @@ impl DesktopWindowCapabilityState {
     }
 
     /// Finish a close after the integration detached native resources.
-    pub fn finish_window_close(&mut self, id: WindowId, ctx: &mut NativeCtx<'_>) -> Vec<WindowHostEffect> {
+    pub fn finish_window_close<A>(
+        &mut self,
+        id: WindowId,
+        ctx: &mut NativeCtx<'_, Single, A>,
+    ) -> Vec<WindowHostEffect> {
         let close_reply = self.windows.get_mut(&id).and_then(|state| state.close_reply.take());
         let existed = self.remove_window(id);
         if !existed {
@@ -371,7 +375,7 @@ impl DesktopWindowCapabilityState {
     /// Translate one native window event and publish typed input directly to
     /// selector-aware subscribers.
     #[allow(clippy::too_many_lines)]
-    pub fn window_event(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_>) {
+    pub fn window_event<A>(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_, Single, A>) {
         let Some(id) = self.winit_windows.get(&winit_id).copied() else {
             return;
         };
@@ -595,7 +599,7 @@ impl DesktopWindowCapabilityState {
         }
     }
 
-    fn publish<K: Kind>(&self, ctx: &mut NativeCtx<'_>, window: WindowId, event: &K) {
+    fn publish<K: Kind, A>(&self, ctx: &mut NativeCtx<'_, Single, A>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
 }
@@ -1150,7 +1154,14 @@ mod tests {
         insert_window(&mut state, id, "main", false);
         state.windows.get_mut(&id).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        // Attachment stages the window's child birth, so the ctx names the cap
+        // it would parent under — the same one the pumped host turn supplies.
+        let mut ctx = NativeCtx::<'_, Single, DesktopWindowCapability>::new_for_actor(
+            &binding,
+            Source::NONE,
+            MailId::NONE,
+            MailId::NONE,
+        );
 
         let effects = state.finish_window_attachment(id, Err("render attach failed".to_owned()), &mut ctx);
 

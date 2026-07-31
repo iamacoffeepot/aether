@@ -8,9 +8,9 @@ use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
     TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
-    extract_native_actor_handler_kind, extract_task_handler_types, multi_kind_or_return_error, parse_handler_class,
-    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
-    types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
+    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, multi_kind_or_return_error,
+    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
+    rewrite_self_state_first_param, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::opts::{ActorCardinality, ActorOpts};
 
@@ -27,6 +27,20 @@ pub enum NativeEmit {
     /// The addressing markers come from the struct-side `#[actor]`, so none are
     /// emitted here and the `NAMESPACE` const is consumed (dropped).
     RuntimeOnly,
+}
+
+/// Issue 4158: the trailing `.erase()` a dispatch arm appends when the
+/// handler's ctx signature does not name the actor — empty when it does, so
+/// the typed ctx (and with it `spawn_child`) reaches only a handler that
+/// asked for it. Mirrors the existing `as_single()` downgrade: capability is
+/// only ever removed, so a handler cannot name a parent at all, let alone the
+/// wrong one.
+fn erase_unless_ctx_names_actor(sig: &syn::Signature) -> TokenStream2 {
+    if ctx_names_actor(sig) {
+        quote!()
+    } else {
+        quote!(.erase())
+    }
 }
 
 fn reject_generic_native_lineage(generics: &syn::Generics, opts: &ActorOpts) -> syn::Result<()> {
@@ -384,23 +398,28 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         // handler is a `&mut self` method and UFCS passes `state` as the
         // receiver; for a split cap it is an associated fn taking the state
         // explicitly. One call form covers both.
+        // Issue 4158: the dispatch ctx is also typed by the actor, so a
+        // handler that named it in its signature can `spawn_child` under the
+        // actor actually running. One that did not gets the `erase()`d view
+        // and reaches no spawn surface at all.
+        let erase = erase_unless_ctx_names_actor(&h.method.sig);
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
                 let __aether_reply = #self_ty::#method_ident(
-                    __aether_state, __aether_ctx.as_single(), __aether_decoded);
+                    __aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
             (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
-                #self_ty::#method_ident(__aether_state, __aether_ctx.as_single(), __aether_decoded);
+                #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
             },
             (HandlerClass::Manual, _) => quote! {
-                #self_ty::#method_ident(__aether_state, __aether_ctx, __aether_decoded);
+                #self_ty::#method_ident(__aether_state, __aether_ctx #erase, __aether_decoded);
             },
             // ADR-0134: a multi handler is called with the `Multi<K>` view
             // (`K` inferred from its ctx signature); it emits 0..n mails and
             // returns `()`, so there is no auto-reply.
             (HandlerClass::Multi, _) => quote! {
-                #self_ty::#method_ident(__aether_state, __aether_ctx.as_multi(), __aether_decoded);
+                #self_ty::#method_ident(__aether_state, __aether_ctx.as_multi() #erase, __aether_decoded);
             },
         };
         if h.is_slice {
@@ -460,17 +479,22 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // ctx, so downgrade with `as_single()`.
             // Folded shape: UFCS `Self::method(state, …)` (see the mail-arm
             // note above) over `__aether_state: &mut Self::State`.
+            // Issue 4158: same signature-directed erasure the mail arms run,
+            // so a completion handler can stage a follow-on child by naming
+            // the actor in its ctx. `resolve_value` is the framework's own
+            // call and always takes the erased view.
+            let erase = erase_unless_ctx_names_actor(&t.method.sig);
             let dispatch = match t.mode {
                 TaskReplyMode::ByValue => quote! {
-                    #self_ty::#method_ident(__aether_state, __aether_ctx.as_single(), __aether_done);
+                    #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, __aether_done);
                 },
                 TaskReplyMode::BorrowReply => quote! {
                     let __aether_reply = #self_ty::#method_ident(
-                        __aether_state, __aether_ctx.as_single(), &__aether_done);
-                    __aether_done.resolve_value(__aether_ctx.as_single(), &__aether_reply);
+                        __aether_state, __aether_ctx.as_single() #erase, &__aether_done);
+                    __aether_done.resolve_value(__aether_ctx.as_single().erase(), &__aether_reply);
                 },
                 TaskReplyMode::BorrowNoReply => quote! {
-                    #self_ty::#method_ident(__aether_state, __aether_ctx.as_single(), &__aether_done);
+                    #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, &__aether_done);
                     __aether_done.release_no_reply();
                 },
             };
@@ -516,17 +540,19 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // override on every envelope.
     // Folded shape: a `#[fallback]` overrides `NativeActor::dispatch_fallback`
     // (the default returns `false`). Forwarded through UFCS over the state,
-    // mirroring the typed-handler arms; the `#[fallback]` keeps its
-    // `NativeCtx<'_>` (= Single) signature, so downgrade.
+    // mirroring the typed-handler arms — including the mode downgrade to the
+    // `Single` signature a `#[fallback]` declares and the issue-4158 actor
+    // erasure, which a catch-all cap opts out of the same way a handler does.
     let fallback_dispatch_override = fallback.as_ref().map(|f| {
         let method_ident = &f.method.sig.ident;
+        let erase = erase_unless_ctx_names_actor(&f.method.sig);
         quote! {
             fn dispatch_fallback(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual, Self>,
                 __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
-                #self_ty::#method_ident(__aether_state, __aether_ctx.as_single(), __aether_env);
+                #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, __aether_env);
                 true
             }
         }
@@ -701,7 +727,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // `Manual` ctx; the arms downgrade per handler class.
             fn dispatch(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, ::aether_actor::Manual, Self>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
