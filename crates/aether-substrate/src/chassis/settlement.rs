@@ -56,6 +56,7 @@ use crate::actor::native::pumped_slot::PumpedSlot;
 use crate::chassis::ctx::MailboxWakeSlot;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;
+use crate::runtime::lifecycle::FatalAbortRecord;
 use aether_data::{Kind, KindId, MailId, MailboxId};
 use aether_kinds::trace::Settled;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
@@ -399,19 +400,34 @@ pub enum TerminalDisposition {
     Panic,
 }
 
+/// Why a gate stopped waiting without its signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateFailure {
+    /// The signal stayed silent for the whole cumulative patience budget.
+    Silent,
+    /// Every sender dropped without firing the signal.
+    Disconnected,
+    /// The chassis fatally aborted, so the thread that would have fired
+    /// the signal is gone. Carries the reason the
+    /// [`FatalAbortRecord`] captured on the way through
+    /// [`crate::runtime::lifecycle::FatalAborter::abort`] — the one piece
+    /// of attribution a caller that only sees the stalled gate could
+    /// otherwise never recover (iamacoffeepot/aether#4193).
+    FatalAbort(String),
+}
+
 /// A wedge detected by [`await_internal_signal`]: the internal signal
-/// did not fire within the cumulative patience budget. Carries enough
-/// context for the caller to log / surface / abort attributably.
+/// did not fire, either because it stayed silent to the cumulative
+/// patience budget or because the chassis went down under it. Carries
+/// enough context for the caller to log / surface / abort attributably.
 #[derive(Debug, Clone)]
 pub struct GateWedge {
     /// The gate name passed to [`await_internal_signal`].
     pub gate: String,
     /// Total wall-clock time waited before giving up.
     pub waited: Duration,
-    /// Whether the channel disconnected (sender dropped without firing)
-    /// rather than simply staying silent to the cap. Both are wedges;
-    /// the distinction is diagnostic.
-    pub disconnected: bool,
+    /// What ended the wait.
+    pub failure: GateFailure,
 }
 
 impl GateWedge {
@@ -419,12 +435,20 @@ impl GateWedge {
     /// [`crate::runtime::lifecycle::FatalAborter`] consumes.
     #[must_use]
     pub fn reason(&self) -> String {
-        let cause = if self.disconnected {
-            "signal channel disconnected without firing"
-        } else {
-            "internal signal never fired within patience budget"
-        };
-        format!("gate {} wedged: {cause}, waited {:?}", self.gate, self.waited)
+        match &self.failure {
+            GateFailure::Silent => format!(
+                "gate {} wedged: internal signal never fired within patience budget, waited {:?}",
+                self.gate, self.waited
+            ),
+            GateFailure::Disconnected => format!(
+                "gate {} wedged: signal channel disconnected without firing, waited {:?}",
+                self.gate, self.waited
+            ),
+            GateFailure::FatalAbort(abort) => format!(
+                "gate {} abandoned after {:?}: the chassis fatally aborted, so nothing is left to fire this signal — {abort}",
+                self.gate, self.waited
+            ),
+        }
     }
 }
 
@@ -460,8 +484,20 @@ pub enum WaitOutcome {
 ///   waiting with logged checkpoints, not a re-poke — a healthy gate
 ///   resolves before the cap; a genuine wedge exhausts it.
 /// - `Disconnected` → the sender dropped without firing; the same
-///   terminal path as cap-exhaustion, with [`GateWedge::disconnected`]
+///   terminal path as cap-exhaustion, with [`GateFailure::Disconnected`]
 ///   set so the wedge is attributable.
+///
+/// `abort_watch` is the chassis's [`FatalAbortRecord`], and it is what
+/// keeps a fatal abort attributable across the gate
+/// (iamacoffeepot/aether#4193). A [`crate::runtime::lifecycle::PanicAborter`]
+/// abort unwinds the thread it fires on, so a gate waiting on a signal
+/// that thread owed fires nothing and simply burns its budget — under a
+/// test-runner ceiling shorter than the budget, the run reports a bare
+/// timeout and the panic that caused it reads as a hang. Watched, the
+/// gate refuses to wait for a chassis that already aborted, wakes on the
+/// record's tripwire if one aborts mid-wait, and folds the recorded
+/// reason into the wedge either way. Pass `None` from a gate with no
+/// chassis behind it.
 ///
 /// On a wedge the helper dispenses `disposition`:
 ///
@@ -484,18 +520,36 @@ pub fn await_internal_signal(
     round_budget: Duration,
     cumulative_cap: Duration,
     disposition: TerminalDisposition,
+    abort_watch: Option<&FatalAbortRecord>,
 ) -> WaitOutcome {
+    // The chassis has already aborted, so whatever owed this signal is
+    // gone and the budget can only expire. Report the abort now rather
+    // than time out anonymously later.
+    if let Some(abort) = abort_watch.and_then(FatalAbortRecord::reason) {
+        return wedge(gate, Duration::ZERO, GateFailure::FatalAbort(abort), disposition);
+    }
+
     // Clamp the per-round budget off zero so a misconfigured caller
     // can't turn the loop into a busy-spin.
     let round = round_budget.max(Duration::from_millis(1));
+    let tripwire = abort_watch.map_or_else(crossbeam_channel::never, FatalAbortRecord::tripwire);
     let start = Instant::now();
     loop {
-        match rx.recv_timeout(round) {
-            Ok(()) => return WaitOutcome::Settled,
-            Err(RecvTimeoutError::Timeout) => {
+        crossbeam_channel::select! {
+            recv(rx) -> received => return match received {
+                Ok(()) => WaitOutcome::Settled,
+                Err(_) => wedge(gate, start.elapsed(), failure(abort_watch, GateFailure::Disconnected), disposition),
+            },
+            // The tripwire never carries a value — a receive on it means
+            // the record dropped its sender, which it does only after
+            // writing the abort reason `failure` is about to read.
+            recv(tripwire) -> _ => {
+                return wedge(gate, start.elapsed(), failure(abort_watch, GateFailure::Silent), disposition);
+            }
+            default(round) => {
                 let waited = start.elapsed();
                 if waited >= cumulative_cap {
-                    return wedge(gate, waited, false, disposition);
+                    return wedge(gate, waited, failure(abort_watch, GateFailure::Silent), disposition);
                 }
                 tracing::warn!(
                     target: "aether_substrate::settlement",
@@ -505,18 +559,22 @@ pub fn await_internal_signal(
                     "gate {gate} slow: waited {waited:?}, extending",
                 );
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                return wedge(gate, start.elapsed(), true, disposition);
-            }
         }
     }
+}
+
+/// The wedge cause, preferring a recorded fatal abort over the raw
+/// channel outcome: an abort that fired while the gate waited is the
+/// attribution a reader wants, not "the signal stayed silent".
+fn failure(abort_watch: Option<&FatalAbortRecord>, channel_outcome: GateFailure) -> GateFailure {
+    abort_watch.and_then(FatalAbortRecord::reason).map_or(channel_outcome, GateFailure::FatalAbort)
 }
 
 /// Build the wedge verdict and dispense the one disposition the helper
 /// owns (`Panic`); the rest ride back to the caller in
 /// [`WaitOutcome::Wedged`].
-fn wedge(gate: &str, waited: Duration, disconnected: bool, disposition: TerminalDisposition) -> WaitOutcome {
-    let wedge = GateWedge { gate: gate.to_owned(), waited, disconnected };
+fn wedge(gate: &str, waited: Duration, failure: GateFailure, disposition: TerminalDisposition) -> WaitOutcome {
+    let wedge = GateWedge { gate: gate.to_owned(), waited, failure };
     match disposition {
         TerminalDisposition::Panic => panic!("{}", wedge.reason()),
         TerminalDisposition::Proceed | TerminalDisposition::ReplyErr | TerminalDisposition::Abort => {
@@ -577,7 +635,7 @@ pub fn install_pump_wake(slot: &MailboxWakeSlot, tx: Sender<PumpWake>) {
 /// [`await_internal_signal`]: `round_budget` is the warn-checkpoint
 /// cadence (clamped off zero so the loop can't spin), `cumulative_cap`
 /// the total patience before a wedge, a `Disconnected` channel is an
-/// attributable wedge with [`GateWedge::disconnected`] set, and the
+/// attributable wedge with [`GateFailure::Disconnected`] set, and the
 /// terminal `disposition` is dispensed the same way (`Panic` diverges via
 /// `panic!`; the rest ride back in [`WaitOutcome::Wedged`]).
 ///
@@ -613,7 +671,7 @@ where
             Err(RecvTimeoutError::Timeout) => {
                 let waited = start.elapsed();
                 if waited >= cumulative_cap {
-                    return wedge(gate, waited, false, disposition);
+                    return wedge(gate, waited, GateFailure::Silent, disposition);
                 }
                 tracing::warn!(
                     target: "aether_substrate::settlement",
@@ -624,7 +682,7 @@ where
                 );
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return wedge(gate, start.elapsed(), true, disposition);
+                return wedge(gate, start.elapsed(), GateFailure::Disconnected, disposition);
             }
         }
     }
@@ -906,13 +964,14 @@ mod tests {
             Duration::from_millis(10),
             Duration::from_secs(5),
             TerminalDisposition::Proceed,
+            None,
         );
         handle.join().expect("firing thread joins");
         assert!(matches!(outcome, WaitOutcome::Settled));
     }
 
     /// Cap-exhaustion: the signal never fires, so the helper exhausts
-    /// the cumulative cap and returns `Wedged` (not disconnected) for a
+    /// the cumulative cap and returns a `Silent` `Wedged` for a
     /// non-`Panic` disposition.
     #[test]
     fn await_internal_signal_cap_exhaustion_wedges() {
@@ -925,10 +984,11 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_millis(20),
             TerminalDisposition::ReplyErr,
+            None,
         );
         match outcome {
             WaitOutcome::Wedged(w) => {
-                assert!(!w.disconnected);
+                assert_eq!(w.failure, GateFailure::Silent);
                 assert_eq!(w.gate, "test.cap");
                 assert!(w.waited >= Duration::from_millis(20));
             }
@@ -937,7 +997,7 @@ mod tests {
     }
 
     /// `Disconnected`: dropping the sender takes the same terminal path
-    /// as cap-exhaustion, with `disconnected` set.
+    /// as cap-exhaustion, with `GateFailure::Disconnected` set.
     #[test]
     fn await_internal_signal_disconnect_wedges() {
         let (tx, rx) = bounded::<()>(1);
@@ -948,10 +1008,11 @@ mod tests {
             Duration::from_millis(50),
             Duration::from_secs(5),
             TerminalDisposition::Proceed,
+            None,
         );
         match outcome {
             WaitOutcome::Wedged(w) => {
-                assert!(w.disconnected);
+                assert_eq!(w.failure, GateFailure::Disconnected);
                 assert_eq!(w.gate, "test.disconnect");
             }
             WaitOutcome::Settled => panic!("expected a wedge, got Settled"),
@@ -971,6 +1032,7 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_millis(20),
             TerminalDisposition::Panic,
+            None,
         );
     }
 

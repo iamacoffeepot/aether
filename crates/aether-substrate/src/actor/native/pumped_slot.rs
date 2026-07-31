@@ -200,7 +200,7 @@ mod tests {
     use crate::actor::registry::ActorRegistry;
     use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox};
     use crate::chassis::settlement::{
-        PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
+        GateFailure, PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
     };
     use crate::config::RingCapacities;
     use crate::mail::Mail;
@@ -883,7 +883,7 @@ mod tests {
         );
         match outcome {
             WaitOutcome::Wedged(w) => {
-                assert!(!w.disconnected, "cap exhaustion is the silent path, not a disconnect");
+                assert_eq!(w.failure, GateFailure::Silent, "cap exhaustion is the silent path, not a disconnect");
                 assert_eq!(w.gate, "test.cap.pumped", "the wedge names the gate attributably");
                 assert!(w.waited >= Duration::from_millis(20), "the wedge waited out the cumulative cap");
             }
@@ -895,7 +895,7 @@ mod tests {
     }
 
     /// ADR-0161 §Decision 2: a disconnected wake channel takes the same
-    /// terminal path as cap exhaustion with `disconnected` set — the pumped
+    /// terminal path as cap exhaustion with `GateFailure::Disconnected` — the pumped
     /// mirror of `await_internal_signal_disconnect_wedges`. No wake sender is
     /// installed on the slot, so dropping the last `Sender` disconnects.
     #[test]
@@ -916,7 +916,7 @@ mod tests {
         );
         match outcome {
             WaitOutcome::Wedged(w) => {
-                assert!(w.disconnected, "dropping every sender disconnects the wake channel");
+                assert_eq!(w.failure, GateFailure::Disconnected, "dropping every sender disconnects the wake channel");
                 assert_eq!(w.gate, "test.disconnect.pumped");
             }
             WaitOutcome::Settled => panic!("expected a wedge, got Settled"),

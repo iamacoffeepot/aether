@@ -45,7 +45,7 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::{BootAuthority, NameConflict, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
-use crate::runtime::lifecycle::FatalAborter;
+use crate::runtime::lifecycle::{FatalAbortRecord, FatalAborter};
 use crate::scheduler::Drainable;
 use crate::scheduler::SeizeHandle;
 use crate::scheduler::WakeHandle;
@@ -352,7 +352,23 @@ impl Spawner {
     /// `round_budget` is the per-round patience interval (the log
     /// cadence); `cumulative_cap` is the total patience per slot before
     /// declaring a wedge.
-    pub(crate) fn shutdown_instanced(&self, round_budget: Duration, cumulative_cap: Duration) {
+    ///
+    /// Issue #4193: `abort_record` is the chassis's [`FatalAbortRecord`],
+    /// and it is what stops this gate laundering a handler panic into a
+    /// bare timeout. A panicking handler escalates through the pool
+    /// worker's [`FatalAborter`]; under [`crate::runtime::lifecycle::PanicAborter`]
+    /// that unwinds the worker, so the slot it was mid-turn on never
+    /// fires close-done and every remaining slot waits out `cumulative_cap`
+    /// — five minutes by default, longer than any test-runner ceiling, so
+    /// the run reports a truncated hang and the panic that caused it never
+    /// reaches the failure. Watching the record makes the gate report the
+    /// abort reason instead, at the moment it looks.
+    pub(crate) fn shutdown_instanced(
+        &self,
+        round_budget: Duration,
+        cumulative_cap: Duration,
+        abort_record: &FatalAbortRecord,
+    ) {
         // Issue #2509: retain the slot's `MailboxId` alongside its entry
         // (previously dropped as `_id`) so a genuine teardown wedge names
         // the actor whose close cycle failed rather than a bare
@@ -399,7 +415,7 @@ impl Spawner {
             // cycle failed (e.g. `shutdown_instanced.close_done[mbx-…]`)
             // rather than the bare `shutdown_instanced.close_done`.
             let gate = format!("shutdown_instanced.close_done[{id}]");
-            match await_internal_signal(rx, &gate, round_budget, cumulative_cap, disposition) {
+            match await_internal_signal(rx, &gate, round_budget, cumulative_cap, disposition, Some(abort_record)) {
                 WaitOutcome::Settled => {}
                 WaitOutcome::Wedged(wedge) => {
                     // `Abort` disposition (release): the close cycle
@@ -1820,7 +1836,7 @@ mod tests {
         assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Dispatch(home));
         assert!(events_rx.try_recv().is_err(), "one live mail performs one ordinary dispatcher drain");
 
-        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1));
+        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
         drop(owner);
         assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
     }
@@ -1897,7 +1913,7 @@ mod tests {
         );
         reborn_done.release_no_reply();
 
-        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1));
+        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
         drop(owner);
         assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
     }
@@ -2008,6 +2024,6 @@ mod tests {
             .expect("instanced_slots mutex poisoned")
             .insert(MailboxId(0xABCD), InstancedSlotEntry { slot, wake });
 
-        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_millis(20));
+        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_millis(20), &FatalAbortRecord::new());
     }
 }

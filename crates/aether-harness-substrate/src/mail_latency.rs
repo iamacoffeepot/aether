@@ -184,7 +184,7 @@ const SETTLE_CAP: Duration = Duration::from_secs(50);
 /// a genuine wedge instead of a downstream assertion. `Panic` diverges
 /// inside the helper, so a return means the chain settled.
 fn assert_settled(rx: &crossbeam_channel::Receiver<()>, gate: &str) {
-    match await_internal_signal(rx, gate, SETTLE_TIMEOUT, SETTLE_CAP, TerminalDisposition::Panic) {
+    match await_internal_signal(rx, gate, SETTLE_TIMEOUT, SETTLE_CAP, TerminalDisposition::Panic, None) {
         WaitOutcome::Settled => {}
         WaitOutcome::Wedged(_) => unreachable!("Panic disposition diverges on a wedge"),
     }
