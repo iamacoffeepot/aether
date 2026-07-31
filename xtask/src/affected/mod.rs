@@ -18,9 +18,16 @@
 //! the wasm-executing scenario suites, resolved through cargo's own
 //! dependency edges (the chassis-bundle coupling special case retired
 //! with that crate, #3816).
+//!
+//! The one narrowing on top of package granularity is [`test_targets`]: a
+//! path under a package's own `tests/` directory compiles into an
+//! integration-test binary nothing links against, so it selects that
+//! package and stops there rather than dragging in a reverse-dependency
+//! closure it cannot reach (#4197).
 
 mod rules;
 mod select;
+mod test_targets;
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
