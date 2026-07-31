@@ -433,17 +433,45 @@ impl ActorRegistry {
             drop(actors);
             forward.entry(target).or_default().push(entry);
         }
-        // Reverse edge, inserted only after the forward edge committed.
-        // Transient observability of forward without reverse is benign —
-        // the close path looks at both, and either direction missing just
-        // makes one cleanup step a no-op.
+        self.link_watcher(watcher, target);
+        Ok(())
+    }
+
+    /// ADR-0114 §2: register `watcher` against an inline child's **alias**.
+    /// An alias has no actor slot of its own — it is a first-class address
+    /// served by its target parent's slot — so its liveness is the routing
+    /// [`Registry`](crate::Registry)'s to answer, and the caller
+    /// ([`crate::actor::native::ctx::NativeCtx::monitor`]) has established it
+    /// before calling. Nothing here re-checks the actors map, which would
+    /// only ever refuse.
+    ///
+    /// Infallible for the same reason `vacate_actor` is: an alias is never
+    /// tombstoned. Its occupant departs when the parent's does, and the
+    /// departure fan-out drains this index by alias, so a registration that
+    /// races that fan-out either drains with it or watches the mailbox's next
+    /// occupant — the vacate semantics ADR-0079 §8 already states for a
+    /// refillable slot.
+    pub(crate) fn register_alias_monitor(&self, watcher: MailboxId, alias: MailboxId) {
+        self.monitors_of
+            .write()
+            .expect("monitors_of lock poisoned; fail-fast per ADR-0063")
+            .entry(alias)
+            .or_default()
+            .push(MonitorEntry { watcher });
+        self.link_watcher(watcher, alias);
+    }
+
+    /// Insert the reverse `monitoring[watcher]` edge, only ever after the
+    /// forward edge committed. Transient observability of forward without
+    /// reverse is benign — the close path looks at both, and either
+    /// direction missing just makes one cleanup step a no-op.
+    fn link_watcher(&self, watcher: MailboxId, target: MailboxId) {
         self.monitoring
             .write()
             .expect("monitoring lock poisoned; fail-fast per ADR-0063")
             .entry(watcher)
             .or_default()
             .push(target);
-        Ok(())
     }
 
     /// Issue 607 Phase 4b (ADR-0079): undo a prior `register_monitor`

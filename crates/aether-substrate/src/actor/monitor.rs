@@ -11,7 +11,11 @@
 
 use std::sync::Arc;
 
+use aether_data::{Kind, MailboxId};
+
+use crate::actor::native::binding::NativeBinding;
 use crate::actor::registry::ActorRegistry;
+use crate::mail::Mail;
 
 /// Issue 607 Phase 4b (ADR-0079): RAII handle returned by
 /// `NativeCtx::monitor`. Holds the registered `(watcher, target)`
@@ -34,23 +38,19 @@ use crate::actor::registry::ActorRegistry;
 /// surface as silent multi-prune).
 pub struct MonitorHandle {
     registry: Arc<ActorRegistry>,
-    watcher: aether_data::MailboxId,
-    target: aether_data::MailboxId,
+    watcher: MailboxId,
+    target: MailboxId,
 }
 
 impl MonitorHandle {
-    pub(crate) fn new(
-        registry: Arc<ActorRegistry>,
-        watcher: aether_data::MailboxId,
-        target: aether_data::MailboxId,
-    ) -> Self {
+    pub(crate) fn new(registry: Arc<ActorRegistry>, watcher: MailboxId, target: MailboxId) -> Self {
         Self { registry, watcher, target }
     }
 
     /// The target this handle is monitoring. Useful for handlers that
     /// hold many handles and need to identify which one fired a notice.
     #[must_use]
-    pub fn target(&self) -> aether_data::MailboxId {
+    pub fn target(&self) -> MailboxId {
         self.target
     }
 }
@@ -58,5 +58,38 @@ impl MonitorHandle {
 impl Drop for MonitorHandle {
     fn drop(&mut self) {
         self.registry.deregister_monitor(self.watcher, self.target);
+    }
+}
+
+/// Fan one [`aether_kinds::MonitorNotice`] naming `target` out to every
+/// watcher the departure drained. The notice is pushed root-shaped (no
+/// parent chain): a departure fan-out runs past the closing chain's
+/// settlement, so it can hold nothing.
+pub(crate) fn notify_departure(binding: &NativeBinding, target: MailboxId, watchers: Vec<MailboxId>) {
+    if watchers.is_empty() {
+        return;
+    }
+    let payload = aether_kinds::MonitorNotice { target }.encode_into_bytes();
+    for watcher in watchers {
+        binding.mailer().push(Mail::new(watcher, aether_kinds::MonitorNotice::ID, payload.clone(), 1));
+    }
+}
+
+/// Drain and notify the watchers of every inline-child alias folded onto
+/// `occupant` (ADR-0114 §2), which departs when `occupant` does — one
+/// notice per alias, naming the alias.
+///
+/// An inline child's sends stamp its alias as their dispatch identity
+/// (ADR-0114 §4), so a cap that keys state on the host-stamped source files
+/// the child's rows under that alias and reclaims them on a notice naming
+/// it. A fan-out that named only `occupant` would leave every such row
+/// behind, outliving the actor that claimed it.
+///
+/// The alias route itself is left in place: it is served by the parent's
+/// slot, which stays addressable and refillable across a vacate, and a
+/// close retires the parent's own name rather than the alias's.
+pub(crate) fn notify_alias_departures(actor_registry: &ActorRegistry, binding: &NativeBinding, occupant: MailboxId) {
+    for alias in binding.mailer().registry().aliases_of(occupant) {
+        notify_departure(binding, alias, actor_registry.vacate_actor(alias));
     }
 }
