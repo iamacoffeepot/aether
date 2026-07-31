@@ -251,13 +251,11 @@ where
         // `with_stamped` envelope as `init` and per-envelope dispatch
         // so `Local<T>` and `tracing::*` route into this actor's
         // `ActorLogRing` identically.
+        //
+        // A chassis-boot birth has no causing mail, so the hook has no chain
+        // to hand a birth-completing effect (ADR-0168 §1).
         local::with_stamped(&resources.slots, || {
-            let mut wire_ctx = NativeCtx::new(
-                &resources.transport,
-                aether_data::Source::NONE,
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut wire_ctx = NativeCtx::for_wire(&resources.transport, aether_data::MailId::NONE);
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
