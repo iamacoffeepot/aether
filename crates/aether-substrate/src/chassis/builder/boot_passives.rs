@@ -97,28 +97,6 @@ impl BootedPassives {
         &self.settlement_registry
     }
 
-    /// Install the ADR-0165 runtime seal (iamacoffeepot/aether#4167).
-    ///
-    /// Boot's claim / init / wire / spawn passes are done, so the last
-    /// [`BootAuthority`] still in circulation — the one on the `Spawner`, the
-    /// only holder that outlives boot — leaves with this call. Every remaining
-    /// route to `Registry::apply_batches` runs through a `&BootAuthority`
-    /// argument (iamacoffeepot/aether#4160 / #4161), so taking the token is
-    /// what makes a post-seal direct write unrepresentable rather than merely
-    /// detected: `Spawner::commit` can no longer produce the argument and
-    /// falls to its owner-submission route.
-    ///
-    /// This is emphatically *not* [`RegistryOwnerLease::attach`], which runs
-    /// far earlier (before the claim passes that legitimately write directly)
-    /// and installs the owner rather than closing the direct path.
-    ///
-    /// Deliberately not called from `boot_passives` itself: a built chassis
-    /// seals only after its driver's `Start` stage returns `Ok`, which happens
-    /// in `Builder::build` after `boot_passives` has already returned.
-    pub(super) fn seal_registry_authority(&self) {
-        let _spent = self.spawner.seal();
-    }
-
     fn shutdown_in_place(&mut self) {
         // Stop new prepared births and synchronously cancel/join every
         // Starting activation while the relay and worker pool are live.

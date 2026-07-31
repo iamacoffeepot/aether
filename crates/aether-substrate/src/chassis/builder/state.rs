@@ -254,10 +254,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // — each actor owns its own `ActorLogRing` and there is no
         // drain target to configure.
         //
-        // ADR-0165: a passive chassis seals immediately before it is returned.
-        // Everything the embedder does from here — `spawn_actor`,
-        // `boot_pumped_actor` — is post-seal and goes through the owner.
-        booted.seal_registry_authority();
         Ok(PassiveChassis { booted, _chassis: PhantomData })
     }
 }
@@ -577,11 +573,6 @@ impl<C: Chassis> Builder<C, HasDriver> {
             driver_boot(&mut driver_ctx)?
         };
 
-        // ADR-0165: a built chassis seals after a *successful* driver `Start`.
-        // The `?` above is what enforces the "successful" half — a driver that
-        // fails to boot returns here, tears its passives down, and never
-        // reaches this line, so the unwind still has boot's own writer.
-        booted.seal_registry_authority();
         Ok(BuiltChassis { booted, driver: driver_running, _chassis: PhantomData })
     }
 }
