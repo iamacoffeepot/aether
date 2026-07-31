@@ -20,8 +20,8 @@ use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
-use aether_substrate::actor::native::NativeActorMailbox;
 use aether_substrate::actor::native::binding::NativeBinding;
+use aether_substrate::actor::native::{NativeActorMailbox, PumpedSlot};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::mailer::Mailer;
@@ -58,6 +58,44 @@ fn boot_tcp_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEve
         .build_passive()
         .expect("TcpCapability boots");
     (registry, mailer, rx, chassis)
+}
+
+/// Boot the same substrate as [`boot_tcp_substrate`] but with `TcpCapability`
+/// as an **externally-pumped** actor (ADR-0161) instead of a pool-dispatched
+/// passive: nothing on its inbox is dispatched until the caller asks for it
+/// via [`PumpedSlot::drain_available`]. That is the hold point
+/// [`duplicate_unbind_preserves_the_first_parked_reply`] needs — it stages two
+/// mails on the cap before either turn runs, which no pool-dispatched boot can
+/// promise.
+///
+/// The slot is `!Send` and its close is the caller's (the chassis never learns
+/// about a post-seal pumped actor), so the test drives it on its own thread and
+/// calls [`PumpedSlot::shutdown`] before the chassis drops.
+fn boot_pumped_tcp_substrate()
+-> (Arc<Registry>, mpsc::Receiver<EgressEvent>, PassiveChassis<TestChassis>, PumpedSlot<TcpCapability>) {
+    let (registry, mailer, rx) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .build_passive()
+        .expect("driverless chassis boots");
+    let (cap, _wake) = chassis.boot_pumped_actor::<TcpCapability>((), ()).expect("TcpCapability boots pumped");
+    (registry, rx, chassis, cap)
+}
+
+/// Pump `cap` until the next outbound reply lands on `rx`, bounded by the same
+/// two-second deadline [`drive_and_decode`] uses. A pumped cap only advances
+/// while this loop runs, so the pump is what carries a parked reply's own
+/// chain — the `MonitorNotice` an unbind waits on arrives as cap mail like any
+/// other.
+fn pump_for_reply(cap: &mut PumpedSlot<TcpCapability>, rx: &mpsc::Receiver<EgressEvent>, what: &str) -> EgressEvent {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        cap.drain_available();
+        if let Ok(event) = rx.try_recv() {
+            return event;
+        }
+        assert!(Instant::now() < deadline, "{what} did not arrive within the deadline");
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn session_reply() -> Source {
@@ -507,16 +545,33 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     assert!(listeners.listeners.is_empty(), "monitor cleanup removes the unbound listener");
 }
 
+/// Tripwire: the parked-unbind path. A second `UnbindListener` that lands
+/// while the first close is still in flight must be told the unbind is in
+/// progress and must not displace the first caller's parked reply.
+///
+/// The ordering is pinned rather than raced (iamacoffeepot/aether#4014). Both
+/// unbinds are staged on the cap's inbox *before* the pump dispatches either,
+/// so the FIFO drain runs the first turn — which parks the reply and only then
+/// buffers `Close` to the listener — ahead of the duplicate. The listener's
+/// `MonitorNotice`, the mail that retires the parked entry, cannot be minted
+/// until that `Close` flushes, so it can never overtake a duplicate that is
+/// already queued. Enqueueing both against a pool-dispatched cap left the
+/// duplicate racing the whole close chain, and a lost race took the
+/// already-closed path instead of the parked one under CI load.
 #[test]
 fn duplicate_unbind_preserves_the_first_parked_reply() {
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
-    let bind_reply: BindListenerResult = drive_and_decode(
+    let (registry, rx, _chassis, mut cap) = boot_pumped_tcp_substrate();
+    enqueue(
         &registry,
-        &rx,
         TcpCapability::NAMESPACE,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer: None },
+        session_reply(),
+        MailId::NONE,
     );
-    let listener_name = match bind_reply {
+    let EgressEvent::ToSession { payload, .. } = pump_for_reply(&mut cap, &rx, "the bind reply") else {
+        panic!("expected the bind reply to a session");
+    };
+    let listener_name = match BindListenerResult::decode_from_bytes(&payload).expect("decode BindListenerResult") {
         BindListenerResult::Ok { listener_name, .. } => listener_name,
         BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
     };
@@ -542,8 +597,9 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
     let mut first_reply = None;
     let mut duplicate_reply = None;
     for _ in 0..2 {
-        let event = rx.recv_timeout(Duration::from_secs(2)).expect("both unbind callers receive a reply");
-        let EgressEvent::ToSession { session, kind_name, payload, .. } = event else {
+        let EgressEvent::ToSession { session, kind_name, payload, .. } =
+            pump_for_reply(&mut cap, &rx, "both unbind replies")
+        else {
             panic!("expected unbind reply to a session");
         };
         assert_eq!(kind_name, UnbindListenerResult::NAME);
@@ -569,6 +625,8 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
         ),
         "the duplicate caller receives the in-progress error: {duplicate_reply:?}",
     );
+
+    cap.shutdown();
 }
 
 /// Tripwire: an outbound dial must correlate its parked reply to the
