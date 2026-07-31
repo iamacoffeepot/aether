@@ -28,7 +28,11 @@ use crate::affected::test_targets;
 /// Over-inclusion here costs a wasm build and never correctness, so the
 /// rule keys on the harness dep rather than on which of its helpers a given
 /// test happens to call.
-const DIST_RESOLVING_HARNESSES: &[&str] =
+///
+/// The list is not trusted: `cargo test -p xtask` derives it from the
+/// workspace sources and fails when the two disagree, in either direction
+/// (issue #4215, `crate::affected::invariants::dist_consumers`).
+pub(super) const DIST_RESOLVING_HARNESSES: &[&str] =
     &["aether-harness-fleet", "aether-harness-substrate", "aether-harness-substrate-capture"];
 
 /// The computed test selection.
