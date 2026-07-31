@@ -844,8 +844,9 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     ///
     /// The departing occupant is a whole cluster (ADR-0114 §2): the
     /// mailbox itself plus every inline-child alias folded onto it, each
-    /// of which drains and fires under its own name — see
-    /// [`notify_alias_departures`].
+    /// of which drains and fires under its own name, so a cap holding rows
+    /// keyed on an inline child's stamped identity (ADR-0114 §4) can
+    /// reclaim them.
     ///
     /// The notice mail is pushed root-shaped (no parent chain),
     /// mirroring the close fan-out. A transport with no spawner wired

@@ -642,7 +642,7 @@ where
 ///
 /// The closing actor's inline-child aliases (ADR-0114 §2) depart with it, so
 /// each of those addresses fans out under its own name too — see
-/// [`notify_alias_departures`]. Only `self_id` is tombstoned: an alias is
+/// `notify_alias_departures`. Only `self_id` is tombstoned: an alias is
 /// served by this slot rather than owning one, and the retired name is the
 /// actor's.
 ///
