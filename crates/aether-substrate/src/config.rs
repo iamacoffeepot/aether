@@ -256,7 +256,7 @@ impl Default for SchedulerTuning {
         Self {
             spin_window_micros: 50,
             local_sticky_max: 256,
-            time_budget_micros: None,
+            time_budget_micros: Some(1),
             peer_steal: false,
             local_chain_backstop: 64,
             handoff_cost_nanos: None,
