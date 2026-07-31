@@ -119,7 +119,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: kit_wasm.to_vec(),
@@ -155,9 +155,9 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 /// need only be unique within the batch.
 fn drag(panel: &str) -> Vec<(&'static str, HarnessOp)> {
     vec![
-        ("press", HarnessOp::send_mail(panel, &press(110.0, 22.0))),
-        ("move", HarnessOp::send_mail(panel, &MouseMove { window: TEST_WINDOW_ID, x: 200.0, y: 22.0 })),
-        ("release", HarnessOp::send_mail(panel, &release(200.0, 22.0))),
+        ("press", HarnessOp::send_and_settle(panel, &press(110.0, 22.0))),
+        ("move", HarnessOp::send_and_settle(panel, &MouseMove { window: TEST_WINDOW_ID, x: 200.0, y: 22.0 })),
+        ("release", HarnessOp::send_and_settle(panel, &release(200.0, 22.0))),
     ]
 }
 
@@ -204,7 +204,7 @@ fn emitted_counts(messages: &[String]) -> Vec<u32> {
 fn swap_script(harness: &mut SubstrateHarness, label: &str, bytes: Vec<u8>) {
     let host = host_address();
     let swapped = harness
-        .execute(vec![(label, HarnessOp::send_and_await(&host, &SetScript { bytes }))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&host, &SetScript { bytes }))])
         .unwrap_or_else(|error| panic!("{label} swap: {error:?}"));
     match swapped.reply::<LoadScriptResult>(label).expect("decode LoadScriptResult") {
         LoadScriptResult::Ok { .. } => {}
@@ -244,7 +244,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
 
     // First tick spawns the host, which spawns + frames the wrapped slider.
     // Then S1/S2/S3: one drag through the `intercept_slider` script.
-    let mut ops = vec![("spawn", HarnessOp::send_mail(&panel, &Tick))];
+    let mut ops = vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick))];
     ops.extend(drag(&panel));
     harness.execute(ops).expect("spawn + S1 drag");
     let (phase1, cursor) = read_panel_log(&mut harness, None);

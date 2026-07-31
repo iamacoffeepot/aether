@@ -52,7 +52,7 @@ fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -145,7 +145,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
 
     for index in 0..64 {
         let staged_reply = harness
-            .execute(vec![("stage", HarnessOp::send_and_await(&world, &empty_chunk_proposal(index)))])
+            .execute(vec![("stage", HarnessOp::send_and_await_reply(&world, &empty_chunk_proposal(index)))])
             .expect("stage retained proposal");
         let (proposal_id, operation_result, _) =
             staged(staged_reply.reply::<ProposalResult>("stage").expect("decode staged proposal"));
@@ -154,7 +154,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
     }
 
     let rejected = harness
-        .execute(vec![("reject", HarnessOp::send_and_await(&world, &empty_chunk_proposal(64)))])
+        .execute(vec![("reject", HarnessOp::send_and_await_reply(&world, &empty_chunk_proposal(64)))])
         .expect("reject proposal beyond retained capacity");
     assert_eq!(
         rejected.reply::<ProposalResult>("reject").expect("decode capacity rejection"),
@@ -164,7 +164,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
     let discarded = harness
         .execute(vec![(
             "discard",
-            HarnessOp::send_and_await(&world, &DiscardProposal { proposal_id: ProposalId { value: 1 } }),
+            HarnessOp::send_and_await_reply(&world, &DiscardProposal { proposal_id: ProposalId { value: 1 } }),
         )])
         .expect("discard retained proposal");
     assert_eq!(
@@ -173,7 +173,7 @@ fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
     );
 
     let restaged = harness
-        .execute(vec![("restage", HarnessOp::send_and_await(&world, &empty_chunk_proposal(65)))])
+        .execute(vec![("restage", HarnessOp::send_and_await_reply(&world, &empty_chunk_proposal(65)))])
         .expect("restage after discard reopens capacity");
     let (proposal_id, operation_result, _) =
         staged(restaged.reply::<ProposalResult>("restage").expect("decode restaged proposal"));
@@ -198,8 +198,11 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let peer_source = MarkRef { id: MarkId::new(42), revision: 1 };
     let proposed = harness
         .execute(vec![
-            ("accepted", HarnessOp::send_and_await(&world, &brush_proposal(accepted_source, Material::Stone, 2048))),
-            ("peer", HarnessOp::send_and_await(&world, &brush_proposal(peer_source, Material::Sand, 2304))),
+            (
+                "accepted",
+                HarnessOp::send_and_await_reply(&world, &brush_proposal(accepted_source, Material::Stone, 2048)),
+            ),
+            ("peer", HarnessOp::send_and_await_reply(&world, &brush_proposal(peer_source, Material::Sand, 2304))),
         ])
         .expect("stage cross-chunk proposal peers");
     let (accepted_id, accepted_operation, accepted_digest) =
@@ -224,7 +227,7 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let preview_set = harness
         .execute(vec![(
             "preview",
-            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(accepted_id) }),
+            HarnessOp::send_and_await_reply(&world, &SetProposalPreview { proposal_id: Some(accepted_id) }),
         )])
         .expect("activate proposal preview");
     assert_eq!(
@@ -254,7 +257,10 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     );
 
     let committed = harness
-        .execute(vec![("commit", HarnessOp::send_and_await(&world, &CommitProposal { proposal_id: accepted_id }))])
+        .execute(vec![(
+            "commit",
+            HarnessOp::send_and_await_reply(&world, &CommitProposal { proposal_id: accepted_id }),
+        )])
         .expect("commit accepted proposal");
     assert_eq!(
         committed.reply::<ProposalResult>("commit").expect("decode commit result"),
@@ -283,7 +289,7 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     assert_eq!(mean_absolute_error(&committed_image, &preview_image).expect("matching dimensions"), 0.0);
 
     let stale = harness
-        .execute(vec![("stale", HarnessOp::send_and_await(&world, &CommitProposal { proposal_id: peer_id }))])
+        .execute(vec![("stale", HarnessOp::send_and_await_reply(&world, &CommitProposal { proposal_id: peer_id }))])
         .expect("reject stale peer");
     assert_eq!(
         stale.reply::<ProposalResult>("stale").expect("decode stale rejection"),
@@ -300,7 +306,7 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let discard_staged = harness
         .execute(vec![(
             "discard_stage",
-            HarnessOp::send_and_await(&world, &brush_proposal(discard_source, Material::Grass, 1792)),
+            HarnessOp::send_and_await_reply(&world, &brush_proposal(discard_source, Material::Grass, 1792)),
         )])
         .expect("stage discard proposal");
     let (discard_id, _, _) =
@@ -308,11 +314,14 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     harness
         .execute(vec![(
             "discard_preview",
-            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(discard_id) }),
+            HarnessOp::send_and_await_reply(&world, &SetProposalPreview { proposal_id: Some(discard_id) }),
         )])
         .expect("preview discard proposal");
     let discarded = harness
-        .execute(vec![("discard", HarnessOp::send_and_await(&world, &DiscardProposal { proposal_id: discard_id }))])
+        .execute(vec![(
+            "discard",
+            HarnessOp::send_and_await_reply(&world, &DiscardProposal { proposal_id: discard_id }),
+        )])
         .expect("discard proposal");
     assert_eq!(
         discarded.reply::<ProposalResult>("discard").expect("decode discard result"),
@@ -324,7 +333,7 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let replacement_staged = harness
         .execute(vec![(
             "replacement_stage",
-            HarnessOp::send_and_await(&world, &brush_proposal(replacement_source, Material::Sand, 2048)),
+            HarnessOp::send_and_await_reply(&world, &brush_proposal(replacement_source, Material::Sand, 2048)),
         )])
         .expect("stage replacement proposal");
     let (replacement_id, _, _) =
@@ -332,13 +341,13 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     harness
         .execute(vec![(
             "replacement_preview",
-            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
+            HarnessOp::send_and_await_reply(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
         )])
         .expect("activate replacement preview");
     let replaced = harness
         .execute(vec![(
             "replace",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id,
@@ -357,7 +366,7 @@ fn terrain_proposal_preview_commit_and_session_reset_are_pixel_exact() {
     let old_id = harness
         .execute(vec![(
             "old_id",
-            HarnessOp::send_and_await(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
+            HarnessOp::send_and_await_reply(&world, &SetProposalPreview { proposal_id: Some(replacement_id) }),
         )])
         .expect("query old proposal before new allocation");
     assert_eq!(

@@ -146,38 +146,41 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
     let mut harness = SubstrateHarness::start().expect("boot synthetic window harness");
     let result = harness
         .execute(vec![
-            ("initial", HarnessOp::send_and_await(window_mailbox(), &ListWindows)),
+            ("initial", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
             (
                 "create-first",
-                HarnessOp::send_and_await(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
+                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
             ),
             (
                 "title-first",
-                HarnessOp::send_and_await(canonical_window("first"), &SetWindowTitle { title: "renamed".to_owned() }),
+                HarnessOp::send_and_await_reply(
+                    canonical_window("first"),
+                    &SetWindowTitle { title: "renamed".to_owned() },
+                ),
             ),
             (
                 "create-second",
-                HarnessOp::send_and_await(window_mailbox(), &CreateWindow { spec: spec("second", 800, 600) }),
+                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("second", 800, 600) }),
             ),
             (
                 "resize-second",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     abbreviated_window("second"),
                     &SetWindowMode { mode: WindowMode::Windowed, width: Some(640), height: Some(360) },
                 ),
             ),
-            ("focus-first", HarnessOp::send_and_await(canonical_window("first"), &FocusWindow)),
-            ("redraw-second", HarnessOp::send_and_await(abbreviated_window("second"), &RequestWindowRedraw)),
-            ("listed", HarnessOp::send_and_await(window_mailbox(), &ListWindows)),
-            ("close-first", HarnessOp::send_and_await(canonical_window("first"), &CloseWindow)),
+            ("focus-first", HarnessOp::send_and_await_reply(canonical_window("first"), &FocusWindow)),
+            ("redraw-second", HarnessOp::send_and_await_reply(abbreviated_window("second"), &RequestWindowRedraw)),
+            ("listed", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
+            ("close-first", HarnessOp::send_and_await_reply(canonical_window("first"), &CloseWindow)),
             (
                 "title-second-after-close",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     abbreviated_window("second"),
                     &SetWindowTitle { title: "survivor".to_owned() },
                 ),
             ),
-            ("remaining", HarnessOp::send_and_await(window_mailbox(), &ListWindows)),
+            ("remaining", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
         ])
         .expect("synthetic window operations settle");
 
@@ -194,11 +197,11 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         .execute(vec![
             (
                 "create-first",
-                HarnessOp::send_and_await(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
+                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
             ),
             (
                 "create-second",
-                HarnessOp::send_and_await(window_mailbox(), &CreateWindow { spec: spec("second", 640, 360) }),
+                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("second", 640, 360) }),
             ),
         ])
         .expect("create routed windows");

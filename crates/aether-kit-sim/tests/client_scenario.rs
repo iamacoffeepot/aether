@@ -64,7 +64,7 @@ fn load_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: 
     let result = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -90,7 +90,7 @@ fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
     let result = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
+            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
         )])
         .expect("drop player client");
     match result.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -200,7 +200,7 @@ fn wait_for_authoritative_entity(harness: &mut SubstrateHarness, sim_address: &s
     loop {
         harness.execute(vec![("advance", HarnessOp::advance(1))]).expect("advance player loop");
         let poll = harness
-            .execute(vec![("poll", HarnessOp::send_and_await(sim_address, &Poll { since_tick: 0 }))])
+            .execute(vec![("poll", HarnessOp::send_and_await_reply(sim_address, &Poll { since_tick: 0 }))])
             .expect("poll TurnSim")
             .reply::<PollResult>("poll")
             .expect("decode PollResult");
@@ -216,7 +216,10 @@ fn gateway_listener_port(harness: &mut SubstrateHarness) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let list = harness
-            .execute(vec![("list-player-listener", HarnessOp::send_and_await("aether.tcp", &ListListeners::default()))])
+            .execute(vec![(
+                "list-player-listener",
+                HarnessOp::send_and_await_reply("aether.tcp", &ListListeners::default()),
+            )])
             .expect("list game gateway listener")
             .reply::<ListListenersResult>("list-player-listener")
             .expect("decode game gateway listener list");
@@ -266,7 +269,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
     harness
         .execute(vec![(
             "camera",
-            HarnessOp::send_mail(
+            HarnessOp::send_and_settle(
                 component_address(CAMERA_NAME),
                 &CameraSetMode {
                     name: "main".into(),

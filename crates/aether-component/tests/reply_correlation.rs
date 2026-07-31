@@ -26,7 +26,7 @@ fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent {
                     wasm,
@@ -68,7 +68,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
     harness
         .execute(vec![(
             "trigger",
-            HarnessOp::send_mail(&fixture_addr, &RunFsDemux { namespace: "save".to_owned(), path }),
+            HarnessOp::send_and_settle(&fixture_addr, &RunFsDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsDemux to fixture");
 

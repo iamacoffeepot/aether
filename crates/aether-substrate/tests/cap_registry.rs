@@ -41,7 +41,7 @@ fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> M
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
             ),
@@ -117,7 +117,7 @@ fn cap_registry_updates_on_replace() {
     let swapped = harness
         .execute(vec![(
             "swap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
                 &ReplaceComponent {
                     mailbox_id: mbox,
@@ -165,7 +165,7 @@ fn cap_registry_clears_on_drop() {
     let dropped = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id: mbox }),
+            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id: mbox }),
         )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {

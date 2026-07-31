@@ -73,7 +73,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -131,30 +131,30 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     // The first tick spawns the widget stack and assigns each child its frame;
     // every later step drives one input event, settling its whole in-cluster
     // chain before the next.
-    // Each input kind is fire-and-forget (no reply), so `send_mail` — which
-    // still blocks until the whole dispatched chain settles — is the op;
-    // `send_and_await` would hang waiting for a reply that never comes.
+    // Each input kind is fire-and-forget (no reply), so `send_and_settle` — which
+    // waits out the whole dispatched chain without expecting an answer — is the op;
+    // `send_and_await_reply` would hang waiting for a reply that never comes.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
             // Slider drag: press mid-track, drag right, release — the release
             // commits at the dragged value (x=160 → 75% of 0..255 ≈ 191). The
             // press also focuses the slider.
-            ("drag_press", HarnessOp::send_mail(&panel, &press(110.0, 52.0))),
-            ("drag_move", HarnessOp::send_mail(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
-            ("drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("drag_press", HarnessOp::send_and_settle(&panel, &press(110.0, 52.0))),
+            ("drag_move", HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
+            ("drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
             // Tab moves focus off the slider to the radio group; Down then
             // routes to the focused radio, moving its selection to index 1.
-            ("tab", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("radio_key", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("radio_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
             // A click on the third radio row (y 118..142) selects index 2.
-            ("radio_press", HarnessOp::send_mail(&panel, &press(30.0, 125.0))),
-            ("radio_release", HarnessOp::send_mail(&panel, &release(30.0, 125.0))),
+            ("radio_press", HarnessOp::send_and_settle(&panel, &press(30.0, 125.0))),
+            ("radio_release", HarnessOp::send_and_settle(&panel, &release(30.0, 125.0))),
             // Focus the text field (y 148..172), type into it, and commit.
-            ("text_focus", HarnessOp::send_mail(&panel, &press(50.0, 160.0))),
-            ("text_focus_up", HarnessOp::send_mail(&panel, &release(50.0, 160.0))),
-            ("type", HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() })),
-            ("commit", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("text_focus", HarnessOp::send_and_settle(&panel, &press(50.0, 160.0))),
+            ("text_focus_up", HarnessOp::send_and_settle(&panel, &release(50.0, 160.0))),
+            ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() })),
+            ("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
         .expect("input session");
 
@@ -206,16 +206,16 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
 
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
-            ("disable_by_lineage", HarnessOp::send_mail(&button, &SetWidgetState { state: unavailable })),
-            ("blocked_press", HarnessOp::send_mail(&panel, &press(30.0, 190.0))),
-            ("blocked_release", HarnessOp::send_mail(&panel, &release(30.0, 190.0))),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("disable_by_lineage", HarnessOp::send_and_settle(&button, &SetWidgetState { state: unavailable })),
+            ("blocked_press", HarnessOp::send_and_settle(&panel, &press(30.0, 190.0))),
+            ("blocked_release", HarnessOp::send_and_settle(&panel, &release(30.0, 190.0))),
             (
                 "enable_by_lineage",
-                HarnessOp::send_mail(&button, &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_and_settle(&button, &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            ("allowed_press", HarnessOp::send_mail(&panel, &press(30.0, 190.0))),
-            ("allowed_release", HarnessOp::send_mail(&panel, &release(30.0, 190.0))),
+            ("allowed_press", HarnessOp::send_and_settle(&panel, &press(30.0, 190.0))),
+            ("allowed_release", HarnessOp::send_and_settle(&panel, &release(30.0, 190.0))),
         ])
         .expect("external inline-child lineage session");
 
@@ -301,7 +301,7 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
@@ -378,14 +378,14 @@ fn panel_stacks_declared_children_in_order() {
     harness
         .execute(vec![
             // First tick spawns + lays out the declared stack.
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
             // Tab from no focus lands on the first focusable child (index 0);
             // an arrow nudge on the focused slider commits + logs it.
-            ("tab_first", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("nudge_first", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("tab_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("nudge_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
             // Tab again advances to the second child; nudge + log it.
-            ("tab_second", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("nudge_second", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("tab_second", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("nudge_second", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
         ])
         .expect("declared-children session");
 
@@ -423,29 +423,32 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
-            ("focus_read_only", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("focus_read_only", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "blocked_read_only_page",
-                HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
+                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
             ),
-            ("blocked_read_only_press", HarnessOp::send_mail(&panel, &press(30.0, 118.0))),
-            ("blocked_read_only_release", HarnessOp::send_mail(&panel, &release(30.0, 118.0))),
-            ("make_mutable", HarnessOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
-            ("page_to_five", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
-            ("down_to_six", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("click_realized_top", HarnessOp::send_mail(&panel, &press(30.0, 22.0))),
-            ("release_realized_top", HarnessOp::send_mail(&panel, &release(30.0, 22.0))),
-            ("disable", HarnessOp::send_mail(&list, &SetWidgetState { state: disabled })),
+            ("blocked_read_only_press", HarnessOp::send_and_settle(&panel, &press(30.0, 118.0))),
+            ("blocked_read_only_release", HarnessOp::send_and_settle(&panel, &release(30.0, 118.0))),
+            (
+                "make_mutable",
+                HarnessOp::send_and_settle(&list, &SetWidgetState { state: WidgetControlState::default() }),
+            ),
+            ("page_to_five", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
+            ("down_to_six", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("click_realized_top", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
+            ("release_realized_top", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
+            ("disable", HarnessOp::send_and_settle(&list, &SetWidgetState { state: disabled })),
             (
                 "blocked_disabled_page",
-                HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
+                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN }),
             ),
-            ("blocked_disabled_press", HarnessOp::send_mail(&panel, &press(30.0, 94.0))),
-            ("blocked_disabled_release", HarnessOp::send_mail(&panel, &release(30.0, 94.0))),
-            ("enable", HarnessOp::send_mail(&list, &SetWidgetState { state: WidgetControlState::default() })),
-            ("refocus", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("page_to_seven", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
+            ("blocked_disabled_press", HarnessOp::send_and_settle(&panel, &press(30.0, 94.0))),
+            ("blocked_disabled_release", HarnessOp::send_and_settle(&panel, &release(30.0, 94.0))),
+            ("enable", HarnessOp::send_and_settle(&list, &SetWidgetState { state: WidgetControlState::default() })),
+            ("refocus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("page_to_seven", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_PAGE_DOWN })),
         ])
         .expect("virtual-list state and selection session");
 
@@ -472,41 +475,50 @@ fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness) {
     let run = child_address("run");
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
             // Forward Tab skips the disabled first slider and focuses the
             // read-only value. Its arrow input must not mutate.
-            ("tab_value", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("blocked_nudge", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("tab_value", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("blocked_nudge", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
             // Runtime state changes preserve the value while enabling mutation.
-            ("make_mutable", HarnessOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
-            ("allowed_nudge", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            (
+                "make_mutable",
+                HarnessOp::send_and_settle(&value, &SetWidgetState { state: WidgetControlState::default() }),
+            ),
+            ("allowed_nudge", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
             // Shift+Tab wraps backward to the Button, skipping the disabled
             // first entry. Space fires on release.
             (
                 "shift",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     &panel,
                     &Modifiers { window: TEST_WINDOW_ID, shift: true, ..Modifiers::default() },
                 ),
             ),
-            ("reverse_tab", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("space", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
-            ("space_release", HarnessOp::send_mail(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            ("reverse_tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("space", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            (
+                "space_release",
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }),
+            ),
             // Enter fires immediately and suppresses repeated key-down mail
             // until its matching release.
-            ("enter", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
-            ("enter_repeat", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
-            ("enter_release", HarnessOp::send_mail(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter_repeat", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            (
+                "enter_release",
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+            ),
             // Hiding the focused button moves focus forward to the live slider;
             // no stale keyboard arm or focus remains on the button.
             (
                 "hide_button",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     &run,
                     &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
                 ),
             ),
-            ("nudge_after_hide", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("nudge_after_hide", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
         ])
         .expect("state and keyboard session");
 }
@@ -574,18 +586,21 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
-            ("focus", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("blocked_key", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("blocked_pointer", HarnessOp::send_mail(&panel, &press(30.0, 70.0))),
-            ("blocked_pointer_release", HarnessOp::send_mail(&panel, &release(30.0, 70.0))),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("blocked_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("blocked_pointer", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
+            ("blocked_pointer_release", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
             (
                 "enable",
-                HarnessOp::send_mail(child_address("choice"), &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_and_settle(
+                    child_address("choice"),
+                    &SetWidgetState { state: WidgetControlState::default() },
+                ),
             ),
-            ("allowed_key", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
-            ("allowed_pointer", HarnessOp::send_mail(&panel, &press(30.0, 70.0))),
-            ("allowed_pointer_release", HarnessOp::send_mail(&panel, &release(30.0, 70.0))),
+            ("allowed_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("allowed_pointer", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
+            ("allowed_pointer_release", HarnessOp::send_and_settle(&panel, &release(30.0, 70.0))),
         ])
         .expect("read-only radio session");
 
@@ -611,12 +626,15 @@ fn drive_button_cancellation_session(harness: &mut SubstrateHarness) {
         .execute(vec![
             // Address the live child directly so focus loss cannot mask a
             // failure to clear its pointer arm on the state transition.
-            ("arm_button", HarnessOp::send_mail(&run, &press(30.0, 22.0))),
-            ("disable_button", HarnessOp::send_mail(&run, &SetWidgetState { state: unavailable })),
-            ("enable_button", HarnessOp::send_mail(&run, &SetWidgetState { state: WidgetControlState::default() })),
-            ("stale_button_release", HarnessOp::send_mail(&run, &release(30.0, 22.0))),
-            ("live_button_press", HarnessOp::send_mail(&run, &press(30.0, 22.0))),
-            ("live_button_release", HarnessOp::send_mail(&run, &release(30.0, 22.0))),
+            ("arm_button", HarnessOp::send_and_settle(&run, &press(30.0, 22.0))),
+            ("disable_button", HarnessOp::send_and_settle(&run, &SetWidgetState { state: unavailable })),
+            (
+                "enable_button",
+                HarnessOp::send_and_settle(&run, &SetWidgetState { state: WidgetControlState::default() }),
+            ),
+            ("stale_button_release", HarnessOp::send_and_settle(&run, &release(30.0, 22.0))),
+            ("live_button_press", HarnessOp::send_and_settle(&run, &press(30.0, 22.0))),
+            ("live_button_release", HarnessOp::send_and_settle(&run, &release(30.0, 22.0))),
         ])
         .expect("button state cancellation session");
 }
@@ -629,14 +647,23 @@ fn drive_slider_cancellation_session(harness: &mut SubstrateHarness) {
         .execute(vec![
             // Read-only leaves root capture intact. Re-enable before moving;
             // only clearing Slider's own drag state prevents stale values.
-            ("begin_drag", HarnessOp::send_mail(&panel, &press(60.0, 52.0))),
-            ("make_slider_read_only", HarnessOp::send_mail(&value, &SetWidgetState { state: read_only })),
-            ("enable_slider", HarnessOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
-            ("stale_drag_move", HarnessOp::send_mail(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
-            ("stale_drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
-            ("live_drag_press", HarnessOp::send_mail(&panel, &press(110.0, 52.0))),
-            ("live_drag_move", HarnessOp::send_mail(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 })),
-            ("live_drag_release", HarnessOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("begin_drag", HarnessOp::send_and_settle(&panel, &press(60.0, 52.0))),
+            ("make_slider_read_only", HarnessOp::send_and_settle(&value, &SetWidgetState { state: read_only })),
+            (
+                "enable_slider",
+                HarnessOp::send_and_settle(&value, &SetWidgetState { state: WidgetControlState::default() }),
+            ),
+            (
+                "stale_drag_move",
+                HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 }),
+            ),
+            ("stale_drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
+            ("live_drag_press", HarnessOp::send_and_settle(&panel, &press(110.0, 52.0))),
+            (
+                "live_drag_move",
+                HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 160.0, y: 52.0 }),
+            ),
+            ("live_drag_release", HarnessOp::send_and_settle(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider state cancellation session");
 }
@@ -658,7 +685,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     );
 
     let panel = panel_address();
-    harness.execute(vec![("spawn", HarnessOp::send_mail(&panel, &Tick))]).expect("spawn widget set");
+    harness.execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick))]).expect("spawn widget set");
     drive_button_cancellation_session(&mut harness);
     drive_slider_cancellation_session(&mut harness);
 
@@ -702,18 +729,21 @@ fn read_only_text_field_blocks_activation_until_enabled() {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_mail(&panel, &Tick)),
-            ("focus", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "blocked_text",
-                HarnessOp::send_mail(&panel, &TextInput { window: TEST_WINDOW_ID, text: " mutation".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: " mutation".to_owned() }),
             ),
-            ("blocked_enter", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("blocked_enter", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
             (
                 "enable",
-                HarnessOp::send_mail(child_address("locked"), &SetWidgetState { state: WidgetControlState::default() }),
+                HarnessOp::send_and_settle(
+                    child_address("locked"),
+                    &SetWidgetState { state: WidgetControlState::default() },
+                ),
             ),
-            ("allowed_enter", HarnessOp::send_mail(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("allowed_enter", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
         .expect("read-only text activation session");
 

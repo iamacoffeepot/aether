@@ -44,7 +44,7 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: Some(export.to_owned()) },
             ),
@@ -59,7 +59,7 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
 /// Drop one loaded actor, blocking on its `DropResult::Ok`.
 fn drop_actor(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
     let dropped = harness
-        .execute(vec![("drop", HarnessOp::send_and_await("aether.component", &DropComponent { mailbox_id }))])
+        .execute(vec![("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { mailbox_id }))])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
@@ -99,7 +99,7 @@ fn module_boot_singleton_spawns_once_across_selector_loads() {
     );
 
     let listed = harness
-        .execute(vec![("list", HarnessOp::send_and_await("aether.component", &ListComponents {}))])
+        .execute(vec![("list", HarnessOp::send_and_await_reply("aether.component", &ListComponents {}))])
         .expect("list sequence");
     let names = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult").names;
     let boot_listed = names.iter().filter(|n| n.ends_with(":aether.test.boot.boot")).count();
@@ -164,7 +164,7 @@ fn boot_actor_is_not_selectable_by_export() {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -242,7 +242,7 @@ fn same_hash_replacement_preserves_the_boot_reference() {
     let replaced = harness
         .execute(vec![(
             "replace",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id: widget,

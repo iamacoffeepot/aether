@@ -36,14 +36,14 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
         .execute(vec![
             (
                 "write",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
                     &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: payload.clone() },
                 ),
             ),
             (
                 "read",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
                     &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
                 ),
@@ -82,19 +82,22 @@ fn fs_delete_removes_written_file() {
         .execute(vec![
             (
                 "write",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
                     &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![1, 2, 3] },
                 ),
             ),
             (
                 "delete",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
                     &Delete { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
                 ),
             ),
-            ("read", HarnessOp::send_and_await(FS_MAILBOX, &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path })),
+            (
+                "read",
+                HarnessOp::send_and_await_reply(FS_MAILBOX, &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path }),
+            ),
         ])
         .expect("write + delete + read");
 
@@ -121,14 +124,14 @@ fn fs_list_returns_written_path() {
         .execute(vec![
             (
                 "write",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
                     &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![0] },
                 ),
             ),
             (
                 "list",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     FS_MAILBOX,
                     &List { namespace: FS_NAMESPACE_SAVE.to_owned(), prefix: String::new() },
                 ),
@@ -153,7 +156,7 @@ fn fs_read_unknown_path_returns_not_found() {
     let result = harness
         .execute(vec![(
             "read",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 FS_MAILBOX,
                 &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: "nonexistent-do-not-create.bin".to_owned() },
             ),

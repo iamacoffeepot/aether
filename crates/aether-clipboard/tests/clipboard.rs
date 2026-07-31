@@ -23,9 +23,12 @@ fn clipboard_set_then_get_round_trips_in_memory() {
         .execute(vec![
             (
                 "set",
-                HarnessOp::send_and_await(CLIPBOARD_MAILBOX, &SetClipboardText { text: "copy then paste".to_owned() }),
+                HarnessOp::send_and_await_reply(
+                    CLIPBOARD_MAILBOX,
+                    &SetClipboardText { text: "copy then paste".to_owned() },
+                ),
             ),
-            ("get", HarnessOp::send_and_await(CLIPBOARD_MAILBOX, &GetClipboardText)),
+            ("get", HarnessOp::send_and_await_reply(CLIPBOARD_MAILBOX, &GetClipboardText)),
         ])
         .expect("set + get clipboard text");
 
@@ -47,8 +50,11 @@ fn unavailable_clipboard_err_replies_to_get_and_set() {
 
     let result = harness
         .execute(vec![
-            ("get", HarnessOp::send_and_await(CLIPBOARD_MAILBOX, &GetClipboardText)),
-            ("set", HarnessOp::send_and_await(CLIPBOARD_MAILBOX, &SetClipboardText { text: "ignored".to_owned() })),
+            ("get", HarnessOp::send_and_await_reply(CLIPBOARD_MAILBOX, &GetClipboardText)),
+            (
+                "set",
+                HarnessOp::send_and_await_reply(CLIPBOARD_MAILBOX, &SetClipboardText { text: "ignored".to_owned() }),
+            ),
         ])
         .expect("unavailable clipboard replies");
 

@@ -36,7 +36,10 @@ fn gateway_listener_port(harness: &mut SubstrateHarness) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let list = harness
-            .execute(vec![("list-player-listener", HarnessOp::send_and_await("aether.tcp", &ListListeners::default()))])
+            .execute(vec![(
+                "list-player-listener",
+                HarnessOp::send_and_await_reply("aether.tcp", &ListListeners::default()),
+            )])
             .expect("list game gateway listener")
             .reply::<ListListenersResult>("list-player-listener")
             .expect("decode game gateway listener list");
@@ -72,7 +75,7 @@ fn load_turn_sim(harness: &mut SubstrateHarness, wasm: Vec<u8>) {
     let loaded = harness
         .execute(vec![(
             "load-turn-sim",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,

@@ -132,14 +132,14 @@ fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool
 /// harness's `aether.control` mailbox (renamed to `aether.component` in
 /// issue 638 phase 3) served as a single FIFO point for both load and
 /// advance; Phase 4 split advance onto `aether.substrate_harness`, so load is
-/// no longer naturally ordered ahead of advance — `SendAndAwait`
+/// no longer naturally ordered ahead of advance — `SendAndAwaitReply`
 /// blocks on `LoadResult` before returning.
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
@@ -161,7 +161,7 @@ fn load_cube(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -401,7 +401,7 @@ fn textured_quad_draws_screen_space_rect() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
             ),
@@ -484,7 +484,7 @@ fn create_observation_texture(harness: &mut SubstrateHarness) -> u32 {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
             ),
@@ -753,7 +753,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: texture_size, height: texture_size, format: TextureFormat::Rgba8, pixels },
             ),
@@ -835,7 +835,7 @@ fn destroyed_texture_draw_drops_from_frame() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
             ),
@@ -879,7 +879,7 @@ fn destroyed_texture_draw_drops_from_frame() {
 
     let destroyed = harness
         .execute(vec![
-            ("destroy", HarnessOp::send_mail("aether.render", &DestroyTexture { texture_id })),
+            ("destroy", HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id })),
             ("advance", HarnessOp::advance(1)),
             ("snap2", HarnessOp::capture_with_mails(vec![draw()], vec![])),
         ])
@@ -916,7 +916,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture {
                     width: texture_width,
@@ -1006,7 +1006,7 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: 8, height: 4, format: TextureFormat::R8, pixels },
             ),
@@ -1062,7 +1062,7 @@ fn textured_material_depth_tests_against_main_geometry() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels },
             ),
@@ -1121,7 +1121,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![255u8; 16] },
             ),
@@ -1276,7 +1276,7 @@ fn textured_quad_clip_bounds_pixels() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
             ),
@@ -1372,7 +1372,7 @@ fn capture_frame_checks_return_substrate_verdict() {
     let result = harness
         .execute(vec![(
             "snap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CaptureFrame {
                     window: None,
@@ -1388,7 +1388,7 @@ fn capture_frame_checks_return_substrate_verdict() {
                 },
             ),
         )])
-        .expect("send_and_await(CaptureFrame) with checks");
+        .expect("send_and_await_reply(CaptureFrame) with checks");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let verdict = match reply {
         CaptureFrameResult::Ok { png, verdict, .. } => {
@@ -1474,7 +1474,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
     let result = harness
         .execute(vec![(
             "snap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CaptureFrame {
                     window: None,
@@ -1489,7 +1489,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
                 },
             ),
         )])
-        .expect("send_and_await(CaptureFrame) with similarity");
+        .expect("send_and_await_reply(CaptureFrame) with similarity");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     match reply {
         CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass } => {
@@ -1562,7 +1562,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
     let result = harness
         .execute(vec![(
             "snap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CaptureFrame {
                     window: None,
@@ -1573,7 +1573,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
                 },
             ),
         )])
-        .expect("send_and_await(CaptureFrame) with region-scoped checks");
+        .expect("send_and_await_reply(CaptureFrame) with region-scoped checks");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let verdict = match reply {
         CaptureFrameResult::Ok { verdict, .. } => verdict.expect("a checks request returns a verdict"),
@@ -1701,7 +1701,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     let result = harness
         .execute(vec![(
             "snap",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.render",
                 &CaptureFrame {
                     window: None,
@@ -1712,7 +1712,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
                 },
             ),
         )])
-        .expect("send_and_await(CaptureFrame) with checks");
+        .expect("send_and_await_reply(CaptureFrame) with checks");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let (png, verdict) = match reply {
         CaptureFrameResult::Ok { png, verdict, .. } => (png, verdict.expect("a checks request returns a verdict")),

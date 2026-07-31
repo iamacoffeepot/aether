@@ -55,7 +55,7 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -149,7 +149,7 @@ fn bundle_unwire_destroys_the_resident_tile() {
 
     let dropped = harness
         .execute(vec![
-            ("drop", HarnessOp::send_and_await("aether.component", &DropComponent { mailbox_id })),
+            ("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { mailbox_id })),
             ("settle", HarnessOp::advance(1)),
         ])
         .expect("drop sequence");

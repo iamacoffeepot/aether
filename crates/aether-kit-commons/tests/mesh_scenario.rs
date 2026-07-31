@@ -76,7 +76,7 @@ fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -133,7 +133,10 @@ fn dsl_box_loads_and_renders() {
     let result = harness
         .execute(vec![
             ("prime", HarnessOp::advance(1)),
-            ("load_mesh", HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
+            (
+                "load_mesh",
+                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path }),
+            ),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])
@@ -169,7 +172,10 @@ fn obj_quad_loads_and_renders() {
     let result = harness
         .execute(vec![
             ("prime", HarnessOp::advance(1)),
-            ("load_mesh", HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
+            (
+                "load_mesh",
+                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path }),
+            ),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])
@@ -210,7 +216,7 @@ fn parse_failure_keeps_prior_mesh() {
             ("prime", HarnessOp::advance(1)),
             (
                 "load_good",
-                HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: good }),
+                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path: good }),
             ),
             ("post_good", HarnessOp::advance(5)),
         ])
@@ -226,7 +232,7 @@ fn parse_failure_keeps_prior_mesh() {
         .execute(vec![
             (
                 "load_bad",
-                HarnessOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: bad }),
+                HarnessOp::send_and_settle(component_address(), &LoadMesh { namespace: "save".to_owned(), path: bad }),
             ),
             ("post_bad", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
@@ -239,7 +245,7 @@ fn parse_failure_keeps_prior_mesh() {
 
 /// Issue 964 acceptance: a good-DSL load replies `aether.mesh.load_result`
 /// with `ok: true`, no `error`, and no `warnings`, echoing the request's
-/// `namespace` + `path`. `send_and_await` blocks through the async
+/// `namespace` + `path`. `send_and_await_reply` blocks through the async
 /// `aether.fs.read` round-trip until the structured reply lands, so the
 /// reply is the wire signal a harness reads instead of inferring success
 /// from rendered geometry.
@@ -263,7 +269,7 @@ fn good_dsl_load_replies_ok() {
     let result = harness
         .execute(vec![(
             "load_mesh",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 component_address(),
                 &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
             ),
@@ -302,7 +308,7 @@ fn bad_dsl_load_replies_err() {
     let result = harness
         .execute(vec![(
             "load_mesh",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 component_address(),
                 &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
             ),

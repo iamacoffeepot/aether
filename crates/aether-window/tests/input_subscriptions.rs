@@ -40,7 +40,7 @@ fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
             ),
@@ -83,7 +83,7 @@ fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
     let result = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
+            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
         )])
         .expect("drop sequence");
     match result.reply::<DropResult>("drop").expect("decode DropResult") {

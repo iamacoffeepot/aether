@@ -33,7 +33,7 @@ fn load_mark_book(harness: &mut SubstrateHarness, wasm_path: &Path) -> aether_da
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -67,14 +67,14 @@ fn mark_crud_and_allocation_survive_component_replace() {
         .execute(vec![
             (
                 "create_point",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     address.as_str(),
                     &MarkCreate { geometry: MarkGeometry::Point(WorldPoint::new(128, 256)), label: "camp".to_owned() },
                 ),
             ),
             (
                 "create_path",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     address.as_str(),
                     &MarkCreate {
                         geometry: MarkGeometry::Path(vec![WorldPoint::new(0, 0), WorldPoint::new(256, 256)]),
@@ -101,7 +101,7 @@ fn mark_crud_and_allocation_survive_component_replace() {
         .execute(vec![
             (
                 "update",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     address.as_str(),
                     &MarkUpdate {
                         id: point_ref.id,
@@ -110,10 +110,10 @@ fn mark_crud_and_allocation_survive_component_replace() {
                     },
                 ),
             ),
-            ("get", HarnessOp::send_and_await(address.as_str(), &MarkGet { id: point_ref.id })),
-            ("list", HarnessOp::send_and_await(address.as_str(), &MarkList)),
-            ("delete", HarnessOp::send_and_await(address.as_str(), &MarkDelete { id: path_ref.id })),
-            ("get_deleted", HarnessOp::send_and_await(address.as_str(), &MarkGet { id: path_ref.id })),
+            ("get", HarnessOp::send_and_await_reply(address.as_str(), &MarkGet { id: point_ref.id })),
+            ("list", HarnessOp::send_and_await_reply(address.as_str(), &MarkList)),
+            ("delete", HarnessOp::send_and_await_reply(address.as_str(), &MarkDelete { id: path_ref.id })),
+            ("get_deleted", HarnessOp::send_and_await_reply(address.as_str(), &MarkGet { id: path_ref.id })),
         ])
         .expect("update, read, and delete sequence");
     assert_eq!(
@@ -149,7 +149,7 @@ fn mark_crud_and_allocation_survive_component_replace() {
     let replaced = harness
         .execute(vec![(
             "replace",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
                     mailbox_id,
@@ -168,11 +168,11 @@ fn mark_crud_and_allocation_survive_component_replace() {
 
     let after = harness
         .execute(vec![
-            ("get", HarnessOp::send_and_await(address.as_str(), &MarkGet { id: point_ref.id })),
-            ("list", HarnessOp::send_and_await(address.as_str(), &MarkList)),
+            ("get", HarnessOp::send_and_await_reply(address.as_str(), &MarkGet { id: point_ref.id })),
+            ("list", HarnessOp::send_and_await_reply(address.as_str(), &MarkList)),
             (
                 "create",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     address.as_str(),
                     &MarkCreate {
                         geometry: MarkGeometry::Point(WorldPoint::new(512, 768)),

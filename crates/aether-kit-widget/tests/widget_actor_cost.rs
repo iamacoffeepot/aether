@@ -106,7 +106,7 @@ fn load_widgets(
         let report = harness
             .execute(vec![(
                 "load",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     ComponentHostCapability::NAMESPACE,
                     &LoadComponent {
                         wasm: wasm.to_vec(),

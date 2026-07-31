@@ -72,7 +72,7 @@ fn load_export(
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm"),
@@ -96,7 +96,7 @@ fn load_panel_font(harness: &mut SubstrateHarness) -> u32 {
     let loaded = harness
         .execute(vec![(
             "font",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.text",
                 &LoadFontBytes {
                     name: "terrain-workbench.ttf".to_owned(),
@@ -129,7 +129,7 @@ fn send_input<K: Kind>(harness: &mut SubstrateHarness, mail: &K) {
 
 fn query_workbench(harness: &mut SubstrateHarness, workbench: &str) -> WorkbenchQueryResult {
     harness
-        .execute(vec![("query", HarnessOp::send_and_await(workbench, &WorkbenchQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(workbench, &WorkbenchQuery))])
         .expect("query workbench")
         .reply::<WorkbenchQueryResult>("query")
         .expect("decode WorkbenchQueryResult")
@@ -273,7 +273,7 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
         .execute(vec![
             (
                 "chunk",
-                HarnessOp::send_mail(
+                HarnessOp::send_and_settle(
                     &world,
                     &SetChunk {
                         chunk_x: 0,
@@ -292,7 +292,10 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
             ),
             (
                 "relief",
-                HarnessOp::send_mail(&world, &SetCellHeights { x: 4, z: 4, deltas: vec![128; SUBCELLS_PER_CELL] }),
+                HarnessOp::send_and_settle(
+                    &world,
+                    &SetCellHeights { x: 4, z: 4, deltas: vec![128; SUBCELLS_PER_CELL] },
+                ),
             ),
             ("activate", HarnessOp::advance(3)),
         ])
@@ -318,13 +321,13 @@ fn terrain_annotation_workbench_runs_the_full_raw_input_proposal_loop() {
     let selected = authored.selection[0];
 
     let terra_state = harness
-        .execute(vec![("terra", HarnessOp::send_and_await(&terra, &TerraQuery))])
+        .execute(vec![("terra", HarnessOp::send_and_await_reply(&terra, &TerraQuery))])
         .expect("query terra")
         .reply::<TerraQueryResult>("terra")
         .expect("decode TerraQueryResult");
     assert_eq!(terra_state.selection, authored.selection);
     let mark = harness
-        .execute(vec![("mark", HarnessOp::send_and_await(&marks, &MarkGet { id: selected.id }))])
+        .execute(vec![("mark", HarnessOp::send_and_await_reply(&marks, &MarkGet { id: selected.id }))])
         .expect("get selected mark")
         .reply::<MarkGetResult>("mark")
         .expect("decode MarkGetResult")

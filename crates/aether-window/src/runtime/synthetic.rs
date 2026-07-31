@@ -503,15 +503,15 @@ mod tests {
             .execute(vec![
                 (
                     "created",
-                    HarnessOp::send_and_await(
+                    HarnessOp::send_and_await_reply(
                         WindowCapability::NAMESPACE,
                         &CreateWindow { spec: spec("main", "Main") },
                     ),
                 ),
-                ("listed", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows)),
+                ("listed", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &ListWindows)),
                 (
                     "duplicate",
-                    HarnessOp::send_and_await(
+                    HarnessOp::send_and_await_reply(
                         WindowCapability::NAMESPACE,
                         &CreateWindow { spec: spec("main", "Second") },
                     ),
@@ -539,26 +539,26 @@ mod tests {
             .execute(vec![
                 (
                     "first",
-                    HarnessOp::send_and_await(
+                    HarnessOp::send_and_await_reply(
                         WindowCapability::NAMESPACE,
                         &CreateWindow { spec: spec("first", "First") },
                     ),
                 ),
                 (
                     "second",
-                    HarnessOp::send_and_await(
+                    HarnessOp::send_and_await_reply(
                         WindowCapability::NAMESPACE,
                         &CreateWindow { spec: spec("second", "Second") },
                     ),
                 ),
                 (
                     "depart-first",
-                    HarnessOp::send_mail(
+                    HarnessOp::send_and_settle(
                         format!("{}/{}:first", WindowCapability::NAMESPACE, WindowInstance::NAMESPACE),
                         &RetireWindow,
                     ),
                 ),
-                ("remaining", HarnessOp::send_and_await(WindowCapability::NAMESPACE, &ListWindows)),
+                ("remaining", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &ListWindows)),
             ])
             .expect("unexpected child departure settles");
 

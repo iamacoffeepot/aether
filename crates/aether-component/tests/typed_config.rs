@@ -37,7 +37,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
         .execute(vec![
             (
                 "load",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     ComponentHostCapability::NAMESPACE,
                     &LoadComponent {
                         wasm,
@@ -49,7 +49,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
             ),
             (
                 "echo",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),
@@ -99,7 +99,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
         .execute(vec![
             (
                 "load",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     ComponentHostCapability::NAMESPACE,
                     &LoadComponent {
                         wasm,
@@ -111,7 +111,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
             ),
             (
                 "echo",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),

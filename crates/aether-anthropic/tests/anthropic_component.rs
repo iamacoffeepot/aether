@@ -65,7 +65,7 @@ fn load_component(harness: &mut SubstrateHarness, wasm_path: &Path, config: &Ant
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm,
@@ -106,7 +106,7 @@ fn messages_send_maps_http_allowlist_refusal_to_typed_error() {
     let result = harness
         .execute(vec![(
             "send",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 component_address(),
                 &MessagesSend {
                     request_id: 42,
@@ -149,7 +149,7 @@ fn cli_send_maps_process_refusal_to_cli_not_found() {
     let result = harness
         .execute(vec![(
             "send",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 component_address(),
                 &CliSend {
                     request_id: 7,

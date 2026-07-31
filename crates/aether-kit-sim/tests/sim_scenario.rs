@@ -47,7 +47,7 @@ fn load_sim(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> Str
     let loaded = harness
         .execute(vec![(
             "load",
-            HarnessOp::send_and_await(
+            HarnessOp::send_and_await_reply(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read kit wasm for turn sim"),
@@ -70,7 +70,7 @@ fn load_sim(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> Str
 
 fn poll(harness: &mut SubstrateHarness, address: &str, label: &'static str) -> PollResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await(address, &Poll { since_tick: 0 }))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(address, &Poll { since_tick: 0 }))])
         .expect("poll turn sim")
         .reply::<PollResult>(label)
         .expect("decode PollResult")
@@ -87,24 +87,36 @@ fn turn_sim_moves_in_tick_order_and_replays_byte_identically_through_real_wasm()
 
     harness
         .execute(vec![
-            ("spawn-a", HarnessOp::send_mail(&first, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
-            ("spawn-b", HarnessOp::send_mail(&second, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
+            ("spawn-a", HarnessOp::send_and_settle(&first, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
+            ("spawn-b", HarnessOp::send_and_settle(&second, &Spawn { entity_id: ENTITY_ID, cell_x: 1, cell_z: 1 })),
             ("spawn-turn", HarnessOp::advance(1)),
             (
                 "superseded-east-a",
-                HarnessOp::send_mail(&first, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East }),
+                HarnessOp::send_and_settle(
+                    &first,
+                    &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East },
+                ),
             ),
             (
                 "winning-north-a",
-                HarnessOp::send_mail(&first, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North }),
+                HarnessOp::send_and_settle(
+                    &first,
+                    &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North },
+                ),
             ),
             (
                 "superseded-east-b",
-                HarnessOp::send_mail(&second, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East }),
+                HarnessOp::send_and_settle(
+                    &second,
+                    &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::East },
+                ),
             ),
             (
                 "winning-north-b",
-                HarnessOp::send_mail(&second, &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North }),
+                HarnessOp::send_and_settle(
+                    &second,
+                    &MoveIntent { entity_id: ENTITY_ID, direction: MoveDirection::North },
+                ),
             ),
             ("move-and-following-turns", HarnessOp::advance(3)),
         ])

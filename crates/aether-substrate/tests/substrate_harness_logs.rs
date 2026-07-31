@@ -50,7 +50,7 @@ mod tests {
         let loaded = harness
             .execute(vec![(
                 "load",
-                HarnessOp::send_and_await(
+                HarnessOp::send_and_await_reply(
                     "aether.component",
                     &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
                 ),
