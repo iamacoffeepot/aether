@@ -15,7 +15,8 @@ use cargo_metadata::MetadataCommand;
 use clap::Args;
 
 use crate::cargo::{
-    Profile, WASM_TARGET, build_chassis, build_component, copy_artifact, wasm_artifact_path, write_json_pretty,
+    Profile, WASM_TARGET, build_chassis, build_component, copy_artifact, host_binary_filename, wasm_artifact_path,
+    write_json_pretty,
 };
 use crate::dist::manifest::Manifest;
 use crate::inventory::{
@@ -99,8 +100,15 @@ pub fn run(args: &DistArgs) -> Result<()> {
         fs::create_dir_all(dist.join("bin")).context("create dist/bin")?;
         let host_profile_dir = target_dir.join(args.profile.as_str());
         for (_, bin) in CHASSIS_BINS {
-            let src = host_profile_dir.join(bin);
-            let rel = format!("bin/{bin}");
+            // The manifest key stays the bare bin name — that is the logical
+            // name every consumer looks a chassis up by — while the path it
+            // maps to carries the host filename cargo actually wrote, which
+            // is `.exe`-suffixed on Windows. Joining the bare name here made
+            // `dist` a unix-only command: it looked for `aether-substrate`
+            // beside the `aether-substrate.exe` cargo had just built.
+            let filename = host_binary_filename(bin);
+            let src = host_profile_dir.join(&filename);
+            let rel = format!("bin/{filename}");
             copy_artifact(&src, &dist.join(&rel))?;
             chassis_paths.insert((*bin).to_string(), rel);
         }
