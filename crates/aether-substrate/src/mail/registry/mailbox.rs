@@ -1,3 +1,6 @@
+// Perf control for iamacoffeepot/aether#4177: this comment is the entire diff,
+// so the perf lane compares this commit's binary against a byte-identical one
+// built from its own merge-base. Not for merge.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::process::abort;
