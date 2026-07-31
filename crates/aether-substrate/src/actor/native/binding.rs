@@ -85,23 +85,12 @@ enum PendingPayload {
     Prebuilt(MailRef),
 }
 
-#[derive(Clone, Copy)]
-enum PendingRoute {
-    /// Ordinary native buffered mail re-enters the shared mailer/blob path.
-    Mailer,
-    /// Component mail preserves the direct component dispatch semantics that
-    /// supply the producer's canonical name to an inbox or inline handler.
-    #[cfg(feature = "wasm")]
-    Component,
-}
-
 /// One outbound mail a handler buffered, pending flush. A native payload is
 /// already in the ring (`InRing`) or copied out (`Owned`); a component payload
 /// is retained as its prebuilt [`MailRef`]. The rest is route metadata
 /// (correlation-derived `reply_to`/`mail_id`, inherited lineage) the flush
 /// stamps onto the [`Mail`] it builds.
 struct PendingMail {
-    sender: MailboxId,
     recipient: u64,
     kind: u64,
     payload: PendingPayload,
@@ -110,13 +99,28 @@ struct PendingMail {
     mail_id: MailId,
     root: MailId,
     parent_mail: Option<MailId>,
-    route: PendingRoute,
 }
 
-struct RoutedPendingMail {
-    mail: Mail,
+/// One guest-authored mail the staged activation hold admitted, paired with
+/// the canonical origin its direct component dispatch supplies to an inbox or
+/// inline handler (ADR-0165). Recorded beside the window rather than on every
+/// [`PendingMail`] because the origin of an ordinary native send is always the
+/// binding's own mailbox: the native window keeps the exact `Vec<Mail>` shape
+/// [`BlobProducer::flush`](super::blob_work::BlobProducer::flush) consumes, and
+/// no flush pays a per-mail route tag for a case only a wasm trampoline reaches
+/// (iamacoffeepot/aether#4178).
+#[derive(Clone, Copy)]
+struct ComponentOrigin {
+    mail_id: MailId,
     sender: MailboxId,
-    route: PendingRoute,
+}
+
+/// The canonical origin a released mail dispatches under, or `None` for
+/// ordinary native mail. `origins` is empty on every steady-state flush, so
+/// the lookup is a length check there and only ever walks the handful of sends
+/// one guest `wire` produced.
+fn component_origin(origins: &[ComponentOrigin], mail_id: MailId) -> Option<MailboxId> {
+    origins.iter().find(|origin| origin.mail_id == mail_id).map(|origin| origin.sender)
 }
 
 struct PendingBirthWork {
@@ -164,6 +168,11 @@ struct OutboundBuffer {
     construct_start: Option<Nanos>,
     /// Per-mail route metadata for the current flush window.
     mails: Vec<PendingMail>,
+    /// The guest-authored origins the activation hold admitted into this
+    /// window. Only a wasm trampoline's staged activation fills it, so it
+    /// remains unallocated on every ordinary handler flush — and its emptiness,
+    /// not a per-mail tag, is the whole route test the native flush pays.
+    component_origins: Vec<ComponentOrigin>,
     /// Births are rare; this vector remains unallocated on the ordinary
     /// mail-only handler path.
     births: Vec<PendingBirthWork>,
@@ -180,6 +189,7 @@ impl OutboundBuffer {
             blob_open: false,
             construct_start: None,
             mails: Vec::new(),
+            component_origins: Vec::new(),
             births: Vec::new(),
             owner_batches: Vec::new(),
         }
@@ -866,18 +876,7 @@ impl NativeBinding {
                 Err(RingFull) => PendingPayload::Owned(bytes.to_vec()),
             }
         };
-        buf.mails.push(PendingMail {
-            sender: self.self_mailbox(),
-            recipient,
-            kind,
-            payload,
-            count,
-            reply_to,
-            mail_id,
-            root,
-            parent_mail,
-            route: PendingRoute::Mailer,
-        });
+        buf.mails.push(PendingMail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail });
         mail_id
     }
 
@@ -905,8 +904,8 @@ impl NativeBinding {
             buffer.construct_start = Some(self.mailer.now_nanos());
         }
         let Mail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail } = mail;
+        buffer.component_origins.push(ComponentOrigin { mail_id, sender });
         buffer.mails.push(PendingMail {
-            sender,
             recipient: recipient.0,
             kind: kind.0,
             payload: PendingPayload::Prebuilt(payload),
@@ -915,7 +914,6 @@ impl NativeBinding {
             mail_id,
             root,
             parent_mail,
-            route: PendingRoute::Component,
         });
         None
     }
@@ -987,7 +985,11 @@ impl NativeBinding {
         let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         assert!(!buffer.activation_held, "one staged activation owns the outbound hold");
         assert!(
-            !buffer.blob_open && buffer.mails.is_empty() && buffer.births.is_empty() && buffer.owner_batches.is_empty(),
+            !buffer.blob_open
+                && buffer.mails.is_empty()
+                && buffer.component_origins.is_empty()
+                && buffer.births.is_empty()
+                && buffer.owner_batches.is_empty(),
             "a prepared actor enters wire with an empty outbound window"
         );
         buffer.activation_held = true;
@@ -1023,6 +1025,7 @@ impl NativeBinding {
                 buffer.blob_open = false;
             }
             buffer.construct_start = None;
+            buffer.component_origins.clear();
             (
                 buffer.ring.as_ref().map(Arc::clone),
                 buffer.mails.drain(..).collect::<Vec<_>>(),
@@ -1068,8 +1071,9 @@ impl NativeBinding {
         // back to `flush_begin` (construct ≈ 0) on the impossible `None` so
         // the field is never a wire hole.
         let construct_start;
-        let (routed, births, owner_batches): (
-            Vec<RoutedPendingMail>,
+        let (routed, component_origins, births, owner_batches): (
+            Vec<Mail>,
+            Vec<ComponentOrigin>,
             Vec<PendingBirthWork>,
             Vec<PendingOwnerBatchWork>,
         ) = {
@@ -1106,16 +1110,17 @@ impl NativeBinding {
                         #[cfg(feature = "wasm")]
                         PendingPayload::Prebuilt(payload) => payload,
                     };
-                    RoutedPendingMail {
-                        mail: Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
-                            .with_reply_to(p.reply_to)
-                            .with_lineage(p.mail_id, p.root, p.parent_mail),
-                        sender: p.sender,
-                        route: p.route,
-                    }
+                    Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
+                        .with_reply_to(p.reply_to)
+                        .with_lineage(p.mail_id, p.root, p.parent_mail)
                 })
                 .collect();
-            (routed, buf.births.drain(..).collect(), buf.owner_batches.drain(..).collect())
+            (
+                routed,
+                buf.component_origins.drain(..).collect(),
+                buf.births.drain(..).collect(),
+                buf.owner_batches.drain(..).collect(),
+            )
         };
 
         // iamacoffeepot/aether#1150: emit each buffered mail's deferred
@@ -1123,13 +1128,13 @@ impl NativeBinding {
         // routing (the lock is already released — `push_trace_ring` runs
         // off the actor's own ring). `in_flight` was bumped eagerly at
         // the send call, so this is purely the trace-event half.
-        for pending in &routed {
-            let mail = &pending.mail;
+        let self_mailbox = self.self_mailbox();
+        for mail in &routed {
             self.mailer.record_sent_event_at(
                 mail.mail_id,
                 mail.root,
                 mail.parent_mail,
-                pending.sender,
+                component_origin(&component_origins, mail.mail_id).unwrap_or(self_mailbox),
                 mail.recipient,
                 mail.kind,
                 construct_start,
@@ -1151,8 +1156,8 @@ impl NativeBinding {
             let mut effects = Vec::with_capacity(births.len());
             for mut birth in births {
                 for mail in routed.iter_mut().skip(birth.after_mail) {
-                    if mail.as_ref().is_some_and(|pending| pending.mail.recipient == birth.recipient) {
-                        let mail = mail.take().expect("matched same-flush child mail remains present").mail;
+                    if mail.as_ref().is_some_and(|mail| mail.recipient == birth.recipient) {
+                        let mail = mail.take().expect("matched same-flush child mail remains present");
                         let kind_name = self
                             .spawner
                             .as_ref()
@@ -1169,7 +1174,7 @@ impl NativeBinding {
             routed.into_iter().flatten().collect()
         };
 
-        self.route_pending_mails(routed);
+        self.route_pending_mails(routed, &component_origins);
     }
 
     /// ADR-0087 / iamacoffeepot/aether#1137: fold native mail into this
@@ -1177,44 +1182,44 @@ impl NativeBinding {
     /// the direct component route that supplies its canonical origin; the
     /// activation-only mixed window routes sequentially so send order remains
     /// explicit.
-    fn route_pending_mails(&self, routed: Vec<RoutedPendingMail>) {
+    fn route_pending_mails(&self, routed: Vec<Mail>, component_origins: &[ComponentOrigin]) {
         // Fold the blob into this
         // actor's single active cursor-shared blob (recipient-grouped,
         // cooperatively drained, broadcast-recruited for wide fan-outs)
         // when a pool sink is wired. Otherwise route per mail (a test
-        // binding with no `Spawner`).
-        let has_component_mail = routed.iter().any(|pending| {
-            #[cfg(feature = "wasm")]
-            {
-                matches!(pending.route, PendingRoute::Component)
-            }
-            #[cfg(not(feature = "wasm"))]
-            {
-                let _ = pending;
-                false
-            }
-        });
-        if self.spawner.is_some() && !has_component_mail {
+        // binding with no `Spawner`, or the activation window that admitted
+        // guest-authored mail). The window arrives as the `Vec<Mail>` the
+        // producer consumes, so the steady-state path hands it straight on.
+        if self.spawner.is_some() && component_origins.is_empty() {
             let mut guard = self.blob_producer.lock().expect("blob_producer poisoned; fail-fast per ADR-0063");
             let producer = guard.get_or_insert_with(|| {
                 let sink = self.spawner.as_ref().expect("spawner present in this branch").wake_sink().clone();
                 super::blob_work::BlobProducer::new(Arc::clone(&self.mailer), sink)
             });
-            producer.flush(routed.into_iter().map(|pending| pending.mail).collect());
+            producer.flush(routed);
         } else {
-            for pending in routed {
-                match pending.route {
-                    PendingRoute::Mailer => self.mailer.push(pending.mail),
-                    #[cfg(feature = "wasm")]
-                    PendingRoute::Component => ComponentCtx::dispatch_routed_mail(
-                        self.mailer.registry(),
-                        &self.mailer,
-                        pending.mail,
-                        pending.sender,
-                    ),
+            for mail in routed {
+                match component_origin(component_origins, mail.mail_id) {
+                    Some(sender) => self.dispatch_component_mail(mail, sender),
+                    None => self.mailer.push(mail),
                 }
             }
         }
+    }
+
+    /// Publish one released component mail under the canonical origin the
+    /// guest sent it with, preserving the direct dispatch an ordinary Live
+    /// component send takes.
+    #[cfg(feature = "wasm")]
+    fn dispatch_component_mail(&self, mail: Mail, sender: MailboxId) {
+        ComponentCtx::dispatch_routed_mail(self.mailer.registry(), &self.mailer, mail, sender);
+    }
+
+    /// Without the wasm trampoline nothing records a component origin, so no
+    /// mail reaches here; the mailer push keeps the arm honest either way.
+    #[cfg(not(feature = "wasm"))]
+    fn dispatch_component_mail(&self, mail: Mail, _sender: MailboxId) {
+        self.mailer.push(mail);
     }
 
     /// Correlation id the substrate minted for this actor's most
@@ -1506,6 +1511,73 @@ mod tests {
 
         mailer.record_finished(envelope.mail_id, envelope.root);
         assert_eq!(counter.live_roots(), 0, "recipient completion balances the retained send");
+    }
+
+    /// ADR-0165 at the release boundary: one activation window that buffered
+    /// both a native lifecycle send and a guest-authored component send
+    /// publishes them in send order, each under its own origin — the native
+    /// mail through the mailer (ADR-0011 `origin: None`), the component mail
+    /// through the direct component dispatch that supplies the guest's
+    /// canonical name.
+    ///
+    /// The bug this catches is the flush collapsing the two into one route to
+    /// shed the per-mail route tag (iamacoffeepot/aether#4178): folding the
+    /// window into the blob/mailer path alone still delivers every mail, so
+    /// only the origin distinguishes a correct split from a lossy one. It
+    /// equally catches the origin record being keyed to the wrong mail, which
+    /// would attribute the component name to the native send.
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn activation_release_gives_native_and_component_mail_their_own_origins_in_send_order() {
+        let (registry, mailer) = bare_substrate();
+        let component = MailboxId(0x0041_4531);
+        let (component_tx, _component_rx) = mpsc::channel::<Envelope>();
+        registry
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                component,
+                "test.mixed.component",
+                forward_to_envelope_sender(component_tx),
+            )
+            .expect("register component trampoline");
+        // Issue 1987: an inline child's mail is attributed to the child's own
+        // address, so the guest-carried identity is deliberately not the
+        // binding's mailbox — that is what makes the origin discriminating.
+        let (child_tx, _child_rx) = mpsc::channel::<Envelope>();
+        let child =
+            registry.register_inbox(&boot_authority(), "test.mixed.child", forward_to_envelope_sender(child_tx));
+        let (recipient_tx, recipient_rx) = mpsc::channel::<Envelope>();
+        let recipient = registry.register_inbox(
+            &boot_authority(),
+            "test.mixed.recipient",
+            forward_to_envelope_sender(recipient_tx),
+        );
+        let (ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), component);
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+
+        binding.hold_outbound_for_activation();
+        binding.push_envelope_buffered(recipient.0, 0x0041_4532, &[7, 7], 1, None, None);
+        ctx.send(recipient, KindId(0x0041_4533), vec![9], 1, child);
+        assert!(recipient_rx.try_recv().is_err(), "a held window publishes nothing before activation");
+        assert_eq!(counter.live_roots(), 2, "both held sends record one in-flight root each");
+
+        binding.release_outbound_after_activation();
+
+        let native = recipient_rx.try_recv().expect("release publishes the buffered native send");
+        assert_eq!(native.payload.bytes(), &[7, 7], "the native send releases first, in buffer order");
+        assert_eq!(native.origin, None, "native mail routes through the mailer, which stamps no component origin");
+        let guest = recipient_rx.try_recv().expect("release publishes the held component send");
+        assert_eq!(guest.payload.bytes(), &[9], "the component send releases after the native one it followed");
+        assert_eq!(
+            guest.origin.as_deref(),
+            Some("test.mixed.child"),
+            "component mail keeps the direct dispatch that names its guest-carried origin"
+        );
+        assert!(recipient_rx.try_recv().is_err(), "release publishes each held mail exactly once");
+
+        mailer.record_finished(native.mail_id, native.root);
+        mailer.record_finished(guest.mail_id, guest.root);
+        assert_eq!(counter.live_roots(), 0, "recipient completion balances both held sends");
     }
 
     /// A failed staged activation rejects guest `wire` mail locally: no route
