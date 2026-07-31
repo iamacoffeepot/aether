@@ -217,11 +217,16 @@ fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
         )
     }
     let ctx_param = sig.inputs.get(1).ok_or_else(|| shape_err(sig))?;
+    // Span every shape failure below on the ctx *type* rather than the whole
+    // parameter — the type is what the author has to rewrite.
+    let FnArg::Typed(ctx_pat) = ctx_param else {
+        return Err(shape_err(ctx_param));
+    };
+    let ctx_ty = &*ctx_pat.ty;
     // The reply mode is the ctx's *first* type argument; an optional second
     // one names the actor (`NativeCtx<'_, Multi<K>, Self>`, issue 4158), so
     // reading positionally is what keeps the two apart.
-    let marker_ty =
-        *ctx_type_args(sig).ok_or_else(|| shape_err(ctx_param))?.first().ok_or_else(|| shape_err(ctx_param))?;
+    let marker_ty = *ctx_type_args(sig).ok_or_else(|| shape_err(ctx_ty))?.first().ok_or_else(|| shape_err(ctx_ty))?;
     let Type::Path(marker_path) = marker_ty else {
         return Err(shape_err(marker_ty));
     };
