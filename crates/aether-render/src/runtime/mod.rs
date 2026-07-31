@@ -915,7 +915,9 @@ impl NativeActor for RenderCapability {
 
     /// `Frame` commits the application-scoped scene once, deduplicates its
     /// dirty window ids, then records and presents that committed scene at
-    /// each live non-occluded target's dimensions. An empty target list is
+    /// each live non-occluded target's dimensions. A target whose record
+    /// fails drops that target's frame and nothing else — the fan-out still
+    /// owes every window behind it its turn. An empty target list is
     /// reserved for the explicitly surfaceless harness.
     #[handler::single]
     fn on_frame(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Frame) {
@@ -974,7 +976,19 @@ impl NativeActor for RenderCapability {
                 .is_some_and(|pending| pending.is_ready() && pending.window == Some(window));
             let meta = match state.record_target_frame(width, height, surface_texture, capture) {
                 Ok(meta) => meta,
-                Err(RenderError::VertexBufferOverflow { .. }) => return,
+                // A record failure disposes of *this* target's frame only —
+                // the fan-out owes every listed window its turn, so the loop
+                // moves on instead of abandoning the ones behind it.
+                Err(RenderError::VertexBufferOverflow { vertex_bytes, cap }) => {
+                    tracing::warn!(
+                        target: "aether_substrate::render",
+                        window = window.0,
+                        vertex_bytes,
+                        cap,
+                        "dropping this window's frame: vertex bytes exceed the buffer; remaining windows still present",
+                    );
+                    continue;
+                }
             };
             if let Some(meta) = meta {
                 state.complete_capture(meta);
