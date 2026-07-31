@@ -7,7 +7,7 @@
 //! trial, so shared run-to-run drift cancels in the per-trial paired
 //! delta (ADR-0085 §3). Each side is invoked as a subprocess so every
 //! trial is a fresh process (§1), and the two **alternate which runs
-//! first** ([`Side::order_for_trial`], iamacoffeepot/aether#4182) so a
+//! first** (`Side::order_for_trial`, iamacoffeepot/aether#4182) so a
 //! first-vs-second effect inside a pair cancels rather than accruing to
 //! one side.
 //!
