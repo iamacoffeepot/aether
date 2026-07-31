@@ -87,11 +87,16 @@ struct HandoffEwma {
     /// Folded-sample count (boot seed counts as 1). Diagnostic / test
     /// observability; never gates a decision.
     samples: AtomicU64,
+    /// The value [`Self::seed`] installed, retained unchanged for the life
+    /// of the process so [`Self::reset_to_seed`] can restore the estimate
+    /// to its boot state after live refinement has moved it. Live folds
+    /// touch `mean`, never this.
+    seed: AtomicU64,
 }
 
 impl HandoffEwma {
     const fn new() -> Self {
-        Self { mean: AtomicU64::new(0), samples: AtomicU64::new(0) }
+        Self { mean: AtomicU64::new(0), samples: AtomicU64::new(0), seed: AtomicU64::new(0) }
     }
 
     /// Seed the estimate from the boot probe (or the env override). Sets
@@ -100,7 +105,17 @@ impl HandoffEwma {
     /// rather than ramps from zero. Called once, before any live fold (the
     /// [`ensure_seeded`] `OnceLock` gates ordering).
     fn seed(&self, nanos: u64) {
+        self.seed.store(nanos, Ordering::Relaxed);
         self.mean.store(nanos, Ordering::Relaxed);
+        self.samples.store(1, Ordering::Relaxed);
+    }
+
+    /// Discard live refinement and put the estimate back at the boot seed —
+    /// the state a freshly-started process would be in. Idempotent, and the
+    /// retained seed survives it, so any number of resets land on the same
+    /// value.
+    fn reset_to_seed(&self) {
+        self.mean.store(self.seed.load(Ordering::Relaxed), Ordering::Relaxed);
         self.samples.store(1, Ordering::Relaxed);
     }
 
@@ -188,6 +203,33 @@ pub fn fold_handoff_sample(nanos: u64) {
         return;
     }
     HANDOFF.fold(nanos.max(1));
+}
+
+/// Put the estimate back at this process's boot seed, discarding whatever
+/// live refinement has folded into it since — **a measurement-isolation
+/// entry point, not a runtime one**.
+///
+/// A running engine must never call this. The estimate is deliberately
+/// live (iamacoffeepot/aether#1182): it is a constant-α EWMA over
+/// `EWMA_SHIFT`, so it forgets a past regime within ~16 wakes and tracks
+/// the handoff cost the valve currently has to out-amortise. Resetting it
+/// would throw away exactly the adaptation it exists for.
+///
+/// A *measurement* process is the case the liveness does not serve. One
+/// process is seeded once, but an in-process harness boots a whole chassis
+/// per measured cell, so cell `n` inherits an estimate shaped by cell
+/// `n − 1`'s wakes and is therefore measured under a different valve than
+/// its siblings (iamacoffeepot/aether#4180). Restoring the boot seed
+/// before each chassis boot re-establishes the one-chassis-per-process
+/// starting state the estimator assumes, without pinning the valve to a
+/// hand-picked constant: the seed is still this box's probed handoff cost,
+/// and the cell's own wakes still refine it while it runs.
+///
+/// A no-op in effect when the estimate is pinned (`AETHER_HANDOFF_COST_NS`)
+/// — live folds are frozen, so the mean has never left the seed.
+pub fn reset_handoff_to_boot_seed() {
+    ensure_seeded();
+    HANDOFF.reset_to_seed();
 }
 
 /// Folded-sample count of the live estimate (boot seed counts as 1).
@@ -363,6 +405,31 @@ mod tests {
         }
         assert!(5_000 - cell.mean() < granularity, "live folds converge toward the operating cost: {}", cell.mean());
         assert_eq!(cell.samples(), 201, "every live fold counted");
+    }
+
+    /// The isolation primitive iamacoffeepot/aether#4180's per-cell reset
+    /// rests on: however far live folds have carried the mean, a reset puts
+    /// it back exactly where the boot probe left it, and does so
+    /// repeatably. Two drift-then-reset rounds land on the same value only
+    /// if the seed is retained separately from the live mean — a reset that
+    /// re-read the mean, zeroed the cell, or forgot the sample count would
+    /// leave the second round somewhere else, and the harness would still
+    /// be measuring cell `n` under cell `n − 1`'s valve.
+    #[test]
+    fn handoff_ewma_reset_restores_the_boot_seed_repeatably() {
+        let cell = HandoffEwma::new();
+        cell.seed(2_000);
+
+        for round in 0..2 {
+            for _ in 0..200 {
+                cell.fold(50_000);
+            }
+            assert!(cell.mean() > 2_000, "round {round}: live folds must move the mean off the seed first");
+
+            cell.reset_to_seed();
+            assert_eq!(cell.mean(), 2_000, "round {round}: reset restores the boot seed exactly");
+            assert_eq!(cell.samples(), 1, "round {round}: reset restores the seeded sample count");
+        }
     }
 
     /// Many workers fold the same cell concurrently (the real wake

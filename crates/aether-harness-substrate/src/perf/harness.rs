@@ -33,6 +33,7 @@ use aether_actor::trace::DEFAULT_TRACE_RING_CAP;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
+use aether_substrate::scheduler::{handoff_cost_nanos, reset_handoff_to_boot_seed};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 use aether_trace::walk::fold_nodes;
 
@@ -717,6 +718,14 @@ pub struct CellSamples {
     /// amendment), threaded to the report builder so the renderer can
     /// suppress the verdict for a non-`light` tier.
     pub tier: Tier,
+    /// The scheduler's handoff-cost estimate (nanos) this cell's chassis
+    /// booted from — the input the keep-local spill valve
+    /// (`worker_deque::time_budget`) is derived from, and therefore the
+    /// operating point the cell's dispatch percentiles were measured under.
+    /// Recorded per cell because it used to differ between them
+    /// (iamacoffeepot/aether#4180); the sweep now restores the process boot
+    /// seed before each cell, so every cell of one trial starts here.
+    pub boot_handoff_nanos: u64,
     /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (flush-begin
     /// → blob open) — the producer building the blob.
     pub construct: Vec<u64>,
@@ -746,6 +755,7 @@ impl CellSamples {
             workers: self.workers,
             topo: self.topo,
             tier: self.tier,
+            boot_handoff_nanos: self.boot_handoff_nanos,
             construct: summarize(self.construct),
             queued: summarize(self.queued),
             drain: summarize(self.drain),
@@ -768,6 +778,9 @@ pub struct CellResult {
     ///
     /// [`TrialReport::from_cells`]: super::report::TrialReport::from_cells
     pub tier: Tier,
+    /// The scheduler handoff-cost estimate (nanos) this cell's chassis
+    /// booted from — see [`CellSamples::boot_handoff_nanos`].
+    pub boot_handoff_nanos: u64,
     /// iamacoffeepot/aether#1158: `t_sent − t_construct_start` (blob open →
     /// flush-begin) — the producer-side time spent building the blob, the
     /// first leg of the four-stage lifecycle. ~0 on eager (non-buffered)
@@ -1264,6 +1277,20 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
     let trace_ring_cap = effective_trace_ring_cap();
     for &workers in &cfg.workers {
         for topo in &cfg.topologies {
+            // iamacoffeepot/aether#4180: the keep-local spill valve is a
+            // multiple of the scheduler's live handoff-cost estimate, which
+            // is process-global and seeded once — one chassis per process is
+            // what the substrate assumes. A sweep breaks that assumption: it
+            // boots a chassis per cell in one process, so without this the
+            // estimate a cell starts from is whatever the *previous* cells'
+            // wakes folded into it, and cell order becomes a hidden variable
+            // in every dispatch percentile the valve gates. Restoring the
+            // boot seed re-establishes the per-process starting state for
+            // each cell — still this box's probed handoff cost, not a pinned
+            // constant, and the cell's own wakes still refine it while it
+            // runs.
+            reset_handoff_to_boot_seed();
+            let boot_handoff_nanos = handoff_cost_nanos();
             let Ok(mut tb) = SubstrateHarness::builder()
                 .with_workers(Some(workers))
                 .trace_ring_capacity(Some(trace_ring_cap))
@@ -1504,6 +1531,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                 workers,
                 topo: topo.name.clone(),
                 tier: topo.tier,
+                boot_handoff_nanos,
                 construct,
                 queued,
                 drain,
@@ -1552,6 +1580,49 @@ mod tests {
             drive: Drive::Saturate { backlog },
         };
         run_sweep_samples(&cfg).into_iter().next()
+    }
+
+    /// iamacoffeepot/aether#4180: every cell of one trial must be measured
+    /// under an equivalent keep-local spill valve.
+    ///
+    /// The valve is `BUDGET_HANDOFF_MULTIPLIER ×` the scheduler's live
+    /// handoff-cost estimate, which is process-global and seeded once —
+    /// correct for a production engine, which is one chassis per process.
+    /// A sweep is not: it boots a chassis per cell in one process, so
+    /// without the per-cell restore each cell inherits an estimate the
+    /// preceding cells' wakes drove, and the valve gating every dispatch
+    /// percentile becomes a function of cell order rather than of the cell.
+    ///
+    /// The assertion is equality among observed values, not a pinned
+    /// number, so it says the same thing on any box. It has teeth: on the
+    /// reference 12-core darwin box these three cells booted at
+    /// 1083 → 2728 → 2899 ns before the restore landed, and the full
+    /// 10-cell `max,2` sweep spanned 1083 → 25343 ns (valve 6.5 → 60 µs,
+    /// pinned against its ceiling on the last cells).
+    #[test]
+    fn every_sweep_cell_boots_under_the_same_handoff_estimate() {
+        let cfg = SweepConfig {
+            workers: vec![2],
+            topologies: vec![depth_chain(1), fanout(4), two_level_tree()],
+            frames: 200,
+            drive: Drive::Latency { pace_hz: None },
+        };
+        let cells = run_sweep_samples(&cfg);
+        if cells.len() < cfg.topologies.len() {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        }
+
+        let first = &cells[0];
+        for cell in &cells[1..] {
+            assert_eq!(
+                cell.boot_handoff_nanos, first.boot_handoff_nanos,
+                "cell {} ({}w) booted under a handoff estimate the earlier cells moved — \
+                 {} booted at {}ns, this one at {}ns, so the two were measured under \
+                 different spill valves",
+                cell.topo, cell.workers, first.topo, first.boot_handoff_nanos, cell.boot_handoff_nanos,
+            );
+        }
     }
 
     #[test]
