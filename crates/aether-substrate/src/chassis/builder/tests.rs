@@ -2271,7 +2271,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     impl Dispatch<Self> for Host {
         fn dispatch(
             _state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -2315,7 +2315,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     impl Dispatch<Self> for Watcher {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual>,
+            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
