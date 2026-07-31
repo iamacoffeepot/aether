@@ -89,12 +89,26 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, cap_namespace: &str, mail: &K, sou
 enum CapturedSessionMail {
     Data(SessionData),
     Closed(SessionClosed),
+    #[allow(dead_code, reason = "named through the Debug rendering the receiving test's panic message carries")]
+    Unexpected(aether_data::KindId),
 }
 
 /// Register a capture inbox for a session consumer. Registers under the
 /// ADR-0099 lineage fold of `name` (`try_register_inbox_with_id`) rather
 /// than `hash(name)`, so `name` may be a nested path — the shape a loaded
 /// wasm component has, and the shape the `consumer` field must serve.
+///
+/// The capture closure runs inline on whichever pool worker dispatched the
+/// session actor's send, so a panic here is escalated to a chassis fatal abort
+/// that kills the worker before its slot fires close-done; teardown then waits
+/// out the five-minute close gate, which the 60 s harness ceiling turns into a
+/// bare `TIMEOUT` carrying no attribution (iamacoffeepot/aether#3752). Both
+/// paths a healthy engine drives it down are therefore total: an unexpected
+/// kind is captured rather than asserted, so the receiving test names it on its
+/// own thread, and a send whose receiver has already dropped is discarded — a
+/// session still live when the test body ends mails its `SessionClosed` on peer
+/// EOF after `rx` is gone, and losing that late capture is correct, since a
+/// test that wants it awaits it.
 fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<CapturedSessionMail> {
     let (tx, rx) = mpsc::channel();
     registry
@@ -112,10 +126,10 @@ fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<
                         SessionClosed::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionClosed"),
                     )
                 } else {
-                    panic!("unexpected consumer kind: {}", dispatch.kind);
+                    CapturedSessionMail::Unexpected(dispatch.kind)
                 };
                 dispatch.discharge();
-                tx.send(captured).expect("capture receiver remains live");
+                let _ = tx.send(captured);
             }),
         )
         .expect("register session consumer");
