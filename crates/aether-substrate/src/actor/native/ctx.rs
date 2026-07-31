@@ -29,7 +29,7 @@ use core::ptr;
 use crate::actor::native::mailbox::NativeActorMailbox;
 use aether_data::{Kind, KindId, MailId, MailboxId, RequestId, mailbox_id_from_name};
 
-use crate::actor::monitor::MonitorHandle;
+use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::registry::MonitorError;
 use crate::mail::Source;
@@ -46,8 +46,8 @@ use crate::actor::native::dispatch_blocking::{
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn_thread;
 use crate::chassis::inbox::InboundMail;
+use crate::mail::SourceAddr;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
-use crate::mail::{Mail, SourceAddr};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
@@ -876,7 +876,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     /// `target` is stale.
     ///
     /// Validation: `target` must currently be `Live` in the
-    /// [`ActorRegistry`](crate::ActorRegistry); tombstoned (closed) and unknown ids
+    /// [`ActorRegistry`](crate::ActorRegistry), **or** be a live
+    /// inline-child alias in the routing [`Registry`](crate::Registry)
+    /// (ADR-0114 §2). An alias is a first-class address served by its target
+    /// parent's slot, so it has no actor entry of its own; refusing it would
+    /// make every row a cap keys on an inline child's stamped identity
+    /// (ADR-0114 §4) unreclaimable. Tombstoned (closed) and unknown ids
     /// surface as [`MonitorError`]. Singletons today don't sit
     /// in the actor registry as `Live` entries (their entries live in
     /// the routing [`Registry`](crate::Registry) only); a future lift inserts
@@ -890,7 +895,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         let spawner = self.binding.spawner().ok_or(MonitorError::Unsupported)?;
         let registry = Arc::clone(spawner.actor_registry());
         let watcher = self.binding.self_mailbox();
-        registry.register_monitor(watcher, target)?;
+        match registry.register_monitor(watcher, target) {
+            // ADR-0114 §2: an inline child's alias has no actor slot, so the
+            // slot-keyed check answers `TargetNotFound` for an address that
+            // is live and mailable. Its liveness lives in the routing
+            // registry; take that as the authority for an alias.
+            Err(MonitorError::TargetNotFound) if self.binding.mailer().registry().is_live_alias(target) => {
+                registry.register_alias_monitor(watcher, target);
+            }
+            other => other?,
+        }
         Ok(MonitorHandle::new(registry, watcher, target))
     }
 
@@ -908,6 +922,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     /// close fan-out never reaches by design. Self-service only: an
     /// actor can declare its own mailbox vacated, never a peer's.
     ///
+    /// The departing occupant is a whole cluster (ADR-0114 §2): the
+    /// mailbox itself plus every inline-child alias folded onto it, each
+    /// of which drains and fires under its own name, so a cap holding rows
+    /// keyed on an inline child's stamped identity (ADR-0114 §4) can
+    /// reclaim them.
+    ///
     /// The notice mail is pushed root-shaped (no parent chain),
     /// mirroring the close fan-out. A transport with no spawner wired
     /// ([`NativeBinding::new_for_test`]) has no monitor index to
@@ -916,15 +936,11 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         let Some(spawner) = self.binding.spawner() else {
             return;
         };
-        let target = self.binding.self_mailbox();
-        let watchers = spawner.actor_registry().vacate_actor(target);
-        if watchers.is_empty() {
-            return;
-        }
-        let payload = aether_kinds::MonitorNotice { target }.encode_into_bytes();
-        for watcher in watchers {
-            self.binding.mailer().push(Mail::new(watcher, aether_kinds::MonitorNotice::ID, payload.clone(), 1));
-        }
+        let registry = spawner.actor_registry();
+        let occupant = self.binding.self_mailbox();
+
+        notify_departure(self.binding, occupant, registry.vacate_actor(occupant));
+        notify_alias_departures(registry, self.binding, occupant);
     }
 }
 

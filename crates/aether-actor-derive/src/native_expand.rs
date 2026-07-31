@@ -336,17 +336,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // name-inventory entry (a completion is not inbound mail).
             let handler_kinds: Vec<HandlerMarker> =
                 handlers.iter().map(|h| (h.kind_ty.clone(), h.reply.manifest_kind().cloned())).collect();
-            emit_native_identity_markers(
-                self_ty,
-                generics,
-                namespace_expr,
-                opts,
-                &handler_kinds,
-                fallback.is_some(),
-                // The name-inventory entry is split-only (an un-split cap
-                // registers its name through the chassis builder, not the macro).
-                is_split,
-            )
+            emit_native_identity_markers(self_ty, generics, namespace_expr, opts, &handler_kinds, fallback.is_some())
         }
         NativeEmit::RuntimeOnly => quote! {},
     };
@@ -839,12 +829,12 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
 /// `#[actor]` path (ADR-0122) and the struct-hosted one (ADR-0123): the
 /// `Addressable` impl (`NAMESPACE` + the cardinality resolver), one
 /// `HandlesKind<K>` per mail handler (a single blanket impl for a
-/// fallback-only catch-all cap), the cardinality-keyed name-inventory entry
-/// (`emit_name_entry`), and the per-handler `HandlerEntry` inventory
-/// submissions. None of these name the runtime state or pull `aether_substrate`,
-/// so they compile in a transport-only / wasm build where the runtime module is
-/// stripped. `handler_kinds` carries each mail handler's `(kind, reply)`; task
-/// completions are not inbound mail and carry no marker.
+/// fallback-only catch-all cap), the cardinality-keyed name-inventory entry, and
+/// the per-handler `HandlerEntry` inventory submissions. None of these name the
+/// runtime state or pull `aether_substrate`, so they compile in a
+/// transport-only / wasm build where the runtime module is stripped.
+/// `handler_kinds` carries each mail handler's `(kind, reply)`; task completions
+/// are not inbound mail and carry no marker.
 fn emit_native_identity_markers(
     self_ty: &Type,
     generics: &syn::Generics,
@@ -852,7 +842,6 @@ fn emit_native_identity_markers(
     opts: &ActorOpts,
     handler_kinds: &[HandlerMarker],
     has_fallback: bool,
-    emit_name_entry: bool,
 ) -> TokenStream2 {
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
 
@@ -900,12 +889,18 @@ fn emit_native_identity_markers(
             .collect()
     };
 
-    // A split cap carries its own always-on name-inventory submission, keyed by
+    // Every native identity carries a name-inventory submission, keyed by
     // cardinality off the `NAMESPACE` expr and gated `not(wasm)` so it rides the
-    // transport build but never the wasm header build.
-    let name_entry = if !emit_name_entry {
-        quote! {}
-    } else if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
+    // transport build but never the wasm header build. Unconditional because it
+    // restates for a link-time reader the same `singleton` / `instanced`
+    // argument the `Addressable` resolver above is built from, so no authoring
+    // shape can carry the resolver without it (ADR-0088 §3: every declared name).
+    // Gating it on anything else is what let an un-split `#[actor(root)]` submit
+    // a `RootEntry` naming a namespace with no cardinality fact — a half
+    // declaration `AddressIndex::build` rejects, taking the whole index and
+    // every other namespace's abbreviated addressing down with it
+    // (iamacoffeepot/aether#4138).
+    let name_entry = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! {
             #[cfg(not(target_family = "wasm"))]
             ::aether_data::name_inventory::inventory::submit! {
@@ -1005,17 +1000,8 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     let (namespace_expr, handler_kinds, has_fallback, runtime_path) =
         harvest_runtime_identity(&module_segments, module_span)?;
 
-    let markers = emit_native_identity_markers(
-        &self_ty,
-        &item.generics,
-        &namespace_expr,
-        opts,
-        &handler_kinds,
-        has_fallback,
-        // The struct-hosted form is always a split identity, so it always
-        // carries its own name-inventory entry.
-        true,
-    );
+    let markers =
+        emit_native_identity_markers(&self_ty, &item.generics, &namespace_expr, opts, &handler_kinds, has_fallback);
 
     // ADR-0123 gap 3: a compile-time dependency edge on the runtime file so a
     // transport-only (runtime-off) build — where `mod runtime` is cfg-stripped

@@ -7,6 +7,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use aether_data::Kind;
+use aether_kinds::MonitorNotice;
+
 use super::authority::BootAuthority;
 use super::effect::{
     ACTIVATION_BARRIER_KIND, ActivationToken, EffectBatch, RegistryApplied, RegistryBatchCompletionSink,
@@ -47,12 +50,25 @@ impl OwnerCommand {
     /// `ActivationCancelled` releases a reservation, and losing it strands a
     /// `Starting` route and every envelope parked behind it; an activation
     /// barrier is the control envelope that promotes a birth to `Live`.
-    /// Their volume is bounded by real engine work — one batch per handler
-    /// flush, one barrier per birth — so admitting them past the bound cannot
+    ///
+    /// A [`MonitorNotice`] joins them (iamacoffeepot/aether#4204). It is the
+    /// one signal that a watched mailbox departed, it fires once per
+    /// (target, watcher) pair from the close or vacate fan-out, and nothing
+    /// re-sends it — a watcher that misses it holds state keyed by a
+    /// departed peer for the rest of the process. Reaching the owner at all
+    /// means the watcher's own route is `Starting`, which the birth window
+    /// makes reachable: `wire` runs against a full `NativeCtx`, so an actor
+    /// may register a monitor before its activation barrier promotes it, and
+    /// a target that closes inside that window fans a notice at a route the
+    /// parked FIFO would deliver on promotion. Shedding it instead loses it.
+    ///
+    /// The volume of the whole reserved class is bounded by real engine work
+    /// — one batch per handler flush, one barrier per birth, one notice per
+    /// watcher of a departing target — so admitting it past the bound cannot
     /// be driven from outside. `over_capacity` counts when it happens.
     fn sheddable(&self) -> bool {
         match self {
-            Self::ParkOrDrop { mail, .. } => mail.kind != ACTIVATION_BARRIER_KIND,
+            Self::ParkOrDrop { mail, .. } => mail.kind != ACTIVATION_BARRIER_KIND && mail.kind != MonitorNotice::ID,
             Self::Batch(_) | Self::ActivationCancelled { .. } => false,
         }
     }
