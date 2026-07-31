@@ -35,6 +35,7 @@ use crate::actor::native::dispatcher_slot::{dispatch_envelope, finalize_close_an
 use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::{MailboxId, Source};
+use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use aether_data::MailId;
 
 /// The externally-pumped dispatch home for a native actor (ADR-0160 §1).
@@ -166,7 +167,12 @@ where
         // native instance churn can't retain stale cells.
         self.binding.mailer().cost_table().drop_mailbox(self.self_id);
         // Phase 4: registry close + parent-key release + monitor fan-out.
-        finalize_close_and_fan_out(&self.actor_registry, &self.binding, self.self_id);
+        finalize_close_and_fan_out(
+            &self.actor_registry,
+            &self.binding,
+            self.self_id,
+            EffectChain::Uncaused(Uncaused::CloseTail),
+        );
         // `actor` drops here — the box was taken out of the `Option`, so the
         // slot is now spent.
     }

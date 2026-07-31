@@ -18,9 +18,10 @@ use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim, MailboxWakeS
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::config::ConfigMemberRecord;
+use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
 use crate::mail::mailer::Mailer;
-use crate::mail::{MailId, MailboxId};
+use crate::runtime::effect_chain::{EffectChain, Uncaused};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -264,7 +265,14 @@ impl<'a> DriverCtx<'a> {
         // The `Spawner` carries the chassis mailer / aborter / actor-registry
         // / ring capacities the assembly needs — the same handles
         // `mail_send_handle` / `fatal_aborter` would source.
-        let slot = match assemble_pumped_slot::<A>(mailbox_id, inbox, self.inner.spawner_arc(), config, params) {
+        let slot = match assemble_pumped_slot::<A>(
+            mailbox_id,
+            inbox,
+            self.inner.spawner_arc(),
+            config,
+            params,
+            Uncaused::ChassisBoot,
+        ) {
             Ok(slot) => slot,
             Err(e) => {
                 self.inner.unclaim_mailbox(mailbox_id);
@@ -292,6 +300,12 @@ impl<'a> DriverCtx<'a> {
 /// can unwind whatever registry / namespace state it reserved. Every other
 /// chassis handle (mailer, aborter, actor registry, ring capacities) is
 /// sourced from the `spawner`, keeping the arg list to the per-actor inputs.
+///
+/// `born` is the caller's ADR-0168 §3 declaration of why this birth has no
+/// causing chain. Both routes here are chainless, but for different reasons —
+/// a driver recovering a Claim-stage reservation is chassis boot, and a
+/// post-boot `PassiveChassis::boot_pumped_actor` is an embedder — so the
+/// answer belongs to the caller rather than to this shared body.
 #[allow(
     clippy::redundant_pub_crate,
     reason = "crate-internal boot helper shared across the private driver / built modules"
@@ -302,6 +316,7 @@ pub(crate) fn assemble_pumped_slot<A>(
     spawner: &Arc<crate::Spawner>,
     config: A::Config,
     params: A::Params,
+    born: Uncaused,
 ) -> Result<PumpedSlot<A>, BootError>
 where
     A: Root + NativeActor,
@@ -351,10 +366,8 @@ where
     });
 
     // `wire` under `with_stamped` — mail-allowed, so subscriptions land.
-    // A pumped root cap is booted by the chassis or by an embedder holding
-    // no mail, so the hook has no causing chain (ADR-0168 §1).
     local::with_stamped(&slots, || {
-        let mut wire_ctx = NativeCtx::for_wire(&transport, MailId::NONE);
+        let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(born));
         A::wire(actor.as_mut(), &mut wire_ctx);
     });
 

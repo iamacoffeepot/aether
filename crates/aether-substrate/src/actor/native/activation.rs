@@ -21,6 +21,7 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, SeizeCell};
 use crate::mail::{Mail, MailId, MailboxId};
+use crate::runtime::effect_chain::EffectChain;
 use crate::scheduler::pending_depth;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeHandle};
 use aether_kinds::trace::Nanos;
@@ -36,10 +37,10 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     slots: Box<ActorSlots>,
     state: A::State,
     finalizer: Option<Arc<NativeSpawnFinalizer>>,
-    /// ADR-0168 §1: the chain of the work that staged this birth, carried to
-    /// the activation home so `wire` can attach a birth-completing effect to
-    /// it. [`MailId::NONE`] for a birth no chain caused.
-    causing_chain: MailId,
+    /// The staging site's ADR-0168 §3 declaration, carried to the activation
+    /// home so `wire` can attach a birth-completing effect to whatever chain
+    /// it names.
+    chain: EffectChain,
 }
 
 pub(super) struct NativeSpawnFinalizer {
@@ -185,6 +186,16 @@ impl NativeSpawnFinalizer {
 }
 
 impl<A: NativeActor> LegacyPreparedActivation<A> {
+    /// `chain` is the staging site's ADR-0168 §3 declaration, carried to the
+    /// activation home so `wire` can attach a birth-completing effect to
+    /// whatever chain it names. Deliberately an argument rather than a
+    /// builder step with a default: a default would be one of the three
+    /// answers, and picking one silently is the shape the requirement exists
+    /// to remove.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every argument is a distinct piece of the prepared birth; the ADR-0168 declaration is required, not defaulted"
+    )]
     pub(super) fn new(
         spawner: Arc<Spawner>,
         id: MailboxId,
@@ -193,16 +204,9 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         state: A::State,
+        chain: EffectChain,
     ) -> Self {
-        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, causing_chain: MailId::NONE }
-    }
-
-    /// Carry the chain of the work that staged this birth to the activation
-    /// home, so `wire` can attach a birth-completing effect to it (ADR-0168
-    /// §1). Left at [`MailId::NONE`] for a birth no chain caused.
-    pub(super) fn caused_by(mut self, causing_chain: MailId) -> Self {
-        self.causing_chain = causing_chain;
-        self
+        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, chain }
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer>) -> Self {
@@ -514,7 +518,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     ) -> Self {
-        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer, causing_chain } =
+        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer, chain } =
             prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
@@ -525,7 +529,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             id,
         );
         binding.hold_outbound_for_activation();
-        slot.wire_activation(causing_chain);
+        slot.wire_activation(chain);
 
         Self {
             spawner,

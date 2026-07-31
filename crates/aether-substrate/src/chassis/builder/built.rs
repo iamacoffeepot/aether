@@ -17,6 +17,7 @@ use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::MailboxId;
 use crate::mail::registry::effect::RegistryEffectError;
+use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
     () => {
@@ -186,7 +187,7 @@ impl<C: Chassis> PassiveChassis<C> {
         let boot = reserved.and_then(|(mailbox_id, token)| {
             let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
             let inbox = SettlingInbox::new(mailbox_id, receiver, Arc::clone(mailer));
-            match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params) {
+            match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall) {
                 Ok(slot) => registry
                     .promote_starting_through_owner(mailbox_id, token, handler)
                     .map(|()| (slot, wake_slot))

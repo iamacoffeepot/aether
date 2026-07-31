@@ -18,6 +18,7 @@ use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
+use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
 struct ClaimResources {
@@ -251,11 +252,8 @@ where
         // `with_stamped` envelope as `init` and per-envelope dispatch
         // so `Local<T>` and `tracing::*` route into this actor's
         // `ActorLogRing` identically.
-        //
-        // A chassis-boot birth has no causing mail, so the hook has no chain
-        // to hand a birth-completing effect (ADR-0168 §1).
         local::with_stamped(&resources.slots, || {
-            let mut wire_ctx = NativeCtx::for_wire(&resources.transport, aether_data::MailId::NONE);
+            let mut wire_ctx = NativeCtx::for_wire(&resources.transport, EffectChain::Uncaused(Uncaused::ChassisBoot));
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
