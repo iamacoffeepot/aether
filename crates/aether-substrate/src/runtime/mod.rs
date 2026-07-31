@@ -4,6 +4,7 @@
 //! routes panic backtraces through the same logging machinery actor
 //! `tracing::*` calls flow through.
 
+pub mod effect_chain;
 pub mod lifecycle;
 pub mod log_install;
 pub mod panic_hook;

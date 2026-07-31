@@ -96,6 +96,7 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, Source};
+use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{
     BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail, time_budget,
 };
@@ -192,19 +193,19 @@ where
     /// Run the post-init wire hook while the activation job owns this slot.
     /// The slot is not routable or drainable yet.
     ///
-    /// `causing_chain` is the chain of the work that staged this birth,
-    /// threaded from the spawn site through the prepared activation because
-    /// it is not otherwise in scope here. An effect the hook stages holds it
-    /// (ADR-0168 §1), so the staging caller's `Settled` covers the newborn's
-    /// birth-completing work — the inline-child alias a `WasmTrampoline`
-    /// publishes from `wire` is the motivating case. [`MailId::NONE`] for a
-    /// birth with no causing chain: an embedder's post-seal `spawn_actor`
-    /// reaches this path from a thread that holds no mail.
-    pub(super) fn wire_activation(&self, causing_chain: aether_data::MailId) {
+    /// `chain` is the staging site's ADR-0168 §3 declaration, threaded here
+    /// through the prepared activation because it is not otherwise in scope.
+    /// A handler-staged birth declares [`EffectChain::Held`] with the chain
+    /// its `spawn_child` ran on, so an effect the hook stages holds it and
+    /// the staging caller's `Settled` covers the newborn's birth-completing
+    /// work — the inline-child alias a `WasmTrampoline` publishes from `wire`
+    /// is the motivating case. An embedder's post-seal `spawn_actor` reaches
+    /// this same path from a thread holding no mail and declares so.
+    pub(super) fn wire_activation(&self, chain: EffectChain) {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
         local::with_stamped(&self.slots, || {
-            let mut ctx = NativeCtx::for_wire(&self.binding, causing_chain);
+            let mut ctx = NativeCtx::for_wire(&self.binding, chain);
             A::wire(actor.as_mut(), &mut ctx);
         });
         drop(actor_guard);
@@ -267,7 +268,12 @@ where
     /// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run
     /// (ADR-0160 §1).
     fn finalize_registry(&self) {
-        finalize_close_and_fan_out(&self.actor_registry, &self.binding, self.self_id);
+        finalize_close_and_fan_out(
+            &self.actor_registry,
+            &self.binding,
+            self.self_id,
+            EffectChain::Uncaused(Uncaused::CloseTail),
+        );
     }
 
     /// Shared drain tail for [`Drainable::run_cycle`] (no seed) and
@@ -639,7 +645,25 @@ where
 /// tombstoned, so owner-time activation answers `SubnameRetired` — the
 /// authoritative reason (ADR-0165) — rather than a stale parent-local
 /// `SubnameInUse`.
-pub fn finalize_close_and_fan_out(actor_registry: &ActorRegistry, binding: &NativeBinding, self_id: MailboxId) {
+///
+/// `chain` is the caller's ADR-0168 §3 declaration. Both callers reach this
+/// after the closing chain has recorded `Finished`, so the only honest answer
+/// is [`Uncaused::CloseTail`] — the registry close and the `MonitorNotice`
+/// fan-out are outside settlement, and no consumer can wait for either. That
+/// is a property of the close tail, not a gap to be repaired here; taking the
+/// declaration as an argument is what stops the next reader from having to
+/// re-derive which of the two it is.
+pub fn finalize_close_and_fan_out(
+    actor_registry: &ActorRegistry,
+    binding: &NativeBinding,
+    self_id: MailboxId,
+    chain: EffectChain,
+) {
+    debug_assert_eq!(
+        chain.held_root(),
+        aether_data::MailId::NONE,
+        "the close tail runs past its chain's Finished, so it can hold nothing",
+    );
     let watchers = actor_registry.close_actor(self_id);
     binding.release_parent_child_reservation();
     if !watchers.is_empty() {

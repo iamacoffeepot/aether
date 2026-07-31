@@ -45,6 +45,7 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::{BootAuthority, NameConflict, Registry};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source};
+use crate::runtime::effect_chain::{EffectChain, OrderingDevice, Uncaused};
 use crate::runtime::lifecycle::{FatalAbortRecord, FatalAborter};
 use crate::runtime::trace::SettlementHold;
 use crate::scheduler::Drainable;
@@ -609,15 +610,14 @@ impl Spawner {
     /// post-seal external caller is blocked on). `None` is for fixtures that
     /// exercise the owner path with nothing waiting on the answer.
     ///
-    /// `causing_chain` is the chain of the work that staged this birth. It
-    /// rides to the activation home so the newborn's `wire` hook can hold it
-    /// across a birth-completing effect (ADR-0168 §1); a birth no chain
-    /// caused passes [`MailId::NONE`].
+    /// `chain` is the staging site's ADR-0168 §3 declaration of what orders
+    /// this birth's effects. It rides to the activation home so the newborn's
+    /// `wire` hook can hold whatever chain it names (ADR-0168 §1).
     fn prepare_commit<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,
         finalizer: Option<Arc<super::activation::NativeSpawnFinalizer>>,
-        causing_chain: MailId,
+        chain: EffectChain,
     ) -> PreparedSpawnCommit
     where
         A: Instanced + NativeActor,
@@ -654,8 +654,8 @@ impl Spawner {
             transport,
             slots,
             state,
-        )
-        .caused_by(causing_chain);
+            chain,
+        );
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
             None => activation,
@@ -733,10 +733,7 @@ impl Spawner {
             Arc::clone(&staged.identity.canonical_name),
             Arc::clone(&self.mailer),
         );
-        // An embedder thread reaching in through `spawn_actor` carries no
-        // mail, so this birth has no causing chain to hand the newborn's
-        // `wire` hook (ADR-0168 §1).
-        let commit = self.prepare_commit(staged, Some(finalizer), MailId::NONE);
+        let commit = self.prepare_commit(staged, Some(finalizer), EffectChain::Uncaused(Uncaused::EmbedderCall));
         if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
         }
@@ -893,10 +890,9 @@ impl Spawner {
         // ctx, peers are running, all mailboxes claimed.
         //
         // This is the pre-seal direct route, reachable only while the boot
-        // authority is unspent — so its caller is boot itself, holding no
-        // mail and offering the hook no causing chain (ADR-0168 §1).
+        // authority is unspent, so its caller is boot itself.
         local::with_stamped(&slots, || {
-            let mut wire_ctx = NativeCtx::for_wire(&transport, MailId::NONE);
+            let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot));
             A::wire(actor.as_mut(), &mut wire_ctx);
         });
 
@@ -1035,6 +1031,11 @@ pub struct HandlerSpawnBuilder<'ctx, A: Instanced + NativeActor> {
     parent_binding: Arc<NativeBinding>,
     completion_root: MailId,
     completion_reply_to: Source,
+    /// ADR-0168 §3: what orders this birth's effects. Defaults to the
+    /// calling handler's chain, which is the answer for every staging site
+    /// that runs on a dispatched mail turn; [`Self::ordered_by`] replaces it
+    /// where a device other than a hold does the ordering.
+    chain: EffectChain,
 }
 
 impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
@@ -1044,7 +1045,25 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         completion_root: MailId,
         completion_reply_to: Source,
     ) -> Self {
-        Self { inner, parent_binding, completion_root, completion_reply_to }
+        Self { inner, parent_binding, completion_root, completion_reply_to, chain: EffectChain::Held(completion_root) }
+    }
+
+    /// Declare that a device other than a settlement hold orders this birth
+    /// (ADR-0168 §3).
+    ///
+    /// Reach for it at a staging site whose context carries no chain — a
+    /// `PumpedSlot::host_turn`, a native-callback turn — where the ordering
+    /// is real but comes from somewhere the staging call cannot show. A bare
+    /// [`stage`](Self::stage) there takes no hold and says nothing about why
+    /// that is correct, which is the reading #4199's inventory had to resolve
+    /// by hand.
+    ///
+    /// Changes nothing about what the birth does: a chainless context yields
+    /// no hold either way. The declaration is the point.
+    #[must_use]
+    pub fn ordered_by(mut self, device: OrderingDevice) -> Self {
+        self.chain = EffectChain::OrderedBy(device);
+        self
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -1075,7 +1094,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     where
         C: Send + 'static,
     {
-        let Self { inner, parent_binding, completion_root, completion_reply_to } = self;
+        let Self { inner, parent_binding, completion_root, completion_reply_to, chain } = self;
         let SpawnBuilder {
             spawner,
             subname,
@@ -1129,7 +1148,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        let commit = spawner.prepare_commit(staged, Some(finalizer), completion_root);
+        let commit = spawner.prepare_commit(staged, Some(finalizer), chain);
         parent_binding.stage_child_birth(commit);
         let _ = sender;
         Ok(receipt)
@@ -1208,7 +1227,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         // The inherited debt names the chain that caused this birth — the
         // successor's own ctx no longer holds it, and the newborn's `wire`
         // hook needs it to cover a birth-completing effect (ADR-0168 §1).
-        let causing_chain = hold.as_ref().map_or(MailId::NONE, SettlementHold::root);
+        let chain = EffectChain::Held(hold.as_ref().map_or(MailId::NONE, SettlementHold::root));
         let completion = parent_binding.dispatch_arm(hold, reply_to, context);
         let receipt = SpawnReceipt {
             mailbox_id: staged.identity.id,
@@ -1223,7 +1242,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer), causing_chain));
+        parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer), chain));
         let _ = sender;
         Ok(receipt)
     }
@@ -1549,7 +1568,7 @@ mod tests {
     ) -> PreparedSpawnCommit {
         let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
         let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
-        spawner.prepare_commit(staged, None, MailId::NONE)
+        spawner.prepare_commit(staged, None, EffectChain::Uncaused(Uncaused::EmbedderCall))
     }
 
     fn prepared_probe_with_lifecycle_target(
@@ -1567,7 +1586,7 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
-        spawner.prepare_commit(staged, None, MailId::NONE)
+        spawner.prepare_commit(staged, None, EffectChain::Uncaused(Uncaused::EmbedderCall))
     }
 
     fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, crossbeam_channel::Receiver<KindId>) {
@@ -1612,7 +1631,7 @@ mod tests {
             Arc::clone(spawner.mailer()),
         );
 
-        (spawner.prepare_commit(staged, Some(finalizer), causing_chain), dispatch_id, key)
+        (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id, key)
     }
 
     fn await_spawn_done(parent: &NativeBinding, dispatch_id: DispatchId) -> TaskDone<SpawnOutcome, ()> {
@@ -1721,7 +1740,7 @@ mod tests {
             Arc::downgrade(&staged.transport),
             Arc::clone(&mailer),
         );
-        let commit = spawner.prepare_commit(staged, Some(finalizer), causing_chain);
+        let commit = spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain));
         let child_id = commit.route.id;
         let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
 

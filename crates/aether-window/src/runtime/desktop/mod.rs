@@ -22,6 +22,7 @@ use aether_kinds::{
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::runtime::effect_chain::OrderingDevice;
 use aether_substrate::{InboundMail, MonitorHandle as ActorMonitorHandle, Subname};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Ime, WindowEvent};
@@ -201,8 +202,17 @@ impl DesktopWindowCapabilityState {
         match attachment {
             Ok(()) => {
                 let predicted = MailboxId(id.0);
+                // ADR-0168 §3: this runs on a `PumpedSlot::host_turn`, which
+                // carries no chain, so the staged birth takes no settlement
+                // hold — and is ordered anyway. `pending.reply` retains the
+                // `create_window` request's `InboundMail` and answers it only
+                // in `finish_window_child_spawn`, so the request's `Finished`
+                // stays un-recorded across the birth and its chain cannot
+                // settle through it. Declared here because that reasoning is
+                // three call frames away from this line.
                 let receipt = match ctx
                     .spawn_child::<WindowCapability, DesktopWindowInstance>(Subname::Named(&pending.spec.name), (), ())
+                    .ordered_by(OrderingDevice::RetainedReplyDebt)
                     .stage()
                 {
                     Ok(receipt) => receipt,

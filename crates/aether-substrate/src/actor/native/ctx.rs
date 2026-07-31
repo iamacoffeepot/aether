@@ -34,6 +34,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::registry::MonitorError;
 use crate::mail::Source;
 use crate::mail::mailer::Mailer;
+use crate::runtime::effect_chain::EffectChain;
 use crate::runtime::trace::SettlementHold;
 
 use super::NativeActor;
@@ -181,23 +182,26 @@ impl<'a> NativeCtx<'a, Single> {
 
     /// The `wire`-hook context, built by every birth path that runs
     /// `A::wire` (ADR-0079 amended). It dispatches no inbound, so it carries
-    /// no in-flight lineage; `causing_chain` names the chain of the work that
-    /// caused this birth, or [`MailId::NONE`] where no such chain exists — a
-    /// chassis-boot fragment, a pumped driver boot, and an embedder's
-    /// `spawn_actor` all reach `wire` with no mail in scope.
+    /// no in-flight lineage of its own.
     ///
-    /// ADR-0168 §1: a birth-completing effect this hook stages holds
-    /// `causing_chain`, so the staging caller's `Settled` covers it. The
-    /// actor's own `wire`-time sends still mint their own roots — see the
+    /// `chain` is the birth path's ADR-0168 §3 declaration of what orders the
+    /// effects this hook stages. [`EffectChain::Held`] carries the chain of
+    /// the work that caused the birth, so a birth-completing effect holds it
+    /// and the staging caller's `Settled` covers it (ADR-0168 §1); the
+    /// chainless arms name why no such chain exists. Making it an argument is
+    /// what puts the question in front of the author of the next birth path
+    /// rather than leaving it to be re-derived.
+    ///
+    /// The actor's own `wire`-time sends still mint their own roots — see the
     /// [`NativeCtx::causing_chain`] field docs for why the two must not share
     /// one root.
-    pub(crate) fn for_wire(binding: &'a Arc<NativeBinding>, causing_chain: MailId) -> Self {
+    pub(crate) fn for_wire(binding: &'a Arc<NativeBinding>, chain: EffectChain) -> Self {
         Self {
             binding,
             source: Source::NONE,
             in_flight_mail_id: MailId::NONE,
             in_flight_root: MailId::NONE,
-            causing_chain,
+            causing_chain: chain.held_root(),
             inbound: None,
             _mode: PhantomData,
         }
