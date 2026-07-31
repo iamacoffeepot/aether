@@ -10,9 +10,12 @@
 //! a hard panic there.
 
 use std::fs;
+use std::thread;
+use std::time::{Duration, Instant};
 
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{ExecutionError, ExecutionResult, HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
@@ -23,6 +26,36 @@ use aether_test_fixtures_kinds::{
 // entries are present in this test binary.
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
+
+/// Send `probe` to an inline child's alias once that alias resolves, and
+/// hand back the sequence that reached it under the label `"probe"`.
+///
+/// An awaited `LoadResult::Ok` is not a barrier for the child becoming
+/// addressable (iamacoffeepot/aether#4186). The load reply rides the
+/// trampoline birth's own `SpawnOutcome`, while the child's alias is a
+/// *second* registry-owner batch the trampoline stages from its `wire`
+/// hook — and `wire` runs on a ctx rooted at `MailId::NONE`, so that batch
+/// holds no chain and the load's settlement never covered it. ADR-0165's
+/// activation suffix submits the batch and deliberately does not wait for
+/// the owner to apply it, so nothing orders the alias against the reply.
+/// There is no ordering to assert here, only an address to observe
+/// becoming resolvable: poll to a bounded deadline so the test measures the
+/// outcome rather than the runner. A child that never appears still fails,
+/// just after 5s.
+fn probe_child_alias<K: Kind>(harness: &mut SubstrateHarness, child_addr: &str, probe: &K) -> ExecutionResult {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match harness.execute(vec![("probe", HarnessOp::send_and_await(child_addr, probe))]) {
+            Ok(reached) => return reached,
+            Err(ExecutionError::OpFailed { error: SubstrateHarnessError::UnknownMailbox(_), .. })
+                if Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("inline child alias {child_addr} never answered a probe within 5s: {error}"),
+        }
+    }
+}
 
 /// ADR-0114 §5: an inline child carries its `type State` across a
 /// `replace_component` swap. Loads `InlineStatefulParent` from the
@@ -81,7 +114,9 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 
     // Bump the *child's* counter to 2 (mail demuxed to the child's alias),
     // then read it back. `send_mail` is fire-and-settle, so the bumps land
-    // before the query.
+    // before the query — but the alias itself only resolves once its own
+    // owner batch applies, which the load reply does not order.
+    probe_child_alias(&mut harness, &child_addr, &CountQuery);
     let pre = harness
         .execute(vec![
             ("bump_a", HarnessOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
@@ -185,7 +220,8 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // (1) Assert the generated resolver accepted only the composable child
     // and rejected wrong-parent, non-instanced, and unknown selections before
     // allocation. (2) The accepted child is live and stateful — bump it to 2
-    // through its own alias and read it back.
+    // through its own alias and read it back, once that alias resolves.
+    probe_child_alias(&mut harness, &child_addr, &CountQuery);
     let pre = harness
         .execute(vec![
             ("tag_report", HarnessOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery)),
@@ -279,27 +315,25 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // answers with the child marker, and the chain settles. The name override
     // keeps the registered lineage address stable so `parent_addr` / `child_addr`
     // remain valid.
-    let live = harness
-        .execute(vec![
-            (
-                "load",
-                HarnessOp::send_and_await(
-                    "aether.component",
-                    &LoadComponent {
-                        wasm,
-                        name: Some(FIXTURE_NAME.to_owned()),
-                        config: Vec::new(),
-                        export: Some("test.inline.despawn_parent".to_owned()),
-                    },
-                ),
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: Some("test.inline.despawn_parent".to_owned()),
+                },
             ),
-            ("probe", HarnessOp::send_and_await(child_addr.as_str(), &InlineProbe)),
-        ])
-        .expect("load + live-probe sequence");
-    match live.reply::<LoadResult>("load").expect("decode LoadResult") {
+        )])
+        .expect("load sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("inline_child_despawn load failed: {error}"),
     }
+    let live = probe_child_alias(&mut harness, &child_addr, &InlineProbe);
     assert_eq!(
         live.reply::<InlineEcho>("probe").expect("decode live-probe InlineEcho"),
         InlineEcho { who: INLINE_WHO_CHILD },
