@@ -8,7 +8,7 @@
 //! every drain retires exactly one. A drainer that never batches cannot
 //! amortize, so its rate is an unloaded service rate.
 //!
-//! The **ceiling** comes from [`fixture::CommitParent`] staging bursts: a
+//! The **ceiling** comes from [`super::fixture::CommitParent`] staging bursts: a
 //! handler submits N births without waiting on any, so they queue together and
 //! the drainer batches. That is the rate ADR-0165 means when it defers sharding
 //! until churn exceeds ~5% of the measured ceiling.
@@ -176,7 +176,7 @@ fn empty(drive: &str, commits: u64, elapsed_nanos: u64) -> OwnerCeiling {
     }
 }
 
-/// Drive [`BURSTS`] staged bursts through `parent` and report the owner's
+/// Drive `BURSTS` staged bursts through `parent` and report the owner's
 /// accounting over just that phase — the loaded ceiling.
 ///
 /// Each burst is one settle-gated send, so it returns only once every staged
@@ -219,7 +219,7 @@ pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: &str) -> O
 
 /// Retire every child the staging parent still holds.
 ///
-/// The ceiling phase leaves [`BURST`] × [`BURSTS`] extra routes behind, which
+/// The ceiling phase leaves `BURST` × `BURSTS` extra routes behind, which
 /// would otherwise inflate the table the read sweep walks well past the
 /// `populated_mailboxes` the report states. Closing them keeps the reported
 /// table size honest.

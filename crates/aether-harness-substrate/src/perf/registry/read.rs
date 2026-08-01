@@ -19,7 +19,7 @@
 //! republication. Measured directly, 200,000 absent lookups moved `admitted`,
 //! `drains`, and `depth_max` by exactly zero.
 //!
-//! So churn is now real — [`fixture::CommitParent`] staging and closing
+//! So churn is now real — [`super::fixture::CommitParent`] staging and closing
 //! children, which commits through the owner — and, more importantly, each
 //! contended cell **reports the owner commits observed during its own window**.
 //! A column that counts its own churn cannot silently claim churn it did not
@@ -91,7 +91,7 @@ pub struct ReadScalingCell {
 }
 
 /// One read-scaling cell: `threads` readers hammering `resolve_route_state`
-/// over `targets` for [`READ_WINDOW`].
+/// over `targets` for `READ_WINDOW`.
 ///
 /// The churn runs on **this** thread rather than a spawned one. `SubstrateHarness`
 /// is not `Sync` — it owns the chassis receivers — so the only thread that can
@@ -176,7 +176,7 @@ pub fn read_cell(
 
 /// Walk the read path on this thread before the sweep starts, so the
 /// single-thread baseline every other cell is scaled against is measured warm.
-/// See [`WARMUP_PASSES`] for why a cold baseline is worse than a slow one.
+/// See `WARMUP_PASSES` for why a cold baseline is worse than a slow one.
 pub fn warm_read_path(registry: &Registry, targets: &[MailboxId]) {
     let kind = <Ping as Kind>::ID;
     for _ in 0..WARMUP_PASSES {
@@ -189,7 +189,7 @@ pub fn warm_read_path(registry: &Registry, targets: &[MailboxId]) {
 /// Republish the route table for `window` by staging and then closing a small
 /// burst of children through `parent`, which commits both ways through the
 /// owner. Stage-then-close keeps the table's size oscillating by
-/// [`CHURN_BURST`] rather than growing for the whole window.
+/// `CHURN_BURST` rather than growing for the whole window.
 ///
 /// Each send is settle-gated, so a cycle returns only once its births have
 /// landed; the loop re-checks the deadline between cycles rather than
