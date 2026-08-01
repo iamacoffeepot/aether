@@ -694,11 +694,11 @@ fn instanced_root_takes_placement_without_claiming_an_address_anchor() {
     // would have to exclude.
     assert!(
         !root_entries().any(|entry| entry.namespace == InstancedRootCap::NAMESPACE),
-        "an instanced root must submit no RootEntry — it cannot anchor an abbreviated address",
+        "an instanced root must submit no RootEntry — it cannot anchor an abbreviated address"
     );
     // The singleton sibling in this same binary still does, so the assertion
     // above is about cardinality and not about inventory being empty.
-    assert!(root_entries().any(|entry| entry.namespace == ReplyMacroCap::NAMESPACE), "a singleton root still anchors",);
+    assert!(root_entries().any(|entry| entry.namespace == ReplyMacroCap::NAMESPACE), "a singleton root still anchors");
 }
 
 // ADR-0109 deferred reply contract (#1805): a `-> Pending<R>` request
