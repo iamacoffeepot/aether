@@ -404,8 +404,16 @@ impl NativeActor for ComponentHostCapability {
         _ctx: &mut NativeCtx<'_>,
         payload: DescribeComponent,
     ) -> DescribeComponentResult {
-        let Some(mailbox) = state.registry.lookup(&payload.name) else {
-            return DescribeComponentResult::Err { error: format!("no component registered at name {}", payload.name) };
+        // `resolve_address`, not `lookup`: an abbreviated name that is
+        // ambiguous rather than absent reports its candidate spellings instead
+        // of collapsing to "nothing registered" (ADR-0166 §5, issue 4125).
+        let mailbox = match state.registry.resolve_address(&payload.name) {
+            Ok(resolved) => resolved.mailbox_id,
+            Err(error) => {
+                return DescribeComponentResult::Err {
+                    error: format!("no component registered at name {}: {error}", payload.name),
+                };
+            }
         };
         match state.mailer.capability_registry().describe(mailbox) {
             Some(capabilities) => DescribeComponentResult::Ok { capabilities },
