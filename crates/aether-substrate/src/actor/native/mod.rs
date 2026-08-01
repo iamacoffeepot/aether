@@ -140,6 +140,30 @@ pub trait Dispatch<S> {
         false
     }
 
+    /// Every kind this actor dispatches through its typed table — the set the
+    /// per-handler cost table is seeded from (iamacoffeepot/aether#4266).
+    ///
+    /// Distinct from [`Self::capabilities`], which is the ADR-0033 *advertised*
+    /// receive surface `describe_component` reports. The two coincided until a
+    /// `#[handler(task)]` made them differ: an ADR-0093 completion arrives as
+    /// [`TaskCompletionWake`], which the typed table dispatches but which is
+    /// internal plumbing between an actor and its own offloaded work, not
+    /// something a caller can address. Advertising it would be misleading;
+    /// leaving it unmeasured means the handler owns no `CostCell`, so its
+    /// execution time never folds, `actor_cost` reports no row, and the
+    /// ADR-0087 cost-aware recruiter cannot see the work.
+    ///
+    /// Defaults to the advertised handlers' ids, which is correct for any actor
+    /// whose typed arms are all declared. The `#[actor]` macro overrides it to
+    /// append `TaskCompletionWake` when the actor has task handlers.
+    #[must_use]
+    fn measured_kinds() -> Vec<KindId>
+    where
+        Self: Sized,
+    {
+        Self::capabilities().handlers.iter().map(|handler| handler.id).collect()
+    }
+
     /// The native cap's ADR-0033 receive-side capability surface — every
     /// `#[handler]` kind plus `#[fallback]` presence (iamacoffeepot/aether#1037).
     /// Static — independent of any state instance. The `#[actor]` macro

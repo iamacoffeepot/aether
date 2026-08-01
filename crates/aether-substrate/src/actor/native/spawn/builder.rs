@@ -626,7 +626,7 @@ impl Spawner {
             CostCells::with(|cells| cells.entries().to_vec())
         });
         if costs.is_empty() {
-            costs = A::capabilities().handlers.iter().map(|handler| (handler.id, Arc::new(CostCell::new()))).collect();
+            costs = A::measured_kinds().into_iter().map(|kind| (kind, Arc::new(CostCell::new()))).collect();
             local::with_stamped(&slots, || {
                 use aether_actor::Local as _;
                 CostCells::with_mut(|cells| cells.seed(costs.clone()));
@@ -863,7 +863,7 @@ impl Spawner {
             CostCells::with(|cells| cells.entries().to_vec())
         });
         if actor_local_costs.is_empty() {
-            let handler_kinds: Vec<KindId> = A::capabilities().handlers.iter().map(|handler| handler.id).collect();
+            let handler_kinds: Vec<KindId> = A::measured_kinds();
             let seeded = self.mailer.cost_table().seed(id, &handler_kinds);
             local::with_stamped(&slots, || {
                 use aether_actor::Local as _;
