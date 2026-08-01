@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use aether_substrate::config::{ConfigError, ConfigSources};
+use aether_substrate::config::{ConfigError, ConfigProvenance, ConfigSources};
 
 use crate::boot_manifest::ChassisSettings;
 
@@ -58,14 +58,19 @@ impl TickConfig {
 /// `set_override` (the binary *is* the product, ADR-0163 §1); on the shared
 /// headless chassis an operator must keep the ability to override a shipped
 /// package with `AETHER_TICK_HZ` / `--tick-hz`, so the manifest slots in one
-/// layer lower. The mechanism: resolve [`TickConfig`] off the stack (folding
-/// any argv / env / file value), and only when it resolved to the compiled
-/// default ([`DEFAULT_TICK_HZ`] — i.e. no higher source supplied a non-default
-/// cadence) substitute the manifest's value, re-staging the result as the
-/// programmatic override the headless `Chassis::build` resolves. A higher
-/// source that pins a value equal to the default is indistinguishable from an
-/// unset knob, so the manifest wins that degenerate case — pinning a knob to
-/// its own default is a semantic no-op.
+/// layer lower. The mechanism: ask the stack which layer supplies
+/// [`TickConfig`], and only when that is
+/// [`ConfigProvenance::Default`] — no argv, env, file, or programmatic source
+/// carried a cadence — substitute the manifest's value, re-staging the result
+/// as the programmatic override the headless `Chassis::build` resolves.
+///
+/// The provenance read is what makes an explicit pin of the compiled default
+/// honour precedence (issue 4006). `TickConfig.hz` is a plain `u32` with no
+/// unset sentinel, so the older shape detected "unset" by comparing the
+/// *resolved* value against [`DEFAULT_TICK_HZ`] — which made an operator's
+/// `AETHER_TICK_HZ=60` over a manifest carrying a different cadence silently
+/// lose to the manifest, the one case where env did not beat it. Asking which
+/// layer won answers the question the fold cannot.
 ///
 /// A `title` / `window_mode` in the manifest is a desktop knob the headless
 /// chassis has no window for, so it is warn-ignored here (mirroring the bundle
@@ -92,11 +97,15 @@ pub fn apply_manifest_tick_settings(
         return Ok(());
     };
 
+    // Read the provenance before resolving: resolution consumes the staged
+    // argv layer and programmatic override, so asking afterwards would report
+    // `Default` for a cadence those layers supplied.
+    let supplied = sources.provenance_of::<TickConfig>() != ConfigProvenance::Default;
     let resolved = sources.resolve::<TickConfig>()?;
-    let hz = if resolved.hz == DEFAULT_TICK_HZ {
-        manifest_hz
-    } else {
+    let hz = if supplied {
         resolved.hz
+    } else {
+        manifest_hz
     };
     sources.set_override(TickConfig { hz });
     Ok(())
@@ -167,5 +176,31 @@ mod tests {
         // SAFETY: same guarded scope.
         unsafe { env::remove_var("AETHER_TICK_HZ") };
         assert_eq!(resolved.expect("apply + resolve").hz, 120, "env AETHER_TICK_HZ overrides the manifest tick_hz");
+    }
+
+    #[test]
+    fn apply_manifest_tick_yields_to_an_env_pin_of_the_compiled_default() {
+        // The #4006 case: an operator pins AETHER_TICK_HZ to the compiled
+        // default over a manifest carrying a different cadence. `hz` is a plain
+        // u32 with no unset sentinel, so the old resolved-value-versus-default
+        // comparison could not tell this explicit pin from an unset knob and
+        // handed the manifest the win — the one case where env lost. The
+        // provenance read distinguishes them, so 60 must survive here even
+        // though 60 *is* DEFAULT_TICK_HZ.
+        let _guard = TICK_ENV_GUARD.lock().expect("env guard");
+        // SAFETY: the guard serializes every env-touching test in this module,
+        // and the key is removed before the guard drops.
+        unsafe { env::set_var("AETHER_TICK_HZ", &DEFAULT_TICK_HZ.to_string()) };
+        let mut sources = ConfigSources::new(None);
+        let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
+        let resolved =
+            apply_manifest_tick_settings(&mut sources, &settings).and_then(|()| sources.resolve::<TickConfig>());
+        // SAFETY: same guarded scope.
+        unsafe { env::remove_var("AETHER_TICK_HZ") };
+        assert_eq!(
+            resolved.expect("apply + resolve").hz,
+            DEFAULT_TICK_HZ,
+            "an explicit env pin of the compiled default still beats the manifest tick_hz"
+        );
     }
 }

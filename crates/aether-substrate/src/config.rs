@@ -982,6 +982,35 @@ impl ConfigSources {
         C::resolve(self)
     }
 
+    /// The highest-precedence source layer supplying member `C`'s value, or
+    /// [`ConfigProvenance::Default`] when nothing above the compiled defaults
+    /// does. The typed counterpart to [`ConfigManifest::provenance`]'s
+    /// whole-fleet rollup, for the caller that needs to slot a value *between*
+    /// the stack and the defaults — a depot package manifest's cadence, which
+    /// must lose to an operator's argv/env/file pin and win over the compiled
+    /// default (issue 4006).
+    ///
+    /// Read it **before** [`resolve`](Self::resolve): resolution consumes the
+    /// staged argv layer and programmatic override, so a provenance read after
+    /// it reports `Default` for a member those layers supplied.
+    ///
+    /// Member-granular, not field-granular: a multi-field config reports the
+    /// winning layer for the member as a whole, so one pinned field reads as
+    /// "supplied" for all of them. Callers wanting per-field precision want
+    /// the layer itself.
+    ///
+    /// A derive-`Config` type declares exactly one record, so the search below
+    /// is really a lookup; a hand impl declaring several reports the first that
+    /// any layer supplied.
+    #[must_use]
+    pub fn provenance_of<C: ConfigMember>(&self) -> ConfigProvenance {
+        C::members()
+            .iter()
+            .map(|record| self.provenance(record.type_id, record.section, record.meta))
+            .find(|provenance| *provenance != ConfigProvenance::Default)
+            .unwrap_or(ConfigProvenance::Default)
+    }
+
     fn take_override<C: 'static>(&mut self) -> Option<C> {
         self.overrides.remove(&TypeId::of::<C>()).map(|boxed| *boxed.downcast::<C>().expect("override TypeId keys C"))
     }
@@ -1093,6 +1122,12 @@ impl ConfigSources {
         }
         if self.has_argv(type_id) {
             return ConfigProvenance::Argv;
+        }
+        // A hermetic stack (`SubstrateHarness`) resolves programmatic > argv >
+        // default and never reads env or file, so attributing a member to
+        // either layer here would report a source resolution does not consult.
+        if self.hermetic {
+            return ConfigProvenance::Default;
         }
         if self.file.as_ref().is_some_and(|table| table.contains_key(section)) {
             return ConfigProvenance::File;
