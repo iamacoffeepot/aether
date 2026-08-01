@@ -36,10 +36,11 @@ use aether_substrate::{MailboxId, Registry};
 use serde::{Deserialize, Serialize};
 
 use super::fixture::{CloseBurst, StageBurst};
+use super::kinds::KindMix;
 use super::owner::RawCounters;
+use super::spread::TargetSpread;
 use super::{CHASSIS_WORKERS, per_second, spawn_bench_thread, usable_cores};
 use crate::SubstrateHarness;
-use crate::perf::harness::Ping;
 
 /// How long each read-scaling cell runs. Long enough to swamp thread start-up,
 /// short enough that the whole sweep stays interactive.
@@ -73,6 +74,12 @@ pub struct ReadScalingCell {
     pub threads: u64,
     /// Whether the owner was concurrently republishing the table.
     pub owner_churn: bool,
+    /// Which kind each reader looked up — the cut that isolates the shared
+    /// kind-name refcount (iamacoffeepot/aether#4276).
+    pub kind_mix: KindMix,
+    /// Whether readers walked the same routes or their own — the cut that
+    /// isolates the per-route endpoint refcounts (iamacoffeepot/aether#4276).
+    pub target_spread: TargetSpread,
     /// Owner items retired during this cell's window. **This is the column's
     /// own evidence**: a `owner_churn: true` cell with zero commits here did
     /// not measure what it claims, and an uncontended cell should read zero.
@@ -103,10 +110,11 @@ pub fn read_cell(
     targets: &[MailboxId],
     threads: usize,
     churn: Option<&str>,
+    mix: KindMix,
+    spread: TargetSpread,
     baseline: Option<f64>,
 ) -> ReadScalingCell {
     let registry = Arc::clone(harness.mail_registry());
-    let kind = <Ping as Kind>::ID;
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));
     let before = RawCounters::read(&registry);
@@ -117,10 +125,14 @@ pub fn read_cell(
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
             let total = Arc::clone(&total);
-            // Each reader starts at a different offset so they are not walking
-            // the id list in lockstep, which would read as better locality than
-            // a real dispatch mix has.
-            let targets: Vec<MailboxId> = targets.iter().copied().cycle().skip(worker).take(targets.len()).collect();
+            // Resolved per reader, which is the whole cut: under `Shared` every
+            // reader gets the same id and every lookup lands on one kind-name
+            // refcount; under `PerReader` each gets its own.
+            let kind = mix.kind_for(worker);
+            // The other half of the cut: under `Overlapping` every reader walks
+            // the same routes and shares their endpoint refcounts, under
+            // `Disjoint` each walks its own. Both windows are the same length.
+            let targets = spread.walk(targets, worker);
             spawn_bench_thread(move || {
                 let mut count = 0_u64;
                 while !stop.load(Ordering::Relaxed) {
@@ -165,6 +177,8 @@ pub fn read_cell(
     ReadScalingCell {
         threads: threads as u64,
         owner_churn: churn.is_some(),
+        kind_mix: mix,
+        target_spread: spread,
         owner_commits_observed,
         lookups,
         elapsed_nanos,
@@ -177,11 +191,23 @@ pub fn read_cell(
 /// Walk the read path on this thread before the sweep starts, so the
 /// single-thread baseline every other cell is scaled against is measured warm.
 /// See `WARMUP_PASSES` for why a cold baseline is worse than a slow one.
+/// Warms **every** kind the sweep will look up, not just the shared arm's.
+/// A `PerReader` cell whose kind slots were cold would pay a first-touch cost
+/// the `Shared` arm had already amortized, which is a difference between the
+/// arms that has nothing to do with the refcount they exist to compare.
 pub fn warm_read_path(registry: &Registry, targets: &[MailboxId]) {
-    let kind = <Ping as Kind>::ID;
+    let kinds: Vec<_> = [KindMix::Shared, KindMix::PerReader]
+        .into_iter()
+        .flat_map(|mix| (0..*READER_THREADS.iter().max().unwrap_or(&1)).map(move |w| mix.kind_for(w)))
+        .collect();
+    // Every route in the table, not just the first window — a `Disjoint` cell
+    // reaches routes no `Overlapping` cell ever touches, and a cold window there
+    // would be a difference between the spreads that is not about sharing.
     for _ in 0..WARMUP_PASSES {
-        for &target in targets {
-            let _ = registry.resolve_route_state(kind, target);
+        for &kind in &kinds {
+            for &target in targets {
+                let _ = registry.resolve_route_state(kind, target);
+            }
         }
     }
 }

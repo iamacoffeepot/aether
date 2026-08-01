@@ -52,6 +52,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::RegistryReport;
+use super::kinds::KindMix;
+use super::read::ReadScalingCell;
+use super::spread::TargetSpread;
 use crate::perf::stats::{BandPosition, BandStats};
 use crate::perf::subprocess::run_child_json;
 
@@ -82,6 +85,13 @@ pub const BAND_SCHEMA: &str = "aether.perf.registry.band.v1";
 pub struct ReadBandCell {
     pub threads: u64,
     pub owner_churn: bool,
+    /// Which kind each reader looked up (iamacoffeepot/aether#4276). Part of
+    /// the cell's identity: `shared` and `per-reader` are two different
+    /// measurements at the same reader count, read against each other.
+    pub kind_mix: KindMix,
+    /// Whether readers walked the same routes or their own — the other half of
+    /// the cell's identity, for the same reason.
+    pub target_spread: TargetSpread,
     /// Readers plus chassis workers exceed the usable core count, so this cell
     /// measures the OS timeslicing threads. Carried per cell exactly as the
     /// single sweep carries it, because replication does not make an
@@ -225,10 +235,11 @@ fn run_trial_in_subprocess(exe: &Path, trial: usize) -> Result<RegistryReport, S
 
 /// Reduce K raw sweeps to per-cell bands.
 ///
-/// Cells pair across trials by `(threads, owner_churn)` rather than by
-/// position, so a trial that dropped a cell contributes its remaining cells
-/// instead of shifting every later one onto the wrong key. The key order comes
-/// from the first completed trial, which is the order the sweep ran them in.
+/// Cells pair across trials by their full key — reader count, churn setting,
+/// kind mix, target spread — rather than by position, so a trial that dropped a
+/// cell contributes its remaining cells instead of shifting every later one onto
+/// the wrong key. The key order comes from the first completed trial, which is
+/// the order the sweep ran them in.
 #[must_use]
 pub fn summarize(reports: &[RegistryReport], requested: usize, isolated: bool) -> RegistryBandReport {
     let first = reports.first();
@@ -252,25 +263,54 @@ pub fn summarize(reports: &[RegistryReport], requested: usize, isolated: bool) -
     }
 }
 
+/// What identifies a read cell across trials: its reader count within its
+/// column, and the column is `(churn, kind mix)`. Every one of the three has to
+/// match — a cell banded against a different mix or churn setting would pool two
+/// deliberately different measurements into one number.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CellKey {
+    threads: u64,
+    owner_churn: bool,
+    kind_mix: KindMix,
+    target_spread: TargetSpread,
+}
+
+impl CellKey {
+    fn of(cell: &ReadScalingCell) -> Self {
+        Self {
+            threads: cell.threads,
+            owner_churn: cell.owner_churn,
+            kind_mix: cell.kind_mix,
+            target_spread: cell.target_spread,
+        }
+    }
+
+    /// The same column's single-reader cell — the denominator of this cell's
+    /// within-trial scaling ratio.
+    fn baseline(self) -> Self {
+        Self { threads: 1, ..self }
+    }
+}
+
+fn find_cell(report: &RegistryReport, key: CellKey) -> Option<&ReadScalingCell> {
+    report.read_scaling.iter().find(|c| CellKey::of(c) == key)
+}
+
 #[allow(clippy::cast_precision_loss, reason = "a commit count is exact in f64 far past what a cell's window retires")]
 fn band_read_cells(first: &RegistryReport, reports: &[RegistryReport]) -> Vec<ReadBandCell> {
     first
         .read_scaling
         .iter()
-        .map(|key| {
-            let matching: Vec<_> = reports
-                .iter()
-                .filter_map(|r| {
-                    r.read_scaling.iter().find(|c| c.threads == key.threads && c.owner_churn == key.owner_churn)
-                })
-                .collect();
-            let scaling = BandStats::of(
-                &reports.iter().filter_map(|r| trial_scaling(r, key.threads, key.owner_churn)).collect::<Vec<_>>(),
-            );
+        .map(|cell| {
+            let key = CellKey::of(cell);
+            let matching: Vec<_> = reports.iter().filter_map(|r| find_cell(r, key)).collect();
+            let scaling = BandStats::of(&reports.iter().filter_map(|r| trial_scaling(r, key)).collect::<Vec<_>>());
             ReadBandCell {
                 threads: key.threads,
                 owner_churn: key.owner_churn,
-                oversubscribed: key.oversubscribed,
+                kind_mix: key.kind_mix,
+                target_spread: key.target_spread,
+                oversubscribed: cell.oversubscribed,
                 lookups_per_sec: BandStats::of(&matching.iter().map(|c| c.lookups_per_sec).collect::<Vec<_>>()),
                 scaling_position: scaling.position_against(1.0),
                 scaling_vs_one: scaling,
@@ -283,16 +323,15 @@ fn band_read_cells(first: &RegistryReport, reports: &[RegistryReport]) -> Vec<Re
 }
 
 /// One trial's own scaling ratio for a cell: its rate over *its* single-reader
-/// rate at the same churn setting.
+/// rate in the same column.
 ///
 /// Formed here rather than read off `ReadScalingCell::scaling_vs_one` so the
 /// single-reader cell itself reads 1.00x instead of the `None` the sweep leaves
 /// on the row it uses as its baseline, and so the pairing is stated where the
 /// band that depends on it is computed.
-#[allow(clippy::cast_precision_loss, reason = "throughput is a trend ratio, exact in f64 at these magnitudes")]
-fn trial_scaling(report: &RegistryReport, threads: u64, churn: bool) -> Option<f64> {
-    let cell = report.read_scaling.iter().find(|c| c.threads == threads && c.owner_churn == churn)?;
-    let one = report.read_scaling.iter().find(|c| c.threads == 1 && c.owner_churn == churn)?;
+fn trial_scaling(report: &RegistryReport, key: CellKey) -> Option<f64> {
+    let cell = find_cell(report, key)?;
+    let one = find_cell(report, key.baseline())?;
     (one.lookups_per_sec > 0.0).then(|| cell.lookups_per_sec / one.lookups_per_sec)
 }
 
@@ -323,6 +362,8 @@ mod tests {
         ReadScalingCell {
             threads,
             owner_churn: churn,
+            kind_mix: KindMix::Shared,
+            target_spread: TargetSpread::Overlapping,
             owner_commits_observed: 0,
             lookups: 0,
             elapsed_nanos: 1,
@@ -358,6 +399,7 @@ mod tests {
             usable_cores: 12,
             chassis_workers: 2,
             read_scaling: cells,
+            per_reader_kinds_registered: true,
             owner_unloaded: owner("sequential-spawn", 57_000.0),
             owner_loaded: None,
         }
