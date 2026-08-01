@@ -3,6 +3,7 @@ use super::super::capture::capture_envelope;
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use std::collections::BTreeSet;
 use std::io::Cursor;
 
 use aether_kinds::{CaptureFrame, FrameVerdict, WindowId};
@@ -266,4 +267,44 @@ fn save_capture_png_unwritable_path_errors() {
     let err = save_capture_png(&dir, &[1u8, 2, 3]).expect_err("writing to a directory must error");
     assert!(!err.is_empty(), "got: {err}");
     std_fs::remove_dir_all(&dir).ok();
+}
+
+/// Tripwire: the schema clients discover must require exactly the fields the
+/// server refuses to default.
+///
+/// A live pilot session lost its first capture to this drift — `window_id`
+/// became required (multi-window desktop) while the advertised schema and the
+/// tool description still described the single-window shape, so the call came
+/// back `missing field window_id` and the field had to be guessed
+/// (iamacoffeepot/aether#4040). The pinned value is *computed* on both sides:
+/// `required` is derived by schemars from the type, and the expected set is
+/// the type's own non-`#[serde(default)]` fields. Adding a field without a
+/// default, or defaulting one that was required, moves one side and not the
+/// other.
+#[test]
+fn capture_frame_schema_requires_exactly_the_non_defaulted_fields() {
+    let schema = schemars::schema_for!(CaptureFrameArgs);
+    let value = serde_json::to_value(&schema).expect("schema serializes");
+
+    let required: BTreeSet<String> = value
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+
+    // `engine_id` and `window_id` are the two fields `CaptureFrameArgs`
+    // declares without `#[serde(default)]`; every other field defaults, so a
+    // caller may omit it.
+    let expected: BTreeSet<String> = ["engine_id".to_owned(), "window_id".to_owned()].into_iter().collect();
+
+    assert_eq!(
+        required, expected,
+        "advertised required-set drifted from the non-defaulted fields; update the capture_frame tool \
+         description in tools/mod.rs alongside the struct, or clients will call with the wrong shape"
+    );
+
+    // The description is the other half clients read, and it is free text no
+    // derive can keep honest.
+    let properties = value.get("properties").and_then(serde_json::Value::as_object).expect("object schema");
+    assert!(properties.contains_key("window_id"), "window_id must appear in the advertised properties");
 }
