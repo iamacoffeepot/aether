@@ -6,11 +6,11 @@ license.workspace = true
 
 # The headless chassis (issue #3811): std-timer tick driver, no GPU, no
 # window — the fleet engine the hub forks. Produces the
-# `aether-substrate-headless` binary over the shared `aether-chassis`
+# `aether-headless` binary over the shared `aether-chassis`
 # composition layer.
 
 [[bin]]
-name = "aether-substrate-headless"
+name = "aether-headless"
 path = "src/bin/headless.rs"
 
 # Same `runtime` convention as the other chassis crates (ADR-0122).

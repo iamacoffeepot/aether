@@ -14,7 +14,7 @@ to turn it on and bind the listening socket:
 ```sh
 AETHER_HTTP_SERVER_ENABLED=1 \
 AETHER_HTTP_SERVER_BIND_ADDR=127.0.0.1:8080 \
-cargo run -p aether-chassis-headless --bin aether-substrate-headless
+cargo run -p aether-chassis-headless --bin aether-headless
 ```
 
 `AETHER_HTTP_SERVER_BIND_ADDR` defaults to `127.0.0.1:8080`; use port `0` to

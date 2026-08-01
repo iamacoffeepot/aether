@@ -26,8 +26,8 @@ dist/
     <stem>.wasm
   bin/
     aether-substrate
-    aether-substrate-headless
-    aether-substrate-hub
+    aether-headless
+    aether-hub
 ```
 
 The manifest records target, profile, component paths, and chassis paths

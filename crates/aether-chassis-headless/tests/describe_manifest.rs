@@ -1,5 +1,5 @@
 //! `--describe` manifest smoke test (ADR-0115, issue 1953): run the real
-//! `aether-substrate-headless` binary with `--describe`, parse the JSON it
+//! `aether-headless` binary with `--describe`, parse the JSON it
 //! prints, and assert the chassis kind plus a non-empty linked-cap list.
 //! This is the same `--describe` mode the hub's binary store forks once at
 //! upload time to capture what a stored binary is — the cap test (the
@@ -10,12 +10,12 @@ use std::process::Command;
 
 use aether_kinds::BinaryManifest;
 
-/// `aether-substrate-headless --describe` prints a `BinaryManifest` JSON
+/// `aether-headless --describe` prints a `BinaryManifest` JSON
 /// reporting `chassis == "headless"`, a non-empty cap list including the
 /// fs cap, and non-empty build provenance, then exits 0.
 #[test]
 fn headless_describe_emits_manifest() {
-    let bin = env!("CARGO_BIN_EXE_aether-substrate-headless");
+    let bin = env!("CARGO_BIN_EXE_aether-headless");
     let output =
         Command::new(bin).arg("--describe").output().expect("test setup: running the headless binary with --describe");
     assert!(output.status.success(), "--describe should exit 0; stderr: {}", String::from_utf8_lossy(&output.stderr));

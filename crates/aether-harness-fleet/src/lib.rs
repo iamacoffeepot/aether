@@ -5,7 +5,7 @@
 //! drives the *actual* hub → RPC → forked-headless-substrate stack: it
 //! boots a hub-shaped passive chassis (`RpcServerCapability` +
 //! `FleetServer` + `TraceDispatchCapability`), connects a raw-frame
-//! `TcpStream` client, and forks real `aether-substrate-headless`
+//! `TcpStream` client, and forks real `aether-headless`
 //! processes through the engines cap. That exercises ADR-0099 lineage
 //! addressing, schema-encode, fork+exec + env injection, and component
 //! load via the wasm custom section — the layers that sit below the
@@ -303,7 +303,7 @@ impl FleetHarness {
         &self.calls
     }
 
-    /// Fork a real `aether-substrate-headless` through the hub's engines
+    /// Fork a real `aether-headless` through the hub's engines
     /// cap and return its `EngineId`. Records the engine for teardown.
     ///
     /// Pins the binary by content hash (ADR-0115, #1954): upload the
@@ -314,7 +314,7 @@ impl FleetHarness {
         self.spawn_headless_inner(None)
     }
 
-    /// Fork a real `aether-substrate-headless` with a `--boot-manifest`
+    /// Fork a real `aether-headless` with a `--boot-manifest`
     /// pointing at `boot_manifest_path` (ADR-0116, issue 1956; the hub
     /// addresses it via argv per ADR-0162), so the
     /// engine comes up with the manifest's components already loading — the
@@ -1045,7 +1045,7 @@ fn dist_dir() -> PathBuf {
 
 /// The chassis bin `FleetHarness` forks — the `dist/manifest.json` chassis
 /// key and the `dist/bin/` filename `cargo xtask dist` packages.
-const HEADLESS_BIN: &str = "aether-substrate-headless";
+const HEADLESS_BIN: &str = "aether-headless";
 
 /// Env override for [`headless_bin_path`]: an explicit path to a
 /// prebuilt headless chassis binary, bypassing the dist manifest — for
@@ -1067,7 +1067,7 @@ pub fn classify_dist_chassis(raw: &str, bin: &str) -> DistManifestClassification
     })
 }
 
-/// The `aether-substrate-headless` binary [`FleetHarness::spawn_headless`]
+/// The `aether-headless` binary [`FleetHarness::spawn_headless`]
 /// forks: the [`HEADLESS_BIN_ENV`] override when set, else the chassis
 /// entry in `dist/manifest.json` resolved under `dist/` — the tree
 /// `cargo xtask dist` packages. `CARGO_BIN_EXE_*` is not an option here:
@@ -1343,12 +1343,12 @@ mod tests {
         let with_bins = r#"{
             "components": {},
             "chassis": {
-                "aether-substrate-headless": "bin/aether-substrate-headless"
+                "aether-headless": "bin/aether-headless"
             }
         }"#;
         assert_eq!(
             classify_dist_chassis(with_bins, HEADLESS_BIN),
-            DistManifestClassification::Available { relative_path: "bin/aether-substrate-headless".to_owned() },
+            DistManifestClassification::Available { relative_path: "bin/aether-headless".to_owned() },
         );
         let no_bins = r#"{ "components": {}, "chassis": {} }"#;
         assert_eq!(classify_dist_chassis(no_bins, HEADLESS_BIN), DistManifestClassification::MissingStem);

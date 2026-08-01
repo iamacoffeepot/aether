@@ -1,5 +1,5 @@
 //! `FleetHarness` `spawn_substrate` proof (issue 1451, Tier-A): fork+exec a
-//! real `aether-substrate-headless` through the hub's engines cap, then
+//! real `aether-headless` through the hub's engines cap, then
 //! confirm the hub registered it in the supervised fleet.
 
 mod tests {

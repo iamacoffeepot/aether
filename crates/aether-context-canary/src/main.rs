@@ -168,7 +168,7 @@ async fn run_scenario(endpoint: &str, component: &Path) -> Result<BTreeMap<Strin
             &mut measurements,
             "spawn_substrate",
             json!({
-                "selector": "aether-substrate",
+                "selector": "aether-desktop",
                 "args": ["--window-mode", "windowed:320x240"],
                 "components": [],
             }),

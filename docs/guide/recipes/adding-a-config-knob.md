@@ -217,7 +217,7 @@ declarations and prints every knob's env key, resolved value, source, default,
 and doc, then exits before boot:
 
 ```sh
-cargo run -p aether-chassis-headless --bin aether-substrate-headless -- --print-config
+cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 ```
 
 Your new field appears with its default. This command is the discovery surface:

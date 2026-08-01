@@ -1,5 +1,5 @@
 //! `FleetHarness` `terminate_substrate` + standalone `list_engines` proofs
-//! (issue 1459, Tier-A): fork real `aether-substrate-headless` processes
+//! (issue 1459, Tier-A): fork real `aether-headless` processes
 //! through the hub's engines cap, then assert the supervised fleet tracks
 //! the spawned set and that a `terminate` evicts an engine synchronously.
 

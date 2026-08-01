@@ -15,7 +15,7 @@ use clap::Parser;
 /// Hub chassis CLI root — coordinator-only, no full-stack caps.
 #[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
-    name = "aether-substrate-hub",
+    name = "aether-hub",
     about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.",
     long_about = "Hub chassis — coordinator between aether-mcp + substrate fleet. ADR-0073.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \

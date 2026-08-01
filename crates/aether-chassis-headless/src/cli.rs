@@ -12,7 +12,7 @@ use clap::Parser;
 /// Headless chassis CLI root.
 #[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
-    name = "aether-substrate-headless",
+    name = "aether-headless",
     about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.",
     long_about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \

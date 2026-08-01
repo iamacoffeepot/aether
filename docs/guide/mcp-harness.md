@@ -23,7 +23,7 @@ engines:
 ```
 :8890  aether-tunnel        — the stable MCP front your client connects to
   ├─ :8891  aether-mcp      — translates each tool call into a wire Call to the hub
-  └─ :8901  aether-substrate-hub  — supervises the fleet
+  └─ :8901  aether-hub  — supervises the fleet
         ├─ substrate (engine A)   — one running chassis
         ├─ substrate (engine B)
         └─ …

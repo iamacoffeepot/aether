@@ -36,13 +36,13 @@ const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 /// #3809-#3816) spreads them over per-chassis crates. Each bin name is
 /// both the `--bin` selector and the output filename.
 pub const CHASSIS_BINS: &[(&str, &str)] = &[
-    ("aether-chassis-desktop", "aether-substrate"),
-    ("aether-chassis-headless", "aether-substrate-headless"),
-    ("aether-chassis-hub", "aether-substrate-hub"),
+    ("aether-chassis-desktop", "aether-desktop"),
+    ("aether-chassis-headless", "aether-headless"),
+    ("aether-chassis-hub", "aether-hub"),
 ];
 
 /// The chassis binary a `cargo xtask package` depot carries by default
-/// (ADR-0163 §1 names `aether-substrate`, the desktop chassis): a
+/// (ADR-0163 §1 names the desktop chassis, whose bin is now `aether-desktop`): a
 /// `(package, bin)` pair, the first [`CHASSIS_BINS`] entry. The platform
 /// updates this file; the package's `pack/` holds the content-addressed
 /// component objects it boots.

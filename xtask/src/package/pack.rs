@@ -143,9 +143,9 @@ mod tests {
             named("alpha_twin", vec![0x00, 0x61, 0x73, 0x6d, 1, 2, 3]),
         ];
         let manifest =
-            emit_depot(&out, &chassis_src, "aether-substrate", &components, ChassisSettings::default()).expect("emit");
+            emit_depot(&out, &chassis_src, "aether-desktop", &components, ChassisSettings::default()).expect("emit");
 
-        assert!(out.join("aether-substrate").exists(), "chassis binary copied into the depot root");
+        assert!(out.join("aether-desktop").exists(), "chassis binary copied into the depot root");
 
         let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read pack/manifest");
         let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(plan.chassis, PackageChassis::Headless, "spec chassis overrides the flag default");
 
         let (_, chassis_bin) = plan.chassis.substrate();
-        assert_eq!(chassis_bin, "aether-substrate-headless", "headless selection ships the headless bin");
+        assert_eq!(chassis_bin, "aether-headless", "headless selection ships the headless bin");
 
         let components = build_planned_components(&plan, Path::new("unused-for-prebuilt"), Profile::Release)
             .expect("read prebuilt components");
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(decoded.entries[1].name, None, "the config-less entry carries no name");
         assert_eq!(decoded.entries[1].config, None, "the config-less entry has no config object");
 
-        assert!(out.join("aether-substrate-headless").exists(), "the headless chassis bin is shipped into the depot");
+        assert!(out.join("aether-headless").exists(), "the headless chassis bin is shipped into the depot");
 
         fs::remove_dir_all(&dir).ok();
     }

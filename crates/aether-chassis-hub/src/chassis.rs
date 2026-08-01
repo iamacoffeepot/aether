@@ -170,7 +170,7 @@ impl DriverRunning for HubServerDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
         let Self { boot } = *self;
         let sig = shutdown_signal();
-        tracing::info!("aether-substrate-hub: {sig} received, shutting down");
+        tracing::info!("aether-hub: {sig} received, shutting down");
         // `boot` drops here — actor registries shut down, dispatcher
         // threads see their inbox senders drop and exit.
         drop(boot);
@@ -185,7 +185,7 @@ impl DriverRunning for HubServerDriverRunning {
 /// Why both signals on Unix: interactive shells deliver SIGINT, but
 /// process supervisors (systemd, supervisord), shell utilities
 /// (`pkill`, `kill` without `-9`), and CI cancellation all send
-/// SIGTERM. Ignoring SIGTERM means `pkill -f aether-substrate-hub`
+/// SIGTERM. Ignoring SIGTERM means `pkill -f aether-hub`
 /// kills the hub without running drops.
 #[cfg(unix)]
 fn shutdown_signal() -> &'static str {
@@ -196,7 +196,7 @@ fn shutdown_signal() -> &'static str {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
-                "aether-substrate-hub: signal handler install failed: {e}; \
+                "aether-hub: signal handler install failed: {e}; \
                  parking thread — SIGKILL is the only exit"
             );
             thread::park();
@@ -223,7 +223,7 @@ fn shutdown_signal() -> &'static str {
         let _ = tx.send(());
     }) {
         tracing::error!(
-            "aether-substrate-hub: ctrl-c handler install failed: {e}; \
+            "aether-hub: ctrl-c handler install failed: {e}; \
              parking thread — SIGKILL is the only exit"
         );
         std::thread::park();

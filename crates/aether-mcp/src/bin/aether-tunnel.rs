@@ -35,7 +35,7 @@
 //!
 //! - hub child: `--rpc-port 8901` (plus `--hub-binary-bootstrap <bins>`
 //!   re-addressed from `AETHER_BINARY_BOOTSTRAP` when the launch script
-//!   exports it) — `aether-substrate-hub` accepts both derive-emitted flags.
+//!   exports it) — `aether-hub` accepts both derive-emitted flags.
 //! - `aether-mcp` child: `AETHER_MCP_PORT=8891`, `AETHER_HUB_RPC_ADDR=127.0.0.1:8901`
 //!   stay on env — `aether-mcp` has no argv/config surface, so these are
 //!   explicit per-fork injections applied on top of the cleared base, not
@@ -329,14 +329,14 @@ fn resolve_specs(ports: Ports) -> anyhow::Result<(ChildSpec, ChildSpec)> {
         exe_dir.as_ref().map_or_else(|| name.to_owned(), |d| d.join(name).to_string_lossy().into_owned())
     };
 
-    let hub_cmd = env::var("AETHER_TUNNEL_HUB_CMD").unwrap_or_else(|_| default_bin("aether-substrate-hub"));
+    let hub_cmd = env::var("AETHER_TUNNEL_HUB_CMD").unwrap_or_else(|_| default_bin("aether-hub"));
     let mcp_cmd = env::var("AETHER_TUNNEL_MCP_CMD").unwrap_or_else(|_| default_bin("aether-mcp"));
 
     let (hub_program, mut hub_args) = split_cmd(&hub_cmd)?;
     let (mcp_program, mcp_args) = split_cmd(&mcp_cmd)?;
 
     // ADR-0162: the hub child's config rides argv (the machine channel),
-    // not ambient env. `aether-substrate-hub` accepts `--rpc-port` (the
+    // not ambient env. `aether-hub` accepts `--rpc-port` (the
     // derive-emitted `RpcServerOverlay` flag) for its RPC bind port. The
     // constructed-environment fork (`ChildSpec::spawn`) admits no `AETHER_*`
     // key, so nothing ambient survives to shadow this.

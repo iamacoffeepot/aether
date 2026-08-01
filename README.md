@@ -68,13 +68,13 @@ Run a chassis explicitly:
 
 ```sh
 # Desktop: window/input/GPU/audio profile
-cargo run -p aether-chassis-desktop --bin aether-substrate
+cargo run -p aether-chassis-desktop --bin aether-desktop
 
 # Headless: timer-driven engine profile
-cargo run -p aether-chassis-headless --bin aether-substrate-headless
+cargo run -p aether-chassis-headless --bin aether-headless
 
 # Hub: fleet supervision and artifact stores
-cargo run -p aether-chassis-hub --bin aether-substrate-hub
+cargo run -p aether-chassis-hub --bin aether-hub
 ```
 
 Use `--print-config` after the binary separator to inspect the knob registry and
@@ -83,7 +83,7 @@ dump runs before config-file and per-capability CLI overlays, so it is not the
 final effective configuration:
 
 ```sh
-cargo run -p aether-chassis-headless --bin aether-substrate-headless -- --print-config
+cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 ```
 
 ## Drive a live engine
