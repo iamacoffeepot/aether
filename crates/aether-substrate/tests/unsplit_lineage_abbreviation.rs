@@ -5,9 +5,9 @@
 //! `#[actor]` emits a `RootEntry` / `ChildEntry` from `root` / `child_of(...)`
 //! and a cardinality fact from `singleton` / `instanced`. `AddressIndex`
 //! consumes the two together: it requires a cardinality fact for every
-//! namespace a placement fact names, and rejects the whole index when one is
-//! absent. So the emissions are only correct jointly, and a macro gate that can
-//! admit one without the other is the defect — not the presence of either
+//! namespace a placement fact names, and excludes a namespace missing one from
+//! the index. So the emissions are only correct jointly, and a macro gate that
+//! can admit one without the other is the defect — not the presence of either
 //! submission on its own, which the `#[actor]` expansion trivially guarantees.
 //!
 //! This lives in `aether-substrate`'s test tree for the same reason
