@@ -431,6 +431,27 @@ jobs:
       - run: cargo install cargo-machete --locked
       - run: cargo machete crates
 
+  # Cargo.lock records every workspace package's dependency list, so a
+  # manifest edit that lands without the matching lock update leaves the
+  # committed lock stale and every fresh clone permanently dirty. The
+  # push-early policy means no local cargo build regenerates it, so the
+  # gate has to be here: `--locked` resolves the graph and fails when the
+  # lock does not match the manifests. No build, so it costs seconds.
+  lock-freshness:
+    name: Cargo lock freshness
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Resolve the dependency graph against the committed lock
+        run: |
+          if ! cargo metadata --format-version 1 --locked > /dev/null; then
+            echo "::error::Cargo.lock is stale. Run 'cargo metadata --format-version 1 --offline > /dev/null' and commit the regenerated Cargo.lock."
+            exit 1
+          fi
+
   # The one required check. Every job above must resolve to `success`
   # here, or to `skipped` where the path filter is allowed to skip it —
   # any other result (`failure`, `cancelled`, or a `skipped` the filter
@@ -441,7 +462,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, clippy, docs, test, dup-check, unused-deps ]
+    needs: [ changes, fmt, clippy, docs, test, dup-check, unused-deps, lock-freshness ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -453,6 +474,7 @@ jobs:
           echo "test:    ${{ needs.test.result }}"
           echo "dup-check: ${{ needs.dup-check.result }}"
           echo "unused-deps: ${{ needs.unused-deps.result }}"
+          echo "lock-freshness: ${{ needs.lock-freshness.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
@@ -461,4 +483,5 @@ jobs:
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.dup-check.result }}" == "success" || "${{ needs.dup-check.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.unused-deps.result }}" == "success" || "${{ needs.unused-deps.result }}" == "skipped" ]] || fail=1
+          [[ "${{ needs.lock-freshness.result }}" == "success" || "${{ needs.lock-freshness.result }}" == "skipped" ]] || fail=1
           exit $fail
