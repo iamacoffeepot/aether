@@ -12,9 +12,16 @@
 //! ```
 //!
 //! For a fixed kind that is the **same `Arc<str>` for every reader on every
-//! lookup**, so its refcount is one cacheline that every reader increments and
-//! decrements twice per lookup. The endpoint's own two `Arc`s are per target
-//! and spread across the populated routes; this one does not spread.
+//! lookup**. Nothing is copied — the `str` bytes stay where they are — but the
+//! strong count inside that one `Arc`'s control block takes an increment on the
+//! clone and a decrement on the drop, so two read-modify-writes per lookup land
+//! on a single word every reader shares. The endpoint's own two `Arc`s are per
+//! target and spread across the populated routes; this one does not spread.
+//!
+//! Which is why the arm below is a fair cut rather than a cheaper one: a
+//! `PerReader` lookup does the *same* work — one clone, one drop — and differs
+//! only in whose counter it touches. Work removed would explain a speed-up
+//! too; work merely un-shared explains only contention.
 //!
 //! [`KindMix`] is the cut. `Shared` is what the sweep has always measured — all
 //! readers on one kind. `PerReader` gives reader *w* its own registered kind, so
