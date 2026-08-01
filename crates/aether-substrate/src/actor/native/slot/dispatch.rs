@@ -19,6 +19,9 @@
 //! - [`fold_handler_cost`] — folds one handler-execution sample into
 //!   the per-handler EWMA (iamacoffeepot/aether#1128, measure-only).
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock, PoisonError};
+
 use aether_actor::Local;
 use aether_actor::OutboundReply;
 use aether_actor::log::ActorLogRing;
@@ -49,16 +52,21 @@ use crate::mail::KindId;
 /// now fires only when actually needed. The clone-then-`&mut`-ctx
 /// borrows are sequential (clone borrows `&ctx`, drops; the fallback
 /// call borrows `&mut ctx`), so no borrow conflict.
+///
+/// Returns whether a **typed** arm serviced the kind — `false` for a fallback
+/// dispatch or a miss. The caller pairs this with `fold_handler_cost`'s result
+/// to detect an undeclared handler (iamacoffeepot/aether#4261).
 pub fn typed_then_fallback_or_warn<A>(
     actor: &mut Box<A::State>,
     ctx: &mut NativeCtx<'_, crate::Manual, A>,
     kind: KindId,
     payload: &[u8],
-) where
+) -> bool
+where
     A: NativeActor,
 {
     if A::dispatch(actor.as_mut(), ctx, kind, payload).is_some() {
-        return;
+        return true;
     }
     let Some(env) = ctx.inbound().cloned() else {
         tracing::warn!(
@@ -66,7 +74,7 @@ pub fn typed_then_fallback_or_warn<A>(
             actor = A::NAMESPACE,
             "actor dispatch missed: no inbound envelope in ctx",
         );
-        return;
+        return false;
     };
     if !A::dispatch_fallback(actor.as_mut(), ctx, &env) {
         tracing::warn!(
@@ -76,6 +84,10 @@ pub fn typed_then_fallback_or_warn<A>(
             "actor dispatch missed: kind not handled or decode failed"
         );
     }
+    // A fallback is not a typed arm: a `#[fallback]`-only catch-all cap
+    // (issue 576) declares no typed handlers by design and correctly owns no
+    // cost cells, so it must not trip the #4261 warning.
+    false
 }
 
 /// ADR-0081 framework-built-in dispatch arm for `aether.log.tail`.
@@ -183,16 +195,66 @@ pub fn dispatch_cost_tail_if_matching(
 /// over a tiny `Vec`.
 ///
 /// **No scheduling change** — this only writes the cell.
-pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
+///
+/// Returns whether a cell was found and folded into. A `false` is ordinary for
+/// a framework arm or a fallback dispatch, and a defect only when a *typed*
+/// arm serviced the kind — see [`warn_undeclared_handler_once`], which the
+/// caller reaches through this return rather than repeating the lookup on the
+/// dispatch fast path.
+pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) -> bool {
     // Sample = handler execution time. `finished >= t_received` always
     // (same monotonic clock, finished stamped after received); guard the
     // subtraction anyway so a clock anomaly can't underflow.
     let sample = finished.0.saturating_sub(t_received.0);
     CostCells::try_with_mut(|cells| {
-        if let Some(cell) = cells.get(kind) {
+        cells.get(kind).map(|cell| {
             cell.fold(sample);
-        }
-    });
+        })
+    })
+    .flatten()
+    .is_some()
+}
+
+/// Warn — once per `(actor, kind)` for the life of the process — that a typed
+/// handler serviced a kind the actor never declared in
+/// [`Dispatch::capabilities`](crate::actor::native::Dispatch::capabilities)
+/// (iamacoffeepot/aether#4261).
+///
+/// The `#[actor]` macro emits `capabilities` from the same handler list it
+/// builds the dispatch table from, so a macro-authored cap cannot reach here.
+/// A hand-written `impl Dispatch` inherits the empty default, and the spawn
+/// path seeds the cost table from exactly that list — so the actor owns no
+/// cost cell, this fold silently skips, the producer's `group_mail_cost`
+/// lookup misses, and the ADR-0087 cost-aware recruiter falls back to the
+/// width gate for the life of the process. Nothing else reports it.
+///
+/// A warning rather than a panic: the degraded path is functionally correct,
+/// merely unmeasured, so failing a running system over it is disproportionate.
+/// It is deduplicated because the condition is a fixed property of the
+/// declaration — it would otherwise repeat on every dispatch forever.
+///
+/// The lock is reached only on the defect path; a correctly-declared actor
+/// never touches it. Returns whether this call was the one that warned.
+pub(super) fn warn_undeclared_handler_once(actor: &'static str, kind: KindId) -> bool {
+    static SEEN: OnceLock<Mutex<HashSet<(&'static str, u64)>>> = OnceLock::new();
+    // Scoped so the guard is released before the `tracing` call — a subscriber
+    // is arbitrary user code, and this lock has no business spanning it.
+    let first_sighting = {
+        let mut seen = SEEN.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap_or_else(PoisonError::into_inner);
+        seen.insert((actor, kind.0))
+    };
+    if first_sighting {
+        tracing::warn!(
+            target: "aether_substrate::dispatch",
+            actor,
+            kind = kind.0,
+            "a typed handler serviced a kind this actor does not declare in `Dispatch::capabilities`; \
+             it owns no cost cell, so its execution cost is unmeasured and cost-aware recruitment \
+             falls back to the width gate. Declare the kind in `capabilities` (the `#[actor]` macro \
+             does this automatically; a hand-written `impl Dispatch` must do it by hand).",
+        );
+    }
+    first_sighting
 }
 
 #[cfg(test)]
@@ -223,7 +285,7 @@ mod cost_tests {
         with_stamped(&slots, || {
             let seeded = mailer.cost_table().seed(self_mbx, &[handled]);
             CostCells::try_with_mut(|cells| cells.seed(seeded));
-            fold_handler_cost(handled, Nanos(1_000), Nanos(6_000));
+            assert!(fold_handler_cost(handled, Nanos(1_000), Nanos(6_000)), "a seeded kind folds");
         });
 
         let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
@@ -251,7 +313,11 @@ mod cost_tests {
         with_stamped(&slots, || {
             let seeded = mailer.cost_table().seed(self_mbx, &[handled]);
             CostCells::try_with_mut(|cells| cells.seed(seeded));
-            fold_handler_cost(stranger, Nanos(0), Nanos(9_999));
+            assert!(
+                !fold_handler_cost(stranger, Nanos(0), Nanos(9_999)),
+                "an unseeded kind reports no fold — the signal iamacoffeepot/aether#4261 warns on when a \
+                 typed arm produced it",
+            );
         });
 
         let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
@@ -261,6 +327,35 @@ mod cost_tests {
         // The seeded handler stays at its neutral seed (samples = 0).
         let seeded_row = rows.iter().find(|r| r.kind_id == handled).unwrap();
         assert_eq!(seeded_row.samples, 0);
+    }
+
+    /// iamacoffeepot/aether#4261: the undeclared-handler warning fires exactly
+    /// once per `(actor, kind)`, not on every dispatch.
+    ///
+    /// Tripwire: the "once" is the load-bearing part. The condition is a fixed
+    /// property of a declaration, so a regression to warn-every-time would spam
+    /// a hot dispatch path for the entire life of the process — the reason this
+    /// carries a dedup at all rather than warning inline.
+    ///
+    /// Deliberately does not assert the message reaches the actor's log ring:
+    /// that routing belongs to `log_install`'s `ActorAwareLayer`, which installs
+    /// process-globally on a first-caller-wins `try_init`, so asserting it from
+    /// a unit test would make the result depend on which test ran first.
+    #[test]
+    fn undeclared_handler_warns_once_per_actor_and_kind() {
+        use crate::actor::native::slot::dispatch::warn_undeclared_handler_once;
+
+        // Namespaces unique to this test: the dedup set is process-global, so a
+        // shared name would couple this to other tests' calls.
+        let actor = "test.undeclared_handler_warning";
+        let other = "test.undeclared_handler_warning.sibling";
+        let kind = KindId(0xDEAD_BEEF);
+        let another_kind = KindId(0xFEED_FACE);
+
+        assert!(warn_undeclared_handler_once(actor, kind), "the first sighting warns");
+        assert!(!warn_undeclared_handler_once(actor, kind), "a repeat of the same pair stays silent");
+        assert!(warn_undeclared_handler_once(actor, another_kind), "a different kind on the same actor warns");
+        assert!(warn_undeclared_handler_once(other, kind), "the same kind on a different actor warns");
     }
 
     /// iamacoffeepot/aether#1128 step 6: the `cost.tail` framework arm

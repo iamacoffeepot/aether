@@ -596,12 +596,14 @@ where
         // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128 framework-built-in
         // dispatch arms for `aether.log.tail` + `aether.trace.tail` +
         // `aether.cost.tail`. See the helper docs in `dispatch`.
-        if !super::dispatch::dispatch_log_tail_if_matching(ctx.erase(), kind, payload)
-            && !super::dispatch::dispatch_trace_tail_if_matching(ctx.erase(), kind, payload)
-            && !super::dispatch::dispatch_cost_tail_if_matching(binding, ctx.erase(), kind, payload)
+        let typed_arm_ran = if super::dispatch::dispatch_log_tail_if_matching(ctx.erase(), kind, payload)
+            || super::dispatch::dispatch_trace_tail_if_matching(ctx.erase(), kind, payload)
+            || super::dispatch::dispatch_cost_tail_if_matching(binding, ctx.erase(), kind, payload)
         {
-            super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, kind, payload);
-        }
+            false
+        } else {
+            super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, kind, payload)
+        };
         // #1757: reclaim the single envelope before the ctx (and its
         // handler-end flush) drops, so an armed inbound is never dropped
         // *inside* the ctx — that would trip the ADR-0094 guard. `None`
@@ -617,7 +619,13 @@ where
         // its per-handler EWMA (lock-free through the per-actor cache;
         // framework / fallback kinds skipped). Measure-only. See
         // `dispatch::fold_handler_cost`.
-        super::dispatch::fold_handler_cost(kind, t_received, t_finished);
+        // iamacoffeepot/aether#4261: a typed arm that folds into no cell means
+        // the actor never declared this kind, so its cost is unmeasured and
+        // cost-aware recruitment silently degrades. Read off the fold's own
+        // lookup — no second scan on the dispatch fast path.
+        if !super::dispatch::fold_handler_cost(kind, t_received, t_finished) && typed_arm_ran {
+            let _ = super::dispatch::warn_undeclared_handler_once(A::NAMESPACE, kind);
+        }
         inbound
     });
     // #1757 / ADR-0080 §2 / ADR-0094: settle the single envelope exactly
