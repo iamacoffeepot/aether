@@ -48,6 +48,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::io;
+use std::mem;
 use std::net::SocketAddr;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -55,7 +56,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_fleet::child_env::isolate_child_environment;
 use anyhow::Context as _;
@@ -90,6 +91,51 @@ const RESTART_BACKOFF: Duration = Duration::from_millis(500);
 
 /// How often the supervisor wakes to reap and re-fork an exited child.
 const SUPERVISE_POLL: Duration = Duration::from_millis(200);
+
+/// Minimum interval between repeated restart / re-fork-failure logs for one
+/// child while it keeps failing.
+///
+/// A child that cannot be re-forked at all — a stale binary path from a
+/// deleted worktree is the case that bit us — fails on every poll, roughly
+/// twice a second. Logging each attempt turned the tunnel log into a
+/// hundreds-of-megabytes sink that eventually hit "No space left on device"
+/// and masked the real diagnostics (issue 4042). The first failure in a streak
+/// still logs immediately; the rest are counted and summarised.
+const RESTART_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Per-child throttle for the restart / re-fork-failure log pair.
+#[derive(Default)]
+struct RestartLogThrottle {
+    last_logged: Option<Instant>,
+    suppressed: u32,
+}
+
+impl RestartLogThrottle {
+    /// Whether this attempt should be logged. The first attempt of a streak
+    /// always is; later ones log at most once per [`RESTART_LOG_INTERVAL`] and
+    /// are counted meanwhile, so the volume is bounded no matter how long the
+    /// failure persists.
+    fn admit(&mut self, now: Instant) -> bool {
+        match self.last_logged {
+            Some(last) if now.duration_since(last) < RESTART_LOG_INTERVAL => {
+                self.suppressed = self.suppressed.saturating_add(1);
+                false
+            }
+            _ => {
+                self.last_logged = Some(now);
+                true
+            }
+        }
+    }
+
+    /// End the streak, reporting how many logs it suppressed. Called when a
+    /// re-fork finally succeeds, so the recovery line carries the count that
+    /// was hidden rather than leaving the gap unexplained.
+    fn recovered(&mut self) -> u32 {
+        self.last_logged = None;
+        mem::take(&mut self.suppressed)
+    }
+}
 
 /// Identifies a supervised child for logging / status.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -422,6 +468,7 @@ fn build_tunnel(ports: Ports, hub_spec: ChildSpec, mcp_spec: ChildSpec) -> anyho
 /// Poll the children; re-fork any that exited (unless shutting down),
 /// with a backoff so a crash-on-boot child can't busy-spin.
 async fn supervise(tunnel: Arc<Tunnel>) {
+    let mut throttles: HashMap<ChildKind, RestartLogThrottle> = HashMap::new();
     loop {
         sleep(SUPERVISE_POLL).await;
         if tunnel.shutting_down.load(Ordering::SeqCst) {
@@ -439,22 +486,41 @@ async fn supervise(tunnel: Arc<Tunnel>) {
                     sup.reap();
                 }
             }
-            tracing::warn!(
-                target: "aether_tunnel",
-                child = kind.as_str(),
-                "child exited; restarting after backoff",
-            );
+            let throttle = throttles.entry(kind).or_default();
+            let admitted = throttle.admit(Instant::now());
+            if admitted {
+                tracing::warn!(
+                    target: "aether_tunnel",
+                    child = kind.as_str(),
+                    "child exited; restarting after backoff",
+                );
+            }
             sleep(RESTART_BACKOFF).await;
             if tunnel.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
-            if let Err(e) = tunnel.fork(kind).await {
-                tracing::error!(
-                    target: "aether_tunnel",
-                    child = kind.as_str(),
-                    error = %e,
-                    "failed to re-fork child",
-                );
+            match tunnel.fork(kind).await {
+                Ok(()) => {
+                    let suppressed = throttles.entry(kind).or_default().recovered();
+                    if suppressed > 0 {
+                        tracing::info!(
+                            target: "aether_tunnel",
+                            child = kind.as_str(),
+                            suppressed,
+                            "child re-forked after a failure streak",
+                        );
+                    }
+                }
+                Err(e) if admitted => {
+                    tracing::error!(
+                        target: "aether_tunnel",
+                        child = kind.as_str(),
+                        error = %e,
+                        interval_secs = RESTART_LOG_INTERVAL.as_secs(),
+                        "failed to re-fork child; further failures logged at most once per interval",
+                    );
+                }
+                Err(_) => {}
             }
         }
     }
@@ -621,6 +687,31 @@ async fn admin_status(State(tunnel): State<Arc<Tunnel>>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use super::{Duration, RESTART_LOG_INTERVAL, RestartLogThrottle};
+
+    /// A child that cannot be re-forked fails on every ~200ms poll, so the
+    /// throttle is what stands between a stale binary path and a
+    /// hundreds-of-megabytes tunnel log (issue 4042). Pinned as a tripwire:
+    /// the bound is "one log per interval regardless of failure count", and
+    /// the recovery line must carry the count it hid.
+    #[test]
+    fn restart_log_throttle_bounds_a_failure_streak_and_reports_what_it_hid() {
+        let mut throttle = RestartLogThrottle::default();
+        let start = Instant::now();
+
+        assert!(throttle.admit(start), "the first failure of a streak always logs");
+        for poll in 1..150 {
+            let now = start + Duration::from_millis(200 * poll);
+            assert!(!throttle.admit(now), "a failure inside the interval is suppressed, not logged");
+        }
+
+        let past_interval = start + RESTART_LOG_INTERVAL + Duration::from_millis(1);
+        assert!(throttle.admit(past_interval), "one log is admitted once the interval elapses");
+
+        assert_eq!(throttle.recovered(), 149, "recovery reports every suppressed attempt");
+        assert!(throttle.admit(past_interval), "a cleared streak logs its next failure immediately");
+    }
+
     use super::*;
     use std::convert::Infallible;
     use std::time::Instant;

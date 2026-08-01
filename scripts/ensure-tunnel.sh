@@ -26,6 +26,13 @@ STATUS_URL="http://127.0.0.1:${TUNNEL_PORT}/admin/status"
 LOG_DIR="${TMPDIR:-/tmp}/aether-tunnel"
 LOG_FILE="${LOG_DIR}/tunnel.log"
 
+# Rotate the log before (re)launching once it passes this size, keeping one
+# previous generation. The in-process throttle bounds the common death spiral
+# (issue 4042), but a long-lived tunnel still appends across many sessions and
+# nothing else ever truncates this file — rotation is what keeps a fresh
+# session from writing onto a multi-hundred-megabyte predecessor.
+LOG_MAX_BYTES=$((32 * 1024 * 1024))
+
 # How long to wait for a freshly-launched tunnel to bind :8890 before
 # giving up (and still exiting 0).
 STARTUP_TIMEOUT_SECS=15
@@ -123,6 +130,19 @@ else
 fi
 
 mkdir -p "$LOG_DIR"
+
+# `wc -c` rather than `stat`: the BSD and GNU `stat` size flags differ and this
+# script runs on both. Guarded by an existence test rather than a redirect
+# fallback, so the first run of a session — where no log exists yet — stays
+# silent instead of printing a shell "No such file or directory".
+if [[ -f "$LOG_FILE" ]]; then
+    log_bytes=$(( $(wc -c <"$LOG_FILE") ))
+    if [[ "$log_bytes" -gt "$LOG_MAX_BYTES" ]]; then
+        mv -f "$LOG_FILE" "${LOG_FILE}.1"
+        echo "[ensure-tunnel] rotated ${log_bytes}-byte log to ${LOG_FILE}.1"
+    fi
+fi
+
 echo "[ensure-tunnel] :${TUNNEL_PORT} not answering — launching: ${LAUNCH[*]}"
 echo "[ensure-tunnel] logs: ${LOG_FILE}"
 
