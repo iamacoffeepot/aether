@@ -91,8 +91,9 @@ pub const HANDOFF_SEED_ENV: &str = "AETHER_PERF_HANDOFF_SEED_NANOS";
 /// Which cell a child process was asked to measure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellSelector {
-    /// The [`Topology::name`] to measure — resolved against the same
-    /// [`parse_topologies`] set the parent enumerated.
+    /// The [`Topology::name`][harness::Topology::name] to measure — resolved
+    /// against the same [`parse_topologies`][harness::parse_topologies] set the
+    /// parent enumerated.
     pub topo: String,
     /// The worker-pool size to boot the cell's chassis with.
     pub workers: usize,
