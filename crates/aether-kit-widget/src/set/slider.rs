@@ -18,12 +18,13 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{push_control_outlines, quad, reply_if_hidden};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{SetTheme, Theme};
+use crate::theme::Theme;
 use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, SliderChanged, SliderConfig,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, SetWidgetState, SliderChanged, SliderConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
 };
 
 /// A horizontal value slider. Local draw is a track with a fill from the left
@@ -107,13 +108,31 @@ impl SliderWidget {
     }
 }
 
+impl WidgetDefaults for SliderWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.dragging = false;
+    }
+}
+
 /// A slider widget. Spawned inline by a panel root with a [`SliderConfig`];
 /// reports [`SliderChanged`] up as it is dragged or nudged.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `SliderConfig` again to reconfigure the range or theme in place.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for SliderWidget {
     type Config = SliderConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.slider";
@@ -149,41 +168,6 @@ impl WasmActor for SliderWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    /// Restyle: adopt the fanned theme.
-    #[handler::single]
-    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.theme = set.theme;
-    }
-
-    /// Cache the layout rect the root assigned.
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    /// Take keyboard focus (draw the focus ring).
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    /// Release keyboard focus.
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.dragging = false;
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     /// A left press begins a drag and sets the value from the cursor.

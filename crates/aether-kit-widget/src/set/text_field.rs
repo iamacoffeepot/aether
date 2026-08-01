@@ -33,6 +33,7 @@ use aether_kinds::{
 use aether_text::FontMetricsResult;
 use alloc::string::String;
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     apply_text_control_state, apply_text_theme, arm_text_drag, pump_text_font_metrics, release_left,
     reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte, text_control_theme_state,
@@ -41,10 +42,7 @@ use crate::set::{
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
-use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextCommitted, TextFieldConfig,
-    WidgetControlState, WidgetFrame,
-};
+use crate::{Collect, SetWidgetState, TextCommitted, TextFieldConfig, WidgetControlState, WidgetFrame};
 
 /// A single-line editable string. Holds the reusable editing state, the
 /// character cap, the latest modifiers, whether a pointer drag is live, and the
@@ -98,13 +96,32 @@ impl TextFieldWidget {
     }
 }
 
+impl WidgetDefaults for TextFieldWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.dragging = false;
+        self.edit.clear_composition();
+    }
+}
+
 /// A text-field widget. Spawned inline by a panel root with a
 /// [`TextFieldConfig`]; reports [`TextCommitted`] up when Enter commits.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `TextFieldConfig` again to reset its contents or theme in place.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TextFieldWidget {
     type Config = TextFieldConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_field";
@@ -150,36 +167,6 @@ impl WasmActor for TextFieldWidget {
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
-    }
-
-    /// Cache the layout rect the root assigned.
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    /// Take keyboard focus (draw the caret and focus ring).
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    /// Release keyboard focus.
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.dragging = false;
-        self.edit.clear_composition();
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     /// Insert committed text over the active selection. `TextInput` is already

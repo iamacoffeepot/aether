@@ -306,7 +306,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // available for components that want to subscribe / unsubscribe at
     // runtime (e.g. conditional input streams).
     let wrapped_init = init_method_emitted;
-    let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref());
+    let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref(), opts.handler_set.as_ref());
 
     let handler_methods_tokens = handlers.iter().map(|h| &h.method);
     let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
@@ -319,8 +319,25 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `config_type.is_some()` at macro time, NOT on `Config != ()` at
     // runtime, keeps `aether.unit` out of every component's capability).
     let config_kind_ty: Option<&Type> = config_type.as_ref().map(|it| &it.ty);
-    let inputs_manifest_consts =
-        build_inputs_manifest_consts(&handlers, fallback.as_ref(), component_doc.as_ref(), config_kind_ty);
+    let inputs_manifest_consts = build_inputs_manifest_consts(
+        &handlers,
+        fallback.as_ref(),
+        component_doc.as_ref(),
+        config_kind_ty,
+        opts.handler_set.as_ref().map(|set| (set, &**self_ty)),
+    );
+
+    // ADR-0169 leaves an adopted set's `HandlesKind` markers unemitted on this
+    // path. The orphan rule forbids the set declaring them itself (`Self`
+    // precedes the first local type in the trait reference), so they have to
+    // travel through a generated `macro_rules!` — and a macro-expanded
+    // `#[macro_export]` macro cannot be named by absolute path from inside its
+    // own crate, which is exactly the same-crate case every adopter is. A wasm
+    // set's kinds are therefore not sendable through the typed resolver
+    // (`ctx.actor::<R>().send(&k)`); parent-to-child sends, which is how the
+    // widget family addresses its members, go by name through
+    // `RelativeMailbox::send<K: Kind>` and carry no such bound. Tracked, with
+    // the native adopters that do need markers, in issue 4282.
     let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
@@ -647,7 +664,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 /// `#[fallback]` is rejected — native actors are typed receivers;
 /// unknown kinds are programming errors, not fallback paths.
 /// What an `impl NativeActor for X` expansion emits, selecting between the two
-fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> TokenStream2 {
+fn build_dispatch_body(
+    handlers: &[HandlerFn],
+    fallback: Option<&FallbackFn>,
+    handler_set: Option<&syn::Path>,
+) -> TokenStream2 {
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
@@ -696,6 +717,20 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         }
     });
 
+    // ADR-0169 §2: after the local chain misses, consult the adopted handler
+    // set. Local-first is what makes a locally-declared kind authoritative
+    // over an inherited one; the set answers `DISPATCH_UNKNOWN_KIND` when it
+    // does not recognize the kind either, leaving the tail below to decide.
+    let set_delegation = handler_set.map(|set| {
+        quote! {
+            if <Self as #set>::__aether_handler_set_dispatch(self, __aether_ctx, __aether_mail)
+                == ::aether_actor::DISPATCH_HANDLED
+            {
+                return ::aether_actor::DISPATCH_HANDLED;
+            }
+        }
+    });
+
     let tail = if let Some(f) = fallback {
         let method = &f.method.sig.ident;
         // ADR-0112: a `#[fallback]` keeps its `WasmCtx<'_>` (= Single)
@@ -717,6 +752,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         let __aether_kind = __aether_mail.kind();
         __aether_ctx.__set_reply_to(__aether_mail.reply_handle());
         #( #arms )*
+        #set_delegation
         #tail
     }
 }

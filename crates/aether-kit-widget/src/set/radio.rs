@@ -17,12 +17,13 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{SetTheme, Theme};
+use crate::theme::Theme;
 use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, RadioConfig, RadioSelected, SetWidgetState,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, RadioConfig, RadioSelected, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
 };
 
 /// A radio group. Holds the option labels, the selected index, and the cached
@@ -68,13 +69,31 @@ impl RadioGroupWidget {
     }
 }
 
+impl WidgetDefaults for RadioGroupWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.pressed = false;
+    }
+}
+
 /// A radio-group widget. Spawned inline by a panel root with a [`RadioConfig`];
 /// reports [`RadioSelected`] up as the selection changes.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `RadioConfig` again to replace the options or theme in place.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for RadioGroupWidget {
     type Config = RadioConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.radio";
@@ -103,41 +122,6 @@ impl WasmActor for RadioGroupWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    /// Restyle: adopt the fanned theme.
-    #[handler::single]
-    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.theme = set.theme;
-    }
-
-    /// Cache the layout rect the root assigned.
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    /// Take keyboard focus.
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    /// Release keyboard focus.
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.pressed = false;
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     /// A left click selects the row under the cursor.

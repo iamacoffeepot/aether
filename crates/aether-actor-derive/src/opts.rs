@@ -35,6 +35,13 @@ pub struct ActorOpts {
     /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
     /// parent exported from the same resident module.
     pub composable: bool,
+    /// ADR-0169: the `#[handler_set]` trait this actor adopts, from
+    /// `#[actor(handler_set(T))]`. Its handlers are consulted after the local
+    /// dispatch chain misses, and its records join this actor's inputs
+    /// manifest. At most one per actor — a set is a block of handlers, not a
+    /// chain of them. `None` ⇒ the actor's own handlers are its whole receive
+    /// surface.
+    pub handler_set: Option<syn::Path>,
 }
 
 pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
@@ -83,6 +90,26 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             }
             opts.composable = true;
             Ok(())
+        } else if meta.path.is_ident("handler_set") {
+            // ADR-0169: adopt a `#[handler_set]` trait's handlers. The path is
+            // used verbatim in the emitted `<Self as Path>::…` delegation and
+            // manifest terms, so any spelling that resolves at the adopter
+            // works.
+            let content;
+            syn::parenthesized!(content in meta.input);
+            let set: syn::Path = content.parse().map_err(|_| {
+                content.error("`handler_set` expects one trait path, for example `handler_set(Chrome)`")
+            })?;
+            if !content.is_empty() {
+                return Err(content.error(
+                    "`handler_set` takes exactly one trait path — an actor adopts at most one set (ADR-0169 §4)",
+                ));
+            }
+            if opts.handler_set.is_some() {
+                return Err(meta.error("duplicate `handler_set` — an actor adopts at most one set (ADR-0169 §4)"));
+            }
+            opts.handler_set = Some(set);
+            Ok(())
         } else if meta.path.is_ident("child_of") {
             let content;
             syn::parenthesized!(content in meta.input);
@@ -121,8 +148,8 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `root`, `child_of(TypePath)`, `composable`, `runtime_feature = \"name\"`, \
-                 or a bare runtime module path",
+                 `root`, `child_of(TypePath)`, `composable`, `handler_set(TraitPath)`, \
+                 `runtime_feature = \"name\"`, or a bare runtime module path",
             ))
         }
     });

@@ -22,16 +22,14 @@ use aether_kinds::{
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, TextCapability};
 use alloc::string::{String, ToString};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     arm_text_drag, release_left, reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte,
 };
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
-use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, NumericChanged, NumericConfig, SetWidgetState,
-    WidgetControlState, WidgetFrame,
-};
+use crate::{Collect, FocusLost, NumericChanged, NumericConfig, SetWidgetState, WidgetControlState, WidgetFrame};
 
 /// Retained edit-buffer bound; comfortably exceeds every canonical finite
 /// `f32` literal while preventing unbounded typed or pasted intermediates.
@@ -328,9 +326,29 @@ impl NumericWidget {
     }
 }
 
+impl WidgetDefaults for NumericWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.dragging = false;
+        self.paste_pending = false;
+        self.edit.clear_composition();
+    }
+}
+
 /// A numeric editor. Spawned inline by a panel root with a [`NumericConfig`];
 /// reports preview and committed [`NumericChanged`] events.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for NumericWidget {
     type Config = NumericConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.numeric";
@@ -372,16 +390,6 @@ impl WasmActor for NumericWidget {
     }
 
     #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    #[handler::single]
     fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         if self.state.can_mutate()
             && let Some(emission) = self.commit_buffer()
@@ -392,16 +400,6 @@ impl WasmActor for NumericWidget {
         self.dragging = false;
         self.paste_pending = false;
         self.edit.clear_composition();
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     #[handler::single]

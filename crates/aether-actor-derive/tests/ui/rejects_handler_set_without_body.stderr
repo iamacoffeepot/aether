@@ -1,0 +1,6 @@
+error: a #[handler_set] handler needs a default body — the shared behavior is what the set carries. Declare it as a required method only if every adopter implements it, in which case it does not belong in the set (ADR-0169)
+  --> tests/ui/rejects_handler_set_without_body.rs:25:5
+   |
+25 | /     #[handler::single]
+26 | |     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, ping: Ping);
+   | |____________________________________________________________________________^

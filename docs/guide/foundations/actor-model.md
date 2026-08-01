@@ -308,6 +308,79 @@ no routable source (session / broadcast mail) drops the emission with a warning.
 The `#[actor]` macro reads `K` off the `Multi<K>` marker, so
 `describe_component` reports the real `ReplyContract::Multi(K)` element kind.
 
+## Sharing handlers across a family
+
+A family of similar actors — the widgets in a set, the per-platform runtimes of
+one capability — tends to carry the same block of handlers. A **handler set**
+declares that block once
+([ADR-0169](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0169-shared-handler-sets-via-dispatch-miss-delegation.md)).
+`#[handler_set]` sits on a trait whose `#[handler::<class>]` methods carry the
+shared bodies as trait defaults, and whose required methods are the accessors
+those bodies reach through:
+
+```rust
+#[handler_set]
+pub trait WidgetDefaults {
+    fn widget_frame(&mut self) -> &mut WidgetFrame;
+    fn widget_state(&mut self) -> &mut InteractionState;
+
+    /// Release any half-finished interaction — an armed press, a live drag.
+    fn cancel_activation(&mut self);
+
+    #[handler::single]
+    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
+        *self.widget_frame() = frame;
+    }
+
+    #[handler::single]
+    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        self.widget_state().lose_focus();
+        self.cancel_activation();
+    }
+}
+```
+
+An actor adopts the set by naming it in `#[actor]` and implementing the trait:
+
+```rust
+impl WidgetDefaults for ToggleWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame { &mut self.frame }
+    fn widget_state(&mut self) -> &mut InteractionState { &mut self.state }
+    fn cancel_activation(&mut self) { self.arms.clear(); }
+}
+
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
+impl WasmActor for ToggleWidget {
+    // only toggle-specific handlers here
+}
+```
+
+Dispatch tries the actor's own handlers first and consults the set on a miss,
+so an actor's local declarations stay authoritative over anything inherited:
+
+```text
+match local arms  ->  DISPATCH_HANDLED
+else set dispatch ->  DISPATCH_HANDLED
+else #[fallback] / DISPATCH_UNKNOWN_KIND
+```
+
+A member that differs for one adopter is **overridden the ordinary Rust way** —
+by implementing that trait method — which keeps the kind owned by the set: one
+dispatch arm, one manifest record. Re-declaring the same kind as a local
+`#[handler]` instead is a coherence error, not a second definition.
+
+Set handlers reach the `aether.kinds.inputs` manifest exactly as local ones do,
+so `describe_component` reports an adopter's full receive surface and input
+subscription covers inherited kinds with no extra wiring. A set is wasm or
+native throughout, uses one authoring shape throughout, does not nest, and an
+actor adopts at most one — a family that outgrows one set wants a second set,
+not a chain.
+
+Put in a set only what is genuinely uniform. When bodies disagree on something
+load-bearing — the widgets' `SetWidgetState` handlers disagree about which
+predicate cancels an activation — a shared body has to pick one reading and
+silently change the rest, which is worse than the repetition it removes.
+
 ## Configuring an actor
 
 An actor can take typed **boot configuration**. Declare a `Config` associated type
