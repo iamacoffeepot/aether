@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use aether_substrate::render::{RealizedTexture, TextureBindings, realize_texture, upload_texture_full};
 
 use crate::TextureFormat;
+use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
 
 /// A texture registered via `create_texture`: the staged pixels (the CPU
 /// source of truth), plus the lazily-realized GPU texture + bind group.
@@ -107,6 +108,107 @@ pub struct TextureRegistry {
 impl TextureRegistry {
     pub fn new() -> Self {
         Self { next_id: 0, entries: HashMap::new() }
+    }
+
+    /// Stage a new texture, validating that `pixels` matches the declared
+    /// dimensions and format before any id is consumed. A rejected create
+    /// leaves `next_id` untouched, so ids stay dense over accepted textures.
+    pub fn create(&mut self, mail: CreateTexture) -> CreateTextureResult {
+        let Some(expected) = expected_pixel_bytes(mail.width, mail.height, mail.format) else {
+            return CreateTextureResult::Err {
+                error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
+            };
+        };
+        if mail.pixels.len() != expected {
+            return CreateTextureResult::Err {
+                error: format!(
+                    "pixels length {} does not match {}x{} {:?} = {expected}",
+                    mail.pixels.len(),
+                    mail.width,
+                    mail.height,
+                    mail.format
+                ),
+            };
+        }
+        let texture_id = self.next_id;
+        self.next_id += 1;
+        self.entries.insert(
+            texture_id,
+            StagedTexture {
+                width: mail.width,
+                height: mail.height,
+                format: mail.format,
+                pixels: mail.pixels,
+                realized: None,
+                dirty: true,
+            },
+        );
+        CreateTextureResult::Ok { texture_id }
+    }
+
+    /// Overwrite a sub-rect of an existing texture. Fire-and-forget, so every
+    /// rejection warns and drops rather than replying — the reserved white
+    /// texture is not writable, and neither is an id that was never created.
+    pub fn update(&mut self, mail: UpdateTexture) {
+        if mail.texture_id == WHITE_TEXTURE_ID {
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = mail.texture_id,
+                "update_texture for reserved internal texture id; dropping",
+            );
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(&mail.texture_id) else {
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = mail.texture_id,
+                "update_texture for unknown texture id; dropping",
+            );
+            return;
+        };
+        if !entry.apply_subrect(mail.x, mail.y, mail.width, mail.height, &mail.pixels) {
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = mail.texture_id,
+                "update_texture rect out of bounds, zero-sized, or pixel length mismatch; \
+                 dropping",
+            );
+        }
+    }
+
+    /// Release a registered texture. Same fire-and-forget disposition as
+    /// [`Self::update`].
+    pub fn destroy(&mut self, mail: DestroyTexture) {
+        if mail.texture_id == WHITE_TEXTURE_ID {
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = mail.texture_id,
+                "destroy_texture for reserved internal texture id; dropping",
+            );
+            return;
+        }
+        if self.entries.remove(&mail.texture_id).is_none() {
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = mail.texture_id,
+                "destroy_texture for unknown texture id; dropping",
+            );
+        }
+    }
+
+    /// Register the reserved 1x1 opaque white texture if it is not present.
+    /// Solid quads are expanded over it (ADR-0107 §4), so it is created on
+    /// first use rather than at boot — a runtime that never draws a solid quad
+    /// never allocates it.
+    pub fn ensure_white(&mut self) {
+        self.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            pixels: vec![255, 255, 255, 255],
+            realized: None,
+            dirty: true,
+        });
     }
 }
 
