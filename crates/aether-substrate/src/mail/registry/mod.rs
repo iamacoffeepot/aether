@@ -35,7 +35,9 @@ mod relay;
 )]
 mod tests;
 
-pub use address::{ActorAddressInventoryError, AddressResolutionError, ResolvedAddress};
+pub use address::{
+    ActorAddressInventoryError, AddressResolutionError, AmbiguousAbbreviation, ResolvedAddress, ambiguous_abbreviations,
+};
 pub use authority::BootAuthority;
 pub use dispatch::{MailDispatch, OwnedDispatch};
 #[cfg(test)]
