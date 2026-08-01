@@ -269,8 +269,9 @@ impl WasmActor for InlineDespawnParent {
     }
 
     /// Tear down the stored inline child (ADR-0114 teardown). The substrate
-    /// alias route is kept, so a later probe to the now-dead alias settles
-    /// back through this parent's dispatch tail rather than leaking.
+    /// alias route is retired with it (#4228), so a later probe to the dead
+    /// alias settles as mail to a retired address rather than falling through
+    /// to this parent — and either way never leaks.
     #[handler::manual]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
         if let Some(child) = self.child {
@@ -279,8 +280,9 @@ impl WasmActor for InlineDespawnParent {
     }
 
     /// Answer an `InlineProbe` addressed to the parent's own mailbox with
-    /// the parent marker — the membrane's own-id (control) path, and the
-    /// post-teardown fallthrough target for a probe to the dead child alias.
+    /// the parent marker — the membrane's own-id (control) path. It is what
+    /// shows the parent still live and answering after a teardown, so the
+    /// dead alias's silence reads as the retirement rather than a dead host.
     #[handler::manual]
     fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_PARENT);
