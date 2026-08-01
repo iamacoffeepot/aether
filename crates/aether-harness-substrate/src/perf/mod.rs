@@ -21,3 +21,9 @@ pub mod isolate;
 // (iamacoffeepot/aether#4176), driven by the `perf-registry` bin.
 pub mod registry;
 pub mod report;
+// ADR-0085's robust centre + band, shared by the paired comparison and the
+// registry replication rather than derived twice.
+pub mod stats;
+// Re-exec'ing this binary to measure one thing in a fresh process — the
+// boundary both `isolate` (per cell) and `registry::band` (per trial) need.
+pub mod subprocess;

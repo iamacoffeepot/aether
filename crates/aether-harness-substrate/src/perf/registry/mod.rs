@@ -20,7 +20,14 @@
 //!
 //! Both are throughput measures over a fixed window, not per-hop percentiles,
 //! so they do not share `perf::harness`'s trace-ring harvest.
+//!
+//! [`band`] is what a reader should quote. A single sweep is one draw, and the
+//! read column's answer turned out to disagree with an earlier one badly enough
+//! (iamacoffeepot/aether#4274) that neither could be believed alone; the band
+//! replicates the whole sweep K times in fresh processes and reports each cell
+//! as a median with an IQR, per ADR-0085.
 
+pub mod band;
 pub mod fixture;
 pub mod owner;
 pub mod read;
