@@ -47,7 +47,7 @@
 //! source of run-to-run spread (§1).
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -179,12 +179,7 @@ pub fn isolation_enabled() -> bool {
 #[allow(clippy::print_stderr)]
 #[must_use]
 pub fn run_banded_benchmark(trials: usize) -> RegistryBandReport {
-    let exe = isolation_enabled().then(|| env::current_exe().ok()).flatten();
-    if exe.is_none() && isolation_enabled() {
-        eprintln!(
-            "perf-registry: cannot resolve the current executable; running trials in this process — they will share process history (ADR-0085 §1)"
-        );
-    }
+    let exe = resolve_trial_exe();
 
     let mut reports = Vec::with_capacity(trials);
     for trial in 0..trials {
@@ -201,6 +196,27 @@ pub fn run_banded_benchmark(trials: usize) -> RegistryBandReport {
         }
     }
     summarize(&reports, trials, exe.is_some())
+}
+
+/// The binary to re-exec per trial, or `None` to run them all here.
+///
+/// Both routes to `None` are announced, because a band silently measured
+/// without the isolation ADR-0085 §1 asks for looks exactly like one measured
+/// with it — the report's `isolated` field records which, but nobody reads a
+/// field they had no reason to check.
+#[allow(clippy::print_stderr, reason = "see `run_banded_benchmark`: no subscriber is installed in this process")]
+fn resolve_trial_exe() -> Option<PathBuf> {
+    if !isolation_enabled() {
+        eprintln!("perf-registry: trial isolation disabled; running every trial in this process");
+        return None;
+    }
+    env::current_exe()
+        .inspect_err(|e| {
+            eprintln!(
+                "perf-registry: cannot resolve the current executable ({e}); running trials in this process — they will share process history (ADR-0085 §1)"
+            );
+        })
+        .ok()
 }
 
 fn run_trial_in_subprocess(exe: &Path, trial: usize) -> Result<RegistryReport, String> {
