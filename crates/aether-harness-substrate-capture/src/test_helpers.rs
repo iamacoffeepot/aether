@@ -10,8 +10,10 @@ use std::path::PathBuf;
 // Union surface: re-export the core (GPU-free) helpers so a visual test
 // imports its whole helper set from one module.
 pub use aether_harness_substrate::test_helpers::{
-    init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
+    envelope, init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
 };
+
+use crate::visual::Image;
 
 /// Probe for any usable wgpu adapter. Used by [`require_runtime`] and
 /// by visual tests that need wgpu but no wasm component.
@@ -54,4 +56,38 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
         return None;
     }
     require_wasm(crate_name)
+}
+
+/// The RGBA quadruple at `(x, y)` in a decoded capture.
+///
+/// The three helpers below are the pixel-assertion vocabulary every visual
+/// scenario reaches for first, and had been carried as byte-identical copies
+/// in `aether-render` and `aether-text` (issue 4131). They live here rather
+/// than in the base harness because `Image` does: the capture crate is
+/// downstream of it.
+///
+/// # Panics
+/// Panics if `(x, y)` is outside the image.
+#[must_use]
+pub fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
+    let start = ((y * img.width + x) * 4) as usize;
+    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
+}
+
+/// Whether `actual`'s colour channels are all within `tolerance` of
+/// `expected`. Alpha is ignored — a capture's background is opaque and the
+/// comparison is about colour.
+#[must_use]
+pub fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
+    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
+}
+
+/// Whether the pixel at `(x, y)` differs from the background beyond
+/// `tolerance` — i.e. something was drawn there.
+///
+/// # Panics
+/// Panics if `(x, y)` is outside the image.
+#[must_use]
+pub fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
+    !rgb_close(rgba_at(img, x, y), bg, tolerance)
 }

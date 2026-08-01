@@ -22,11 +22,11 @@ use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime};
+use aether_harness_substrate_capture::test_helpers::{envelope, init_save_sandbox, require_runtime};
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
-    LoadResult, NamedMail, Tick, WindowId, WindowSize,
+    LoadResult, Tick, WindowId, WindowSize,
 };
 use aether_kit_commons::{ConsoleCommandOutput, ConsoleConfig};
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
@@ -73,15 +73,6 @@ fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> SubstrateHarn
         .namespace_roots(roots)
         .build()
         .expect("boot")
-}
-
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 fn load_console(harness: &mut SubstrateHarness, wasm: &[u8]) -> MailboxId {

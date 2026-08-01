@@ -10,12 +10,12 @@ use aether_component::WasmTrampoline;
 use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::ArtifactGuard;
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{Rect, decode_png, run_checks, target_color_stats};
 use aether_kinds::keycode::{KEY_A, KEY_ENTER, KEY_UP};
 use aether_kinds::{
     FrameCheck, FrameCheckResult, FrameReduction, Key, LoadComponent, LoadResult, Modifiers, MouseButton,
-    MouseButtonRelease, NamedMail, Render, TextInput, Tick, WindowId,
+    MouseButtonRelease, Render, TextInput, Tick, WindowId,
 };
 use aether_kit_commons::console::ConsoleConfig;
 use aether_kit_terrain::mark::{Mark, MarkGeometry, MarkGet, MarkGetResult};
@@ -51,15 +51,6 @@ fn component_address(name: &str) -> String {
 
 fn child_address(parent: &str, subname: &str) -> String {
     format!("{parent}/{}:{subname}", WasmTrampoline::NAMESPACE)
-}
-
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 fn load_export(

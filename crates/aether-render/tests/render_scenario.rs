@@ -41,14 +41,16 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
 use aether_harness_substrate_capture::{
     ArtifactGuard, RenderHarnessBuilderExt, RenderHarnessExt,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
+    test_helpers::{
+        envelope, has_wgpu_adapter, init_save_sandbox, pixel_is_lit, require_runtime, rgba_at, test_namespace_roots,
+    },
 };
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
@@ -84,18 +86,6 @@ fn probe_address() -> String {
     format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
 }
 
-/// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
-/// the kind's wire encoding (`encode_into_bytes`) so any K — cast
-/// or structured — packs correctly.
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
-}
-
 /// Mirrors `ArtifactGuard`'s private root resolution (`CARGO_MANIFEST_DIR`
 /// two levels up to the workspace root, `CARGO_TARGET_DIR` override if
 /// set) so the artifact-guard scenario below can locate the directory a
@@ -109,19 +99,6 @@ fn artifact_dir(id: &str) -> PathBuf {
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
     let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     target_root.join("substrate-harness-artifacts").join(id)
-}
-
-fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
-    let start = ((y * img.width + x) * 4) as usize;
-    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
-}
-
-fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
-    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
-}
-
-fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
-    !rgb_close(rgba_at(img, x, y), bg, tolerance)
 }
 
 /// Load the probe into the harness via `execute`, blocking on the

@@ -5,16 +5,15 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::ArtifactGuard;
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{
     ColorRegionStats, FramePoint, Rect, decode_png, mean_absolute_error, run_checks, target_color_stats,
 };
 use aether_kinds::{
-    FrameCheck, FrameCheckResult, FrameReduction, LoadComponent, LoadResult, NamedMail, Render, ReplaceComponent,
-    ReplaceResult,
+    FrameCheck, FrameCheckResult, FrameReduction, LoadComponent, LoadResult, Render, ReplaceComponent, ReplaceResult,
 };
 use aether_kit_terrain::mark::{MarkId, MarkRef};
 use aether_kit_terrain::world::{
@@ -37,15 +36,6 @@ const AUTHORED_REGION: Rect = Rect { min_x: 16, min_y: 16, max_x: 111, max_y: 11
 
 fn component_address() -> String {
     format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
