@@ -67,12 +67,99 @@ tunnel_is_up() {
     return 1
 }
 
-# The :8890 check at the top is the double-launch guard: if a tunnel is
-# already bound we never launch a second one.
+# Classify what is holding $TUNNEL_PORT. Echoes one of:
+#
+#   healthy    — our tunnel, both supervised children alive
+#   degraded   — our tunnel, but a child is dead (issue 4039's zombie)
+#   unknown    — answering, but not identifiably our tunnel
+#
+# The three-way split exists because the recovery below *kills a process*. A
+# bound port is not health — a zombie tunnel keeps answering on :8890 while
+# `hub` and `aether_mcp` fail to re-fork (stale binary paths from a deleted
+# worktree is the case that bit a live session), which is `degraded` and is
+# safe to replace. But an unreachable or unparseable `/admin/status` is NOT
+# evidence of a broken tunnel: something else entirely may own the port, and
+# killing it would be worse than any no-op. That is `unknown`, and it is
+# reported rather than reaped.
+#
+# Liveness uses `jq` when present and otherwise counts `"alive":true` in the
+# compact body — order-independent, so it never assumes which child serializes
+# first.
+tunnel_health() {
+    command -v curl >/dev/null 2>&1 || { echo unknown; return; }
+    local body
+    body=$(curl -fsS --max-time 2 "$STATUS_URL" 2>/dev/null) || { echo unknown; return; }
+    # Only our tunnel serves a status body carrying both child keys. Anything
+    # else answering on this port is not ours to kill.
+    if ! grep -q '"hub"' <<<"$body" || ! grep -q '"aether_mcp"' <<<"$body"; then
+        echo unknown
+        return
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        if jq -e '.children.hub.alive == true and .children.aether_mcp.alive == true' >/dev/null 2>&1 <<<"$body"; then
+            echo healthy
+        else
+            echo degraded
+        fi
+        return
+    fi
+    if [[ $(grep -o '"alive":true' <<<"$body" | wc -l) -eq 2 ]]; then
+        echo healthy
+    else
+        echo degraded
+    fi
+}
+
+# Kill whatever holds $TUNNEL_PORT so the launch path below can replace it.
+# Only ever called for a `degraded` verdict — a tunnel we positively
+# identified, whose children are dead. Without this a dead-child tunnel keeps
+# the port and every rerun no-ops.
+reap_degraded_tunnel() {
+    command -v lsof >/dev/null 2>&1 || return 1
+    local pids
+    pids=$(lsof -ti "tcp:${TUNNEL_PORT}" -sTCP:LISTEN 2>/dev/null) || true
+    [[ -n "$pids" ]] || return 1
+    echo "[ensure-tunnel] replacing degraded tunnel (pids: ${pids//$'\n'/ })"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    # Give it a moment to release the port before we bind a fresh one.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        tunnel_is_up || return 0
+        sleep 0.3
+    done
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+    return 0
+}
+
+# The :8890 check at the top is the double-launch guard: if a healthy tunnel is
+# already bound we never launch a second one. An answering-but-unhealthy tunnel
+# is torn down here so the launch path below replaces it, rather than being
+# reported as success.
 if tunnel_is_up; then
-    echo "[ensure-tunnel] tunnel already up on :${TUNNEL_PORT} — nothing to do."
-    echo "run \`/mcp\` to (re)connect the harness tools if they're missing."
-    exit 0
+    case "$(tunnel_health)" in
+        healthy)
+            echo "[ensure-tunnel] tunnel already up on :${TUNNEL_PORT} — nothing to do."
+            echo "run \`/mcp\` to (re)connect the harness tools if they're missing."
+            exit 0
+            ;;
+        degraded)
+            echo "[ensure-tunnel] :${TUNNEL_PORT} answers but a supervised child is dead — recovering."
+            if ! reap_degraded_tunnel; then
+                echo "[ensure-tunnel] could not reclaim :${TUNNEL_PORT} (no lsof, or nothing listening)." >&2
+                echo "[ensure-tunnel] kill the process holding :${TUNNEL_PORT} and rerun." >&2
+                exit 1
+            fi
+            ;;
+        *)
+            # Something owns the port but did not identify itself as our
+            # tunnel. Never kill it — say what is true and let a human decide.
+            echo "[ensure-tunnel] :${TUNNEL_PORT} is held by something that is not an aether-tunnel," >&2
+            echo "[ensure-tunnel] or its /admin/status is unreadable. Not touching it." >&2
+            echo "[ensure-tunnel] free the port (or set AETHER_TUNNEL_PORT) and rerun." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # Pre-build every binary the tunnel will need to fork. `cargo run` below only

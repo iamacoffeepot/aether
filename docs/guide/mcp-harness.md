@@ -59,7 +59,7 @@ before cycling either process.
 
 The stack isn't running by default — a cold build of the tunnel can take long
 enough to look like a frozen session, so it's left to the point of use. Bring it up
-yourself with `scripts/ensure-tunnel.sh`: it is idempotent and starts the local
+yourself with `scripts/ensure-tunnel.sh`: it is idempotent — a no-op only when the running tunnel's supervised children are both alive — and starts the local
 stack only when needed. Treat `.codex/config.toml`, `.mcp.json`, the helper, and
 the active MCP schema as the current connection contract; do not translate
 another agent surface's harness syntax by analogy.

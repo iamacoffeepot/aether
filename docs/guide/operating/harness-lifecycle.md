@@ -15,7 +15,8 @@ These surfaces operate at different scopes:
 
 | Surface | Scope | Mutation |
 |---|---|---|
-| `scripts/ensure-tunnel.sh` while `:8890` answers | harness discovery | none; it exits without replacing the live stack |
+| `scripts/ensure-tunnel.sh` while a healthy tunnel answers | harness discovery | none; it exits without replacing the live stack |
+| `scripts/ensure-tunnel.sh` while `:8890` answers but a child is dead | host process stack | replaces the unhealthy tunnel — a bound port is not health |
 | `scripts/ensure-tunnel.sh` on a cold host | host process stack | builds and starts the tunnel, hub, and `aether-mcp` |
 | `GET /admin/status` | tunnel observation | none; reports child liveness, PIDs, and ports |
 | `terminate_substrate(engine_id)` | one supervised engine | force-stops that engine |
