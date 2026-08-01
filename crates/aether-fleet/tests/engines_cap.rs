@@ -1,7 +1,7 @@
 // End-to-end test for the engines cap (issue 763 P4).
 //
 // Boots a passive chassis hosting `FleetServer`, mails it a
-// `SpawnEngine` pointed at the real `aether-substrate-headless`
+// `SpawnEngine` pointed at the real `aether-headless`
 // binary, and asserts the full lifecycle: the substrate forks and
 // binds its RPC port, the per-engine proxy bridges the startup gap
 // and connects, `ListEngines` reflects the live engine, and
@@ -437,7 +437,7 @@ mod tests {
         // but never connected — the post-allocation failure this test
         // pins. `exec` makes the sleep the direct child so the proxy's
         // SIGKILL reaps it (no orphan).
-        let stand_in = dir.join("aether-substrate-headless");
+        let stand_in = dir.join("aether-headless");
         fs::write(
             &stand_in,
             "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \

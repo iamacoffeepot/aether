@@ -468,7 +468,7 @@ mod tests {
         // A stand-in that prints a pre-ADR-0162 manifest on `--describe`
         // (no config surface) — nonconforming, so the upload gate rejects
         // it and bootstrap skips it.
-        let stand_in = dir.join("aether-substrate-headless");
+        let stand_in = dir.join("aether-headless");
         fs::write(
             &stand_in,
             "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \

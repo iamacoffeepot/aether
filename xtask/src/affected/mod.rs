@@ -91,7 +91,7 @@ pub fn run(args: &AffectedArgs) -> Result<()> {
         // artifact class it packages: component/behavior wasm (a dep on a
         // wasm source — the tests execute that crate's wasm), or the chassis
         // binaries (a dep on aether-harness-fleet, whose harness forks the
-        // dist-resolved `aether-substrate-headless`; issue #3766).
+        // dist-resolved `aether-headless`; issue #3766).
         let wasm_consumers: BTreeSet<String> = metadata
             .packages
             .iter()

@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! <package>/
-//!   aether-substrate            # the chassis binary
+//!   aether-desktop              # the chassis binary
 //!   pack/manifest               # the one persisted manifest (this module)
 //!   pack/objects/<sha256>       # component wasm + config bytes, immutable
 //! ```

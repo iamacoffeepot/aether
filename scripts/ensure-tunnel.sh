@@ -170,18 +170,20 @@ fi
 # is current, so warm-target runs stay fast.
 #
 # Fork chain (extend this list if a new forked binary is added):
-#   aether-tunnel        — the supervisor process itself (started below)
-#   aether-mcp           — forked by the tunnel; speaks MCP to Claude
-#   aether-substrate-hub — forked by the tunnel; the RPC server the fleet talks to
-#   aether-substrate-headless — forked by the hub for `spawn_substrate`
+#   aether-tunnel   — the supervisor process itself (started below)
+#   aether-mcp      — forked by the tunnel; speaks MCP to Claude
+#   aether-hub      — forked by the tunnel; the RPC server the fleet talks to
+#   aether-headless — forked by the hub for `spawn_substrate`
+#   aether-desktop  — forked by the hub for a windowed `spawn_substrate`
 echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)..."
 (
     cd "$PROJECT_DIR" || exit 0
     cargo build --release \
         -p aether-mcp --bin aether-tunnel \
         -p aether-mcp --bin aether-mcp \
-        -p aether-chassis-hub --bin aether-substrate-hub \
-        -p aether-chassis-headless --bin aether-substrate-headless
+        -p aether-chassis-hub --bin aether-hub \
+        -p aether-chassis-headless --bin aether-headless \
+        -p aether-chassis-desktop --bin aether-desktop
 ) || true
 
 # Bootstrap the hub's content-addressed binary store (ADR-0115) with the
@@ -193,8 +195,14 @@ echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)...
 # `AETHER_BINARY_BOOTSTRAP` env layer, ADR-0090) and ingests each (idempotent
 # via content dedup). Exported so the detached tunnel — and the hub it forks —
 # inherit it; only bins that actually built are listed.
+#
+# Desktop is bootstrapped alongside headless (issue 4041) so `spawn_substrate`
+# can select `aether-desktop` without a separate release build and manual
+# `upload_binary`. Its build needs wgpu / winit and may fail on a headless box;
+# the `|| true` above and the `-x` test below mean that degrades to "headless
+# only" rather than failing the launch.
 BOOTSTRAP_BINS=()
-for bin in aether-substrate-headless aether-substrate; do
+for bin in aether-headless aether-desktop; do
     candidate="${PROJECT_DIR}/target/release/${bin}"
     [[ -x "$candidate" ]] && BOOTSTRAP_BINS+=("$candidate")
 done

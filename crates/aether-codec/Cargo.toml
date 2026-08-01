@@ -9,7 +9,7 @@ license.workspace = true
 # substrate kind hub-encodable from JSON params; this crate is that
 # encoder, factored out of the hub so callers outside the supervisor
 # (scenario runner, future tooling) can use the same path without
-# taking a heavy dep on `aether-substrate-hub`.
+# taking a heavy dep on `aether-hub`.
 #
 # ADR-0069 renamed this crate from `aether-params-codec` to
 # `aether-codec` — the codec is universal (schema → bytes), not

@@ -8,7 +8,7 @@ license.workspace = true
 # path (issue 1451), extracted from `aether-substrate-bundle`'s tests tree
 # (iamacoffeepot/aether#3767) so fleet scenarios can dev-dep the harness from
 # any crate. It boots a hub-shaped passive chassis, connects a raw-frame
-# `TcpStream` client, and fork+execs real `aether-substrate-headless`
+# `TcpStream` client, and fork+execs real `aether-headless`
 # processes resolved through `dist/manifest.json` (the `cargo xtask dist`
 # tree) — no `CARGO_BIN_EXE_*`, which only resolves inside the package that
 # defines the binary.

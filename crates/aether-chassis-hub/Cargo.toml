@@ -7,11 +7,11 @@ license.workspace = true
 # The hub chassis (issue #3810): the thin coordinator between
 # aether-mcp and the substrate fleet. Stands up trace dispatch, the
 # engines cap, and the RPC server, then blocks on SIGINT/SIGTERM.
-# Produces the `aether-substrate-hub` binary; the shared composition
+# Produces the `aether-hub` binary; the shared composition
 # layer comes from `aether-chassis`.
 
 [[bin]]
-name = "aether-substrate-hub"
+name = "aether-hub"
 path = "src/bin/hub.rs"
 
 # Same `runtime` convention as the other chassis crates (ADR-0122):

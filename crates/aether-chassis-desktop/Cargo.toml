@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 # The desktop chassis (issue #3812): winit window + wgpu render + cpal
-# audio. Produces the `aether-substrate` binary over the shared
+# audio. Produces the `aether-desktop` binary over the shared
 # `aether-chassis` composition layer.
 
 [[bin]]
-name = "aether-substrate"
+name = "aether-desktop"
 path = "src/bin/desktop.rs"
 
 # Same `runtime` convention as the other chassis crates (ADR-0122).

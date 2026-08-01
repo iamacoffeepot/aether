@@ -438,7 +438,7 @@ mod tests {
         // headless manifest (non-empty caps + config surface, so the
         // upload gate accepts it, #3936); its own bytes are what the
         // store content-addresses.
-        let stand_in = dir.join("aether-substrate-headless");
+        let stand_in = dir.join("aether-headless");
         fs::write(
             &stand_in,
             "#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf \

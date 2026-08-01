@@ -8,7 +8,7 @@ mod tests {
 
     use aether_harness_fleet::FleetHarness;
 
-    /// Upload the real `aether-substrate-headless` binary, then assert
+    /// Upload the real `aether-headless` binary, then assert
     /// the store ingested it content-addressed with the right
     /// `--describe` manifest, dedups an identical re-upload to the same
     /// hash, and resolves the name back.
@@ -32,7 +32,7 @@ mod tests {
             UploadBinaryResult::Err { error } => panic!("upload_binary failed: {error}"),
         };
 
-        let desktop = aether_harness_fleet::chassis_bin_path("aether-substrate");
+        let desktop = aether_harness_fleet::chassis_bin_path("aether-desktop");
         let desktop = desktop.to_str().expect("dist desktop path is utf-8");
         let unnamed_hash = match harness.upload_binary(desktop, None) {
             UploadBinaryResult::Ok { hash, name } => {

@@ -254,7 +254,7 @@ fn dist_resolution_reads_calls_and_paths_but_not_prose() {
         "a literal artifact path handed to a read"
     );
     assert!(
-        dist_resolution(r#"let path = dist_root.join("dist/bin/aether-substrate-headless"); path.is_file()"#).is_some(),
+        dist_resolution(r#"let path = dist_root.join("dist/bin/aether-headless"); path.is_file()"#).is_some(),
         "a dist-tree path built and probed"
     );
 

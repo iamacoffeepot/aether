@@ -14,7 +14,7 @@ use clap::Parser;
 /// Desktop chassis CLI root.
 #[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
-    name = "aether-substrate",
+    name = "aether-desktop",
     about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.",
     long_about = "Desktop chassis — winit window + wgpu render + cpal audio. ADR-0035 / ADR-0090.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \

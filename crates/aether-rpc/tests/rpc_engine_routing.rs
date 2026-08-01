@@ -6,7 +6,7 @@
 // drives the whole forward model through that one socket — exactly
 // the shape the out-of-process `aether-mcp` binary will take in P5d:
 //
-//   1. An `engine = None` Call spawns a real `aether-substrate-headless`
+//   1. An `engine = None` Call spawns a real `aether-headless`
 //      via the engines cap and yields its `engine_id`.
 //   2. An `engine = Some(engine_id)` Call is *routed* — hub RpcServer
 //      -> `aether.fleet` -> proxy -> (RPC) -> substrate -> back — and

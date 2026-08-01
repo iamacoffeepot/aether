@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)] // integration test — spawns helper binaries/threads; no settlement contract
 // ADR-0090 unit d (issue 1258) acceptance test: argv reaches the
 // headless chassis binary and shadows `AETHER_TICK_HZ`. Spawns
-// `aether-substrate-headless` three times with the bin's
+// `aether-headless` three times with the bin's
 // `CARGO_BIN_EXE_*` path:
 //
 // 1. `--tick-hz 30`  — argv overlay, low cadence.
@@ -34,7 +34,7 @@ fn run_headless_capture(args: &[&str], wait: Duration) -> Vec<String> {
 /// pairs onto the child (issue 1990: set `AETHER_ACTOR_TRACE_RING_SIZE`
 /// to observe the chassis-main resolution reaching the boot line).
 fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait: Duration) -> Vec<String> {
-    let bin = env!("CARGO_BIN_EXE_aether-substrate-headless");
+    let bin = env!("CARGO_BIN_EXE_aether-headless");
     let mut cmd = Command::new(bin);
     cmd.args(args)
         // `AETHER_TICK_HZ` is intentionally unset so the env-only
@@ -49,7 +49,7 @@ fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
-    let mut child = cmd.spawn().expect("spawn aether-substrate-headless");
+    let mut child = cmd.spawn().expect("spawn aether-headless");
     let stderr = child.stderr.take().expect("captured stderr handle");
 
     let (tx, rx) = mpsc::channel::<String>();

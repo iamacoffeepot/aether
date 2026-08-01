@@ -49,7 +49,7 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 # The `aether-component` integration binaries mix two rehomed slow classes:
 # the scenario tests (iamacoffeepot/aether#3769) cold-load and compile
 # fixture wasm into a `SubstrateHarness`, and the fleet tests
-# (iamacoffeepot/aether#3776) fork real debug `aether-substrate-headless`
+# (iamacoffeepot/aether#3776) fork real debug `aether-headless`
 # processes through `FleetHarness` and wait for them to bind. The fork class
 # stretches well past 60s under contention with the sibling fleet suites,
 # so the whole package rides the same 180s deadlock-guard backstop as the
@@ -67,7 +67,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # `aether_kit_commons.wasm`, the exact load that pushed the aether-kit-commons
 # binaries past 60s (#2805) — and the fleet log-tail test (`fleetharness_logs`,
 # iamacoffeepot/aether#3781) forks a real debug
-# `aether-substrate-headless` process and waits for it to bind. The fork
+# `aether-headless` process and waits for it to bind. The fork
 # class stretches well past 60s under contention with the sibling fleet
 # suites, so the whole package rides the same 180s deadlock-guard
 # backstop as the bundle / rpc / engine overrides below — a wall-clock
@@ -95,7 +95,7 @@ filter = "package(=aether-chassis-hub) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The rehomed tcp fleet-load test (`fleetharness_tcp_load`, #3780) forks a
-# real debug `aether-substrate-headless` process through `FleetHarness` and
+# real debug `aether-headless` process through `FleetHarness` and
 # then churns real loopback listeners/sessions on top — the same
 # fork-contention class as the bundle's fleet suites above, so it carries
 # the same 180s wall-clock backstop. `kind(test)` scopes the cap to the
@@ -108,7 +108,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # The `aether-actor` addressing fleet tests (`fleetharness_inline_child`,
 # `fleetharness_matrix_sweep`, rehomed from the bundle by
 # iamacoffeepot/aether#3777) are the same slow class: they fork real debug
-# `aether-substrate-headless` processes and wait for them to bind, which
+# `aether-headless` processes and wait for them to bind, which
 # stretches well past the 60s steady-state cap under fork contention with
 # the sibling fleet suites. Same generous deadlock-guard stance as the
 # bundle override above; `kind(test)` keeps the crate's unit tests on the
@@ -134,7 +134,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The `aether-rpc` integration tests (`fleetharness_mail`, `rpc_engine_routing`,
 # rehomed from the bundle by iamacoffeepot/aether#3778) are the same slow
-# class: they fork real debug `aether-substrate-headless` processes and wait
+# class: they fork real debug `aether-headless` processes and wait
 # for them to bind, which stretches well past the 60s steady-state cap under
 # fork contention with the sibling fleet suites. Same generous deadlock-guard
 # stance as the bundle override above; `kind(test)` keeps the crate's unit
@@ -163,7 +163,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # The `aether-fleet` integration tests (`fleetharness_spawn`,
 # `fleetharness_terminate`, `engines_cap`, rehomed from the bundle by
 # iamacoffeepot/aether#3779) are the same slow class: they fork real debug
-# `aether-substrate-headless` processes and wait for them to bind, which
+# `aether-headless` processes and wait for them to bind, which
 # stretches well past the 60s steady-state cap under fork contention with the
 # sibling fleet suites. Same generous deadlock-guard stance as the bundle
 # override above; `kind(test)` keeps the crate's unit tests on the 60s

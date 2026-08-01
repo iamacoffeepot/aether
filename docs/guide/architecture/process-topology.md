@@ -36,8 +36,8 @@ table as intent rather than a hardcoded manifest.
 | Profile | Entry binary | Primary job |
 |---|---|---|
 | Desktop | `aether-substrate` | window, GPU/input/audio integration and interactive frames |
-| Headless | `aether-substrate-headless` | timer-driven engine without a desktop event loop |
-| Hub | `aether-substrate-hub` | supervise child engines, store artifacts, and route RPC |
+| Headless | `aether-headless` | timer-driven engine without a desktop event loop |
+| Hub | `aether-hub` | supervise child engines, store artifacts, and route RPC |
 | Substrate harness | `aether-harness-substrate` | deterministic in-process operations and test evidence |
 
 Their builders live under
