@@ -19,8 +19,6 @@ pub struct ResolvedAddress {
 pub enum ActorAddressInventoryError {
     InvalidNamespace { namespace: String, reason: NamespaceError },
     InvalidActorTag { namespace: String, declared: ActorId, expected: ActorId },
-    MissingCardinality { namespace: String },
-    ContradictoryCardinality { namespace: String },
 }
 
 impl fmt::Display for ActorAddressInventoryError {
@@ -32,23 +30,44 @@ impl fmt::Display for ActorAddressInventoryError {
             Self::InvalidActorTag { namespace, declared, expected } => {
                 write!(formatter, "actor namespace `{namespace}` declares tag {declared:?}, expected {expected:?}")
             }
-            Self::MissingCardinality { namespace } => {
-                write!(formatter, "actor namespace `{namespace}` has no singleton or dynamic-instanced name fact")
-            }
-            Self::ContradictoryCardinality { namespace } => {
-                write!(formatter, "actor namespace `{namespace}` has both singleton and instanced name facts")
-            }
         }
     }
 }
 
 impl Error for ActorAddressInventoryError {}
 
+/// Why a declared namespace carries no usable cardinality, and so is excluded
+/// from the index alone (ADR-0166 §5). Both shapes mean the same thing to a
+/// caller — the namespace is half-declared, so it anchors nothing — while
+/// naming which half is wrong for whoever fixes the declaration.
+///
+/// Reachable only through a hand-written `inventory::submit!` of a `RootEntry`
+/// / `ChildEntry` without the matching name entry; the derive cannot produce
+/// either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardinalityDefect {
+    /// No singleton or dynamic-instanced name fact.
+    Missing,
+    /// Both a singleton and an instanced name fact.
+    Contradictory,
+}
+
+impl fmt::Display for CardinalityDefect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self {
+            Self::Missing => "has no singleton or dynamic-instanced name fact",
+            Self::Contradictory => "has both singleton and instanced name facts",
+        };
+        formatter.write_str(reason)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddressResolutionError {
     InvalidInventory(ActorAddressInventoryError),
     UnknownRoot { root: String },
     InstancedRoot { root: String },
+    HalfDeclaredRoot { root: String, defect: CardinalityDefect },
     IllegalSegment { parent: String, segment: String },
     AmbiguousSegment { parent: String, segment: String, candidates: Vec<String> },
     PathTooDeep { limit: usize },
@@ -64,6 +83,11 @@ impl fmt::Display for AddressResolutionError {
             Self::InstancedRoot { root } => {
                 write!(formatter, "actor root `{root}` is instanced, so it cannot anchor an abbreviated address")
             }
+            Self::HalfDeclaredRoot { root, defect } => write!(
+                formatter,
+                "actor root `{root}` {defect}, so it cannot anchor an abbreviated address until its declaration is \
+                 completed"
+            ),
             Self::IllegalSegment { parent, segment } => {
                 write!(formatter, "actor address segment `{segment}` is not legal beneath `{parent}`")
             }
@@ -117,6 +141,11 @@ pub(super) struct AddressIndex {
     /// instanced (ADR-0166 §5). Retained so a `://` prefix naming one
     /// reports why it cannot anchor rather than reading as unknown.
     instanced_roots: BTreeSet<String>,
+    /// Declared roots excluded from `roots` because their namespace carries no
+    /// usable cardinality fact, with the defect that excluded each. Retained
+    /// for the same reason as `instanced_roots`: a `://` prefix naming one
+    /// reports the half-declaration rather than reading as unknown.
+    half_declared_roots: BTreeMap<String, CardinalityDefect>,
     children: HashMap<ActorId, Vec<ChildNode>>,
 }
 
@@ -205,16 +234,21 @@ impl AddressIndex {
             referenced_namespaces.insert(fact.child_namespace);
         }
 
+        // A namespace whose placement fact carries no matching cardinality fact
+        // — or two contradicting ones — is excluded from the index alone, on
+        // the same argument the instanced-root exclusion below rests on:
+        // rejecting the whole index would disable abbreviated addressing
+        // process-wide over one unrelated declaration, and the error would name
+        // a namespace the caller was not addressing.
         let mut resolved_cardinalities = BTreeMap::new();
+        let mut half_declared = BTreeMap::<&str, CardinalityDefect>::new();
         for namespace in referenced_namespaces {
             match cardinalities.get(namespace) {
                 None => {
-                    return Err(ActorAddressInventoryError::MissingCardinality { namespace: namespace.to_owned() });
+                    half_declared.insert(namespace, CardinalityDefect::Missing);
                 }
                 Some(values) if values.len() > 1 => {
-                    return Err(ActorAddressInventoryError::ContradictoryCardinality {
-                        namespace: namespace.to_owned(),
-                    });
+                    half_declared.insert(namespace, CardinalityDefect::Contradictory);
                 }
                 Some(values) => {
                     resolved_cardinalities.insert(
@@ -224,15 +258,27 @@ impl AddressIndex {
                 }
             }
         }
+        for (namespace, defect) in &half_declared {
+            tracing::warn!(
+                namespace,
+                %defect,
+                "declared namespace carries no usable cardinality; excluded from the address index"
+            );
+        }
 
         let mut roots = HashMap::new();
         let mut instanced_roots = BTreeSet::new();
+        let mut half_declared_roots = BTreeMap::new();
         for fact in root_facts {
+            // Retain an excluded root's reason so a `://` prefix naming one
+            // reports why it cannot anchor rather than reading as unknown.
+            if let Some(defect) = half_declared.get(fact.namespace) {
+                half_declared_roots.insert(fact.namespace.to_owned(), *defect);
+                continue;
+            }
             // ADR-0166 §5: a `://` prefix is the exact NAMESPACE of a declared
             // root, so an instanced namespace identifies no single actor and
-            // cannot anchor one. Exclude that root alone — rejecting the whole
-            // index would disable abbreviated addressing process-wide over one
-            // unrelated declaration.
+            // cannot anchor one.
             if resolved_cardinalities[&fact.namespace] == Cardinality::Instanced {
                 if instanced_roots.insert(fact.namespace.to_owned()) {
                     tracing::warn!(
@@ -245,14 +291,18 @@ impl AddressIndex {
             roots.insert(fact.namespace.to_owned(), fact.actor);
         }
 
+        // An edge touching an excluded namespace is dropped rather than walked:
+        // the child's cardinality decides how a segment elides, so an edge with
+        // no cardinality has no defined traversal. Sibling edges are unaffected.
         let mut logical_edges = BTreeSet::new();
         for fact in child_facts {
-            logical_edges.insert((
-                fact.parent,
-                fact.child,
-                fact.child_namespace,
-                resolved_cardinalities[&fact.child_namespace],
-            ));
+            if half_declared.contains_key(fact.parent_namespace) {
+                continue;
+            }
+            let Some(cardinality) = resolved_cardinalities.get(fact.child_namespace) else {
+                continue;
+            };
+            logical_edges.insert((fact.parent, fact.child, fact.child_namespace, *cardinality));
         }
 
         let mut children = HashMap::<ActorId, Vec<ChildNode>>::new();
@@ -267,7 +317,7 @@ impl AddressIndex {
             nodes.sort_by(|left, right| left.namespace.cmp(&right.namespace).then(left.actor.cmp(&right.actor)));
         }
 
-        Ok(Self { roots, instanced_roots, children })
+        Ok(Self { roots, instanced_roots, half_declared_roots, children })
     }
 
     pub(super) fn expand(&self, root: &str, relative: &str) -> Result<String, AddressResolutionError> {
@@ -295,11 +345,14 @@ impl AddressIndex {
         Ok(canonical_segments.join("/"))
     }
 
-    /// Distinguish a prefix that names an instanced declared root — legal
-    /// spelling, deliberately excluded at build — from one nothing declares.
+    /// Distinguish a prefix that names a declared root excluded at build —
+    /// instanced, or half-declared — from one nothing declares at all. The
+    /// three are the same miss in `roots` but different things to fix.
     fn unanchored_root(&self, root: &str) -> AddressResolutionError {
         if self.instanced_roots.contains(root) {
             AddressResolutionError::InstancedRoot { root: root.to_owned() }
+        } else if let Some(defect) = self.half_declared_roots.get(root) {
+            AddressResolutionError::HalfDeclaredRoot { root: root.to_owned(), defect: *defect }
         } else {
             AddressResolutionError::UnknownRoot { root: root.to_owned() }
         }
@@ -533,20 +586,64 @@ mod tests {
     }
 
     #[test]
-    fn invalid_or_contradictory_generated_metadata_is_rejected() {
+    fn a_mistagged_namespace_still_rejects_the_whole_index() {
+        // The two surviving inventory errors are declaration faults no
+        // exclusion can localize: a namespace that does not validate, and an
+        // actor tag that disagrees with the namespace it claims. Both mean the
+        // fact itself cannot be trusted to name what it says it names, so
+        // there is no "offending namespace" to exclude.
         assert!(matches!(
-            AddressIndex::build([RootFact { actor: ActorId(7), namespace: "root" }], [], [singleton("root")],),
+            AddressIndex::build([RootFact { actor: ActorId(7), namespace: "root" }], [], [singleton("root")]),
             Err(ActorAddressInventoryError::InvalidActorTag { .. })
         ));
-        assert!(matches!(
-            AddressIndex::build([root("root")], [], [singleton("root"), instanced("root")],),
-            Err(ActorAddressInventoryError::ContradictoryCardinality { .. })
-        ));
+    }
+
+    #[test]
+    fn a_half_declared_root_is_excluded_without_disabling_the_rest_of_the_index() {
+        // #4138's blast radius, inverted: a half-declared namespace used to
+        // return InvalidInventory for *every* abbreviated address, including
+        // roots from other crates whose facts are entirely healthy.
+        for (defect, cardinality_facts) in [
+            (CardinalityDefect::Missing, vec![singleton("root"), instanced("worker")]),
+            (
+                CardinalityDefect::Contradictory,
+                vec![singleton("root"), instanced("worker"), singleton("swarm"), instanced("swarm")],
+            ),
+        ] {
+            let index =
+                AddressIndex::build([root("root"), root("swarm")], [child("root", "worker")], cardinality_facts)
+                    .expect("a half-declared namespace excludes itself rather than failing the index");
+
+            assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
+            assert_eq!(
+                index.expand("swarm", "camera"),
+                Err(AddressResolutionError::HalfDeclaredRoot { root: "swarm".to_owned(), defect })
+            );
+            assert_eq!(
+                index.expand("missing", "camera"),
+                Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_edges_touching_a_half_declared_namespace_are_dropped() {
+        // A child namespace with no cardinality fact has no defined elision, so
+        // its edge cannot be walked — but its siblings under the same parent
+        // still resolve, and the parent itself still anchors.
+        let index = AddressIndex::build(
+            [root("root")],
+            [child("root", "worker"), child("root", "status")],
+            [singleton("root"), instanced("worker")],
+        )
+        .expect("a half-declared child excludes its own edge");
+
+        assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(index.expand("root", "worker:camera"), Ok("root/worker:camera".to_owned()));
         assert_eq!(
-            AddressIndex::build([root("root")], [child("root", "worker")], [singleton("root")])
-                .err()
-                .expect("missing child cardinality"),
-            ActorAddressInventoryError::MissingCardinality { namespace: "worker".to_owned() }
+            index.expand("root", "status"),
+            Ok("root/worker:status".to_owned()),
+            "with `status` excluded, a bare segment elides through the one remaining instanced child"
         );
     }
 }

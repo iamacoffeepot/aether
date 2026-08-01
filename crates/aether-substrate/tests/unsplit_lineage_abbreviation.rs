@@ -86,9 +86,10 @@ fn register(registry: &Registry, canonical: &str) -> ResolvedAddress {
 /// output, and each fails unless the *cardinality* half of one declaration is
 /// present alongside its placement half. Reinstating any gate that emits a
 /// `RootEntry` / `ChildEntry` without the matching singleton / instanced fact
-/// puts `AddressIndex::build` back into `MissingCardinality`, which fails the
-/// whole index — so this also stands watch over every other namespace in a
-/// binary that links a fixture like these two.
+/// excludes that namespace from the address index, so the root stops anchoring
+/// (`HalfDeclaredRoot`) and the child edge stops eliding — both assertions go
+/// red. The exclusion is per-namespace, so this watches these two fixtures and
+/// not, as it once did, every other namespace in the binary.
 #[test]
 fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
     let registry = Registry::new();

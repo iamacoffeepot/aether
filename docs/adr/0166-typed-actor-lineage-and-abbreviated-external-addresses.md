@@ -301,6 +301,22 @@ The boundary resolver walks generated lineage records from that root:
   caller must provide the canonical child segment.
 - Expansion is iterative and retains ADR-0099's path depth and byte limits.
 
+A declaration the index cannot use excludes its own namespace and nothing
+else. Two shapes reach this: a root whose namespace is instanced, which
+identifies no single actor and so anchors nothing; and a namespace carrying a
+placement fact without a matching cardinality fact, or carrying two that
+contradict, whose elision behaviour is undefined. Both are reachable only
+through a hand-written `inventory::submit!` — the macro emits placement and
+cardinality together — and both are per-namespace rather than fatal to the
+index, because rejecting the whole index would disable abbreviated addressing
+process-wide over one unrelated declaration and report a namespace the caller
+was not addressing. An excluded root keeps its reason, so a `://` prefix
+naming one is a structured boundary error distinguishing it from a root
+nothing declares; an excluded child drops its own edge while its siblings
+still resolve. A malformed namespace or an actor tag disagreeing with the
+namespace it claims stays fatal: the fact cannot be trusted to name what it
+says it names, so there is no offending namespace to exclude.
+
 For the first consumer:
 
 ```text
