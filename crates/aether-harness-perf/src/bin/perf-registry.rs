@@ -17,11 +17,14 @@
 //!   with and without concurrent owner churn. Reads never touch
 //!   `Registry::inner`, so the expectation is near-linear scaling and
 //!   indifference to the churn column; a contended-column collapse would mean
-//!   the lock-free claim does not hold in practice.
-//! - **The single-owner ceiling** — `drained / busy_nanos`, plus the duty cycle
-//!   ADR-0165's "sustained churn exceeds approximately 5%" trigger reads
-//!   against. The trigger has a counter but never had this denominator, so it
-//!   could not fire.
+//!   the lock-free claim does not hold in practice. Each contended cell reports
+//!   the owner commits it observed, so the column cannot claim republication it
+//!   did not drive.
+//! - **The single-owner ceiling** — `drained / busy_nanos`, reported twice.
+//!   The sequential populate phase yields a *floor* (blocking spawns never
+//!   queue, so the drainer never batches); staged bursts yield the ceiling
+//!   ADR-0165's "sustained churn exceeds approximately 5%" trigger divides by.
+//!   The trigger has had its counter all along and never had this denominator.
 //!
 //! Unlike `perf-trial` this reports throughput over a fixed window rather than
 //! per-hop percentiles, so it carries no verdict and is not wired into the
@@ -31,7 +34,36 @@
 
 use std::process::ExitCode;
 
+use aether_harness_substrate::perf::registry::owner::OwnerCeiling;
 use aether_harness_substrate::perf::registry::run_registry_benchmark;
+
+/// Print one owner sample, saying plainly whether its rate is the ceiling or
+/// only a floor. `drain_max` is the tell: 1 means the drainer retired items one
+/// at a time and had nothing to amortize over.
+fn report_owner(owner: &OwnerCeiling) {
+    eprintln!(
+        "owner [{}] commits={} drained={} drains={} drain_max={} depth_max={} over_capacity={} shed={}",
+        owner.drive,
+        owner.commits_driven,
+        owner.drained,
+        owner.drains,
+        owner.drain_max,
+        owner.depth_max,
+        owner.over_capacity,
+        owner.shed,
+    );
+    match owner.items_per_sec_while_draining {
+        Some(rate) if owner.queued_under_load => {
+            eprintln!("      {rate:.0} items/s while draining — measured under queue pressure (the ceiling)");
+        }
+        Some(rate) => {
+            eprintln!("      {rate:.0} items/s while draining — a FLOOR, not the ceiling:");
+            eprintln!("      the queue never batched, so this rate cannot amortize.");
+            eprintln!("      ADR-0165's trigger divides by the ceiling, so a floor biases toward early sharding.");
+        }
+        None => eprintln!("      rate unavailable: no owner queue attached"),
+    }
+}
 
 fn main() -> ExitCode {
     let Some(report) = run_registry_benchmark() else {
@@ -50,32 +82,18 @@ fn main() -> ExitCode {
         } else {
             ""
         };
+        // The commit count is the churn column's own evidence. Printed on every
+        // row so a contended cell that drove nothing is visible here rather than
+        // only in the JSON.
         eprintln!(
-            "read  threads={:>2} churn={:<5} {:>12.0} lookups/s  {scaling}{note}",
-            cell.threads, cell.owner_churn, cell.lookups_per_sec,
+            "read  threads={:>2} churn={:<5} commits={:>5} {:>12.0} lookups/s  {scaling}{note}",
+            cell.threads, cell.owner_churn, cell.owner_commits_observed, cell.lookups_per_sec,
         );
     }
-    let owner = &report.owner;
-    eprintln!(
-        "owner commits={} drained={} drains={} drain_max={} depth_max={} over_capacity={} shed={}",
-        owner.commits_driven,
-        owner.drained,
-        owner.drains,
-        owner.drain_max,
-        owner.depth_max,
-        owner.over_capacity,
-        owner.shed,
-    );
-    match owner.items_per_sec_while_draining {
-        Some(rate) if owner.queued_under_load => {
-            eprintln!("owner {rate:.0} items/s while draining, measured under queue pressure");
-        }
-        Some(rate) => {
-            eprintln!("owner {rate:.0} items/s while draining — a FLOOR, not the ceiling:");
-            eprintln!("      depth_max=1, so the queue never batched and this cannot amortize.");
-            eprintln!("      ADR-0165's trigger divides by the ceiling, so a floor biases toward early sharding.");
-        }
-        None => eprintln!("owner rate unavailable: no owner queue attached"),
+    report_owner(&report.owner_unloaded);
+    match &report.owner_loaded {
+        Some(loaded) => report_owner(loaded),
+        None => eprintln!("owner loaded ceiling unavailable: the staging parent did not spawn"),
     }
 
     match serde_json::to_string(&report) {
