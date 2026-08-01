@@ -24,6 +24,7 @@
 
 use std::env;
 use std::hint::black_box;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -969,7 +970,7 @@ pub const SCHEDULER_TUNING_ENV_KEYS: [&str; 9] = [
 /// reproducing `SchedulerTuningConfig::to_scheduler_tuning`.
 #[must_use]
 pub fn scheduler_tuning_from_env() -> SchedulerTuning {
-    fn parsed<T: std::str::FromStr>(key: &str) -> Option<T> {
+    fn parsed<T: FromStr>(key: &str) -> Option<T> {
         env::var(key).ok().and_then(|value| value.trim().parse().ok())
     }
 
@@ -984,8 +985,7 @@ pub fn scheduler_tuning_from_env() -> SchedulerTuning {
         time_budget_micros: parsed("AETHER_LOCAL_TIME_BUDGET_US").or(defaults.time_budget_micros),
         peer_steal: env::var("AETHER_PEER_STEAL")
             .ok()
-            .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
-            .unwrap_or(defaults.peer_steal),
+            .map_or(defaults.peer_steal, |value| matches!(value.trim(), "1" | "true" | "yes")),
         local_chain_backstop: parsed::<u32>("AETHER_LOCAL_CHAIN_BACKSTOP")
             .filter(|&n| n > 0)
             .unwrap_or(defaults.local_chain_backstop),
