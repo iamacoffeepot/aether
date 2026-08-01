@@ -148,13 +148,39 @@ pub fn validate_subscriber_mailbox(ctx: &NativeCtx<'_>, mailbox: MailboxId) -> R
 
 #[cfg(test)]
 mod tests {
-    use aether_data::Kind;
+    use std::sync::Arc;
+
+    use aether_data::{Kind, SessionToken, Uuid};
     use aether_kinds::{Key, MouseMove};
+    use aether_substrate::Registry;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::{MailId, Source, SourceAddr};
 
     use super::*;
 
     fn fixture() -> (WindowSubscribers, MailboxId, MailboxId) {
         (WindowSubscribers::new(), MailboxId(1), MailboxId(2))
+    }
+
+    /// The reflexive forms read their subscriber off the host-stamped
+    /// envelope, so they are only meaningful for an in-process actor. A
+    /// `Session` source (an external MCP session or a remote engine) must
+    /// use the explicit-mailbox `subscribe` / `unsubscribe` instead, and
+    /// gets an `Err` plus an untouched route table rather than a silently
+    /// mis-attributed subscription.
+    #[test]
+    fn reflexive_subscribe_rejects_a_non_component_source_without_touching_routes() {
+        let mut subscribers = WindowSubscribers::new();
+        let transport =
+            Arc::new(NativeBinding::new_for_test(Arc::new(Mailer::new(Arc::new(Registry::new()))), MailboxId(0)));
+        let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
+        let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
+
+        assert!(subscribers.subscribe_self(&mut ctx, WindowSelector::All, Key::ID).is_err());
+        assert!(subscribers.unsubscribe_self(&ctx, WindowSelector::All, Key::ID).is_err());
+
+        assert!(subscribers.recipients(WindowId(1), Key::ID).is_empty(), "a rejected subscribe inserts no route");
     }
 
     #[test]
