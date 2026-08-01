@@ -15,7 +15,7 @@
 //!    `log_install::with_actor_dispatch(binding, ...)` so traces /
 //!    `Local<T>` lookups behave identically across every actor, and the
 //!    per-envelope dispatch reuses the shared helpers in
-//!    [`crate::actor::native::dispatch`].
+//!    [`super::dispatch`].
 //! 3. Returns one of:
 //!    - [`CycleResult::Idle`] — inbox drained, post-empty recheck saw
 //!      no race; worker drops the slot Arc.
@@ -37,7 +37,7 @@
 //! ## In-place demux seed (iamacoffeepot/aether#1135)
 //!
 //! [`Self::seize_and_run`] is the demux-direct counterpart to
-//! [`Self::run_cycle`]: a [`crate::actor::native::blob_work::BlobWork`]
+//! [`Self::run_cycle`]: a [`crate::actor::native::blob::work::BlobWork`]
 //! that has **seized** this slot (`Idle → Running`) hands it one
 //! envelope to dispatch in place — skipping the inbox deposit +
 //! `try_recv` repop the deposit-then-wake path paid. Both methods share
@@ -202,7 +202,7 @@ where
     /// work — the inline-child alias a `WasmTrampoline` publishes from `wire`
     /// is the motivating case. An embedder's post-seal `spawn_actor` reaches
     /// this same path from a thread holding no mail and declares so.
-    pub(super) fn wire_activation(&self, chain: EffectChain) {
+    pub(crate) fn wire_activation(&self, chain: EffectChain) {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
         local::with_stamped(&self.slots, || {
@@ -213,7 +213,7 @@ where
     }
 
     /// Cancel a wired-but-not-live activation at the same execution home.
-    pub(super) fn cancel_activation(&self) {
+    pub(crate) fn cancel_activation(&self) {
         let mut actor = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(actor) = actor.as_mut() {
             self.run_close_hook(actor);
@@ -241,7 +241,7 @@ where
     /// Per-envelope dispatch — a one-line delegation to the shared
     /// [`dispatch_envelope`] free function, the single dispatch body both
     /// this pooled slot and the externally-pumped
-    /// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run
+    /// [`PumpedSlot`](super::pumped::PumpedSlot) run
     /// (ADR-0160 §1). Keeping the body in one place is what makes the two
     /// slots' dispatch semantics structurally identical rather than a copy
     /// that can drift.
@@ -266,7 +266,7 @@ where
     /// mark Dead, release the parent-local live child key, fan
     /// `MonitorNotice` mail out via the chassis mailer), the close tail
     /// both this slot and
-    /// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run
+    /// [`PumpedSlot`](super::pumped::PumpedSlot) run
     /// (ADR-0160 §1).
     fn finalize_registry(&self) {
         finalize_close_and_fan_out(
@@ -515,7 +515,7 @@ where
 
 /// The single per-envelope dispatch body both the pooled [`DispatcherSlot`]
 /// and the externally-pumped
-/// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run, so
+/// [`PumpedSlot`](super::pumped::PumpedSlot) run, so
 /// there is exactly one dispatch semantics in the substrate (ADR-0160 §1).
 /// Extracting it as a free function — rather than copying it into the
 /// pumped slot — is what keeps the two homes structurally identical and
@@ -635,7 +635,7 @@ where
 
 /// The Phase 4 close tail both the pooled [`DispatcherSlot`] and the
 /// externally-pumped
-/// [`PumpedSlot`](crate::actor::native::pumped_slot::PumpedSlot) run
+/// [`PumpedSlot`](super::pumped::PumpedSlot) run
 /// (ADR-0160 §1): drain `monitors_of[self_id]`, prune `monitoring[id]`
 /// from each target, mark the slot Dead, release this actor's parent-local
 /// live child key, and fan one

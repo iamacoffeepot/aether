@@ -4,7 +4,7 @@
 //! workers, future drivers like `WebSocketCapability` or pollers,
 //! occasional CPU-offload workers) need a structured way to send mail
 //! from those threads while staying coherent with the trace pipeline.
-//! The pattern matches the per-handler [`super::ctx::NativeCtx`]:
+//! The pattern matches the per-handler [`crate::actor::native::ctx::NativeCtx`]:
 //! threads receive a ctx that grants send authority and carries the
 //! inheritance choice in its type. There is no way to send mail
 //! without holding one.
@@ -44,7 +44,7 @@ use aether_actor::{Addressable, HandlesKind};
 use aether_actor::{MailSender, Singleton};
 use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_name};
 
-use super::binding::NativeBinding;
+use crate::actor::native::binding::NativeBinding;
 use crate::runtime::trace::SettlementHold;
 
 /// ADR-0080 §12 spawn-context that captures the spawning handler's
@@ -74,7 +74,7 @@ pub struct InheritCtx<A> {
 
 impl<A> InheritCtx<A> {
     /// Construct from raw parts. Crate-private — produced only by
-    /// [`super::ctx::NativeCtx::spawn_inherit`].
+    /// [`crate::actor::native::ctx::NativeCtx::spawn_inherit`].
     pub(crate) fn new(
         binding: Arc<NativeBinding>,
         inherited_mail_id: MailId,
@@ -196,7 +196,7 @@ pub struct RootCtx<A> {
 
 impl<A> RootCtx<A> {
     /// Construct from raw parts. Crate-private — produced only by
-    /// [`super::ctx::NativeCtx::spawn_detached`].
+    /// [`crate::actor::native::ctx::NativeCtx::spawn_detached`].
     pub(crate) fn new(binding: Arc<NativeBinding>) -> Self {
         Self { binding, _phantom: PhantomData }
     }
@@ -252,7 +252,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
 /// [`InheritCtx<A>`] that captures `(in_flight_mail_id, in_flight_root)`
 /// from the spawning handler. The spawning function is the
 /// `spawn_inherit` entry point on
-/// [`super::ctx::NativeCtx`]; this function is the crate-private
+/// [`crate::actor::native::ctx::NativeCtx`]; this function is the crate-private
 /// runtime body it delegates to.
 // This IS the spawn_inherit primitive (ADR-0080 §12) — the sanctioned raw spawn
 // the lint points callers at; it cannot route through itself.

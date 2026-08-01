@@ -25,13 +25,13 @@ use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_se
 use aether_data::{ActorId, Kind, Tag, fold_lineage, with_tag};
 use aether_kinds::trace::Nanos;
 
+use super::reservation::ChildReservationKey;
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::dispatch_blocking::IntoDeferredReply;
-use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
-use crate::actor::native::reservation::ChildReservationKey;
-use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
+use crate::actor::native::offload::blocking::IntoDeferredReply;
+use crate::actor::native::slot::dispatcher::DispatcherSlot;
+use crate::actor::native::{DispatchId, ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
@@ -125,7 +125,7 @@ const BIRTH_PATIENCE: Duration = Duration::from_secs(30);
 pub struct SpawnReceipt {
     pub mailbox_id: MailboxId,
     pub canonical_name: Arc<str>,
-    pub completion: super::DispatchId,
+    pub completion: DispatchId,
 }
 
 /// The authoritative fate of one staged child birth, delivered through the
@@ -450,7 +450,7 @@ impl Spawner {
         &self.mailer
     }
 
-    pub(super) fn registry(&self) -> &Arc<Registry> {
+    pub(crate) fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
 
@@ -1011,7 +1011,7 @@ pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor> {
 }
 
 /// Handler-owned child builder, the only spawn surface
-/// [`NativeCtx::spawn_child`](super::ctx::NativeCtx::spawn_child) hands back.
+/// [`NativeCtx::spawn_child`](crate::actor::native::ctx::NativeCtx::spawn_child) hands back.
 /// Every terminal it carries — [`stage`](Self::stage),
 /// [`stage_with`](Self::stage_with), [`continue_from`](Self::continue_from) —
 /// performs only local preparation during the actor turn and appends one
@@ -1033,7 +1033,7 @@ pub struct HandlerSpawnBuilder<'ctx, A: Instanced + NativeActor> {
 }
 
 impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
-    pub(super) fn new(
+    pub(crate) fn new(
         inner: SpawnBuilder<'ctx, A>,
         parent_binding: Arc<NativeBinding>,
         completion_root: MailId,
@@ -1131,8 +1131,8 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     }
 
     /// Stage a successor birth that inherits an already-owed reply — either a
-    /// bare [`DeferredReply`](super::DeferredReply) or the
-    /// [`TaskDone`](super::TaskDone) a completion handler is already holding,
+    /// bare [`DeferredReply`](crate::actor::native::DeferredReply) or the
+    /// [`TaskDone`](crate::actor::native::TaskDone) a completion handler is already holding,
     /// whose debt rides inside it. Every synchronous validation/build failure
     /// hands `owed` back untouched so the original terminal reply can still be
     /// sent exactly once.
@@ -1237,7 +1237,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// `parent` is the spawning actor's own runtime identity, read off the
     /// staging ctx — never a caller-declared type — so there is nothing here
     /// to disagree with the executing binding (issue 4158).
-    pub(super) fn new_child(
+    pub(crate) fn new_child(
         spawner: Arc<Spawner>,
         subname: Subname<'ctx>,
         config: A::Config,

@@ -1,7 +1,7 @@
 //! ADR-0093 hold-until-resolve dispatch primitive (runtime half).
 //!
 //! The third spawn shape (alongside `spawn_inherit` and
-//! `spawn_detached`, see [`super::spawn_thread`]): *work that replies in a
+//! `spawn_detached`, see [`super::thread`]): *work that replies in a
 //! later handler turn*. A handler kicks off a slow blocking call, the
 //! worker pushes its result and dies, and the real reply is sent from a
 //! *subsequent* handler invocation when that result lands. The
@@ -23,7 +23,7 @@
 //! - the in-flight ledger (`InflightTable`) — a per-actor map from
 //!   `DispatchId` to its held `(hold, reply_to, context)` plus a
 //!   completion output slot the worker fills. Lives behind a `&self`
-//!   interior-mutability `Mutex` on [`NativeBinding`](super::binding),
+//!   interior-mutability `Mutex` on [`NativeBinding`](crate::actor::native::binding),
 //!   like `outbound` / `blob_producer`; the single logical writer is the
 //!   actor's own dispatch thread.
 //! - [`TaskCompletionWake`] — a substrate-internal framework kind the
@@ -32,7 +32,7 @@
 //!   worker uses to wake the actor.
 //!
 //! The request side and completion routing live on
-//! [`NativeCtx`](super::ctx): `dispatch_blocking` /
+//! [`NativeCtx`](crate::actor::native::ctx): `dispatch_blocking` /
 //! `dispatch_blocking_with` spawn the worker, and `take_task_done`
 //! reunites the worker's output with the held `(hold, reply_to,
 //! context)` when the completion-wake mail lands. The
@@ -51,8 +51,8 @@ use aether_data::{Kind, KindId, MailId};
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
 
-use super::binding::NativeBinding;
-use super::ctx::NativeCtx;
+use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::ctx::NativeCtx;
 
 /// A `Copy` correlation token minted monotonically per
 /// [`dispatch_blocking`](NativeCtx::dispatch_blocking). Names one
@@ -219,7 +219,7 @@ struct InflightEntry {
 /// plain-actor-state rule (ADR-0038).
 ///
 /// The `Mutex` is for `&self` interior mutability + `Sync` only, like
-/// [`NativeBinding`](super::binding)'s `outbound` / `blob_producer`: the
+/// [`NativeBinding`](crate::actor::native::binding)'s `outbound` / `blob_producer`: the
 /// actor's own dispatch thread is the single logical writer of the
 /// `(hold, reply_to, context)` slot and the reader of the output, while
 /// the worker thread fills the output slot once. Contention is the brief
@@ -363,7 +363,7 @@ impl Drop for DeferredReply {
 /// Implemented by [`DeferredReply`] itself (identity) and by [`TaskDone`],
 /// whose completion carries the same debt alongside a worker output and a
 /// context. Staging surfaces such as
-/// [`HandlerSpawnBuilder::continue_from`](super::spawn::HandlerSpawnBuilder::continue_from)
+/// [`HandlerSpawnBuilder::continue_from`](crate::actor::native::spawn::HandlerSpawnBuilder::continue_from)
 /// take `impl IntoDeferredReply` so a handler can continue from either without
 /// an intermediate noun at the call site, and can be handed the value back
 /// unchanged when synchronous preparation fails.
@@ -604,9 +604,9 @@ impl InflightTable {
     }
 }
 
-/// Crate-internal accessors the [`NativeBinding`](super::binding) wraps
+/// Crate-internal accessors the [`NativeBinding`](crate::actor::native::binding) wraps
 /// in its `Mutex<InflightTable>` field expose to
-/// [`NativeCtx`](super::ctx). Kept here next to the table so the
+/// [`NativeCtx`](crate::actor::native::ctx). Kept here next to the table so the
 /// ledger's invariants (mint-then-insert, fill-once, take-removes) stay
 /// in one file.
 impl InflightTable {
@@ -636,7 +636,7 @@ impl InflightTable {
     }
 }
 
-/// Wrap [`InflightTable`] for the [`NativeBinding`](super::binding)
+/// Wrap [`InflightTable`] for the [`NativeBinding`](crate::actor::native::binding)
 /// field: a `Mutex` for `&self` interior mutability matching the binding's
 /// other single-writer buffers.
 pub(crate) type InflightLedger = Mutex<InflightTable>;

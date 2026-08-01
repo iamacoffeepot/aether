@@ -40,11 +40,11 @@ use crate::runtime::trace::SettlementHold;
 use super::NativeActor;
 use crate::actor::native::InheritCtx;
 use crate::actor::native::RootCtx;
-use crate::actor::native::dispatch_blocking::{
+use crate::actor::native::envelope::Envelope;
+use crate::actor::native::offload::blocking::{
     DeferredCompletion, DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskDone,
 };
-use crate::actor::native::envelope::Envelope;
-use crate::actor::native::spawn_thread;
+use crate::actor::native::offload::thread;
 use crate::chassis::inbox::InboundMail;
 use crate::mail::SourceAddr;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
@@ -245,7 +245,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, M, A> {
     /// `binding` must be that actor's own binding — the birth lands under
     /// whatever identity the binding carries, and `A` is what the child's
     /// `ChildOf<A>` permission is checked against. The pumped host turn
-    /// ([`PumpedSlot::host_turn`](super::pumped_slot::PumpedSlot::host_turn))
+    /// ([`PumpedSlot::host_turn`](super::slot::pumped::PumpedSlot::host_turn))
     /// is the production caller and derives both from the same slot; a
     /// cap-side fixture driving a spawning handler names its own actor here.
     pub fn new_for_actor(
@@ -347,7 +347,7 @@ impl<'a, A> NativeCtx<'a, Manual, A> {
     /// [`Envelope`] into the ctx so a handler can retain it via
     /// [`Self::take_inbound`] (and so the dispatcher's settlement tail
     /// settles exactly one owner). Only the native dispatcher
-    /// ([`DispatcherSlot::dispatch_one`](crate::actor::native::dispatcher_slot))
+    /// ([`DispatcherSlot::dispatch_one`](crate::actor::native::slot::dispatcher))
     /// builds these; the inbound-less [`Self::new`] backs the
     /// close-hook / chassis-root / cap-test ctxs that dispatch nothing.
     pub(crate) fn with_inbound(
@@ -478,7 +478,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         W: Addressable + 'static,
         F: FnOnce(InheritCtx<W>) + Send + 'static,
     {
-        spawn_thread::spawn_inherit::<W, F>(Arc::clone(self.binding), self.in_flight_mail_id, self.in_flight_root, f)
+        thread::spawn_inherit::<W, F>(Arc::clone(self.binding), self.in_flight_mail_id, self.in_flight_root, f)
     }
 
     /// ADR-0080 §12 spawn primitive: launch a worker thread with no
@@ -495,7 +495,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         W: Addressable + Singleton + 'static,
         F: FnOnce(RootCtx<W>) + Send + 'static,
     {
-        spawn_thread::spawn_detached::<W, F>(Arc::clone(self.binding), f)
+        thread::spawn_detached::<W, F>(Arc::clone(self.binding), f)
     }
 
     /// ADR-0093 hold-until-resolve dispatch: run the blocking closure
@@ -513,7 +513,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     ///
     /// When `f` returns, the worker stores the output in the ledger's
     /// completion slot and pushes a
-    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake) to this
+    /// [`TaskCompletionWake`](super::offload::blocking::TaskCompletionWake) to this
     /// actor's own mailbox (the loopback-wake mechanism). The actor's
     /// completion handler decodes that wake's [`DispatchId`] and calls
     /// [`Self::take_task_done`] to rebuild the [`TaskDone`], then
@@ -654,7 +654,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         });
         if let Err(e) = spawned {
             tracing::error!(
-                target: "aether_substrate::actor::native::dispatch_blocking",
+                target: "aether_substrate::actor::native::offload::blocking",
                 error = %e,
                 "failed to spawn dispatch_blocking worker thread",
             );
@@ -719,7 +719,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
 
     /// ADR-0093 completion-routing entry point: remove the in-flight
     /// ledger entry named by `id` (decoded from a landed
-    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake) and rebuild its [`TaskDone<O, C>`]. The
+    /// [`TaskCompletionWake`](super::offload::blocking::TaskCompletionWake) and rebuild its [`TaskDone<O, C>`]. The
     /// (future) `#[handler(task)]` macro — and, for now, a hand-wired
     /// completion handler — calls this and then `resolve`s the result.
     ///
@@ -737,7 +737,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     /// This is the routing primitive behind `#[handler(task)]`. Multiple
     /// task handlers on one actor are discriminated by their `TaskDone<O>`
     /// output type, not a kind id — all completions arrive as the single
-    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake) kind. The generated dispatch arm tries each
+    /// [`TaskCompletionWake`](super::offload::blocking::TaskCompletionWake) kind. The generated dispatch arm tries each
     /// task handler's `(O, C)` in
     /// turn; a wrong-type probe must *not* consume the entry, or the first
     /// handler tried would swallow a completion destined for a later one.

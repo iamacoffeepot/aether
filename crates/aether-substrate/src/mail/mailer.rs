@@ -607,7 +607,7 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             // `Received`/`Finished` bracket fires here. `Inbox`
             // is the actor-enqueue variant — the handler body
             // pushes the envelope onto an mpsc inbox, and the
-            // actor's dispatch loop at `actor/native/dispatch.rs`
+            // actor's dispatch loop at `actor/native/slot/dispatch.rs`
             // records the bracket downstream when its worker picks
             // the envelope up. Adding a bracket here would
             // double-count `Finished` and fire settlement
@@ -626,7 +626,7 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             // copies.
             // ADR-0094: the first of two production mint sites. The
             // dispatch is armed here; the downstream actor dispatcher
-            // (`dispatcher_slot::dispatch_one`) discharges it beside its
+            // (`slot::dispatcher::dispatch_one`) discharges it beside its
             // `record_finished`. The relay closure that forwards it onto
             // the actor's mpsc (`spawn.rs` / `chassis/ctx.rs`) is a
             // transfer — the obligation rides the moved value.

@@ -74,7 +74,7 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// consumer explicitly disarms it via exactly one of:
 /// - [`OwnedDispatch::discharge`] — "the obligation ends here": call it
 ///   adjacent to every `Mailer::record_finished(mail_id, root)` for a
-///   consumed envelope (e.g. `dispatcher_slot::dispatch_one`, the wasm
+///   consumed envelope (e.g. `slot::dispatcher::dispatch_one`, the wasm
 ///   trampoline drain via that same dispatcher, the desktop window
 ///   drain). The two must sit together so they cannot drift.
 /// - [`OwnedDispatch::mark_transferred`] — "the obligation moves

@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 
 use aether_data::ActorId;
 
-use super::binding::NativeBinding;
+use crate::actor::native::binding::NativeBinding;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ChildReservationKey {

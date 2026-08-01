@@ -29,10 +29,10 @@ use std::sync::Arc;
 use aether_actor::Single;
 use aether_actor::local::ActorSlots;
 
+use super::dispatcher::{dispatch_envelope, finalize_close_and_fan_out};
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
-use crate::actor::native::dispatcher_slot::{dispatch_envelope, finalize_close_and_fan_out};
 use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::{MailboxId, Source};

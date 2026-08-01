@@ -134,8 +134,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use aether_kinds::trace::Nanos;
 use rustc_hash::FxHashMap;
 
+use super::lifecycle::{Lifecycle, MAX_GROUPS, Published};
 use crate::actor::native::Envelope;
-use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
 use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId};
@@ -403,7 +403,7 @@ impl Group {
 /// because publication is already ordered by the lifecycle word — the
 /// producer writes the slot before [`Lifecycle::publish`]'s release of
 /// `len`, and a worker reads it only after [`Lifecycle::claim`]'s acquire
-/// observes `len > idx` (the `blob_lifecycle` publication-ordering note).
+/// observes `len > idx` (the `lifecycle` publication-ordering note).
 /// Dropping the `OnceLock` drops a CAS (write) + an acquire load (read)
 /// per group.
 struct GroupSlot {
@@ -1027,7 +1027,7 @@ mod tests {
             // ADR-0094: this mock stands in for the real
             // `DispatcherSlot::seize_and_run` → `dispatch_one`, which
             // discharges the seed's obligation. Mirror that here so the
-            // armed in-place demux seed (`blob_work::dispatch_one`) does
+            // armed in-place demux seed (`blob::work::dispatch_one`) does
             // not trip the debug guard on drop.
             seed.discharge();
             let _ = self.direct.send(seed.payload.bytes()[0]);

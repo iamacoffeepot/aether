@@ -272,7 +272,7 @@ pub enum CycleResult {
 /// - The actor's inbox (so [`run_cycle`](Self::run_cycle) can drain).
 /// - Whatever the actor's handler invocation needs (a `Box<A>` plus
 ///   the per-envelope wrapping `DispatcherSlot::dispatch_one` applies
-///   around the shared helpers in `crate::actor::native::dispatch` —
+///   around the shared helpers in `crate::actor::native::slot::dispatch` —
 ///   `local::with_stamped`, etc).
 pub trait Drainable: Send + Sync + 'static {
     /// One drain cycle. Sequence:
@@ -536,7 +536,7 @@ pub struct SeizeHandle {
 
 impl SeizeHandle {
     /// Construct a seize handle over a `Pooled` slot. The Pooled-branch
-    /// wiring in `chassis/builder.rs` + `actor/native/spawn.rs` builds
+    /// wiring in `chassis/builder.rs` + `actor/native/spawn/builder.rs` builds
     /// one once the slot exists and installs it into the registry entry.
     #[must_use]
     pub fn new(state: Arc<SlotState>, slot: Weak<dyn Drainable>) -> Self {
@@ -601,7 +601,7 @@ pub mod tests {
     /// ready-queue path, which sits below the recruit gate, so the
     /// `workers - 1` recruit cap (iamacoffeepot/aether#1147) never
     /// engages — any plausible pool size behaves identically. Shared
-    /// with `pool::tests` (same parent module); `blob_work::tests`
+    /// with `pool::tests` (same parent module); `blob::work::tests`
     /// keeps its own local copy since it lives outside `scheduler`.
     pub const TEST_WORKERS: usize = 8;
 

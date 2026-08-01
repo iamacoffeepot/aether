@@ -10,26 +10,26 @@ use aether_data::MailboxId;
 /// runtime type tag — the parent-declaration check — is gone, and what remains
 /// is the concrete instance the lineage fold and canonical name are built from.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ActorRuntimeIdentity {
+pub struct ActorRuntimeIdentity {
     mailbox: MailboxId,
     carry: u64,
     canonical_name: Arc<str>,
 }
 
 impl ActorRuntimeIdentity {
-    pub(super) fn new(mailbox: MailboxId, carry: u64, canonical_name: Arc<str>) -> Self {
+    pub fn new(mailbox: MailboxId, carry: u64, canonical_name: Arc<str>) -> Self {
         Self { mailbox, carry, canonical_name }
     }
 
-    pub(super) fn mailbox(&self) -> MailboxId {
+    pub fn mailbox(&self) -> MailboxId {
         self.mailbox
     }
 
-    pub(super) fn carry(&self) -> u64 {
+    pub fn carry(&self) -> u64 {
         self.carry
     }
 
-    pub(super) fn canonical_name(&self) -> &Arc<str> {
+    pub fn canonical_name(&self) -> &Arc<str> {
         &self.canonical_name
     }
 }

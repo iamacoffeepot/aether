@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use aether_actor::local::ActorSlots;
 
-use super::binding::NativeBinding;
-use super::dispatch_blocking::DeferredCompletion;
-use super::dispatcher_slot::DispatcherSlot;
 use super::reservation::ParentReservation;
-use super::spawn::{SpawnError, SpawnOutcome};
-use super::{Envelope, NativeActor};
+use super::{SpawnError, SpawnOutcome};
+use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::offload::blocking::DeferredCompletion;
+use crate::actor::native::slot::dispatcher::DispatcherSlot;
+use crate::actor::native::{Envelope, NativeActor};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::mail::mailer::Mailer;
@@ -26,7 +26,7 @@ use crate::scheduler::pending_depth;
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeHandle};
 use aether_kinds::trace::Nanos;
 
-use super::spawn::Spawner;
+use super::Spawner;
 
 pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     spawner: Arc<Spawner>,
