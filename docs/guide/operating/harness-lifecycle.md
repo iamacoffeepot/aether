@@ -23,6 +23,14 @@ These surfaces operate at different scopes:
 | `POST /admin/restart-hub` | entire supervised fleet | terminates and replaces the hub process |
 | graceful tunnel shutdown by `SIGINT` or `SIGTERM` | entire harness | asks the tunnel to terminate the hub, `aether-mcp`, and supervised fleet |
 
+A cold run also builds the binaries the hub forks for `spawn_substrate` —
+`aether-headless` and `aether-desktop`. It names the missing ones before
+starting, because the desktop chassis pulls in wgpu and winit and compiles for
+minutes with no output; that silence is the build, not a wedged script. Set
+`AETHER_TUNNEL_SKIP_DESKTOP=1` to skip the desktop chassis on a host that only
+ever spawns headless engines, and `spawn_substrate` will resolve
+`aether-headless` alone.
+
 The tunnel's admin endpoint is loopback control, not an ownership system. It
 does not authenticate a task or establish which session may restart the fleet.
 Likewise, `/admin/status` and `list_engines` expose no owner or hub epoch. A
