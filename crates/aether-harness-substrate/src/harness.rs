@@ -262,6 +262,7 @@ pub struct SubstrateHarnessBuilder {
     render_hook: Option<HookFactory>,
     component_host: bool,
     compose: Vec<ComposeFn>,
+    scheduler_tuning: SchedulerTuning,
 }
 
 impl Default for SubstrateHarnessBuilder {
@@ -278,11 +279,33 @@ impl Default for SubstrateHarnessBuilder {
             render_hook: None,
             component_host: false,
             compose: Vec::new(),
+            scheduler_tuning: SchedulerTuning::default(),
         }
     }
 }
 
 impl SubstrateHarnessBuilder {
+    /// Pin the scheduler's hot-path tuning for this harness.
+    ///
+    /// The scheduler reads these values off the resolved [`SchedulerTuning`]
+    /// it is booted with; it performs no env reads of its own (issue 464). A
+    /// chassis binary fills that struct from `aether-chassis`'s
+    /// `SchedulerTuningConfig` — argv > env > file > default — but the harness
+    /// resolves off a **hermetic** source stack (ADR-0156 §5) and cannot
+    /// depend on `aether-chassis` regardless, since `aether-chassis` already
+    /// depends on this crate. So the `AETHER_SPIN_WINDOW_USEC` /
+    /// `AETHER_LOCAL_TIME_BUDGET_US` / … keys do nothing under a harness
+    /// scenario, and this is the staging path that does: an explicit value on
+    /// the programmatic layer, the same seam `with_actor_configured` uses.
+    ///
+    /// A scenario that wants to A/B a scheduler knob calls this. Setting the
+    /// env key instead measures the same configuration twice (issue 4234).
+    #[must_use]
+    pub fn scheduler_tuning(mut self, tuning: SchedulerTuning) -> Self {
+        self.scheduler_tuning = tuning;
+        self
+    }
+
     /// Set the offscreen target size. Width / height are clamped to a
     /// minimum of 1 inside `Gpu::new`.
     #[must_use]
@@ -513,6 +536,7 @@ impl SubstrateHarness {
             render_hook,
             component_host,
             compose,
+            scheduler_tuning,
         } = builder;
         let hook_factory = render_hook;
 
@@ -555,7 +579,7 @@ impl SubstrateHarness {
             workers: WORKERS,
             pool_workers,
             ring_capacities,
-            scheduler_tuning: SchedulerTuning::default(),
+            scheduler_tuning,
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             namespace_roots,

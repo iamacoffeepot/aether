@@ -21,16 +21,23 @@
 //! cross-worker handoff cost ([`handoff_cost`]) — the
 //! thing the valve out-amortises — so it tracks the hardware instead of a
 //! one-box constant (the prior fixed 12µs sat at `≈ 6 ×` this box's ~2µs
-//! handoff). `AETHER_LOCAL_TIME_BUDGET_US` still overrides. Duration is the
+//! handoff). The resolved [`SchedulerTuning::time_budget_micros`](crate::SchedulerTuning::time_budget_micros) still
+//! overrides — a chassis binary fills it from `AETHER_LOCAL_TIME_BUDGET_US`,
+//! the harness from whatever a scenario staged. Duration is the
 //! discriminator: a cheap cascade's whole burst stays fully inlined (no
 //! bimodal), while a heavy one trips the valve and spills
 //! (iamacoffeepot/aether#1174 matrix: heavy −15% end-to-end, trivial flat).
-//! `AETHER_LOCAL_TIME_BUDGET_US=0` disables the valve (pure inline-cascade,
-//! bounded only by the deque-length backstop `AETHER_LOCAL_STICKY_MAX`,
+//! A pinned budget of `0` disables the valve (pure inline-cascade,
+//! bounded only by the deque-length backstop `local_sticky_max`,
 //! [`hard_cap`]). A worker is also **owner-only** over its own deque by
 //! default ([`peer_steal_enabled`], iamacoffeepot/aether#1174): it pulls only
-//! the shared injector, never a sibling's cascade. Set `AETHER_PEER_STEAL=1`
-//! to opt the sibling-tail raid back in.
+//! the shared injector, never a sibling's cascade. Setting
+//! [`SchedulerTuning::peer_steal`](crate::SchedulerTuning::peer_steal) opts the sibling-tail raid back in.
+//!
+//! None of these are read from the process environment here: the scheduler
+//! takes its whole configuration from the resolved [`SchedulerTuning`](crate::SchedulerTuning) it is
+//! booted with (issue 464). The `AETHER_*` keys named above are the chassis
+//! binaries' spelling of those fields, resolved once at boot.
 //!
 //! The depth-0 keep-local exemption (the `len > 0` term in
 //! [`try_push_local_budgeted`]'s spill condition) means a serial relay
@@ -41,7 +48,7 @@
 //! loop per worker, starve the injector completely. The **every-K chain
 //! backstop** (iamacoffeepot/aether#1535) bounds that monopoly: every
 //! [`chain_backstop`] consecutive own-deque pops ([`chain_pop_due`],
-//! `AETHER_LOCAL_CHAIN_BACKSTOP`, default 64) `acquire_slot` takes one
+//! default 64) `acquire_slot` takes one
 //! look at the injector before continuing the chain, so injector
 //! starvation is bounded at ~K × cycle-time per worker while the chain
 //! stays warm K−1 of K cycles — no clock read added.
@@ -133,8 +140,8 @@ pub fn pending_depth() -> u32 {
 /// Deque-length backstop (iamacoffeepot/aether#1160, #1174) — the max slots a
 /// worker keeps on its own deque before [`try_push_local_budgeted`] is forced
 /// to spill, so a pathological unbounded local cascade can't grow the deque
-/// without bound. Resolved from `AETHER_LOCAL_STICKY_MAX` (repurposed from
-/// the pre-#1160 stickiness cap); values `< 1` coerce to `256`. This is the
+/// without bound. Read off [`SchedulerTuning::local_sticky_max`](crate::SchedulerTuning::local_sticky_max) (repurposed
+/// from the pre-#1160 stickiness cap); values `< 1` coerce to `256`. This is the
 /// deque-growth backstop, not the primary
 /// governor — the per-burst time valve ([`time_budget`], default 12µs) is;
 /// for any realistic cascade (well under 256 blobs queued at once) `hard_cap`
@@ -177,9 +184,9 @@ const MAX_ADAPTIVE_BUDGET: Duration = Duration::from_micros(60);
 /// one where mail-count can't): a trivial tree's whole burst stays inlined,
 /// while a heavy cascade trips the valve and spills.
 ///
-/// `AETHER_LOCAL_TIME_BUDGET_US` (microseconds) overrides — an explicit
-/// value pins the budget and `0` disables the valve (pure inline-cascade,
-/// bounded only by `hard_cap`). Unset (the default), the budget is
+/// [`SchedulerTuning::time_budget_micros`](crate::SchedulerTuning::time_budget_micros) overrides — an explicit value pins
+/// the budget and `0` disables the valve (pure inline-cascade, bounded only
+/// by `hard_cap`). `None` (the default), the budget is
 /// **derived from the measured handoff cost**: `derive_budget` of
 /// [`handoff_cost`] — `BUDGET_HANDOFF_MULTIPLIER ×` the
 /// boot-probed, live-refined cross-worker handoff on this box, clamped to
@@ -207,9 +214,8 @@ fn derive_budget(handoff: Duration) -> Duration {
 }
 
 /// Whether idle workers may raid siblings' deques (peer-deque stealing),
-/// read once from `AETHER_PEER_STEAL`; default **off** — each worker is
-/// **owner-only** over its own deque (iamacoffeepot/aether#1174). Set
-/// **1** (or `true`) to opt the sibling raid back in.
+/// read off [`SchedulerTuning::peer_steal`](crate::SchedulerTuning::peer_steal); default **off** — each worker is
+/// **owner-only** over its own deque (iamacoffeepot/aether#1174).
 ///
 /// The default flipped to owner-only because peer-deque stealing stopped
 /// being load-bearing after seize-direct (iamacoffeepot/aether#1135),
@@ -224,7 +230,7 @@ fn derive_budget(handoff: Duration) -> Duration {
 /// loss of the budget-misclassification safety net — heavy work the budget
 /// *wrongly* keeps local strands on its owner with no idle-sibling rescue,
 /// raising the stakes on the iamacoffeepot/aether#1128 cost classification;
-/// `AETHER_PEER_STEAL=1` restores the rescue.
+/// pinning `peer_steal` restores the rescue.
 #[must_use]
 pub fn peer_steal_enabled() -> bool {
     tuning().peer_steal
@@ -237,8 +243,8 @@ pub fn peer_steal_enabled() -> bool {
 /// clock read (iamacoffeepot/aether#1174), so a *self-sustaining* chain
 /// would otherwise monopolise its worker forever; this bounds injector
 /// starvation at ~K × cycle-time per worker while the chain stays warm
-/// K−1 of K cycles. Resolved from `AETHER_LOCAL_CHAIN_BACKSTOP`; values
-/// `< 1` coerce to `64`.
+/// K−1 of K cycles. Read off [`SchedulerTuning::local_chain_backstop`](crate::SchedulerTuning::local_chain_backstop);
+/// values `< 1` coerce to `64`.
 #[must_use]
 pub fn chain_backstop() -> u32 {
     tuning().local_chain_backstop
@@ -328,8 +334,8 @@ pub fn burst_reset() {
 /// work — while a heavy cascade trips the valve after ~12µs and spills its
 /// backlog to parallelise (iamacoffeepot/aether#1174 matrix: heavy −15%
 /// end-to-end, trivial flat). The `len > 0` guard keeps a serial chain or
-/// single-blob fan-out local with no clock read. Set
-/// `AETHER_LOCAL_TIME_BUDGET_US=0` to disable the valve (pure inline-cascade).
+/// single-blob fan-out local with no clock read. A pinned budget of `0`
+/// disables the valve (pure inline-cascade).
 ///
 /// Returns `Ok(())` when kept local (the caller skips injector + notify),
 /// or `Err(slot)` to spill. Off a pool worker there is no own deque, so
@@ -505,7 +511,7 @@ mod tests {
         // ENTIRE cascade — every blob is kept local even when the burst is
         // long-running, because no spill term fires at any generation. Only
         // `hard_cap` bounds it. (The shipped default leaves the time valve on
-        // at 12µs; this is the `AETHER_LOCAL_TIME_BUDGET_US=0` pure-inline
+        // at 12µs; this is the `time_budget_micros: Some(0)` pure-inline
         // opt-out.)
         install(Worker::new_lifo());
         drain_local();

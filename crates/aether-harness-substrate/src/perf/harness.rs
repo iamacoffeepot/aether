@@ -34,7 +34,7 @@ use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_substrate::scheduler::{handoff_cost_nanos, reset_handoff_to_boot_seed};
-use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
+use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SchedulerTuning, Subname};
 use aether_trace::walk::fold_nodes;
 
 use crate::SubstrateHarness;
@@ -930,6 +930,76 @@ pub fn effective_trace_ring_cap() -> usize {
         .unwrap_or(DEFAULT_TRACE_RING_CAP)
 }
 
+/// The nine `AETHER_*` keys `scheduler_tuning_from_env` reads, in
+/// [`SchedulerTuning`] field order. Named as a const so the chassis can pin
+/// this list against `SchedulerTuningConfig`'s — the two spellings of the same
+/// key set are what would otherwise drift apart.
+pub const SCHEDULER_TUNING_ENV_KEYS: [&str; 9] = [
+    "AETHER_SPIN_WINDOW_USEC",
+    "AETHER_LOCAL_STICKY_MAX",
+    "AETHER_LOCAL_TIME_BUDGET_US",
+    "AETHER_PEER_STEAL",
+    "AETHER_LOCAL_CHAIN_BACKSTOP",
+    "AETHER_HANDOFF_COST_NS",
+    "AETHER_BLOB_RECRUIT_MIN",
+    "AETHER_BLOB_RECRUIT_MAX",
+    "AETHER_WAKE_COST_NANOS",
+];
+
+/// Resolve the scheduler's hot-path tuning from the perf lane's process env,
+/// falling back to [`SchedulerTuning::default`] per knob.
+///
+/// The nine keys are chassis-boot config (`aether-chassis`'s
+/// `SchedulerTuningConfig`), and a `SubstrateHarness` neither takes that path
+/// nor could — it resolves off a hermetic source stack (ADR-0156 §5), and
+/// `aether-chassis` already depends on this crate, so the reverse edge is a
+/// cycle. Left alone, that made every key inert under the perf lane while the
+/// scheduler's own docs advertised them, so an A/B across two values ran the
+/// same configuration twice and returned a clean null indistinguishable from a
+/// real "this knob does not affect this cell" result (issue 4234).
+///
+/// Reading them here rather than in the harness proper keeps ordinary scenario
+/// tests hermetic — a stray `AETHER_PEER_STEAL` in a developer's shell must
+/// not reconfigure an unrelated substrate test — while making the perf lane's
+/// documented `PERF_BASE_ENV` / `PERF_CAND_ENV` pinning real. It sits beside
+/// the other `*_from_env` perf knobs for the same reason they live here.
+///
+/// The two adaptive knobs stay `None` when unset (measured / derived
+/// behaviour) and the `nonzero` knobs coerce a `0` to their default,
+/// reproducing `SchedulerTuningConfig::to_scheduler_tuning`.
+#[must_use]
+pub fn scheduler_tuning_from_env() -> SchedulerTuning {
+    fn parsed<T: std::str::FromStr>(key: &str) -> Option<T> {
+        env::var(key).ok().and_then(|value| value.trim().parse().ok())
+    }
+
+    let defaults = SchedulerTuning::default();
+    SchedulerTuning {
+        spin_window_micros: parsed("AETHER_SPIN_WINDOW_USEC").unwrap_or(defaults.spin_window_micros),
+        local_sticky_max: parsed::<usize>("AETHER_LOCAL_STICKY_MAX")
+            .filter(|&n| n > 0)
+            .unwrap_or(defaults.local_sticky_max),
+        // Unset auto-tunes; an explicit `0` is meaningful (it disables the
+        // valve), so this one does not filter zero.
+        time_budget_micros: parsed("AETHER_LOCAL_TIME_BUDGET_US").or(defaults.time_budget_micros),
+        peer_steal: env::var("AETHER_PEER_STEAL")
+            .ok()
+            .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+            .unwrap_or(defaults.peer_steal),
+        local_chain_backstop: parsed::<u32>("AETHER_LOCAL_CHAIN_BACKSTOP")
+            .filter(|&n| n > 0)
+            .unwrap_or(defaults.local_chain_backstop),
+        handoff_cost_nanos: parsed::<u64>("AETHER_HANDOFF_COST_NS").filter(|&n| n >= 1).or(defaults.handoff_cost_nanos),
+        blob_recruit_min: parsed::<usize>("AETHER_BLOB_RECRUIT_MIN")
+            .filter(|&n| n > 0)
+            .unwrap_or(defaults.blob_recruit_min),
+        blob_recruit_max: parsed::<usize>("AETHER_BLOB_RECRUIT_MAX")
+            .filter(|&n| n > 0)
+            .unwrap_or(defaults.blob_recruit_max),
+        wake_cost_nanos: parsed::<u64>("AETHER_WAKE_COST_NANOS").filter(|&n| n >= 1).or(defaults.wake_cost_nanos),
+    }
+}
+
 #[must_use]
 pub fn saturate_backlog_from_env() -> u32 {
     let cap = u32::try_from(effective_trace_ring_cap()).unwrap_or(u32::MAX);
@@ -1294,6 +1364,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             let Ok(mut tb) = SubstrateHarness::builder()
                 .with_workers(Some(workers))
                 .trace_ring_capacity(Some(trace_ring_cap))
+                .scheduler_tuning(scheduler_tuning_from_env())
                 .size(16, 16)
                 .build()
             else {

@@ -208,6 +208,16 @@ out-amortizes. `AETHER_LOCAL_TIME_BUDGET_US` pins the valve (0 disables it);
 `AETHER_HANDOFF_COST_NS` pins the measurement; `AETHER_LOCAL_STICKY_MAX`
 (default 256) is the deque-length backstop behind it all.
 
+Those keys are **chassis boot config**, resolved once into `SchedulerTuning`
+by `aether-chassis`'s `SchedulerTuningConfig` (argv > env > file > default).
+The scheduler itself reads no environment. Two consequences worth knowing
+before an A/B: a `SubstrateHarness` scenario resolves off a hermetic source
+stack, so setting one of these keys changes nothing there — stage the value
+with `SubstrateHarness::builder().scheduler_tuning(...)` instead. The perf
+lane reads them from its own process environment
+(`perf::harness::scheduler_tuning_from_env`), which is what makes
+`perf-compare.sh`'s `PERF_BASE_ENV` / `PERF_CAND_ENV` pinning real.
+
 **The chain backstop.** A self-sustaining relay (A mails B, B mails A) oscillates
 its own deque 0→1→0 and would never visit the injector. Every
 `AETHER_LOCAL_CHAIN_BACKSTOP`-th consecutive own-deque pop (default 64) the
