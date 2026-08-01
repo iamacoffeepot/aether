@@ -5,9 +5,9 @@
 //! `#[actor]` emits a `RootEntry` / `ChildEntry` from `root` / `child_of(...)`
 //! and a cardinality fact from `singleton` / `instanced`. `AddressIndex`
 //! consumes the two together: it requires a cardinality fact for every
-//! namespace a placement fact names, and rejects the whole index when one is
-//! absent. So the emissions are only correct jointly, and a macro gate that can
-//! admit one without the other is the defect — not the presence of either
+//! namespace a placement fact names, and excludes a namespace missing one from
+//! the index. So the emissions are only correct jointly, and a macro gate that
+//! can admit one without the other is the defect — not the presence of either
 //! submission on its own, which the `#[actor]` expansion trivially guarantees.
 //!
 //! This lives in `aether-substrate`'s test tree for the same reason
@@ -86,9 +86,10 @@ fn register(registry: &Registry, canonical: &str) -> ResolvedAddress {
 /// output, and each fails unless the *cardinality* half of one declaration is
 /// present alongside its placement half. Reinstating any gate that emits a
 /// `RootEntry` / `ChildEntry` without the matching singleton / instanced fact
-/// puts `AddressIndex::build` back into `MissingCardinality`, which fails the
-/// whole index — so this also stands watch over every other namespace in a
-/// binary that links a fixture like these two.
+/// excludes that namespace from the address index, so the root stops anchoring
+/// (`HalfDeclaredRoot`) and the child edge stops eliding — both assertions go
+/// red. The exclusion is per-namespace, so this watches these two fixtures and
+/// not, as it once did, every other namespace in the binary.
 #[test]
 fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
     let registry = Registry::new();
