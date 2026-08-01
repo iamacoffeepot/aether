@@ -124,6 +124,24 @@ existing cardinality and resolver bounds; the first implementation admits the
 current root-singleton and instanced-child cases rather than inventing a
 keyless native-child resolver inside this decision.
 
+`root` names two properties, and they are carried by two artifacts rather than
+one. **Placement permission** — this identity may exist with no actor parent —
+is the `Root` implementation, which the chassis spawn surfaces read as a bound;
+every `root` declaration gets it. **Anchoring** — this namespace may stand
+before `://` in an abbreviated address — is the `RootEntry` record §4 emits,
+which the boundary resolver reads at link time. Only a singleton root anchors:
+an instanced namespace identifies no single actor, so §5 has nothing for it to
+resolve to. An instanced `#[actor(instanced, root)]` therefore takes the
+placement and submits no record.
+
+The anchor claim follows from cardinality rather than from a second keyword
+because the mapping is total — a singleton root always anchors, an instanced
+one never can — so a separate declaration could only restate what cardinality
+already decides, or claim something unsatisfiable. Splitting the artifacts and
+not the keyword keeps a coherent shape reachable: a family of parentless
+instanced siblings, addressed by index, is placeable without making an
+addressing claim it cannot honour.
+
 The relationship is declared with the child type. That makes an implementation
 legal when the child is local even if the parent comes from another crate, and
 prevents a downstream crate from redefining the placement semantics of two
@@ -254,7 +272,9 @@ so only exact `Root` and `Child` records participate in external abbreviation.
 ### 4. The macro emits anonymous lineage metadata
 
 `#[actor(root)]` and `#[actor(child_of(...))]` emit discoverable records
-alongside their trait implementations. Conceptually:
+alongside their trait implementations. A `RootEntry` is the anchor claim §1
+describes, so a singleton `root` emits one and an instanced `root` emits none
+while still implementing the `Root` marker. Conceptually:
 
 ```rust
 RootEntry {
@@ -324,7 +344,8 @@ identifies no single actor and so anchors nothing; and a namespace carrying a
 placement fact without a matching cardinality fact, or carrying two that
 contradict, whose elision behaviour is undefined. Both are reachable only
 through a hand-written `inventory::submit!` — the macro emits placement and
-cardinality together — and both are per-namespace rather than fatal to the
+cardinality together, and withholds the record entirely for an instanced root
+(§1) — and both are per-namespace rather than fatal to the
 index, because rejecting the whole index would disable abbreviated addressing
 process-wide over one unrelated declaration and report a namespace the caller
 was not addressing. An excluded root keeps its reason, so a `://` prefix
