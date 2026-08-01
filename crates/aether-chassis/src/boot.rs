@@ -1267,6 +1267,25 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_tuning_env_keys_match_the_perf_lane() {
+        // Tripwire: the perf lane resolves the same nine knobs from its own
+        // process env, because a SubstrateHarness cannot take the chassis
+        // config path (hermetic sources, and aether-chassis already depends on
+        // the harness crate, so the reverse edge is a cycle — issue 4234).
+        // Two independent spellings of one key set drift silently: a key
+        // renamed here alone would go inert in the perf lane exactly the way
+        // the whole set was before, with no signal.
+        use aether_harness_substrate::perf::harness::SCHEDULER_TUNING_ENV_KEYS;
+        use aether_substrate::config::known_keys;
+        use confique::Config as _;
+        use std::collections::BTreeSet;
+
+        let declared = known_keys(&[&SchedulerTuningConfigLayer::META], &[]).iter().collect::<BTreeSet<_>>();
+        let perf_side = SCHEDULER_TUNING_ENV_KEYS.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(declared, perf_side, "SchedulerTuningConfig and the perf lane must read the same env keys");
+    }
+
+    #[test]
     fn to_workers_none_returns_none() {
         // No workers knob set — pool uses PoolConfig::default.
         assert_eq!(ChassisBootConfig::default().to_workers(), None);

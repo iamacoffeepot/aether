@@ -177,16 +177,16 @@ impl Default for RegistryQueueCapacities {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingCapacities {
     /// Per-actor [`ActorLogRing`](aether_actor::log::ActorLogRing)
-    /// capacity (env `AETHER_ACTOR_LOG_RING_SIZE`; default
+    /// capacity (chassis-boot key `AETHER_ACTOR_LOG_RING_SIZE`; default
     /// [`DEFAULT_RING_CAP`]).
     pub log: usize,
     /// Per-actor [`ActorTraceRing`](aether_actor::trace::ActorTraceRing)
     /// and chassis-host-ring *floor* capacity — the size each ring starts
-    /// at (env `AETHER_ACTOR_TRACE_RING_SIZE`; default
+    /// at (chassis-boot key `AETHER_ACTOR_TRACE_RING_SIZE`; default
     /// [`DEFAULT_TRACE_RING_CAP`]).
     pub trace: usize,
     /// Ceiling a saturating trace ring grows to before it resumes
-    /// drop-oldest (env `AETHER_ACTOR_TRACE_RING_MAX_SIZE`; default
+    /// drop-oldest (chassis-boot key `AETHER_ACTOR_TRACE_RING_MAX_SIZE`; default
     /// [`DEFAULT_TRACE_RING_MAX_CAP`]). The trace ring grows geometrically
     /// from [`trace`](Self::trace) toward this; the log ring has no such
     /// ceiling (drop-oldest is its intended semantic).
@@ -217,19 +217,19 @@ impl Default for RingCapacities {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SchedulerTuning {
     /// Route-to-spinner spin-window (microseconds) before a worker parks
-    /// (env `AETHER_SPIN_WINDOW_USEC`; default `50`).
+    /// (chassis-boot key `AETHER_SPIN_WINDOW_USEC`; default `50`).
     pub spin_window_micros: u64,
     /// Deque-length backstop: max slots a worker keeps on its own deque
-    /// before forcing a spill (env `AETHER_LOCAL_STICKY_MAX`; default
+    /// before forcing a spill (chassis-boot key `AETHER_LOCAL_STICKY_MAX`; default
     /// `256`).
     pub local_sticky_max: usize,
     /// Keep-local time valve (microseconds): `Some` pins/disables the
     /// burst spill valve (`0` disables it), `None` derives it from the
-    /// measured handoff cost (env `AETHER_LOCAL_TIME_BUDGET_US`; default
+    /// measured handoff cost (chassis-boot key `AETHER_LOCAL_TIME_BUDGET_US`; default
     /// `None`).
     pub time_budget_micros: Option<u64>,
     /// Whether idle workers may raid siblings' deques (peer-deque
-    /// stealing); default owner-only (env `AETHER_PEER_STEAL`; default
+    /// stealing); default owner-only (chassis-boot key `AETHER_PEER_STEAL`; default
     /// `false`).
     pub peer_steal: bool,
     /// Every-K injector backstop for keep-local chains (env
@@ -240,10 +240,10 @@ pub struct SchedulerTuning {
     /// `AETHER_HANDOFF_COST_NS`; default `None`).
     pub handoff_cost_nanos: Option<u64>,
     /// Minimum fresh-group count for a flush to broadcast-recruit siblings
-    /// (env `AETHER_BLOB_RECRUIT_MIN`; default `9`).
+    /// (chassis-boot key `AETHER_BLOB_RECRUIT_MIN`; default `9`).
     pub blob_recruit_min: usize,
     /// Cap on the number of sibling copies a single flush injects when
-    /// recruiting (env `AETHER_BLOB_RECRUIT_MAX`; default `32`).
+    /// recruiting (chassis-boot key `AETHER_BLOB_RECRUIT_MAX`; default `32`).
     pub blob_recruit_max: usize,
     /// Pins the recruit wake break-even (nanoseconds) and freezes live
     /// refinement; `None` uses the box-measured handoff cost (env
