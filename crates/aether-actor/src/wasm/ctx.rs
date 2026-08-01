@@ -690,15 +690,24 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// the alias named no inline child — idempotent, so despawning an
     /// absent or already-gone alias is a clean `false`, not an error.
     ///
-    /// **The substrate alias route is kept** — teardown is guest-only, with
-    /// no substrate change and no alias deregistration. The alias stays a
-    /// route to this component's slot, so any in-flight or later mail to the
-    /// torn-down alias — fresh mail or an orphaned downstream reply — lands
-    /// in this inbox, the `export!` membrane finds no resident child and
-    /// falls through to the parent's standard dispatch tail, and the chain
-    /// settles (ADR-0080 / ADR-0094) rather than leaking. Discarding the
-    /// alias would short-circuit-drop that orphan mail; routing it to the
-    /// parent is the deliberate teardown discipline.
+    /// **The substrate alias route is retired too** (#4228): the address
+    /// departs with the actor it named. The host retires the route and fans
+    /// one [`MonitorNotice`](aether_kinds::MonitorNotice) out per watcher, so
+    /// a cap holding rows keyed on the child's stamped identity (ADR-0114 §4)
+    /// reclaims them — the despawn counterpart of what a vacate and a close
+    /// already do for a departing cluster.
+    ///
+    /// Later mail to a retired alias resolves as *dropped* rather than
+    /// resolving to this component's slot: the substrate warns and discards
+    /// it, balancing the send so the causal chain still settles (ADR-0080 §2)
+    /// rather than leaking. A sender therefore gets an honest "this address
+    /// was registered and is gone" instead of mail that silently lands in a
+    /// parent that never claimed it.
+    ///
+    /// The retirement is staged, not immediate — it lands through the
+    /// registry owner just after this guest call returns, the same path the
+    /// spawn-side publication takes. The child's own `unwire`, which runs
+    /// below, therefore still sends through a live alias.
     ///
     /// Callable from any depth: a parent on a child, a sibling on a
     /// sibling, or a child on itself. A self-despawn mid-dispatch drops
@@ -732,7 +741,17 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
             let mut unwire_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
             taken.erased_unwire(&mut unwire_ctx);
         }
-        self.inline.remove(child)
+        let removed = self.inline.remove(child);
+        // Only a slot that was actually ours earns a retirement: the guest
+        // registry is the authority on which aliases this cluster resides at,
+        // so an idempotent re-despawn (or an alias that named no child) leaves
+        // the substrate untouched. wasm32-only — the host build carries no FFI
+        // surface, and its inline registry has no substrate route behind it.
+        #[cfg(target_family = "wasm")]
+        if removed {
+            mail::despawn_inline_child(child.0);
+        }
+        removed
     }
 }
 

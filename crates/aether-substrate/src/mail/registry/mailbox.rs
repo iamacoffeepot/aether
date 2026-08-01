@@ -990,6 +990,33 @@ impl Registry {
                     publication.inventory_dirty |= target_live;
                     applied.push(RegistryApplied::Mailbox(alias.alias));
                 }
+                RegistryEffect::RetireAlias(alias) => {
+                    // Only an alias record is retirable here — see the effect's
+                    // own doc for why that is structural rather than checked at
+                    // the caller. Anything else (absent, already `Dropped`, or a
+                    // real mailbox that happens to answer to this id) falls
+                    // through as a clean `false`, which is what makes a
+                    // re-despawn idempotent.
+                    let Some(mut record) = staged_route(&staged_routes, inner, alias).cloned() else {
+                        applied.push(RegistryApplied::AliasRetired(false));
+                        continue;
+                    };
+                    let RouteLifecycle::Alias { target_parent } = record.lifecycle else {
+                        applied.push(RegistryApplied::AliasRetired(false));
+                        continue;
+                    };
+                    // The alias only occupied the live inventory while its
+                    // target parent was live, so only then does retiring it
+                    // change what the inventory publishes.
+                    let inventory_live = staged_route(&staged_routes, inner, target_parent)
+                        .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. }));
+
+                    record.lifecycle = RouteLifecycle::Dropped;
+                    staged_routes.insert(alias, Some(record.clone()));
+                    publication.route_updates.push(Update::Insert(alias, record));
+                    publication.inventory_dirty |= inventory_live;
+                    applied.push(RegistryApplied::AliasRetired(true));
+                }
                 RegistryEffect::ReserveStarting { route } => {
                     if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));

@@ -308,6 +308,17 @@ impl PreparedActivation {
 pub enum RegistryEffect {
     PreparedSpawn(PreparedSpawnCommit),
     PublishAlias(PreparedAliasRoute),
+    /// Retire one logical inline-child alias (ADR-0114 §2) when its child is
+    /// despawned: the route goes `Dropped`, so the address stops resolving
+    /// to the host's slot and reports as retired rather than absent.
+    ///
+    /// Deliberately narrower than [`Self::DropMailbox`], which this could
+    /// otherwise reuse. The id crosses from a guest, so "this effect can only
+    /// ever retire an alias" is worth holding structurally rather than in the
+    /// caller that validates ownership: a record whose lifecycle is not
+    /// `Alias` is left untouched. Absent or already-retired is a no-op,
+    /// matching the idempotence `WasmCtx::despawn_inline_child` promises.
+    RetireAlias(MailboxId),
     ReserveStarting {
         route: PreparedRoute,
     },
@@ -371,10 +382,16 @@ pub enum StartingCancellation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistryApplied {
-    Starting { id: MailboxId, token: ActivationToken },
+    Starting {
+        id: MailboxId,
+        token: ActivationToken,
+    },
     StartingCancellation(StartingCancellation),
     Mailbox(MailboxId),
     Dropped(String),
+    /// Outcome of [`RegistryEffect::RetireAlias`]: `true` when a live alias
+    /// route was retired, `false` when the id named no alias to retire.
+    AliasRetired(bool),
     Removed(bool),
     SeizeInstalled(bool),
     Kind(KindId),
@@ -440,6 +457,14 @@ impl RegistryBatch {
     #[must_use]
     pub fn publish_alias(alias: PreparedAliasRoute) -> Self {
         Self { batch: EffectBatch::new(vec![RegistryEffect::PublishAlias(alias)]) }
+    }
+
+    /// Retire one logical inline-child alias through the owner — the teardown
+    /// counterpart of [`Self::publish_alias`], staged when the guest despawns
+    /// the child the alias addressed.
+    #[must_use]
+    pub fn retire_alias(alias: MailboxId) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::RetireAlias(alias)]) }
     }
 
     pub(crate) fn into_effects(self) -> EffectBatch {

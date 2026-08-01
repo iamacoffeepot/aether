@@ -125,6 +125,12 @@ pub struct ComponentCtx {
     /// The trampoline drains these after the guest call and submits them to
     /// the registry owner; no parent endpoint is retained in the Store.
     pending_aliases: Vec<PreparedAliasRoute>,
+    /// ADR-0114 teardown (#4228): logical inline-child aliases whose child the
+    /// guest despawned, staged by the `despawn_inline_child` host function and
+    /// drained beside `pending_aliases`. The trampoline retires each route
+    /// through the registry owner and fans a departure notice out to its
+    /// watchers — the teardown mirror of the publish path.
+    pending_alias_retirements: Vec<MailboxId>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -195,6 +201,7 @@ impl ComponentCtx {
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawns: Vec::new(),
             pending_aliases: Vec::new(),
+            pending_alias_retirements: Vec::new(),
             load_window: None,
         }
     }
@@ -209,6 +216,23 @@ impl ComponentCtx {
 
     pub(crate) fn has_pending_alias(&self, alias: MailboxId) -> bool {
         self.pending_aliases.iter().any(|pending| pending.alias == alias && pending.target_parent == self.sender)
+    }
+
+    /// Stage the retirement of `alias`, whose inline child the guest just
+    /// despawned. A spawn and a despawn inside one guest call cancel out
+    /// against the still-unstaged publication rather than publishing a route
+    /// only to retire it a moment later, so the owner never sees an alias that
+    /// was never addressable.
+    pub(crate) fn stage_alias_retirement(&mut self, alias: MailboxId) {
+        let staged = self.pending_aliases.len();
+        self.pending_aliases.retain(|pending| pending.alias != alias || pending.target_parent != self.sender);
+        if self.pending_aliases.len() == staged {
+            self.pending_alias_retirements.push(alias);
+        }
+    }
+
+    pub(crate) fn take_pending_alias_retirements(&mut self) -> Vec<MailboxId> {
+        mem::take(&mut self.pending_alias_retirements)
     }
 
     /// Install the ADR-0163 asset load window before

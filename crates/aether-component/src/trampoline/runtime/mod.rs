@@ -139,7 +139,7 @@ impl NativeActor for WasmTrampoline {
     /// races the input cap's `validate_subscriber_mailbox`,
     /// silently dropping subscribes.
     fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-        let aliases = state.component.as_mut().map_or_else(Vec::new, |component| {
+        let (aliases, retired) = state.component.as_mut().map_or_else(Default::default, |component| {
             if let Err(e) = component.wire() {
                 tracing::error!(
                     target: "aether_component",
@@ -153,9 +153,10 @@ impl NativeActor for WasmTrampoline {
             // metadata for the instance's life. Runs whether or not `wire`
             // errored; the window's job (init + wire) is done either way.
             component.close_load_window();
-            component.drain_pending_aliases()
+            (component.drain_pending_aliases(), component.drain_pending_alias_retirements())
         });
         state.stage_inline_aliases(ctx, aliases);
+        state.stage_inline_alias_retirements(ctx, retired);
     }
 
     /// Drop the **wasm component**. Runs the guest's `unwire`
@@ -249,7 +250,7 @@ impl NativeActor for WasmTrampoline {
         // the guest staged during `deliver`. The block scopes the
         // `&mut component` borrow so `spawn_sibling` can read the
         // trampoline's other fields afterward.
-        let (aliases, pendings) = {
+        let (aliases, retired, pendings) = {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
                     target: "aether_component",
@@ -289,9 +290,14 @@ impl NativeActor for WasmTrampoline {
                 // today.
                 ctx.fatal_abort(format!("component {} (kind {}) trapped: {e}", state.mailbox, env.kind_name));
             }
-            (component.drain_pending_aliases(), component.drain_pending_spawns())
+            (
+                component.drain_pending_aliases(),
+                component.drain_pending_alias_retirements(),
+                component.drain_pending_spawns(),
+            )
         };
         state.stage_inline_aliases(ctx, aliases);
+        state.stage_inline_alias_retirements(ctx, retired);
         for pending in pendings {
             state.spawn_sibling(ctx, pending);
         }

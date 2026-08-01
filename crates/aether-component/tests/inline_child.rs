@@ -1,7 +1,7 @@
 //! ADR-0114 inline-child scenarios (rehomed per issue #3769): a wasm
 //! parent's inline children carry state across `replace_component`
-//! (typed reconstruct + by-tag spawn, issue 2692) and settle orphan mail
-//! through the parent after a mid-life despawn (#1939). The children ride
+//! (typed reconstruct + by-tag spawn, issue 2692) and surrender their
+//! address on a mid-life despawn (#1939, #4228). The children ride
 //! aether-actor's inline-child machinery, but the component host is what
 //! boots and replaces the hosting module, so the scenarios live here.
 //!
@@ -276,23 +276,34 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     );
 }
 
-/// ADR-0114 teardown (#1939): an inline child torn down mid-life still
-/// settles mail to its now-dead alias through the parent. Loads
-/// `InlineDespawnParent` from the `inline_child` bundle (issue 1994,
-/// ADR-0096) via `export: Some("test.inline.despawn_parent")`, probes
-/// the child's first-class alias and asserts the *child* answers + the
-/// chain settles, sends a `DespawnChild` trigger to the parent (which
-/// calls `ctx.despawn_inline_child` on the stored alias), then probes the
-/// **same** alias again. The substrate alias route is kept on teardown, so
-/// the orphaned probe lands in the parent's inbox, the membrane finds no
-/// resident child and falls through to the parent's dispatch tail — the
-/// *parent* answers and the chain **settles**. A `SettlementTimeout` on
-/// the post-teardown probe would be the leak this verb exists to prevent.
-/// Teardown settlement is engine-internal (membrane fallthrough → parent
-/// dispatch tail → `record_finished`), `SubstrateHarness`'s lane; #1916's
-/// `FleetHarness` already proved over-the-wire inline addressing.
+/// ADR-0114 teardown (#1939, #4228): tearing an inline child down takes its
+/// address with it. Loads `InlineDespawnParent` from the `inline_child`
+/// bundle (issue 1994, ADR-0096) via
+/// `export: Some("test.inline.despawn_parent")`, probes the child's
+/// first-class alias and asserts the *child* answers, sends a
+/// `DespawnChild` trigger to the parent (which calls
+/// `ctx.despawn_inline_child` on the stored alias), then addresses the
+/// **same** alias again.
+///
+/// Teardown retires the alias route with the child (#4228), and name
+/// resolution answers only for a live route — so the second probe does not
+/// reach the parent's dispatch tail as it once did, it fails to resolve at
+/// all. That is the correcting signal a peer holding a stale address was
+/// previously denied: before this, the alias resolved, the membrane found no
+/// resident child, and the parent silently answered for an actor that no
+/// longer existed.
+///
+/// The parent is probed on its own address afterwards as the positive
+/// control: it still answers, so the alias's disappearance is the retirement
+/// rather than a host that went away with its child. A peer holding the
+/// alias's `MailboxId` rather than its name takes the retired-route path
+/// instead, which settles the chain (ADR-0080 §2) — asserted at the route
+/// level in `aether-substrate`'s
+/// `despawning_an_inline_child_retires_its_alias_and_notifies_watchers`,
+/// since the harness addresses only by name. #1916's `FleetHarness` already
+/// proved over-the-wire inline addressing.
 #[test]
-fn despawn_inline_child_settles_orphan_mail_via_parent() {
+fn despawn_inline_child_retires_the_alias_address() {
     use aether_actor::Addressable;
 
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
@@ -341,20 +352,33 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     );
 
     // Tear the child down via the parent (`ctx.despawn_inline_child(self.child)`),
-    // then probe the *same* alias again. The kept alias routes the orphaned
-    // probe to the parent's dispatch tail, so it settles (a SettlementTimeout
-    // here would be the leak this verb prevents) and the *parent* answers.
-    let post = harness
-        .execute(vec![
-            ("despawn", HarnessOp::send_and_settle::<DespawnChild>(parent_addr.as_str(), &DespawnChild)),
-            ("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &InlineProbe)),
-        ])
-        .expect("despawn + post-teardown probe must settle, not SettlementTimeout");
+    // then address the *same* alias again. Its route is retired with the child,
+    // and only a live route resolves, so the probe never reaches the parent.
+    harness
+        .execute(vec![("despawn", HarnessOp::send_and_settle::<DespawnChild>(parent_addr.as_str(), &DespawnChild))])
+        .expect("despawn must settle");
+
+    let orphan =
+        harness.execute(vec![("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &InlineProbe))]).err();
+    assert!(
+        matches!(
+            &orphan,
+            Some(ExecutionError::OpFailed { label, error: SubstrateHarnessError::UnknownMailbox(name) })
+                if label == "probe" && name == &child_addr,
+        ),
+        "a despawned alias must stop resolving, so a peer holding the stale address is told the \
+         recipient is unknown instead of being silently answered by the host; got {orphan:?}",
+    );
+
+    // Positive control: the parent is still live and still answers, so the
+    // alias's disappearance is the retirement and not a departed host.
+    let parent = harness
+        .execute(vec![("parent", HarnessOp::send_and_await_reply(parent_addr.as_str(), &InlineProbe))])
+        .expect("the parent must still be addressable after tearing its child down");
     assert_eq!(
-        post.reply::<InlineEcho>("probe").expect("decode post-teardown InlineEcho"),
+        parent.reply::<InlineEcho>("parent").expect("decode post-teardown InlineEcho"),
         InlineEcho { who: INLINE_WHO_PARENT },
-        "after teardown, a probe to the same alias falls through to the parent \
-         (kept alias → membrane no resident child → parent dispatch tail)",
+        "the host component survives its inline child's teardown",
     );
 }
 
