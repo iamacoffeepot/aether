@@ -293,6 +293,18 @@ pub struct TaskDone<O, C = ()> {
 /// strands the caller forever, which is why [`Drop`] releases the hold and then
 /// `debug_assert`s — the distinction from a plain context value, whose drop
 /// means nothing.
+///
+/// # Distinct from `InboundMail`
+///
+/// ADR-0080 keeps two counts per root, and this type and
+/// [`InboundMail`](crate::chassis::inbox::InboundMail) are the handles for one
+/// each (iamacoffeepot/aether#4163). This one is the debt and moves
+/// `held_open`; `InboundMail` brackets a drained envelope and moves
+/// `in_flight`. They are deliberately not one type: on every deferred reply
+/// both are outstanding on the same chain, the inbound recording `Finished`
+/// when the handler returns while this hold keeps the chain open until the
+/// answer goes out. Merging the handles would merge the counts and settle the
+/// chain inside the window the hold exists to cover.
 #[must_use = "stage a successor or reply to the original caller before dropping the deferred reply"]
 pub struct DeferredReply {
     hold: Option<SettlementHold>,

@@ -243,6 +243,23 @@ impl Drop for SettlingInbox {
 /// counter rather than borrowing the [`SettlingInbox`], so a consumer can
 /// hold the guard while still reaching the surrounding `&mut self` (the
 /// desktop window driver dispatches each mail against `&mut App`).
+///
+/// # Distinct from `DeferredReply`
+///
+/// ADR-0080 keeps two counts per root, and this type and
+/// [`DeferredReply`](crate::actor::native::DeferredReply) are the handles for
+/// one each (iamacoffeepot/aether#4163). This one brackets an *envelope* and
+/// moves `in_flight`; `DeferredReply` carries a *debt* — a `SettlementHold`
+/// plus a reply target, no envelope — and moves `held_open`. Both are
+/// outstanding at once on every deferred reply: the handler returns and its
+/// inbound records `Finished`, while the hold keeps the chain open until the
+/// answer goes out.
+///
+/// [`Self::reply`] is a capability this guard offers rather than an obligation
+/// it carries, which is why it returns `bool` and why dropping unreplied is
+/// ordinary: an envelope earns exactly one `Finished` whether or not anyone
+/// asked for an answer. A `DeferredReply` exists only when someone is waiting,
+/// so its drop asserts.
 pub struct InboundMail {
     env: Envelope,
     mailer: Arc<Mailer>,

@@ -140,6 +140,35 @@ multi-second hang the chain would otherwise wedge into. Parked mail is unarmed
 tears down, every mail still parked on a never-resolving handle receives its
 `Finished`, so the upstream chain closes rather than hanging.
 
+## Two handles, because there are two counts
+
+Replies bring you into contact with two RAII types, and which one you are holding
+follows directly from `in_flight` and `held_open`.
+
+`InboundMail` brackets a drained envelope. Its drop records `Finished`, so it
+moves `in_flight`. Replying is a capability it offers along the way — it has the
+sender and the reply lineage to hand — and `reply` returns `false` when the
+sender asked for nothing.
+
+`DeferredReply` is the obligation to answer someone. It carries a
+`SettlementHold` and a reply target and knows nothing about an envelope, so it
+moves `held_open`. `TaskDone` is the same debt with a worker's output attached;
+both surrender a bare `DeferredReply` through `IntoDeferredReply`.
+
+Keeping them apart is what lets both be outstanding on one chain at the same
+time, which is precisely the deferred case: the handler returns and its inbound
+settles `in_flight`, while the hold keeps `held_open` above zero until the answer
+goes out. One combined handle would mean one combined count, and the window the
+hold exists to cover would close early — the settle-before-the-reply failure the
+hold contract above is there to prevent.
+
+Their drop contracts differ for the same reason. Every drained envelope earns
+exactly one `Finished` whether or not anyone wanted an answer, so dropping an
+`InboundMail` unreplied is ordinary. A hold is taken only when a caller is
+waiting, so dropping a `DeferredReply` unreplied strands that caller forever —
+which is why its drop releases the hold and then `debug_assert`s, in that order,
+so the release still happens in a release build.
+
 ## The trace tree
 
 The same lineage keys that drive settlement — each mail's id, its parent, its
