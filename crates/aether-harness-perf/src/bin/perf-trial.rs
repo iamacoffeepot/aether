@@ -40,6 +40,19 @@
 //!   fan-out widths to append (iamacoffeepot/aether#1075); unset, unchanged.
 //! - `AETHER_PERF_GIT_SHA` — stamped into the report; falls back to
 //!   `git rev-parse HEAD`.
+//! - `AETHER_PERF_CELL_ISOLATION` — set to `0` to measure every cell in this
+//!   process (the pre-#4177 behaviour) instead of one child process per cell.
+//!
+//! # Per-cell process isolation (iamacoffeepot/aether#4177)
+//!
+//! A trial runs each of its cells in a **fresh child of this same binary**.
+//! `perf::isolate` carries the why: a cell's execution mode is decided by the
+//! process state it boots into, so cells measured back-to-back in one process
+//! are correlated and cell order leaks into every percentile. This bin is both
+//! sides of that — run with `AETHER_PERF_CELL` set it *is* the child, measuring
+//! the one named cell and writing its raw samples to stdout; without it, it
+//! orchestrates. The child's output is a private transport between the two, not
+//! the `TrialReport` schema this bin publishes.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -47,7 +60,10 @@ use std::env;
 use std::process::{Command, ExitCode};
 
 use aether_harness_substrate::perf::harness::{
-    Drive, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep,
+    CellSamples, Drive, SweepConfig, drive_from_env, parse_topologies, parse_workers,
+};
+use aether_harness_substrate::perf::isolate::{
+    CellSelector, run_sweep_samples_isolated, selected_cell, selected_cell_json,
 };
 use aether_harness_substrate::perf::report::TrialReport;
 
@@ -70,6 +86,25 @@ fn git_sha() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Child mode (iamacoffeepot/aether#4177): measure the one cell `selector`
+/// names and write its raw samples to stdout for the parent to collect. An
+/// unmeasurable cell writes nothing and exits clean — it logged why on the
+/// stderr it shares with the parent, and the parent drops it exactly as an
+/// in-process sweep drops a cell it could not measure.
+fn run_one_cell(cfg: &SweepConfig, selector: &CellSelector) -> ExitCode {
+    match selected_cell_json(cfg, selector) {
+        Ok(Some(json)) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("perf-trial: cell serialize failed: {e}");
+            ExitCode::from(3)
+        }
+    }
+}
+
 // Dev/perf tooling: this perf-trial binary takes its run parameters from env in
 // main — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
@@ -78,9 +113,22 @@ fn main() -> ExitCode {
     let drive = drive_from_env();
 
     let cfg = SweepConfig { workers: parse_workers(), topologies: parse_topologies(), frames, drive };
-    let cells = run_sweep(&cfg);
+
+    // Child mode first: a malformed selector fails loudly rather than falling
+    // through and running the whole sweep in what the parent treats as one
+    // cell's process.
+    match selected_cell() {
+        Ok(Some(selector)) => return run_one_cell(&cfg, &selector),
+        Ok(None) => {}
+        Err(value) => {
+            eprintln!("perf-trial: malformed AETHER_PERF_CELL `{value}` (expected `<topology>@<workers>`)");
+            return ExitCode::from(4);
+        }
+    }
+
+    let cells: Vec<_> = run_sweep_samples_isolated(&cfg).into_iter().map(CellSamples::summarize).collect();
     if cells.is_empty() {
-        eprintln!("perf-trial: no cells measured (no wgpu adapter, or every cell boot failed)");
+        eprintln!("perf-trial: no cells measured (every cell's boot or subprocess failed)");
         return ExitCode::from(2);
     }
     // A `Saturate` run emits the throughput section only (latency under

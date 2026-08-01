@@ -12,6 +12,11 @@
 //! (reaching `SubstrateHarness`'s `pub(crate)` drive methods) and unit-testable.
 
 pub mod harness;
+// Per-cell process isolation for the sweep (iamacoffeepot/aether#4177): a cell
+// booted after other cells inherits their process state, and that inheritance —
+// not anything the cell executes — decides which of two execution modes it
+// lands in. `isolate` re-execs one child per cell so the modes are independent.
+pub mod isolate;
 // The real-`Registry` read-scaling + owner-ceiling benchmark
 // (iamacoffeepot/aether#4176), driven by the `perf-registry` bin.
 pub mod registry;

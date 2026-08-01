@@ -47,6 +47,24 @@ outliers. It does not make noisy hardware deterministic; inspect the full cell
 distribution and repeated trial set before changing architecture around one
 number.
 
+The fresh process goes all the way down to the cell. A trial measures each of
+its cells in its own child process rather than booting every chassis in one,
+because a cell's execution mode turns out to be decided by the process state it
+boots into: at small worker counts a cell settles into one of two modes at boot
+and holds it for the whole window, with dispatch percentiles differing several
+fold, while every in-window observable stays identical. Measured back-to-back in
+one process, cells inherit that state from each other and sweep position leaks
+into every percentile — enough on its own to render a large apparent regression
+that no code path explains. Per-cell processes make the mode an independent draw
+that replication averages out.
+
+Isolation deliberately changes only what a cell inherits from its siblings. The
+scheduler's handoff-cost estimate — the operating point the keep-local spill
+valve derives from — is still probed once per trial and shared with every cell,
+because letting each child probe for itself would restore the same drift by
+another route. Set `AETHER_PERF_CELL_ISOLATION=0` to measure in one process when
+attaching a debugger or profiler.
+
 Report sections version independently. A new or incompatible section is shown
 as unpaired rather than making every other comparable metric unreadable.
 
