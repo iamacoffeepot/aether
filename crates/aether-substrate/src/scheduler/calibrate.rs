@@ -232,6 +232,36 @@ pub fn reset_handoff_to_boot_seed() {
     HANDOFF.reset_to_seed();
 }
 
+/// Install `nanos` as this process's handoff seed, as though its boot probe
+/// had measured that value — **a measurement-isolation entry point, not a
+/// runtime one**, and the cross-process counterpart of
+/// [`reset_handoff_to_boot_seed`]. A running engine must never call it; that
+/// function carries why the estimate is deliberately live.
+///
+/// The case this serves is a harness that measures each cell in its **own
+/// process** (iamacoffeepot/aether#4177), which it does because a cell's
+/// execution mode is otherwise decided by the process state it inherits.
+/// Isolation fixes that inheritance, but it also gives every cell its own boot
+/// probe — and the probe varies enough between processes to reintroduce the
+/// operating-point drift iamacoffeepot/aether#4180 removed, siblings measured
+/// under different valves again, now by an unreported random draw rather than
+/// by cell order. Seeding every cell's process from **one** probe restores the
+/// shared starting point across a trial's cells.
+///
+/// Unlike pinning (`AETHER_HANDOFF_COST_NS`) this leaves live refinement
+/// enabled, so the cell's own wakes still move the estimate while it runs —
+/// the same bargain [`reset_handoff_to_boot_seed`] strikes, extended across a
+/// process boundary. A pinned estimate outranks it and is left alone: an
+/// operator who pinned a value asked for exactly that value. Floored to 1 ns,
+/// matching [`handoff_cost`].
+pub fn seed_handoff_cost_nanos(nanos: u64) {
+    ensure_seeded();
+    if PINNED.load(Ordering::Relaxed) {
+        return;
+    }
+    HANDOFF.seed(nanos.max(1));
+}
+
 /// Folded-sample count of the live estimate (boot seed counts as 1).
 /// Test / diagnostic observability for the dark refinement path.
 #[cfg(test)]

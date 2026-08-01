@@ -7,7 +7,12 @@
 //! Diagnostics go to stderr; PNGs land in `AETHER_PERF_PLOT_DIR`
 //! (default `./perf-plots`), one per `(topology × worker-count)` cell.
 //! Sweep config matches `perf-trial` (shared env parsers), so the plots
-//! describe the same cells the comparison measures.
+//! describe the same cells the comparison measures — including the per-cell
+//! process isolation (iamacoffeepot/aether#4177), so a plotted distribution is
+//! the one the comparison would see and not an in-process cell measured under
+//! a different boot history. Like `perf-trial`, this bin re-execs itself once
+//! per cell; `AETHER_PERF_CELL` puts it in that child mode and
+//! `AETHER_PERF_CELL_ISOLATION=0` turns isolation off.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 // Binning + axis math: latency samples and bin counts are small positive
@@ -23,7 +28,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use aether_harness_substrate::perf::harness::{
-    CellSamples, SweepConfig, drive_from_env, parse_topologies, parse_workers, run_sweep_samples,
+    CellSamples, SweepConfig, drive_from_env, parse_topologies, parse_workers,
+};
+use aether_harness_substrate::perf::isolate::{
+    CellSelector, run_sweep_samples_isolated, selected_cell, selected_cell_json,
 };
 use plotters::prelude::*;
 use plotters::style::register_font;
@@ -43,23 +51,54 @@ const FONT: &[u8] = include_bytes!("../../../aether-text/assets/fonts/RobotoMono
 /// clearly distinct from the queued/drain/handler `BLUE`/`RED`/`GREEN`.
 const CONSTRUCT: RGBColor = RGBColor(255, 140, 0);
 
+/// Child mode (iamacoffeepot/aether#4177): measure the one cell `selector`
+/// names and write its raw samples to stdout for the parent to collect. See
+/// `perf-trial`'s counterpart — this bin plots the cells rather than reporting
+/// them, but it measures them the same isolated way.
+fn emit_one_cell(cfg: &SweepConfig, selector: &CellSelector) -> ExitCode {
+    match selected_cell_json(cfg, selector) {
+        Ok(Some(json)) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("perf-plot: cell serialize failed: {e}");
+            ExitCode::from(3)
+        }
+    }
+}
+
 // Dev/perf tooling: this perf-plot binary takes its run parameters from env in
 // main — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     let frames: u32 = env::var("AETHER_PERF_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
     let dir = env::var("AETHER_PERF_PLOT_DIR").unwrap_or_else(|_| "perf-plots".to_owned());
+    let cfg = SweepConfig { workers: parse_workers(), topologies: parse_topologies(), frames, drive: drive_from_env() };
+
+    // Child mode (iamacoffeepot/aether#4177) before any rendering setup: a
+    // child measures one cell and writes its samples to stdout, and never
+    // renders — the parent owns the fonts, the plot directory, and the PNGs.
+    match selected_cell() {
+        Ok(Some(selector)) => return emit_one_cell(&cfg, &selector),
+        Ok(None) => {}
+        Err(value) => {
+            eprintln!("perf-plot: malformed AETHER_PERF_CELL `{value}` (expected `<topology>@<workers>`)");
+            return ExitCode::from(4);
+        }
+    }
+
     // Register the embedded font under "sans-serif" so every FontDesc the
     // chart builds (caption, mesh labels, legend) resolves to it.
     if register_font("sans-serif", FontStyle::Normal, FONT).is_err() {
         eprintln!("perf-plot: failed to parse the embedded font");
         return ExitCode::from(1);
     }
-    let cfg = SweepConfig { workers: parse_workers(), topologies: parse_topologies(), frames, drive: drive_from_env() };
 
-    let cells = run_sweep_samples(&cfg);
+    let cells = run_sweep_samples_isolated(&cfg);
     if cells.is_empty() {
-        eprintln!("perf-plot: no cells measured (no wgpu adapter, or every cell boot failed)");
+        eprintln!("perf-plot: no cells measured (every cell's boot or subprocess failed)");
         return ExitCode::from(2);
     }
     if let Err(e) = fs::create_dir_all(&dir) {
