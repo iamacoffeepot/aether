@@ -29,8 +29,9 @@ use std::sync::Arc;
 use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
-use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailId, MailboxId, ReplyContract, mailbox_id_from_name};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
+use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
@@ -72,6 +73,22 @@ impl NativeActor for RingRelay {
     type State = Self;
 }
 impl Dispatch<Self> for RingRelay {
+    /// See `perf::harness::Relay::capabilities` (iamacoffeepot/aether#4236) — a
+    /// hand-written `Dispatch` gets no generated handler declaration, so
+    /// without this the actor owns no cost cells and every cost-aware decision
+    /// made about it falls back.
+    fn capabilities() -> ComponentCapabilities {
+        ComponentCapabilities {
+            handlers: vec![HandlerCapability {
+                id: Ping::ID,
+                name: <Ping as Kind>::NAME.to_owned(),
+                doc: None,
+                reply: ReplyContract::None,
+            }],
+            ..ComponentCapabilities::default()
+        }
+    }
+
     fn dispatch(
         state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
@@ -132,6 +149,22 @@ impl NativeActor for HoldRelay {
     type State = Self;
 }
 impl Dispatch<Self> for HoldRelay {
+    /// See `perf::harness::Relay::capabilities` (iamacoffeepot/aether#4236) — a
+    /// hand-written `Dispatch` gets no generated handler declaration, so
+    /// without this the actor owns no cost cells and every cost-aware decision
+    /// made about it falls back.
+    fn capabilities() -> ComponentCapabilities {
+        ComponentCapabilities {
+            handlers: vec![HandlerCapability {
+                id: Ping::ID,
+                name: <Ping as Kind>::NAME.to_owned(),
+                doc: None,
+                reply: ReplyContract::None,
+            }],
+            ..ComponentCapabilities::default()
+        }
+    }
+
     fn dispatch(
         _state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,

@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 
 use aether_actor::OutboundReply;
 use aether_actor::trace::DEFAULT_TRACE_RING_CAP;
-use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailboxId, ReplyContract, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
-use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
+use aether_kinds::{ComponentCapabilities, HandlerCapability, LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_substrate::scheduler::{handoff_cost_nanos, reset_handoff_to_boot_seed};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SchedulerTuning, Subname};
 use aether_trace::walk::fold_nodes;
@@ -181,6 +181,36 @@ impl NativeActor for Relay {
     type State = Self;
 }
 impl Dispatch<Self> for Relay {
+    /// Declare the kinds this relay handles (iamacoffeepot/aether#4236).
+    ///
+    /// `Dispatch::capabilities` defaults to an empty surface, and a hand-written
+    /// `Dispatch` impl — unlike an `#[actor]` one — gets no generated override.
+    /// The spawn path seeds the cost table from exactly this list, so leaving it
+    /// empty means the relay owns no cost cells: `fold_handler_cost` finds no
+    /// cell to fold into, the producer's `group_mail_cost` lookup misses, and the
+    /// #1178 cost-aware recruiter reports `cost_confident = false` on every
+    /// flush. The harness would then measure a dispatch path with cost-awareness
+    /// permanently disabled, which is not what a production `#[actor]` cap does.
+    fn capabilities() -> ComponentCapabilities {
+        ComponentCapabilities {
+            handlers: vec![
+                HandlerCapability {
+                    id: Ping::ID,
+                    name: <Ping as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::None,
+                },
+                HandlerCapability {
+                    id: CountQuery::ID,
+                    name: <CountQuery as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::One(CountReport::ID),
+                },
+            ],
+            ..ComponentCapabilities::default()
+        }
+    }
+
     fn dispatch(
         state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
@@ -273,6 +303,29 @@ impl NativeActor for TickSource {
     type State = Self;
 }
 impl Dispatch<Self> for TickSource {
+    /// See `Relay::capabilities` (iamacoffeepot/aether#4236) — a hand-written
+    /// `Dispatch` gets no generated handler declaration, and the spawn path
+    /// seeds the cost table from this list.
+    fn capabilities() -> ComponentCapabilities {
+        ComponentCapabilities {
+            handlers: vec![
+                HandlerCapability {
+                    id: Tick::ID,
+                    name: <Tick as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::None,
+                },
+                HandlerCapability {
+                    id: CountQuery::ID,
+                    name: <CountQuery as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::One(CountReport::ID),
+                },
+            ],
+            ..ComponentCapabilities::default()
+        }
+    }
+
     fn dispatch(
         state: &mut Self,
         ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
@@ -2126,5 +2179,70 @@ mod tests {
         // `real_cell` advances 4 frames at burst 1 → 4 roots.
         assert_eq!(keepup.offered, 4 * hops as u64, "offered = frames × hops-per-root");
         assert!(keepup.expected_nanos > 0, "a paced cell carries a positive 60 Hz budget");
+    }
+}
+
+/// Tripwire for iamacoffeepot/aether#4236: the sweep's relays must own live
+/// cost cells after a real run.
+///
+/// A hand-written `Dispatch` impl inherits an empty `capabilities()`, and the
+/// spawn path seeds the cost table from exactly that list — so forgetting to
+/// declare a handler leaves the actor with no cost cells at all. Nothing fails
+/// when that happens: `fold_handler_cost` finds no cell and silently skips, the
+/// producer's cost lookup misses, and the #1178 cost-aware recruiter reports
+/// `cost_confident = false` on every flush and falls back to the width gate
+/// forever. The sweep still produces numbers — measured against a dispatch path
+/// with cost-awareness disabled, which is not the path a production `#[actor]`
+/// cap takes.
+///
+/// The pinned value is read back from a live 200-frame run rather than restated
+/// from the declaration, so it moves when the wiring moves.
+#[cfg(test)]
+mod cost_cell_liveness {
+    use super::*;
+    use aether_kinds::{CostTail, CostTailResult};
+
+    #[test]
+    fn sweep_relays_own_live_cost_cells_after_a_run() {
+        let topo = fanout(4);
+
+        let Ok(mut tb) = SubstrateHarness::builder().with_workers(Some(2)).size(16, 16).build() else {
+            // Driverless box: the sweep itself skips the same way.
+            return;
+        };
+
+        for i in 0..topo.downstreams.len() {
+            let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+            let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
+            tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish().expect("relay spawns");
+        }
+        tb.spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), 1), ()).finish().expect("source spawns");
+
+        let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
+        let reply =
+            tb.send_bytes_and_await("aether.lifecycle", LifecycleSubscribe::ID, sub_req).expect("subscribe sends");
+        assert!(matches!(LifecycleSubscribeResult::decode_from_bytes(&reply), Some(LifecycleSubscribeResult::Ok)));
+
+        let _ = tb.advance(200);
+
+        for i in 0..topo.downstreams.len() {
+            let name = format!("mlat.relay:{i}");
+            let request = CostTail { kind: Some(Ping::ID) }.encode_into_bytes();
+            let bytes = tb.send_bytes_and_await(&name, CostTail::ID, request).expect("the relay answers cost.tail");
+            let Some(CostTailResult::Ok { rows }) = CostTailResult::decode_from_bytes(&bytes) else {
+                panic!("{name}: cost.tail did not answer Ok");
+            };
+            let row = rows.first().unwrap_or_else(|| {
+                panic!(
+                    "{name} owns no cost cell for Ping — its `Dispatch::capabilities` no longer declares the \
+                     handler, so the sweep is measuring a path with cost-aware recruitment disabled"
+                )
+            });
+            assert!(
+                row.samples > 0,
+                "{name} has a Ping cost cell but folded no samples over 200 frames; the dispatch path stopped \
+                 reaching `fold_handler_cost`",
+            );
+        }
     }
 }
