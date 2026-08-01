@@ -147,6 +147,47 @@ pub(super) struct AddressIndex {
     /// reports the half-declaration rather than reading as unknown.
     half_declared_roots: BTreeMap<String, CardinalityDefect>,
     children: HashMap<ActorId, Vec<ChildNode>>,
+    /// Namespace of every actor that appears as a parent in `children`. The
+    /// child nodes carry their own namespace; this recovers the parent's, which
+    /// the `ActorId` key alone does not spell. Total over `children`'s keys by
+    /// construction — both maps are filled from the same edge.
+    parent_namespaces: HashMap<ActorId, String>,
+}
+
+/// Every parent in *this binary's* linked actor inventory beneath which a bare
+/// discriminator is ambiguous (ADR-0166 §5), sorted by parent namespace.
+///
+/// The linkage is the point. A `child_of(...)` in one crate can collapse an
+/// abbreviation that another crate's callers depend on, and the collapse is
+/// only visible to a binary that links both — so a gate over this reads the
+/// same link-time facts the resolver does rather than scanning source
+/// (iamacoffeepot/aether#4127).
+///
+/// # Errors
+///
+/// Returns [`ActorAddressInventoryError`] when a linked placement fact is
+/// malformed — a namespace that is not a legal segment, or an actor tag
+/// disagreeing with the namespace it claims. Those stay fatal to the whole
+/// index, because such a fact cannot be trusted to name what it says it names.
+pub fn ambiguous_abbreviations() -> Result<Vec<AmbiguousAbbreviation>, ActorAddressInventoryError> {
+    Ok(AddressIndex::from_inventory()?.ambiguous_abbreviations())
+}
+
+/// A point in the linked declaration graph where a bare discriminator cannot
+/// elide: more than one instanced child namespace is declared beneath the same
+/// parent, so `parent://name` names no single child (ADR-0166 §5).
+///
+/// Ambiguity is a property of the declaration graph rather than of any one
+/// actor, and a `child_of(...)` added in an unrelated crate can create it — so
+/// the shape exists to be enumerated and gated, not only reported at the moment
+/// an address fails to resolve (iamacoffeepot/aether#4127).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AmbiguousAbbreviation {
+    /// The parent whose bare discriminators cannot elide.
+    pub parent_namespace: String,
+    /// The competing instanced child namespaces, sorted. A caller addressing
+    /// this parent must name one of these explicitly as `namespace:discriminator`.
+    pub child_namespaces: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -302,22 +343,50 @@ impl AddressIndex {
             let Some(cardinality) = resolved_cardinalities.get(fact.child_namespace) else {
                 continue;
             };
-            logical_edges.insert((fact.parent, fact.child, fact.child_namespace, *cardinality));
+            logical_edges.insert((fact.parent, fact.parent_namespace, fact.child, fact.child_namespace, *cardinality));
         }
 
         let mut children = HashMap::<ActorId, Vec<ChildNode>>::new();
-        for (parent, child, child_namespace, cardinality) in logical_edges {
+        let mut parent_namespaces = HashMap::new();
+        for (parent, parent_namespace, child, child_namespace, cardinality) in logical_edges {
             children.entry(parent).or_default().push(ChildNode {
                 actor: child,
                 namespace: child_namespace.to_owned(),
                 cardinality,
             });
+            parent_namespaces.insert(parent, parent_namespace.to_owned());
         }
         for nodes in children.values_mut() {
             nodes.sort_by(|left, right| left.namespace.cmp(&right.namespace).then(left.actor.cmp(&right.actor)));
         }
 
-        Ok(Self { roots, instanced_roots, half_declared_roots, children })
+        Ok(Self { roots, instanced_roots, half_declared_roots, children, parent_namespaces })
+    }
+
+    /// Every parent beneath which a bare discriminator is ambiguous, sorted by
+    /// parent namespace. Reads the same resolved edges `expand_segment` walks,
+    /// so what this reports and what a caller hits at resolution time cannot
+    /// disagree.
+    pub(super) fn ambiguous_abbreviations(&self) -> Vec<AmbiguousAbbreviation> {
+        let mut points = self
+            .children
+            .iter()
+            .filter_map(|(parent, nodes)| {
+                let child_namespaces = nodes
+                    .iter()
+                    .filter(|node| node.cardinality == Cardinality::Instanced)
+                    .map(|node| node.namespace.clone())
+                    .collect::<Vec<_>>();
+                // One instanced child elides; none leaves nothing to elide into.
+                if child_namespaces.len() < 2 {
+                    return None;
+                }
+                let parent_namespace = self.parent_namespaces.get(parent)?.clone();
+                Some(AmbiguousAbbreviation { parent_namespace, child_namespaces })
+            })
+            .collect::<Vec<_>>();
+        points.sort();
+        points
     }
 
     pub(super) fn expand(&self, root: &str, relative: &str) -> Result<String, AddressResolutionError> {
