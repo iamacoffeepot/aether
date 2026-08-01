@@ -37,6 +37,13 @@ LOG_MAX_BYTES=$((32 * 1024 * 1024))
 # giving up (and still exiting 0).
 STARTUP_TIMEOUT_SECS=15
 
+# Skip the desktop chassis in the pre-build below. Desktop is the only binary in
+# the fork chain that pulls wgpu + winit, so building it cold costs minutes where
+# the rest cost seconds. Set `AETHER_TUNNEL_SKIP_DESKTOP=1` on a box that never
+# spawns a windowed substrate to trade that away for a fast first run;
+# `spawn_substrate` then resolves only `aether-headless`.
+SKIP_DESKTOP="${AETHER_TUNNEL_SKIP_DESKTOP:-0}"
+
 # Resolve the project root so we can find a pre-built binary / run cargo.
 # `CLAUDE_PROJECT_DIR` is set by the harness; fall back to the script's
 # repo when run by hand.
@@ -175,15 +182,45 @@ fi
 #   aether-hub      — forked by the tunnel; the RPC server the fleet talks to
 #   aether-headless — forked by the hub for `spawn_substrate`
 #   aether-desktop  — forked by the hub for a windowed `spawn_substrate`
-echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)..."
+BUILD_TARGETS=(
+    -p aether-mcp --bin aether-tunnel
+    -p aether-mcp --bin aether-mcp
+    -p aether-chassis-hub --bin aether-hub
+    -p aether-chassis-headless --bin aether-headless
+)
+FORK_CHAIN_BINS=(aether-tunnel aether-mcp aether-hub aether-headless)
+if [[ "$SKIP_DESKTOP" == "1" || "$SKIP_DESKTOP" == "true" ]]; then
+    echo "[ensure-tunnel] AETHER_TUNNEL_SKIP_DESKTOP is set — skipping the desktop chassis."
+    echo "[ensure-tunnel] \`spawn_substrate\` will resolve aether-headless only."
+else
+    BUILD_TARGETS+=(-p aether-chassis-desktop --bin aether-desktop)
+    FORK_CHAIN_BINS+=(aether-desktop)
+fi
+
+# Say *before* the build how long it is likely to take. A cold desktop build
+# compiles wgpu + winit and goes quiet for minutes, which reads as a hung
+# session to an agent watching the hook's output — the point of naming the
+# missing binaries up front is that the silence is accounted for rather than
+# ambiguous.
+missing_bins=()
+for bin in "${FORK_CHAIN_BINS[@]}"; do
+    [[ -x "${PROJECT_DIR}/target/release/${bin}" ]] || missing_bins+=("$bin")
+done
+if (( ${#missing_bins[@]} > 0 )); then
+    echo "[ensure-tunnel] cold build — not yet in target/release: ${missing_bins[*]}"
+    echo "[ensure-tunnel] compiling these from source takes minutes. Long silences are the build"
+    echo "[ensure-tunnel] working, not a hang; cargo prints nothing while a large crate compiles."
+    # Only advertise the escape hatch to someone who has not already taken it.
+    if [[ " ${missing_bins[*]} " == *" aether-desktop "* ]]; then
+        echo "[ensure-tunnel] aether-desktop dominates that time (wgpu + winit) —"
+        echo "[ensure-tunnel] set AETHER_TUNNEL_SKIP_DESKTOP=1 to skip it and start faster."
+    fi
+else
+    echo "[ensure-tunnel] pre-building tunnel + forked binaries (warm target — expect a no-op)..."
+fi
 (
     cd "$PROJECT_DIR" || exit 0
-    cargo build --release \
-        -p aether-mcp --bin aether-tunnel \
-        -p aether-mcp --bin aether-mcp \
-        -p aether-chassis-hub --bin aether-hub \
-        -p aether-chassis-headless --bin aether-headless \
-        -p aether-chassis-desktop --bin aether-desktop
+    cargo build --release "${BUILD_TARGETS[@]}"
 ) || true
 
 # Bootstrap the hub's content-addressed binary store (ADR-0115) with the
@@ -200,7 +237,10 @@ echo "[ensure-tunnel] pre-building tunnel + forked binaries (no-op when warm)...
 # can select `aether-desktop` without a separate release build and manual
 # `upload_binary`. Its build needs wgpu / winit and may fail on a headless box;
 # the `|| true` above and the `-x` test below mean that degrades to "headless
-# only" rather than failing the launch.
+# only" rather than failing the launch. The list is derived from what is on
+# disk rather than from what this run built, so an already-built desktop binary
+# is still bootstrapped under `AETHER_TUNNEL_SKIP_DESKTOP` — the skip is about
+# not paying for the build, not about withholding a binary that already exists.
 BOOTSTRAP_BINS=()
 for bin in aether-headless aether-desktop; do
     candidate="${PROJECT_DIR}/target/release/${bin}"
