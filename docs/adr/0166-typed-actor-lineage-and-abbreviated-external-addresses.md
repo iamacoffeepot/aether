@@ -220,12 +220,29 @@ module, not hostile isolation inside a shared Store.
 exclusive with explicit `child_of(...)` declarations on that actor. The Wasm
 lineage section records
 `ActorLineageRecord::ModuleChild { child, child_namespace }` separately from
-exact `Child` edges and bumps `ACTOR_LINEAGE_SECTION_VERSION`; malformed or
-version-mismatched metadata fails closed. Typed spawn retains the
-`C: ChildOf<P> + Instanced` bound and runtime parent-tag check. Dynamic by-tag
-spawn validates exported membership, generated instanced cardinality, and the
-generated exact-or-module-child fact before allocating an alias or staging a
-detached spawn.
+exact `Child` edges and bumps `ACTOR_LINEAGE_SECTION_VERSION`. Typed spawn
+retains the `C: ChildOf<P> + Instanced` bound and runtime parent-tag check.
+Dynamic by-tag spawn validates exported membership, generated instanced
+cardinality, and the generated exact-or-module-child fact before allocating an
+alias or staging a detached spawn.
+
+Placement enforcement is **guest-side and terminal**, not a host load gate.
+Every check above reads the generated tables inside the resident module — the
+`ChildOf<P>` bound at compile time, the exported-membership and
+module-child facts at by-tag spawn. That is the correct locus for the contract
+this section states: an application-correctness rule confined to actors
+executing from one resident module, explicitly not hostile isolation. A host
+reader that re-validated the same facts would duplicate a check the guest
+already cannot evade by accident, and would gain nothing against a guest that
+is not trusted in the first place — the threat model this decision disclaims.
+
+The `aether.actor.lineage` custom section is therefore **reserved**: written by
+`export!`, read by no host today, and carrying its version byte so a future
+host-side *reader* — the discovery and autocomplete surface §5 contemplates,
+not a permission gate — can version-check it. The substrate's manifest reader
+knows `aether.kinds`, `aether.kinds.labels`, `aether.namespace`,
+`aether.no_default`, and `aether.boot`; that list is complete, and a module
+whose lineage section is absent or unreadable loads normally.
 
 `Addressable::NAMESPACE` remains the logical actor type key.
 `aether.embedded` remains owned by the resolver and never becomes a prefix

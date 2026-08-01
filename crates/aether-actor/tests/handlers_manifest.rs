@@ -135,6 +135,10 @@ enum LineageSectionError {
     MalformedRecord,
 }
 
+/// Decode the generated lineage manifest so the tests below can assert its
+/// *contents* — which namespaces, which edge kinds. This is a test-local
+/// decoder for macro output, not a mirror of a host reader: enforcement is
+/// guest-side and no host parses this section (ADR-0166 §3).
 fn parse_lineage_section(bytes: &[u8]) -> Result<Vec<ActorLineageRecord>, LineageSectionError> {
     let mut out = Vec::new();
     let mut cursor = bytes;
@@ -336,14 +340,4 @@ fn lineage_const_encoders_match_runtime_wire_for_every_selector() {
             "const and runtime actor-lineage encoders must agree for {record:?}"
         );
     }
-}
-
-#[test]
-fn lineage_reader_rejects_stale_and_malformed_records() {
-    let mut stale = ComposableProbe::__AETHER_LINEAGE_MANIFEST;
-    stale[0] = 0x01;
-    assert_eq!(parse_lineage_section(&stale), Err(LineageSectionError::UnsupportedVersion(0x01)));
-
-    let malformed = &ComposableProbe::__AETHER_LINEAGE_MANIFEST[..ComposableProbe::__AETHER_LINEAGE_MANIFEST_LEN - 1];
-    assert_eq!(parse_lineage_section(malformed), Err(LineageSectionError::MalformedRecord));
 }
