@@ -190,7 +190,7 @@ mod tests {
         let _guard = TICK_ENV_GUARD.lock().expect("env guard");
         // SAFETY: the guard serializes every env-touching test in this module,
         // and the key is removed before the guard drops.
-        unsafe { env::set_var("AETHER_TICK_HZ", &DEFAULT_TICK_HZ.to_string()) };
+        unsafe { env::set_var("AETHER_TICK_HZ", DEFAULT_TICK_HZ.to_string()) };
         let mut sources = ConfigSources::new(None);
         let settings = ChassisSettings { title: None, window_mode: None, tick_hz: Some(30) };
         let resolved =
