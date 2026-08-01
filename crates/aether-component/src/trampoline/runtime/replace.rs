@@ -6,7 +6,9 @@ use aether_actor::Local as _;
 use aether_actor::Single;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
+use aether_substrate::actor::native::{
+    Dispatch, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
+};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
@@ -343,7 +345,16 @@ impl WasmTrampolineState {
         // cache directly with the freshly-returned `Arc`s — keeping
         // the cache exact across replace (a new kind's cell would
         // otherwise miss until the cache happened to re-pull).
-        let handler_kinds: Vec<KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
+        //
+        // The trampoline's own framework arms ride along
+        // (iamacoffeepot/aether#4269): `capabilities` is the *guest's* handler
+        // set, and seeding from it alone dropped the cells for the kinds this
+        // native actor dispatches itself — `ReplaceComponent` among them, so
+        // this very handler's cost went unmeasured on every replace.
+        let mut handler_kinds: Vec<KindId> = <WasmTrampoline as Dispatch<Self>>::measured_kinds();
+        let guest_kinds: Vec<KindId> =
+            capabilities.handlers.iter().map(|h| h.id).filter(|id| !handler_kinds.contains(id)).collect();
+        handler_kinds.extend(guest_kinds);
         let seeded = self.mailer.cost_table().seed(self.mailbox, &handler_kinds);
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
