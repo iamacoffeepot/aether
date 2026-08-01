@@ -651,6 +651,56 @@ fn macro_emits_native_lineage_inventory_from_actor_types() {
     assert_eq!(parents, vec![ReplyParentA::NAMESPACE, ReplyParentB::NAMESPACE]);
 }
 
+/// An instanced cap that declares `root`. It is placeable at the chassis root
+/// and, being instanced, anchors no abbreviated address — the two halves of
+/// `root` that iamacoffeepot/aether#4121 separates.
+struct InstancedRootCap;
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for InstancedRootCap {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.macro_native_actor.instanced_root";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    /// Present only so the identity carries a handler like any other cap; the
+    /// link-time placement facts are what this fixture exists to exercise.
+    #[allow(clippy::unused_self)]
+    #[aether_actor::handler::single]
+    fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
+}
+
+/// ADR-0166 §1/§5, issue 4121: `root` grants placement permission and, for a
+/// singleton, the right to anchor an abbreviated address. Those are two
+/// artifacts — the `Root` impl and the `RootEntry` — and an instanced actor
+/// gets only the first, because an instanced namespace identifies no single
+/// actor and so anchors nothing.
+///
+/// Tripwire: the assertion is on link-time inventory the macro computes from
+/// cardinality, so re-coupling the two artifacts fails here rather than as a
+/// runtime warn-and-exclude inside `AddressIndex::build` — which is where the
+/// mismatch used to surface, in a subsystem the declaration never mentions.
+#[test]
+fn instanced_root_takes_placement_without_claiming_an_address_anchor() {
+    use aether_data::name_inventory::root_entries;
+
+    // Placement: the bound the chassis spawn surfaces ask for still holds.
+    fn root<T: aether_actor::Root>() {}
+    root::<InstancedRootCap>();
+
+    // Anchoring: no `RootEntry`, so the address index never sees a root it
+    // would have to exclude.
+    assert!(
+        !root_entries().any(|entry| entry.namespace == InstancedRootCap::NAMESPACE),
+        "an instanced root must submit no RootEntry — it cannot anchor an abbreviated address"
+    );
+    // The singleton sibling in this same binary still does, so the assertion
+    // above is about cardinality and not about inventory being empty.
+    assert!(root_entries().any(|entry| entry.namespace == ReplyMacroCap::NAMESPACE), "a singleton root still anchors");
+}
+
 // ADR-0109 deferred reply contract (#1805): a `-> Pending<R>` request
 // handler plus a borrow-form `#[handler(task)]` completion. `&TaskDone ->
 // R` has the macro send `R` via `resolve_value`; `&TaskDone -> ()` has it

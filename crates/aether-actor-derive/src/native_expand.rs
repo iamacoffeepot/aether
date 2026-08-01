@@ -770,8 +770,27 @@ type HandlerMarker = (Type, Option<Type>);
 /// Emit ADR-0166 placement marker impls and their native link-time inventory
 /// records. Generic identities with lineage declarations are rejected before
 /// this helper so every emitted marker has a corresponding inventory fact.
+///
+/// `root` names two properties that ADR-0166 keeps distinct, and they are
+/// carried by two different artifacts (iamacoffeepot/aether#4121):
+///
+/// - **Placement permission** — "this identity may exist with no actor parent"
+///   — is the [`Root`](::aether_actor::Root) impl, read as a bound by the
+///   chassis spawn surfaces. It is emitted for every `root` declaration.
+/// - **Anchoring** — "this namespace can anchor an abbreviated
+///   `namespace://relative` address" — is the `RootEntry` inventory record,
+///   read at link time by `AddressIndex`. An instanced namespace identifies no
+///   single actor, so it can never anchor (ADR-0166 §5) and submits no entry.
+///
+/// So an instanced `#[actor(instanced, root)]` is placeable at the top level
+/// while claiming nothing of the address index — the anchor claim follows from
+/// cardinality rather than from a second keyword, because the mapping is total:
+/// a singleton root always anchors and an instanced one never can. Emitting the
+/// record unconditionally is what made the index warn about, and exclude, an
+/// anchor the author never meant to claim.
 fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &ActorOpts) -> TokenStream2 {
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let anchors = opts.root && !matches!(opts.cardinality, Some(ActorCardinality::Instanced));
     let root_impl = opts.root.then(|| {
         quote! {
             impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
@@ -783,7 +802,10 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
                 for #self_ty #where_clause {}
         }
     });
-    let root_entry = opts.root.then(|| {
+    // `ActorId::singleton` is the right tag by construction here: `anchors`
+    // already excluded the instanced case, which is the only one this call
+    // would have misdescribed.
+    let root_entry = anchors.then(|| {
         quote! {
             #[cfg(not(target_family = "wasm"))]
             ::aether_data::name_inventory::inventory::submit! {
