@@ -117,7 +117,6 @@ pub struct Registry {
     inner: Mutex<Inner>,
     routes: View<FxHashMap<MailboxId, RouteRecord>>,
     kinds: View<KindTable>,
-    empty_kind_name: Arc<str>,
     inventory: View<RegistryInventory>,
     addresses: Result<AddressIndex, ActorAddressInventoryError>,
     subscribers: Mutex<Vec<Weak<ChangeSubscriber>>>,
@@ -219,7 +218,7 @@ impl Drop for PendingBirth {
 }
 
 pub enum CapturedDisposition {
-    Live { endpoint: RouteEndpoint, kind_name: Arc<str> },
+    Live { endpoint: RouteEndpoint },
     Dropped,
     Unknown,
 }
@@ -276,12 +275,18 @@ pub enum RouteResolution {
     Unknown,
 }
 
-/// One point-in-time route and kind-name lookup.
+/// One point-in-time route lookup.
+///
+/// Carries no kind name. The name is derived data — every caller already holds
+/// the `KindId` it would be resolved from — and attaching it here meant every
+/// lookup took an increment and a decrement on **one** `Arc` strong count
+/// shared by every reader, which is half of why registry reads did not scale
+/// (iamacoffeepot/aether#4276, #4278). Render and wire sites resolve it through
+/// [`Registry::kind_name`] when they actually need the string.
 pub struct RouteLookup {
     endpoint: Option<RouteEndpoint>,
     starting: bool,
     dropped: bool,
-    kind_name: Arc<str>,
     generation: u64,
 }
 
@@ -294,10 +299,6 @@ impl RouteLookup {
         self.endpoint.is_none() && !self.starting && !self.dropped
     }
 
-    pub(crate) fn kind_name_shared(&self) -> Arc<str> {
-        Arc::clone(&self.kind_name)
-    }
-
     pub(crate) fn seize_handle(&self) -> Option<&SeizeHandle> {
         match &self.endpoint {
             Some(RouteEndpoint::Inbox { seize, .. }) => seize.get(),
@@ -307,7 +308,7 @@ impl RouteLookup {
 
     pub(crate) fn into_captured(self) -> CapturedDisposition {
         match self.endpoint {
-            Some(endpoint) => CapturedDisposition::Live { endpoint, kind_name: self.kind_name },
+            Some(endpoint) => CapturedDisposition::Live { endpoint },
             None if self.dropped => CapturedDisposition::Dropped,
             None => CapturedDisposition::Unknown,
         }
@@ -353,7 +354,6 @@ struct Inner {
     /// Every insert into `kinds` mirrors into `name_index`; every slot
     /// has exactly one entry here.
     name_index: HashMap<String, KindId>,
-    empty_kind_name: Arc<str>,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
     inventory_publisher: ViewPublisher<RegistryInventory>,
@@ -519,7 +519,6 @@ fn staged_pending_token(
 impl Registry {
     #[must_use]
     pub fn new() -> Self {
-        let empty_kind_name: Arc<str> = Arc::from("");
         let route_publisher = DoubleBuffer::default();
         let routes = route_publisher.view();
         let kind_publisher = ViewPublisher::new(KindTable::default());
@@ -538,7 +537,6 @@ impl Registry {
                 next_activation_token: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
-                empty_kind_name: Arc::clone(&empty_kind_name),
                 route_publisher,
                 kind_publisher,
                 inventory_publisher,
@@ -547,7 +545,6 @@ impl Registry {
             }),
             routes,
             kinds,
-            empty_kind_name,
             inventory,
             addresses: AddressIndex::from_inventory(),
             subscribers: Mutex::new(Vec::new()),
@@ -1209,17 +1206,9 @@ impl Registry {
             let Some(mut birth) = inner.pending_births.remove(&id) else {
                 continue;
             };
-            continuations.extend(birth.parked.drain(..).map(|mail| {
-                RouteContinuation {
-                    disposition: CapturedDisposition::Live {
-                        endpoint: endpoint.clone(),
-                        kind_name: inner
-                            .kinds
-                            .get(&mail.kind)
-                            .map_or_else(|| Arc::clone(&inner.empty_kind_name), |slot| Arc::clone(&slot.name)),
-                    },
-                    mail,
-                }
+            continuations.extend(birth.parked.drain(..).map(|mail| RouteContinuation {
+                disposition: CapturedDisposition::Live { endpoint: endpoint.clone() },
+                mail,
             }));
             birth.disarm();
         }
@@ -1297,17 +1286,7 @@ impl Registry {
             return None;
         };
         let bootstrap = mem::take(&mut birth.after_init);
-        let parked = birth
-            .parked
-            .drain(..)
-            .map(|mail| {
-                let kind_name = inner
-                    .kinds
-                    .get(&mail.kind)
-                    .map_or_else(|| Arc::clone(&inner.empty_kind_name), |slot| Arc::clone(&slot.name));
-                PreparedMail::parked(mail, kind_name)
-            })
-            .collect();
+        let parked = birth.parked.drain(..).map(PreparedMail::parked).collect();
         let installed = live.install(bootstrap, parked);
         birth.costs.as_ref().expect("prepared Starting birth retains cost reservation").promote(id, token);
 
@@ -1342,16 +1321,9 @@ impl Registry {
                 pending.parked.push_back(mail);
                 None
             }
-            ResolvedRoute::Live { endpoint } => Some(RouteContinuation {
-                disposition: CapturedDisposition::Live {
-                    endpoint: endpoint.clone(),
-                    kind_name: inner
-                        .kinds
-                        .get(&mail.kind)
-                        .map_or_else(|| Arc::clone(&inner.empty_kind_name), |slot| Arc::clone(&slot.name)),
-                },
-                mail,
-            }),
+            ResolvedRoute::Live { endpoint } => {
+                Some(RouteContinuation { disposition: CapturedDisposition::Live { endpoint: endpoint.clone() }, mail })
+            }
             ResolvedRoute::Dropped => Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped }),
             ResolvedRoute::Unknown => Some(RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
         }
@@ -1745,12 +1717,13 @@ impl Registry {
         }
     }
 
-    /// Hot-path combined lookup for the mailer's route step.
+    /// Hot-path route lookup for the mailer's route step.
     ///
-    /// Route and kind snapshots are loaded independently. This is coherent
-    /// because kind definitions are immutable after their first successful
-    /// registration: a later kind publication cannot change an existing id.
-    pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
+    /// Reads only the route view. It used to load the kind view as well and
+    /// clone the kind's name out of it, which put an `Arc` strong count shared
+    /// by every reader on the hot path for data the caller could already
+    /// derive from the `kind` it passed in (iamacoffeepot/aether#4278).
+    pub(crate) fn route_lookup(&self, _kind: KindId, recipient: MailboxId) -> RouteLookup {
         let (endpoint, starting, dropped, generation) = {
             let routes = self.routes.load();
             let (endpoint, starting, dropped) = match resolve_route(recipient, |id| routes.entry_for(&id)) {
@@ -1761,19 +1734,7 @@ impl Registry {
             };
             (endpoint, starting, dropped, routes.generation())
         };
-        RouteLookup {
-            endpoint,
-            starting,
-            dropped,
-            kind_name: self
-                .kinds
-                .load()
-                .table()
-                .kinds
-                .get(&kind)
-                .map_or_else(|| Arc::clone(&self.empty_kind_name), |slot| Arc::clone(&slot.name)),
-            generation,
-        }
+        RouteLookup { endpoint, starting, dropped, generation }
     }
 
     /// What the published route view resolves `(kind, recipient)` to.
@@ -1906,8 +1867,18 @@ impl Registry {
         self.kinds.load().table().kinds.get(&kind).map(|slot| Arc::clone(&slot.name))
     }
 
-    pub(crate) fn kind_name_or_empty_shared(&self, kind: KindId) -> Arc<str> {
-        self.kind_name_shared(kind).unwrap_or_else(|| Arc::clone(&self.empty_kind_name))
+    /// A human-readable label for a kind, for diagnostics.
+    ///
+    /// The registered name when there is one, else the tagged id — so a render
+    /// site always has something to print and never has to decide what to do
+    /// about an unregistered kind. This is the call the dispatch path used to
+    /// pre-empt by carrying an `Arc<str>` through every mail
+    /// (iamacoffeepot/aether#4278); made here, at the moment something is
+    /// actually being written, it costs a lookup on a path that is already
+    /// formatting a string.
+    #[must_use]
+    pub fn kind_label(&self, kind: KindId) -> String {
+        self.kind_name(kind).unwrap_or_else(|| kind.to_string())
     }
 
     /// The descriptor stored for a given kind id, or `None` if the id

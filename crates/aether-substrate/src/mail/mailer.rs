@@ -595,7 +595,7 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
     let inbound_root = mail.root;
 
     match disposition {
-        CapturedDisposition::Live { endpoint: RouteEndpoint::Inbox { handler, .. }, kind_name } => {
+        CapturedDisposition::Live { endpoint: RouteEndpoint::Inbox { handler, .. } } => {
             // Mail reaching a closure-bound mailbox through `push`
             // came from substrate core or a chassis (e.g. the frame
             // loop's FrameStats push, platform input fan-out). Per
@@ -617,8 +617,8 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             // the inline facade path below and get the bracket because
             // nothing downstream owns it.
             //
-            // iamacoffeepot/aether#848: payload + kind_name move
-            // into [`OwnedDispatch`] rather than being borrowed.
+            // iamacoffeepot/aether#848: the payload moves into
+            // [`OwnedDispatch`] rather than being borrowed.
             // The handler is `Arc<dyn InboxHandler>` whose `enqueue`
             // takes owned bytes — cap closures move directly into
             // their downstream envelope (via
@@ -632,7 +632,6 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             // transfer — the obligation rides the moved value.
             handler.enqueue(OwnedDispatch::armed(
                 mail.kind,
-                kind_name,
                 None,
                 mail.reply_to,
                 mail.payload,
@@ -651,10 +650,9 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
                 recipient,
             ));
         }
-        CapturedDisposition::Live { endpoint: RouteEndpoint::Inline(handler), kind_name } => {
+        CapturedDisposition::Live { endpoint: RouteEndpoint::Inline(handler) } => {
             handler.dispatch(MailDispatch {
                 kind: mail.kind,
-                kind_name: &kind_name,
                 origin: None,
                 sender: mail.reply_to,
                 payload: mail.payload.bytes(),

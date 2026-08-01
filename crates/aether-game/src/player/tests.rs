@@ -227,7 +227,6 @@ fn enqueue_with_source<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, ma
     };
     handler.enqueue(OwnedDispatch::disarmed(
         K::ID,
-        K::NAME.to_owned(),
         None,
         source,
         MailRef::from(mail.encode_into_bytes()),
@@ -255,7 +254,6 @@ fn enqueue_rooted<K: Kind>(
     };
     handler.enqueue(OwnedDispatch::disarmed(
         K::ID,
-        K::NAME.to_owned(),
         None,
         source,
         MailRef::from(mail.encode_into_bytes()),

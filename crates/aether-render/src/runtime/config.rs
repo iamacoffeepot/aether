@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use aether_data::KindId;
+
 /// Boot knobs for `RenderCapability` (ADR-0090). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `RenderTuningConfigLayer`, the clap-shaped `RenderTuningOverlay`,
@@ -28,7 +30,7 @@ pub struct RenderTuningConfig {
 /// off the operator-resolvable [`RenderTuningConfig`] `Config`.
 ///
 /// `observed_kinds`, when set, has every successfully-dispatched
-/// inbound mail's kind name pushed to it from the cap's `#[handler]`
+/// inbound mail's kind id pushed to it from the cap's `#[handler]`
 /// methods — used by the in-process substrate-harness to assert what kinds
 /// the cap has seen. Production chassis leave it `None` (zero
 /// overhead). Decode failures and unknown kinds don't push (the
@@ -37,7 +39,7 @@ pub struct RenderTuningConfig {
 #[derive(Clone, Default)]
 pub struct RenderParams {
     /// `SubstrateHarness` observation sink.
-    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
     /// Resolved path for the `"assets"` namespace, used by the
     /// `capture_frame` handler to read reference images for similarity
     /// checks (iamacoffeepot/aether#1780). The handler resolves the

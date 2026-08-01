@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::{cell::Cell, thread};
 
@@ -13,10 +12,9 @@ use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 /// that drive a registered handler synchronously without going
 /// through the full `Mail` → `Mailer::push` path.
 #[cfg(test)]
-pub fn test_dispatch<'a>(kind: KindId, kind_name: &'a str, payload: &'a [u8], count: u32) -> MailDispatch<'a> {
+pub fn test_dispatch(kind: KindId, payload: &[u8], count: u32) -> MailDispatch<'_> {
     MailDispatch {
         kind,
-        kind_name,
         origin: None,
         sender: Source::NONE,
         payload,
@@ -37,10 +35,9 @@ pub fn test_dispatch<'a>(kind: KindId, kind_name: &'a str, payload: &'a [u8], co
 /// [`OwnedDispatch`] migration so cap-side dispatcher tests stay
 /// terse without each rebuilding the full struct literal.
 #[cfg(test)]
-pub fn test_owned_dispatch(kind: KindId, kind_name: &str, payload: &[u8], count: u32) -> OwnedDispatch {
+pub fn test_owned_dispatch(kind: KindId, payload: &[u8], count: u32) -> OwnedDispatch {
     OwnedDispatch::disarmed(
         kind,
-        kind_name,
         None,
         Source::NONE,
         MailRef::from(payload.to_vec()),
@@ -75,7 +72,6 @@ pub struct MailDispatch<'a> {
     pub kind: KindId,
     /// Kind's registered name. Resolved by the dispatcher for
     /// diagnostic logging; handlers that only match on `kind` ignore.
-    pub kind_name: &'a str,
     /// Sending mailbox's registered name, if the mail came from a
     /// component. `None` for substrate-core pushes with no sending
     /// mailbox (ADR-0011).
@@ -122,7 +118,7 @@ pub struct MailDispatch<'a> {
 #[derive(Debug)]
 struct ObligationGuard {
     mail_id: MailId,
-    kind_name: Arc<str>,
+    kind: KindId,
     mailbox: MailboxId,
     armed: Cell<bool>,
 }
@@ -143,14 +139,14 @@ impl ObligationGuard {
     /// condition matches `record_finished`'s NONE no-op exactly — a
     /// dispatch carries a guard obligation iff it carries a real
     /// settlement obligation (ADR-0094, issue 1326).
-    fn armed(mail_id: MailId, kind_name: Arc<str>, mailbox: MailboxId) -> Self {
-        Self { mail_id, kind_name, mailbox, armed: Cell::new(mail_id != MailId::NONE) }
+    fn armed(mail_id: MailId, kind: KindId, mailbox: MailboxId) -> Self {
+        Self { mail_id, kind, mailbox, armed: Cell::new(mail_id != MailId::NONE) }
     }
 
     /// A guard that carries no obligation — test/helper mints and the
     /// disarmed result of a `Clone`.
-    fn disarmed(mail_id: MailId, kind_name: Arc<str>, mailbox: MailboxId) -> Self {
-        Self { mail_id, kind_name, mailbox, armed: Cell::new(false) }
+    fn disarmed(mail_id: MailId, kind: KindId, mailbox: MailboxId) -> Self {
+        Self { mail_id, kind, mailbox, armed: Cell::new(false) }
     }
 
     fn disarm(&self) {
@@ -164,7 +160,7 @@ impl Clone for ObligationGuard {
     /// is always disarmed — an accidental future clone cannot
     /// manufacture a phantom obligation (ADR-0094 `Clone` note).
     fn clone(&self) -> Self {
-        Self::disarmed(self.mail_id, self.kind_name.clone(), self.mailbox)
+        Self::disarmed(self.mail_id, self.kind, self.mailbox)
     }
 }
 
@@ -180,10 +176,10 @@ impl Drop for ObligationGuard {
         }
         panic!(
             "ADR-0094 settlement-obligation leak: OwnedDispatch dropped without \
-             discharge() or mark_transferred() — mail_id={:?} kind_name={:?} mailbox={:?}. \
+             discharge() or mark_transferred() — mail_id={:?} kind={:?} mailbox={:?}. \
              The consumer must record Finished (discharge) or hand the obligation onward \
              (mark_transferred); see the InboxHandler contract in mail/registry.rs.",
-            self.mail_id, self.kind_name, self.mailbox,
+            self.mail_id, self.kind, self.mailbox,
         );
     }
 }
@@ -191,13 +187,13 @@ impl Drop for ObligationGuard {
 /// Owned mirror of [`MailDispatch`] handed to
 /// [`InboxHandler::enqueue`](crate::mail::registry::InboxHandler::enqueue).
 /// Built by the mailer at the `Inbox` arm by moving `mail.payload`
-/// and `kind_name` out of the inbound `Mail`, so the receiving
+/// out of the inbound `Mail`, so the receiving
 /// closure can forward the bytes onto a downstream mpsc without an
 /// intervening `payload.to_vec()` clone. The `MailDispatch<'_>`
 /// borrow shape is wrong for actor-enqueue handlers — the borrow
 /// can't outlive the synchronous push call, so any handler that
 /// wants to enqueue must first clone. `OwnedDispatch` owns its
-/// payload + `kind_name` so it can be moved cross-thread directly.
+/// payload so it can be moved cross-thread directly.
 ///
 /// ADR-0094: under `#[cfg(debug_assertions)]` the struct carries a
 /// debug-only `ObligationGuard` that panics if the dispatch is
@@ -214,9 +210,6 @@ impl Drop for ObligationGuard {
 pub struct OwnedDispatch {
     /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
     pub kind: KindId,
-    /// Kind's registered name. Shared with the registry's immutable kind
-    /// slot so ordinary dispatch only clones an [`Arc`].
-    pub kind_name: Arc<str>,
     /// Sending mailbox's registered name, if the mail came from a
     /// component. `None` for substrate-core pushes with no sending
     /// mailbox (ADR-0011).
@@ -291,7 +284,6 @@ impl OwnedDispatch {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn armed(
         kind: KindId,
-        kind_name: impl Into<Arc<str>>,
         origin: Option<String>,
         sender: Source,
         payload: MailRef,
@@ -303,12 +295,10 @@ impl OwnedDispatch {
         enqueue_depth: u32,
         recipient: MailboxId,
     ) -> Self {
-        let kind_name = kind_name.into();
         #[cfg(debug_assertions)]
-        let obligation = ObligationGuard::armed(mail_id, kind_name.clone(), recipient);
+        let obligation = ObligationGuard::armed(mail_id, kind, recipient);
         Self {
             kind,
-            kind_name,
             origin,
             sender,
             payload,
@@ -340,7 +330,6 @@ impl OwnedDispatch {
     #[allow(clippy::too_many_arguments)]
     pub fn disarmed(
         kind: KindId,
-        kind_name: impl Into<Arc<str>>,
         origin: Option<String>,
         sender: Source,
         payload: MailRef,
@@ -352,12 +341,10 @@ impl OwnedDispatch {
         enqueue_depth: u32,
         recipient: MailboxId,
     ) -> Self {
-        let kind_name = kind_name.into();
         #[cfg(debug_assertions)]
-        let obligation = ObligationGuard::disarmed(mail_id, kind_name.clone(), recipient);
+        let obligation = ObligationGuard::disarmed(mail_id, kind, recipient);
         Self {
             kind,
-            kind_name,
             origin,
             sender,
             payload,
@@ -403,7 +390,6 @@ impl Clone for OwnedDispatch {
     fn clone(&self) -> Self {
         Self {
             kind: self.kind,
-            kind_name: self.kind_name.clone(),
             origin: self.origin.clone(),
             sender: self.sender,
             payload: self.payload.clone(),
@@ -428,7 +414,6 @@ impl fmt::Debug for OwnedDispatch {
         // is identical across debug/release builds.
         f.debug_struct("OwnedDispatch")
             .field("kind", &self.kind)
-            .field("kind_name", &self.kind_name)
             .field("origin", &self.origin)
             .field("sender", &self.sender)
             .field("payload", &self.payload)

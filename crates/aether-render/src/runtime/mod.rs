@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
-pub use aether_data::Kind;
+pub use aether_data::{Kind, KindId};
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
 
@@ -173,7 +173,7 @@ pub struct RenderCapabilityState {
     /// never take the deferred guard.
     outbound: Arc<HubOutbound>,
     assets_dir: Option<PathBuf>,
-    observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
 }
 
 impl RenderCapabilityState {
@@ -228,11 +228,11 @@ impl RenderCapabilityState {
         self.overlay_observation.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone()
     }
 
-    /// Push a dispatched kind name into the `SubstrateHarness` observation
+    /// Push a dispatched kind id into the `SubstrateHarness` observation
     /// sink, when one is installed. Production chassis leave it `None`.
-    fn observe(&self, name: &str) {
+    fn observe(&self, kind: KindId) {
         if let Some(obs) = &self.observed_kinds {
-            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(name.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(kind);
         }
     }
 
@@ -538,7 +538,7 @@ impl NativeActor for RenderCapability {
     /// Truncates at the cap boundary, rounding to whole triangles.
     #[handler::single]
     fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
-        state.observe(<DrawTriangle as Kind>::NAME);
+        state.observe(<DrawTriangle as Kind>::ID);
         let bytes: &[u8] = bytemuck::cast_slice(mails);
         let cap_bytes = state.vertex_buffer_bytes;
         let available = cap_bytes.saturating_sub(state.frame_vertices.len());
@@ -562,7 +562,7 @@ impl NativeActor for RenderCapability {
     /// `ViewProjection` latest-value-wins, on the owned `camera_state`.
     #[handler::single]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
-        state.observe(<ViewProjection as Kind>::NAME);
+        state.observe(<ViewProjection as Kind>::ID);
         state.camera_state = mail.view_proj;
     }
 
@@ -573,28 +573,28 @@ impl NativeActor for RenderCapability {
         _ctx: &mut NativeCtx<'_>,
         mail: CreateTexture,
     ) -> CreateTextureResult {
-        state.observe(<CreateTexture as Kind>::NAME);
+        state.observe(<CreateTexture as Kind>::ID);
         state.textures.create(mail)
     }
 
     /// `UpdateTexture` (ADR-0105), on the owned texture registry.
     #[handler::single]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
-        state.observe(<UpdateTexture as Kind>::NAME);
+        state.observe(<UpdateTexture as Kind>::ID);
         state.textures.update(mail);
     }
 
     /// `DestroyTexture`, on the owned texture registry.
     #[handler::single]
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
-        state.observe(<DestroyTexture as Kind>::NAME);
+        state.observe(<DestroyTexture as Kind>::ID);
         state.textures.destroy(mail);
     }
 
     /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `quad_frame`.
     #[handler::single]
     fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
-        state.observe(<DrawTexturedQuads as Kind>::NAME);
+        state.observe(<DrawTexturedQuads as Kind>::ID);
         state.quad_frame.push(QuadBatch::textured(mail));
     }
 
@@ -602,7 +602,7 @@ impl NativeActor for RenderCapability {
     /// the reserved white texture tinted by `color`.
     #[handler::single]
     fn on_draw_solid_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
-        state.observe(<DrawSolidQuads as Kind>::NAME);
+        state.observe(<DrawSolidQuads as Kind>::ID);
         let batch = QuadBatch::solid(mail, &mut state.textures);
         state.quad_frame.push(batch);
     }
@@ -610,14 +610,14 @@ impl NativeActor for RenderCapability {
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
     #[handler::single]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
-        state.observe(<DrawMaterialTextured as Kind>::NAME);
+        state.observe(<DrawMaterialTextured as Kind>::ID);
         state.material_frame.push(MaterialBatch::textured(mail));
     }
 
     /// `DrawMaterialCoverage` (ADR-0140), on the owned material stream.
     #[handler::single]
     fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
-        state.observe(<DrawMaterialCoverage as Kind>::NAME);
+        state.observe(<DrawMaterialCoverage as Kind>::ID);
         state.material_frame.push(MaterialBatch::coverage(mail));
     }
 
@@ -625,7 +625,7 @@ impl NativeActor for RenderCapability {
     /// `pre_remaining`. A stray notice with no pending capture is ignored.
     #[handler::single]
     fn on_pre_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: PreSettled) {
-        state.observe(<PreSettled as Kind>::NAME);
+        state.observe(<PreSettled as Kind>::ID);
         if let Some(pending) = &mut state.pending_capture {
             pending.pre_remaining = pending.pre_remaining.saturating_sub(1);
         }
@@ -635,7 +635,7 @@ impl NativeActor for RenderCapability {
     /// selected for that target.
     #[handler::single]
     fn on_occluded(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Occluded) {
-        state.observe(<Occluded as Kind>::NAME);
+        state.observe(<Occluded as Kind>::ID);
         #[cfg(feature = "desktop")]
         let became_occluded =
             state.targets.set_occluded(mail.window, mail.occluded, |target, occluded| target.occluded = occluded)
@@ -660,7 +660,7 @@ impl NativeActor for RenderCapability {
     /// reserved for the explicitly surfaceless harness.
     #[handler::single]
     fn on_frame(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Frame) {
-        state.observe(<Frame as Kind>::NAME);
+        state.observe(<Frame as Kind>::ID);
         let Frame { replay_cache_when_idle, windows } = mail;
         let windows = deduplicate_windows(windows);
 
@@ -761,7 +761,7 @@ impl NativeActor for RenderCapability {
     /// the settlement bridge only mails — it never waits.
     #[handler::manual]
     fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
-        state.observe(<CaptureFrame as Kind>::NAME);
+        state.observe(<CaptureFrame as Kind>::ID);
         let sender = ctx.reply_target();
 
         if let Err(error) = state.validate_capture_target(mail.window) {
@@ -882,7 +882,6 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Envelope>();
         tx.send(OwnedDispatch::disarmed(
             KindId(0),
-            "test.capture.pending".to_owned(),
             None,
             // A Session sender routes the guard's reply to the egress rx.
             Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
@@ -1071,7 +1070,7 @@ mod tests {
     #[test]
     fn destroy_texture_removes_registry_entry() {
         let (mailer, _rx) = test_mailer_and_rx();
-        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = Arc::new(Mutex::new(Vec::<KindId>::new()));
         let mut state = headless_state(&mailer);
         state.observed_kinds = Some(Arc::clone(&observed));
         let texture_id = 7;
@@ -1087,7 +1086,7 @@ mod tests {
         );
         let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
         assert!(
-            seen.contains(&DestroyTexture::NAME.to_owned()),
+            seen.contains(&<DestroyTexture as Kind>::ID),
             "destroy_texture handler should push its kind name; observed: {seen:?}",
         );
     }
@@ -1147,7 +1146,7 @@ mod tests {
     #[test]
     fn draw_solid_quads_accumulates_and_observed() {
         let (mailer, _rx) = test_mailer_and_rx();
-        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = Arc::new(Mutex::new(Vec::<KindId>::new()));
         let mut state = headless_state(&mailer);
         state.observed_kinds = Some(Arc::clone(&observed));
         let binding = ctx_binding(&mailer);
@@ -1171,7 +1170,7 @@ mod tests {
 
         let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
         assert!(
-            seen.contains(&DrawSolidQuads::NAME.to_owned()),
+            seen.contains(&<DrawSolidQuads as Kind>::ID),
             "draw_solid_quads handler should push its kind name; observed: {seen:?}",
         );
 

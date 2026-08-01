@@ -266,7 +266,7 @@ impl NativeActor for WasmTrampoline {
                 tracing::warn!(
                     target: "aether_component",
                     mailbox = %state.mailbox,
-                    kind = %env.kind_name,
+                    kind = %ctx.mailer().registry().kind_label(env.kind),
                     "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
                 );
                 return true;
@@ -299,7 +299,8 @@ impl NativeActor for WasmTrampoline {
                 // on a future epoch-deadline ADR — symmetric with
                 // native actors, which have no wedge guard either
                 // today.
-                ctx.fatal_abort(format!("component {} (kind {}) trapped: {e}", state.mailbox, env.kind_name));
+                let kind = ctx.mailer().registry().kind_label(env.kind);
+                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", state.mailbox));
             }
             (
                 component.drain_pending_aliases(),

@@ -11,6 +11,8 @@ use std::sync::{Arc, Weak};
 use aether_actor::Addressable;
 use aether_actor::local::ActorSlots;
 
+use aether_data::KindId;
+
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
@@ -28,7 +30,7 @@ use std::sync::OnceLock;
 // iamacoffeepot/aether#848 PR 3: the `build_envelope(&MailDispatch)`
 // helper retired. Production cap registration closures now take
 // `OwnedDispatch` directly and call `Envelope::from(dispatch)` —
-// payload + kind_name + origin all move rather than clone. The
+// payload + origin move rather than clone. The
 // borrowed-dispatch shape is still available through the
 // `MailboxEntry::Inline` path elsewhere.
 
@@ -205,7 +207,7 @@ impl MailboxWakeSlot {
 }
 
 /// Outcome of [`relay_or_transfer`]. Each abandonment variant carries
-/// the discarded mail's `kind_name` (moved out of the transferred
+/// the discarded mail's kind id (copied out of the transferred
 /// dispatch) so the caller can render its own site-specific
 /// `tracing::warn!` — the `target:` literal
 /// and message differ per relay seam, which is why the log stays at the
@@ -219,11 +221,11 @@ pub(crate) enum RelayOutcome {
     /// The `Weak` sender could not be upgraded — the actor's strong
     /// sender is gone (it dropped its `MailboxSender` during shutdown).
     /// The mail was transferred (not dropped armed) before returning.
-    SenderGone { kind_name: Arc<str> },
+    SenderGone { kind: KindId },
     /// The sender upgraded but the receiver had disconnected, so the
     /// `mpsc::send` failed. The returned envelope was transferred before
     /// returning.
-    ReceiverGone { kind_name: Arc<str> },
+    ReceiverGone { kind: KindId },
 }
 
 /// The shared inbox-relay core (ADR-0094): upgrade the actor's `Weak`
@@ -249,16 +251,16 @@ pub(crate) fn relay_or_transfer(
     let Some(tx) = weak_tx.upgrade() else {
         // ADR-0094: the strong sender is gone — discard at this relay
         // seam, transferring the obligation. `mark_transferred` disarms
-        // the guard, then `kind_name` moves out for the caller's log
+        // the guard, then the kind id is copied out for the caller's log
         // (the rest of the dispatch, guard included, drops here).
         dispatch.mark_transferred();
-        return RelayOutcome::SenderGone { kind_name: dispatch.kind_name };
+        return RelayOutcome::SenderGone { kind: dispatch.kind };
     };
     let env: Envelope = dispatch;
     if let Err(mpsc::SendError(env)) = tx.send(env) {
         // ADR-0094: receiver disconnected — discard at the seam, transfer.
         env.mark_transferred();
-        return RelayOutcome::ReceiverGone { kind_name: env.kind_name };
+        return RelayOutcome::ReceiverGone { kind: env.kind };
     }
     if let Some(wake) = wake.get() {
         wake();
@@ -322,10 +324,10 @@ pub(crate) fn prepare_relay_inbox() -> RelayInbox {
         debug_assert!(Arc::strong_count(&tx) >= 1);
         match relay_or_transfer(dispatch, &Arc::downgrade(&tx), &wake_for_handler) {
             RelayOutcome::Delivered => {}
-            RelayOutcome::ReceiverGone { kind_name } => {
+            RelayOutcome::ReceiverGone { kind } => {
                 tracing::warn!(
                     target: "aether_substrate::capability",
-                    kind = %kind_name,
+                    kind = %kind,
                     "capability mailbox receiver dropped — mail discarded"
                 );
             }
@@ -585,17 +587,17 @@ impl<'a> ChassisCtx<'a> {
             // send racing teardown from dropping an armed dispatch.
             Arc::new(move |dispatch: OwnedDispatch| match relay_or_transfer(dispatch, &weak, &wake_for_handler) {
                 RelayOutcome::Delivered => {}
-                RelayOutcome::SenderGone { kind_name } => {
+                RelayOutcome::SenderGone { kind } => {
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = %kind_name,
+                        kind = %kind,
                         "capability mailbox sender dropped — mail discarded"
                     );
                 }
-                RelayOutcome::ReceiverGone { kind_name } => {
+                RelayOutcome::ReceiverGone { kind } => {
                     tracing::warn!(
                         target: "aether_substrate::capability",
-                        kind = %kind_name,
+                        kind = %kind,
                         "capability mailbox receiver dropped — mail discarded"
                     );
                 }
@@ -797,7 +799,6 @@ mod tests {
     fn armed_subscribe_self(id: MailboxId) -> OwnedDispatch {
         OwnedDispatch::armed(
             KindId(7),
-            "aether.lifecycle.subscribe_self".to_owned(),
             None,
             Source::NONE,
             MailRef::from(Vec::new()),
@@ -904,8 +905,8 @@ mod tests {
         let weak = Arc::downgrade(&tx);
         drop(tx);
         match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
-            RelayOutcome::SenderGone { kind_name } => {
-                assert_eq!(kind_name.as_ref(), "aether.lifecycle.subscribe_self");
+            RelayOutcome::SenderGone { kind } => {
+                assert_eq!(kind, KindId(7), "the discarded mail's kind id rides the outcome");
             }
             other => panic!("expected SenderGone, got {other:?}"),
         }
@@ -917,8 +918,8 @@ mod tests {
         let weak = Arc::downgrade(&tx);
         drop(rx);
         match relay_or_transfer(armed_subscribe_self(id), &weak, &wake) {
-            RelayOutcome::ReceiverGone { kind_name } => {
-                assert_eq!(kind_name.as_ref(), "aether.lifecycle.subscribe_self");
+            RelayOutcome::ReceiverGone { kind } => {
+                assert_eq!(kind, KindId(7), "the discarded mail's kind id rides the outcome");
             }
             other => panic!("expected ReceiverGone, got {other:?}"),
         }

@@ -37,6 +37,18 @@
 //! - Both stay pinned → it is the per-target endpoint clones, and the next cut
 //!   is readers walking disjoint target sets.
 //!
+//! # It answered, and is now a tripwire
+//!
+//! The first arm was the true one, and iamacoffeepot/aether#4278 acted on it:
+//! `route_lookup` no longer attaches a name, so there is no shared kind-name
+//! refcount left for `PerReader` to un-share. **The two arms are expected to
+//! read the same from here on**, and they do.
+//!
+//! The cut stays in the sweep because a flat result is now the assertion. If
+//! the arms ever diverge again, something has put a per-kind shared clone back
+//! on the read path — which is precisely the regression that took two issues
+//! and a K-trial replication to characterise the first time.
+//!
 //! # Why these are real registered kinds
 //!
 //! An *unregistered* id would miss the table and take the `empty_kind_name`
