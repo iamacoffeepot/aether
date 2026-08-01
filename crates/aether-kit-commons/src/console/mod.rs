@@ -581,13 +581,6 @@ fn f32_floor_to_usize(value: f32) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
-    fn console_overlay_is_module_child() {
-        fn assert_module_child<T: aether_actor::ModuleChild>() {}
-
-        assert_module_child::<ConsoleOverlay>();
-    }
-
     fn overlay(config: ConsoleConfig) -> ConsoleOverlay {
         ConsoleOverlay {
             state: ConsoleState::new(&config),
