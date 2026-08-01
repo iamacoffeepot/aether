@@ -25,14 +25,14 @@ use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::ArtifactGuard;
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{
     ColorRegionStats, Rect, decode_png, mean_absolute_error, target_color_stats,
 };
 use aether_kinds::keycode::KEY_W;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameReduction, Key, KeyRelease, LoadComponent,
-    LoadResult, NamedMail, Render, WindowId, WindowSize,
+    LoadResult, Render, WindowId, WindowSize,
 };
 use aether_kit_terrain::world::{Material, SetChunk, SetRegion};
 use aether_kit_terrain::{MoverConfig, MoverTeleport};
@@ -71,15 +71,6 @@ struct SceneCapture {
 
 fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str) -> MailboxId {

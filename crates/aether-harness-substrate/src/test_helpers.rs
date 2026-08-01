@@ -42,6 +42,8 @@
 //! `aether_harness_substrate_capture::test_helpers::require_runtime`
 //! instead — the probe belongs with the GPU crate (issue #3765).
 
+use aether_data::Kind;
+use aether_kinds::NamedMail;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -207,4 +209,22 @@ pub fn write_fixture(name: &str, bytes: &[u8]) -> String {
     let dir = TEST_SAVE_DIR.get().expect("init_save_sandbox must run before write_fixture");
     fs::write(dir.join(name), bytes).expect("write fixture");
     name.to_owned()
+}
+
+/// Build a [`NamedMail`] for a mail bundle — the `pre` / `after` lists a
+/// `CaptureFrame` carries, or any other named-mail batch a scenario sends.
+///
+/// Uses the kind's wire encoding (`encode_into_bytes`), so any `K` — cast or
+/// structured — packs correctly.
+///
+/// Every scenario crate that drives a `SubstrateHarness` needs this and had
+/// been carrying its own byte-identical copy (issue 4131); the dependency edge
+/// that lets them share it already existed in all ten.
+pub fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
+    NamedMail {
+        recipient_name: recipient.to_owned(),
+        kind_name: K::NAME.to_owned(),
+        payload: mail.encode_into_bytes(),
+        count: 1,
+    }
 }

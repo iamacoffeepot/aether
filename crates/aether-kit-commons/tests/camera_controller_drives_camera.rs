@@ -29,10 +29,10 @@ use std::fs;
 use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
-use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowId, WindowSize};
+use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, Render, WindowId, WindowSize};
 use aether_kit_commons::camera::controller::ControllerConfig;
 use aether_kit_terrain::SetChunk;
 use aether_kit_terrain::world::Material;
@@ -51,17 +51,6 @@ const CHUNK_EDGE: usize = 16;
 /// the component host `/`-joined to the trampoline node under `name`.
 fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-/// A `NamedMail` carrying `mail`'s wire encoding to `recipient` — the capture
-/// bundle / input-injection envelope.
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 /// Load one `aether_kit_commons` export under `name` with optional init-config bytes,

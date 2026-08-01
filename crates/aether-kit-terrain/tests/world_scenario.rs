@@ -15,13 +15,12 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
-use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
+use aether_kinds::{LoadComponent, LoadResult, Render};
 use aether_kit_terrain::mark::{MarkId, MarkRef};
 use aether_kit_terrain::world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, OperatorCell,
@@ -61,15 +60,6 @@ fn unsafe_extent_rejection(source: MarkRef, operator: &str) -> OperatorResult {
 
 fn component_address() -> String {
     format!("aether.component/{}:{COMPONENT_NAME}", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) {

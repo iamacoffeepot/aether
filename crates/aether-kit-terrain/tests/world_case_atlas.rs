@@ -25,13 +25,13 @@ use std::iter::once;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::ArtifactGuard;
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, FrameVerdict,
-    LoadComponent, LoadResult, NamedMail, Render,
+    LoadComponent, LoadResult, Render,
 };
 use aether_kit_terrain::world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CellPos, ChunkPos, Material, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE,
@@ -330,15 +330,6 @@ fn offset_cell(anchor: CellPos, offset: CellPos) -> CellPos {
 
 fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
 }
 
 fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str) -> MailboxId {

@@ -33,7 +33,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
@@ -41,9 +40,9 @@ use aether_harness_substrate_capture::visual::{
 };
 use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
-    test_helpers::{has_wgpu_adapter, init_save_sandbox},
+    test_helpers::{envelope, has_wgpu_adapter, init_save_sandbox, pixel_is_lit},
 };
-use aether_kinds::{CachedFontMetrics, ClipRect, NamedMail, QuadScale, QuadSpace};
+use aether_kinds::{CachedFontMetrics, ClipRect, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::{DrawSolidQuads, SolidQuad, ViewProjection};
 use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
@@ -64,31 +63,6 @@ fn font_assets_root() -> PathBuf {
 fn font_namespace_roots() -> NamespaceRoots {
     let sandbox = init_save_sandbox("text-scenario");
     NamespaceRoots { save: sandbox.to_path_buf(), assets: font_assets_root(), config: sandbox.to_path_buf() }
-}
-
-/// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
-/// the kind's wire encoding (`encode_into_bytes`) so any K — cast
-/// or structured — packs correctly.
-fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
-    NamedMail {
-        recipient_name: recipient.to_owned(),
-        kind_name: K::NAME.to_owned(),
-        payload: mail.encode_into_bytes(),
-        count: 1,
-    }
-}
-
-fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
-    let start = ((y * img.width + x) * 4) as usize;
-    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
-}
-
-fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
-    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
-}
-
-fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
-    !rgb_close(rgba_at(img, x, y), bg, tolerance)
 }
 
 fn lit_fraction_in_rect(img: &Image, x: u32, y: u32, width: u32, height: u32, bg: [u8; 3], tolerance: u8) -> f32 {
