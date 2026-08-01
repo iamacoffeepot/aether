@@ -1,0 +1,74 @@
+//! The control core (ADR-0149 §The control core).
+//!
+//! One pure function — [`reduce`] — owns every state transition. Events are
+//! admitted facts with idempotency keys; decisions are value objects
+//! destined for a transactional outbox; **side effects never occur inside
+//! the reducer**. The journal plus the content-addressed artifact bytes are
+//! the only truth, and a [`Snapshot`] is the rebuildable projection the
+//! reducer reads.
+//!
+//! [`reduce`] *decides* — it reads a snapshot and returns [`Decisions`]. It
+//! never mutates the snapshot. [`Snapshot::apply`] *evolves* — it folds a
+//! decided event's effects into the next snapshot. Journal replay is
+//! `reduce` then `apply`, event by event; the split keeps the decision pure
+//! and the evolution mechanical.
+//!
+//! The active-membership uniqueness constraint (at most one active bloom per
+//! workpiece) lives in the store in production (ADR-0149 §The control core);
+//! the reducer enforces the same rule over its projection so seal decisions
+//! are correct before the store transaction commits.
+
+mod attempt;
+mod decision;
+mod error;
+mod event;
+mod evidence;
+mod integrate;
+mod land;
+mod outcome;
+mod review;
+mod seal;
+mod snapshot;
+mod view;
+
+pub use decision::Decision;
+pub use error::{
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AttemptCompletedError, BaseMismatch, IntegrateError,
+    LandError, ResolveError, SealConflict, SealError, SupersedeError,
+};
+pub use event::{Event, Fact};
+pub use outcome::{Decisions, Outcome};
+pub use seal::is_active_unlanded;
+pub use snapshot::{BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
+pub use view::view_of;
+
+use attempt::reduce_attempt_completed;
+use evidence::{reduce_admit_evidence, reduce_adopt_answer};
+use integrate::{reduce_integrate, reduce_resolve};
+use land::reduce_land;
+use review::reduce_aggregate_review_completed;
+use seal::{reduce_seal, reduce_supersede};
+
+/// Reduce one event against a snapshot into decisions. Pure: reads the
+/// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
+#[must_use]
+pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
+    if snapshot.seen.contains(&event.idempotency_key) {
+        return Decisions::rejected(Outcome::Duplicate);
+    }
+    match &event.fact {
+        Fact::Seal(spec) => reduce_seal(snapshot, spec),
+        Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor),
+        Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
+        Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
+        Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),
+        Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence, candidate } => {
+            reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence, *candidate)
+        }
+        Fact::Resolve { bloom, tree, head, lineage } => reduce_resolve(snapshot, bloom, tree, head, lineage),
+        Fact::AggregateReviewCompleted { bloom, passed, evidence, implicated } => {
+            reduce_aggregate_review_completed(snapshot, bloom, *passed, evidence, implicated)
+        }
+        Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
+    }
+}
