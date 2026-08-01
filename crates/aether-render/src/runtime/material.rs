@@ -3,12 +3,28 @@
 //! stream so mixed textured/coverage submissions replay in the order
 //! the render capability received them.
 
-use super::super::kinds::{MaterialCoverageRect, MaterialTexturedRect, TextureFormat};
+use super::super::kinds::{
+    DrawMaterialCoverage, DrawMaterialTextured, MaterialCoverageRect, MaterialTexturedRect, TextureFormat,
+};
 
 #[derive(Clone)]
 pub enum MaterialBatch {
     Textured { texture_id: u32, rects: Vec<MaterialTexturedRect> },
     Coverage { texture_id: u32, rects: Vec<MaterialCoverageRect> },
+}
+
+impl MaterialBatch {
+    /// The batch a `draw_material_textured` submission accumulates to.
+    pub fn textured(mail: DrawMaterialTextured) -> Self {
+        Self::Textured { texture_id: mail.texture_id, rects: mail.rects }
+    }
+
+    /// The batch a `draw_material_coverage` submission accumulates to. Both
+    /// land in the same ordered stream, which is what keeps a mixed
+    /// textured/coverage frame replaying in receipt order.
+    pub fn coverage(mail: DrawMaterialCoverage) -> Self {
+        Self::Coverage { texture_id: mail.texture_id, rects: mail.rects }
+    }
 }
 
 #[must_use]

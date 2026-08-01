@@ -32,8 +32,6 @@
 //!   [`aether_substrate::render::visual`], so the ready-branch readback scores
 //!   the verdict and similarity directly.
 
-#[cfg(feature = "desktop")]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
 use std::iter;
@@ -45,14 +43,11 @@ use std::time::{Duration, Instant};
 use aether_actor::runtime;
 pub use aether_data::Kind;
 
-use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameCheck, WindowId};
+use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
 
 use aether_substrate::Manual;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::inbox::InboundMail;
-use aether_substrate::mail::Mail;
 use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -83,6 +78,10 @@ mod quad;
 // pipeline builder, swapchain acquisition, and the surface / offscreen
 // device boot, called by the pumped render runtime.
 mod surface;
+// Per-window render targets and the id-keyed map over them; desktop-only, so
+// unlike its siblings this one carries the feature gate.
+#[cfg(feature = "desktop")]
+mod target;
 mod texture;
 
 // The cap-root re-exports source these names through `runtime`. The
@@ -93,23 +92,22 @@ pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer
 pub use self::pipeline::RenderGpu;
 
 use self::pipeline::{record_material_batches, record_overlay_batches};
-#[cfg(feature = "desktop")]
-use self::surface::acquire_surface_texture;
-#[cfg(feature = "desktop")]
-use self::surface::{attach_surface, boot_surface};
 use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline};
+#[cfg(feature = "desktop")]
+use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTargets};
 
 // These seam items are `pub` (visible in `render`) in their now-nested child
 // modules, so the re-export up to runtime level keeps that exact visibility.
+use self::capture::PendingCapture;
 pub use self::capture::resolve_reference;
 pub use self::material::MaterialBatch;
 pub use self::quad::QuadBatch;
-pub use self::texture::{StagedTexture, TextureRegistry, WHITE_TEXTURE_ID, expected_pixel_bytes};
+pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
     DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled,
-    RenderCapability, SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, ViewProjection,
+    RenderCapability, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -118,142 +116,6 @@ use super::{
 /// disposition event-driven. Matches the desktop driver's 30s
 /// advance-settlement bound.
 const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
-
-/// A parked capture, as plain owned state (ADR-0161 §Decision 4) — no
-/// `Arc`, no atomic, no cross-thread queue. The retained [`InboundMail`]
-/// guard defers the reply a frame (or more) past `on_capture_frame`; its
-/// un-fired `record_finished` keeps the inbound's chain open until the
-/// reply lands (ADR-0080 §6, ADR-0106).
-struct PendingCapture {
-    /// Selected desktop target. `None` is the explicit surfaceless path.
-    window: Option<WindowId>,
-    reply: InboundMail,
-    after_mails: Vec<Mail>,
-    /// `FrameCheck` verdict requests, scored on the read-back RGBA in
-    /// `on_frame`'s ready-branch (ADR-0161 §Decision 4). The scorer lives in
-    /// `aether_substrate::render::visual`, so the branch is reachable without
-    /// a downstream cycle.
-    checks: Vec<FrameCheck>,
-    /// Optional similarity reference (issue 1780), scored alongside `checks`.
-    reference: Option<ReferenceCapture>,
-    /// Count of pre-mail settlements still awaited; `on_pre_settled`
-    /// decrements it, and `on_frame` captures once it reaches zero.
-    pre_remaining: usize,
-    /// Wall-clock instant past which the capture wedges to `Err`.
-    deadline: Instant,
-}
-
-impl PendingCapture {
-    /// Ready to read back — every pre-mail chain has settled.
-    fn is_ready(&self) -> bool {
-        self.pre_remaining == 0
-    }
-
-    /// Past its wedge deadline (`FRAME_SETTLEMENT_CAP` since parking).
-    fn is_expired(&self, now: Instant) -> bool {
-        now >= self.deadline
-    }
-}
-
-#[cfg(feature = "desktop")]
-struct WindowTargets<T> {
-    entries: BTreeMap<WindowId, T>,
-}
-
-#[cfg(feature = "desktop")]
-impl<T> Default for WindowTargets<T> {
-    fn default() -> Self {
-        Self { entries: BTreeMap::new() }
-    }
-}
-
-#[cfg(feature = "desktop")]
-impl<T> WindowTargets<T> {
-    fn attach_with<R>(&mut self, id: WindowId, build: impl FnOnce() -> Result<(T, R), String>) -> Result<R, String> {
-        if self.entries.contains_key(&id) {
-            return Err(format!("render target for window {} is already attached", id.0));
-        }
-        let (target, result) = build()?;
-        self.entries.insert(id, target);
-        Ok(result)
-    }
-
-    fn detach(&mut self, id: WindowId) -> Option<T> {
-        self.entries.remove(&id)
-    }
-
-    fn set_occluded(&mut self, id: WindowId, occluded: bool, update: impl FnOnce(&mut T, bool)) -> bool {
-        let Some(target) = self.entries.get_mut(&id) else {
-            return false;
-        };
-        update(target, occluded);
-        true
-    }
-
-    fn validate_capture_selection(
-        &self,
-        window: Option<WindowId>,
-        is_occluded: impl Fn(&T) -> bool,
-    ) -> Result<bool, String> {
-        let Some(id) = window else {
-            if self.entries.is_empty() {
-                return Ok(false);
-            }
-            return Err(
-                "capture_frame failed: a window target is required when desktop targets are attached".to_owned()
-            );
-        };
-        let target =
-            self.entries.get(&id).ok_or_else(|| format!("capture_frame failed: unknown window target {}", id.0))?;
-        if is_occluded(target) {
-            return Err(format!("capture_frame failed: window target {} is occluded", id.0));
-        }
-        Ok(true)
-    }
-}
-
-#[cfg(feature = "desktop")]
-struct RenderTarget {
-    /// Retained with its surface so detachment drops render's native-window
-    /// ownership before the window manager completes close.
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    occluded: bool,
-}
-
-#[cfg(feature = "desktop")]
-impl RenderTarget {
-    fn prepare_frame(&mut self, device: &wgpu::Device) -> Option<(u32, u32, Option<wgpu::SurfaceTexture>)> {
-        if self.occluded {
-            return None;
-        }
-        let size = self.window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return None;
-        }
-        if size.width != self.config.width || size.height != self.config.height {
-            self.config.width = size.width;
-            self.config.height = size.height;
-            self.surface.configure(device, &self.config);
-        }
-        let surface_texture = acquire_surface_texture(&self.surface, device, &self.config);
-        Some((self.config.width, self.config.height, surface_texture))
-    }
-}
-
-#[cfg(feature = "desktop")]
-struct DesktopGpuContext {
-    instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
-}
-
-#[cfg(feature = "desktop")]
-struct FirstWindowGpu {
-    context: DesktopGpuContext,
-    gpu: RenderGpu,
-    wire_pipeline: Option<wgpu::RenderPipeline>,
-}
 
 /// Pumped `aether.render` runtime state (ADR-0161). Owns the accumulators,
 /// the shared GPU + window-keyed surfaces, and the pending capture as plain
@@ -389,44 +251,14 @@ impl RenderCapabilityState {
         let vertex_buffer_bytes = self.vertex_buffer_bytes;
 
         let install = if let (Some(gpu), Some(context)) = (self.gpu.as_ref(), self.desktop_gpu.as_ref()) {
-            let instance = context.instance.clone();
-            let adapter = context.adapter.clone();
             let device = Arc::clone(&gpu.device);
             let format = gpu.color_format;
             self.targets.attach_with(id, || {
-                let attached = attach_surface(
-                    &instance,
-                    &adapter,
-                    &device,
-                    Arc::clone(&window),
-                    (size.width, size.height),
-                    format,
-                )?;
-                Ok((RenderTarget { window, surface: attached.surface, config: attached.config, occluded: false }, None))
+                RenderTarget::attach_to_booted_gpu(context, &device, window, (size.width, size.height), format)
             })?
         } else if self.gpu.is_none() && self.desktop_gpu.is_none() {
             self.targets.attach_with(id, || {
-                let booted = boot_surface(Arc::clone(&window), (size.width, size.height), wireframe.as_deref())?;
-                let gpu = RenderGpu::new(
-                    Arc::clone(&booted.device),
-                    Arc::clone(&booted.queue),
-                    booted.format,
-                    booted.config.width,
-                    booted.config.height,
-                    booted.polygon_mode,
-                    vertex_buffer_bytes,
-                );
-                let wire_pipeline = booted.build_overlay.then(|| {
-                    build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout)
-                });
-                Ok((
-                    RenderTarget { window, surface: booted.surface, config: booted.config, occluded: false },
-                    Some(FirstWindowGpu {
-                        context: DesktopGpuContext { instance: booted.instance, adapter: booted.adapter },
-                        gpu,
-                        wire_pipeline,
-                    }),
-                ))
+                RenderTarget::boot_first(window, (size.width, size.height), wireframe.as_deref(), vertex_buffer_bytes)
             })?
         } else {
             return Err("render GPU boot state cannot accept desktop window targets".to_owned());
@@ -742,99 +574,28 @@ impl NativeActor for RenderCapability {
         mail: CreateTexture,
     ) -> CreateTextureResult {
         state.observe(<CreateTexture as Kind>::NAME);
-        let Some(expected) = expected_pixel_bytes(mail.width, mail.height, mail.format) else {
-            return CreateTextureResult::Err {
-                error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
-            };
-        };
-        if mail.pixels.len() != expected {
-            return CreateTextureResult::Err {
-                error: format!(
-                    "pixels length {} does not match {}x{} {:?} = {expected}",
-                    mail.pixels.len(),
-                    mail.width,
-                    mail.height,
-                    mail.format
-                ),
-            };
-        }
-        let texture_id = state.textures.next_id;
-        state.textures.next_id += 1;
-        state.textures.entries.insert(
-            texture_id,
-            StagedTexture {
-                width: mail.width,
-                height: mail.height,
-                format: mail.format,
-                pixels: mail.pixels,
-                realized: None,
-                dirty: true,
-            },
-        );
-        CreateTextureResult::Ok { texture_id }
+        state.textures.create(mail)
     }
 
     /// `UpdateTexture` (ADR-0105), on the owned texture registry.
     #[handler::single]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
         state.observe(<UpdateTexture as Kind>::NAME);
-        if mail.texture_id == WHITE_TEXTURE_ID {
-            tracing::warn!(
-                target: "aether_render",
-                texture_id = mail.texture_id,
-                "update_texture for reserved internal texture id; dropping",
-            );
-            return;
-        }
-        let Some(entry) = state.textures.entries.get_mut(&mail.texture_id) else {
-            tracing::warn!(
-                target: "aether_render",
-                texture_id = mail.texture_id,
-                "update_texture for unknown texture id; dropping",
-            );
-            return;
-        };
-        if !entry.apply_subrect(mail.x, mail.y, mail.width, mail.height, &mail.pixels) {
-            tracing::warn!(
-                target: "aether_render",
-                texture_id = mail.texture_id,
-                "update_texture rect out of bounds, zero-sized, or pixel length mismatch; \
-                 dropping",
-            );
-        }
+        state.textures.update(mail);
     }
 
     /// `DestroyTexture`, on the owned texture registry.
     #[handler::single]
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         state.observe(<DestroyTexture as Kind>::NAME);
-        if mail.texture_id == WHITE_TEXTURE_ID {
-            tracing::warn!(
-                target: "aether_render",
-                texture_id = mail.texture_id,
-                "destroy_texture for reserved internal texture id; dropping",
-            );
-            return;
-        }
-        if state.textures.entries.remove(&mail.texture_id).is_none() {
-            tracing::warn!(
-                target: "aether_render",
-                texture_id = mail.texture_id,
-                "destroy_texture for unknown texture id; dropping",
-            );
-        }
+        state.textures.destroy(mail);
     }
 
     /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `quad_frame`.
     #[handler::single]
     fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         state.observe(<DrawTexturedQuads as Kind>::NAME);
-        state.quad_frame.push(QuadBatch {
-            texture_id: mail.texture_id,
-            space: mail.space,
-            clip: mail.clip,
-            quads: mail.quads,
-        });
+        state.quad_frame.push(QuadBatch::textured(mail));
     }
 
     /// `DrawSolidQuads` (ADR-0107 §4), on the owned `quad_frame` — expand to
@@ -842,44 +603,22 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_solid_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
         state.observe(<DrawSolidQuads as Kind>::NAME);
-        state.textures.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
-            width: 1,
-            height: 1,
-            format: TextureFormat::Rgba8,
-            pixels: vec![255, 255, 255, 255],
-            realized: None,
-            dirty: true,
-        });
-        let quads: Vec<TexturedQuad> = mail
-            .quads
-            .into_iter()
-            .map(|SolidQuad { x, y, width, height, color }| TexturedQuad {
-                x,
-                y,
-                width,
-                height,
-                u0: 0.0,
-                v0: 0.0,
-                u1: 1.0,
-                v1: 1.0,
-                tint: color,
-            })
-            .collect();
-        state.quad_frame.push(QuadBatch { texture_id: WHITE_TEXTURE_ID, space: mail.space, clip: mail.clip, quads });
+        let batch = QuadBatch::solid(mail, &mut state.textures);
+        state.quad_frame.push(batch);
     }
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
     #[handler::single]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
         state.observe(<DrawMaterialTextured as Kind>::NAME);
-        state.material_frame.push(MaterialBatch::Textured { texture_id: mail.texture_id, rects: mail.rects });
+        state.material_frame.push(MaterialBatch::textured(mail));
     }
 
     /// `DrawMaterialCoverage` (ADR-0140), on the owned material stream.
     #[handler::single]
     fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
         state.observe(<DrawMaterialCoverage as Kind>::NAME);
-        state.material_frame.push(MaterialBatch::Coverage { texture_id: mail.texture_id, rects: mail.rects });
+        state.material_frame.push(MaterialBatch::coverage(mail));
     }
 
     /// `PreSettled` (ADR-0161) — decrement the pending capture's
@@ -962,7 +701,7 @@ impl NativeActor for RenderCapability {
         #[cfg(feature = "desktop")]
         for window in windows.iter().copied() {
             let prepared = {
-                let Some(target) = state.targets.entries.get_mut(&window) else {
+                let Some(target) = state.targets.get_mut(window) else {
                     continue;
                 };
                 target.prepare_frame(&device)
@@ -1109,6 +848,8 @@ impl NativeActor for RenderCapability {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{SolidQuad, TextureFormat};
+    use super::texture::StagedTexture;
     use super::*;
     use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};
@@ -1254,34 +995,6 @@ mod tests {
 
         assert!(state.pending_capture.is_none(), "an expired capture is cleared");
         assert!(capture_err(&rx).contains("settlement cap"), "the wedge disposition replies Err");
-    }
-
-    /// Target bookkeeping is transactional: failed and duplicate attachments
-    /// do not replace entries; occlusion and removal stay local to one id.
-    #[test]
-    #[cfg(feature = "desktop")]
-    fn window_target_bookkeeping_is_transactional_and_target_local() {
-        let mut targets = WindowTargets::<bool>::default();
-        let failed: Result<(), String> = targets.attach_with(WindowId(1), || Err("surface failed".to_owned()));
-        assert!(failed.is_err());
-        assert!(targets.entries.is_empty(), "a failed builder must not insert a target");
-
-        targets.attach_with(WindowId(1), || Ok((false, ()))).expect("first target attaches");
-        let duplicate: Result<(), String> =
-            targets.attach_with(WindowId(1), || panic!("duplicate validation must run before the target builder"));
-        assert!(duplicate.expect_err("duplicate id is rejected").contains("already attached"));
-        targets.attach_with(WindowId(2), || Ok((false, ()))).expect("second target attaches");
-
-        assert!(targets.set_occluded(WindowId(1), true, |target, value| *target = value));
-        assert!(targets.entries[&WindowId(1)]);
-        assert!(!targets.entries[&WindowId(2)]);
-        assert!(targets.validate_capture_selection(Some(WindowId(1)), |target| *target).is_err());
-        assert_eq!(targets.validate_capture_selection(Some(WindowId(2)), |target| *target), Ok(true),);
-        assert!(targets.validate_capture_selection(Some(WindowId(99)), |target| *target).is_err());
-        assert!(targets.validate_capture_selection(None, |target| *target).is_err());
-
-        assert_eq!(targets.detach(WindowId(1)), Some(true));
-        assert!(targets.entries.contains_key(&WindowId(2)), "detaching one target leaves the other live");
     }
 
     #[test]

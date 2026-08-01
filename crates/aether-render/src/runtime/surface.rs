@@ -355,6 +355,11 @@ pub fn build_wireframe_overlay_pipeline(
 /// `Occluded` / `Timeout` / an unexpected status returns `None` and the
 /// caller skips the present step for this frame. Offscreen is the source
 /// of truth for capture, so a skipped present never blocks a readback.
+///
+/// Desktop-only, like every other surface entry point in this module: a
+/// swapchain exists only where a window does, and its one caller is
+/// `target::RenderTarget::prepare_frame`.
+#[cfg(feature = "desktop")]
 #[must_use]
 pub fn acquire_surface_texture(
     surface: &wgpu::Surface<'_>,
