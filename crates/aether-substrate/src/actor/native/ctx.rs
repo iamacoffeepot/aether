@@ -942,6 +942,33 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         notify_departure(self.binding, occupant, registry.vacate_actor(occupant));
         notify_alias_departures(registry, self.binding, occupant);
     }
+
+    /// ADR-0114 teardown (#4228): declare one inline-child `alias` folded onto
+    /// the calling actor's mailbox vacated, because the child that occupied it
+    /// was despawned. Drains that alias's watchers and fires one
+    /// [`aether_kinds::MonitorNotice`] naming it — the single-address form of
+    /// what [`Self::vacate`] does for a whole departing cluster.
+    ///
+    /// Self-service like `vacate`, and narrower: an actor can only vacate an
+    /// alias that is folded onto its own mailbox, so a caller cannot reach a
+    /// peer's inline children. An alias that is not this actor's is a no-op
+    /// `false`, as is a transport with no spawner wired
+    /// ([`NativeBinding::new_for_test`]) — there is no monitor index to drain.
+    ///
+    /// Retiring the route itself is a separate, owner-staged step: the notice
+    /// goes out from the despawning actor's own turn, while the route change
+    /// lands through the registry owner.
+    pub fn vacate_alias(&self, alias: MailboxId) -> bool {
+        let Some(spawner) = self.binding.spawner() else {
+            return false;
+        };
+        if !self.binding.mailer().registry().is_alias_to(alias, self.binding.self_mailbox()) {
+            return false;
+        }
+        let registry = spawner.actor_registry();
+        notify_departure(self.binding, alias, registry.vacate_actor(alias));
+        true
+    }
 }
 
 /// The one surface that needs the ctx to name its actor: a birth's parent is

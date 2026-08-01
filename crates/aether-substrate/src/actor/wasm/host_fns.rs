@@ -308,6 +308,46 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: the teardown half of `spawn_inline_child_p32` above. An
+    // inline child is created and destroyed synchronously inside one guest
+    // call (ADR-0114 §2) — it owns no resource a capability could hold, and
+    // routing its teardown through mail would put the retirement an actor turn
+    // behind the guest-side removal, which is the window this fixes. A
+    // capability here would also have to be addressable from every component,
+    // and would still need this host fn to learn the despawn happened.
+    //
+    // ADR-0114 teardown (#4228): retire an inline child's alias route when the
+    // guest despawns the child. It stages the retirement the way the spawn half
+    // stages a publication, and the trampoline drains it after the guest call,
+    // retiring the route through the registry owner and firing the departure
+    // notices the alias's watchers are owed.
+    //
+    // A guest can only retire an alias of its own — the same in-cluster
+    // question `send_mail`'s origin stamping asks, so it takes the same
+    // answer (`is_own_cluster_alias`: the prepared local fact, or the
+    // owner-published relation). Anything that is not this component's alias
+    // warn-logs and returns 0 without staging, so a malformed id cannot retire
+    // a peer's child.
+    linker.func_wrap(
+        "aether",
+        "despawn_inline_child_p32",
+        |mut caller: Caller<'_, ComponentCtx>, alias: u64| -> u32 {
+            let alias = MailboxId(alias);
+            let ctx = caller.data();
+            if !is_own_cluster_alias(ctx, alias) {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %alias,
+                    parent = %ctx.sender,
+                    "despawn_inline_child: id is not this component's inline-child alias",
+                );
+                return 0;
+            }
+            caller.data_mut().stage_alias_retirement(alias);
+            1
+        },
+    )?;
+
     // `resolve_kind_p32` was retired in ADR-0030 Phase 2: kind ids are
     // the `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` hash,
     // computed on the

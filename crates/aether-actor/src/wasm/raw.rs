@@ -116,6 +116,17 @@ unsafe extern "C" {
     /// host-side error (no memory, OOB, bad UTF-8, no binding/spawner).
     #[link_name = "spawn_inline_child_p32"]
     pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
+    /// ADR-0114 teardown (#4228): retire the alias route
+    /// [`spawn_inline_child`] registered, because the child it addressed was
+    /// despawned. `alias` is that call's returned `MailboxId` raw value. The
+    /// host validates it names an inline-child alias of the calling
+    /// component's own cluster, then stages the retirement and the departure
+    /// notices its watchers are owed; both land just after this returns,
+    /// alongside the staged publications. Returns `1` when the retirement was
+    /// staged, `0` when `alias` is not this component's (warn-logged
+    /// host-side, nothing staged).
+    #[link_name = "despawn_inline_child_p32"]
+    pub fn despawn_inline_child(alias: u64) -> u32;
     /// ADR-0163 §3 (#3984): pull one asset's bytes through the load window.
     /// `(name_ptr, name_len)` is the asset name (a UTF-8 slice in guest
     /// memory), copied out before the call returns. The return is the
@@ -283,6 +294,22 @@ pub unsafe fn spawn_sibling(
 #[must_use]
 pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::despawn_inline_child` import
+/// (ADR-0114). Always panics — callers outside the FFI guest are
+/// misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn despawn_inline_child(_alias: u64) -> u32 {
+    panic!("aether-actor: despawn_inline_child called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0163).

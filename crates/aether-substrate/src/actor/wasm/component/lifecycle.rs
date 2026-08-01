@@ -4,6 +4,7 @@ use wasmtime::Store;
 
 use super::instantiate::Placement;
 use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES, StateBundle};
+use crate::mail::MailboxId;
 use crate::mail::registry::PreparedAliasRoute;
 
 impl Component {
@@ -74,6 +75,14 @@ impl Component {
     /// before its handler-end buffered mail is routed.
     pub fn drain_pending_aliases(&mut self) -> Vec<PreparedAliasRoute> {
         self.store.data_mut().take_pending_aliases()
+    }
+
+    /// Drain the inline-child aliases the just-returned guest call despawned
+    /// (#4228). The trampoline retires each route through the registry owner
+    /// and notifies its watchers, the teardown mirror of
+    /// [`Self::drain_pending_aliases`].
+    pub fn drain_pending_alias_retirements(&mut self) -> Vec<MailboxId> {
+        self.store.data_mut().take_pending_alias_retirements()
     }
 
     /// Extract a failure recorded by `save_state` (size cap, OOB).

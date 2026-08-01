@@ -177,3 +177,19 @@ pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
         raw::spawn_inline_child(u32::from(is_counter), subname_bytes.as_ptr().addr() as u32, subname_bytes.len() as u32)
     }
 }
+
+/// ADR-0114 teardown (#4228): retire the alias route
+/// [`spawn_inline_child`] registered, now that the child it addressed has
+/// been despawned. `alias` is that call's returned raw `MailboxId`. The host
+/// retires the route and fires the departure notices the alias's watchers are
+/// owed, so an address never outlives the actor it named. `true` when the
+/// retirement was staged, `false` when `alias` is not this component's own
+/// inline-child alias (see [`crate::WasmCtx::despawn_inline_child`]).
+#[cfg(target_family = "wasm")]
+pub fn despawn_inline_child(alias: u64) -> bool {
+    // SAFETY: forwards to `raw::despawn_inline_child`, whose ABI is
+    // documented at the import site in `raw.rs`. The argument is a plain
+    // scalar — no pointer crosses, so there is nothing for the host to read
+    // out of guest memory.
+    unsafe { raw::despawn_inline_child(alias) == 1 }
+}

@@ -34,13 +34,28 @@ impl WasmTrampolineState {
         }
     }
 
+    /// Retire the logical inline-child routes a guest call despawned (#4228),
+    /// the teardown mirror of [`Self::stage_inline_aliases`]. Each alias fires
+    /// its departure notices here, from this actor's own turn, so a cap keying
+    /// rows on the child's stamped identity (ADR-0114 §4) reclaims them; the
+    /// route retirement itself is staged through the owner alongside.
+    pub fn stage_inline_alias_retirements<A>(&self, ctx: &mut NativeCtx<'_, Single, A>, aliases: Vec<MailboxId>) {
+        for alias in aliases {
+            ctx.vacate_alias(alias);
+            let _ = ctx.stage_registry_batch(
+                RegistryBatch::retire_alias(alias),
+                InlineAliasContext { parent: self.mailbox, alias },
+            );
+        }
+    }
+
     pub(super) fn finish_inline_aliases(done: TaskDone<RegistryBatchResult, InlineAliasContext>) {
         if let Err(error) = done.output() {
             tracing::warn!(
                 target: "aether_component",
                 parent = %done.context().parent,
                 alias = %done.context().alias,
-                "inline-child alias publication failed after owner staging: {error}",
+                "inline-child alias registry batch failed after owner staging: {error}",
             );
         }
         done.release_no_reply();
@@ -296,15 +311,19 @@ impl WasmTrampolineState {
         if let Some(bundle) = saved
             && let Err(e) = new_component.call_on_rehydrate(&bundle)
         {
-            let aliases = new_component.drain_pending_aliases();
+            let (aliases, retired) =
+                (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
             self.component = Some(new_component);
             self.stage_inline_aliases(ctx, aliases);
+            self.stage_inline_alias_retirements(ctx, retired);
             return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
         }
 
-        let aliases = new_component.drain_pending_aliases();
+        let (aliases, retired) =
+            (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
         self.component = Some(new_component);
         self.stage_inline_aliases(ctx, aliases);
+        self.stage_inline_alias_retirements(ctx, retired);
 
         // iamacoffeepot/aether#1037: re-register the trampoline's
         // capabilities against the post-replace handler set. The
