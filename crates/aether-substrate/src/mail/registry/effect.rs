@@ -180,17 +180,16 @@ pub struct InstalledActivation {
 
 pub struct PreparedMail {
     pub(crate) mail: Mail,
-    pub(crate) kind_name: Arc<str>,
     pub(crate) bootstrap: bool,
 }
 
 impl PreparedMail {
-    pub(crate) fn bootstrap(mail: Mail, kind_name: impl Into<Arc<str>>) -> Self {
-        Self { mail, kind_name: kind_name.into(), bootstrap: true }
+    pub(crate) fn bootstrap(mail: Mail) -> Self {
+        Self { mail, bootstrap: true }
     }
 
-    pub(super) fn parked(mail: Mail, kind_name: impl Into<Arc<str>>) -> Self {
-        Self { mail, kind_name: kind_name.into(), bootstrap: false }
+    pub(super) fn parked(mail: Mail) -> Self {
+        Self { mail, bootstrap: false }
     }
 }
 
@@ -247,9 +246,9 @@ impl PreparedSpawnCommit {
         self.activation.take()
     }
 
-    pub(crate) fn retain_after_init(&mut self, mail: Mail, kind_name: Arc<str>) {
+    pub(crate) fn retain_after_init(&mut self, mail: Mail) {
         self.activation.retain_mail(&mail);
-        self.after_init.push(PreparedMail::parked(mail, kind_name));
+        self.after_init.push(PreparedMail::parked(mail));
     }
 
     pub fn discard_at_home(self) -> crossbeam_channel::Receiver<()> {

@@ -148,9 +148,9 @@ impl SubstrateBoot {
             &authority,
             AETHER_DIAGNOSTICS,
             Arc::new(|dispatch: MailDispatch<'_>| {
-                let kind_name = dispatch.kind_name;
+                let kind = dispatch.kind;
                 let bytes = dispatch.payload;
-                if kind_name == <aether_kinds::UnresolvedMail as aether_data::Kind>::NAME
+                if kind == <aether_kinds::UnresolvedMail as aether_data::Kind>::ID
                     && let Ok(record) = bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
                 {
                     tracing::warn!(
@@ -164,7 +164,7 @@ impl SubstrateBoot {
                 }
                 tracing::warn!(
                     target: "aether_substrate::diagnostics",
-                    kind = %kind_name,
+                    kind = %kind,
                     "aether.diagnostics received an unexpected kind or malformed payload",
                 );
             }),

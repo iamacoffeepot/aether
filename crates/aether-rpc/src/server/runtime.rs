@@ -593,12 +593,12 @@ impl NativeActor for RpcServerCapability {
     /// kind two peers share is reachable; reply correlation goes
     /// through this fallback.
     #[fallback]
-    fn on_any(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
+    fn on_any(state: &mut Self::State, ctx: &mut NativeCtx<'_>, env: &Envelope) {
         let correlation = env.sender.correlation_id;
         let Some(entry) = state.in_flight.get(&correlation).copied() else {
             tracing::debug!(
                 target: "aether_substrate::rpc",
-                kind = %env.kind_name,
+                kind = %ctx.mailer().registry().kind_label(env.kind),
                 correlation,
                 "rpc reply with no matching in-flight call; dropping",
             );

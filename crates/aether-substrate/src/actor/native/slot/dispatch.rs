@@ -80,7 +80,7 @@ where
         tracing::warn!(
             target: "aether_substrate::dispatch",
             actor = A::NAMESPACE,
-            kind = env.kind_name.as_ref(),
+            kind = %env.kind,
             "actor dispatch missed: kind not handled or decode failed"
         );
     }

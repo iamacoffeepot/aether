@@ -656,7 +656,6 @@ impl Spawner {
                     Mail::new(id, envelope.kind, envelope.payload, envelope.count)
                         .with_reply_to(envelope.sender)
                         .with_lineage(envelope.mail_id, envelope.root, envelope.parent_mail),
-                    envelope.kind_name,
                 )
             })
             .collect();
@@ -819,17 +818,17 @@ impl Spawner {
             Arc::new(move |dispatch: OwnedDispatch| {
                 match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler) {
                     RelayOutcome::Delivered => {}
-                    RelayOutcome::SenderGone { kind_name } => {
+                    RelayOutcome::SenderGone { kind } => {
                         tracing::warn!(
                             target: "aether_substrate::spawn",
-                            kind = %kind_name,
+                            kind = %kind,
                             "instanced actor sender dropped — mail discarded"
                         );
                     }
-                    RelayOutcome::ReceiverGone { kind_name } => {
+                    RelayOutcome::ReceiverGone { kind } => {
                         tracing::warn!(
                             target: "aether_substrate::spawn",
-                            kind = %kind_name,
+                            kind = %kind,
                             "instanced actor receiver dropped — mail discarded"
                         );
                     }
@@ -1302,7 +1301,6 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         // `record_finished` on `NONE` anyway).
         let env = Envelope::disarmed(
             kind,
-            self.spawner.registry().kind_name_shared(kind).unwrap_or_else(|| Arc::from(K::NAME)),
             None,
             self.sender,
             MailRef::from(payload),
@@ -1618,7 +1616,6 @@ mod tests {
                 },
             )
             .unwrap();
-        let registered = registry.kind_name_shared(ActivationPoke::ID).expect("registered kind has a shared name");
         let (events_tx, _events_rx) = crossbeam_channel::unbounded();
         let builder = SpawnBuilder::<ActivationProbe>::new(
             Arc::clone(&spawner),
@@ -1630,10 +1627,7 @@ mod tests {
         .after_init(ActivationPoke);
 
         assert_eq!(builder.after_init.len(), 1);
-        assert!(
-            Arc::ptr_eq(&builder.after_init[0].kind_name, &registered),
-            "bootstrap preparation clones the registry-owned Arc"
-        );
+        assert_eq!(builder.after_init[0].kind, ActivationPoke::ID, "bootstrap preparation carries the kind id forward");
 
         assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
     }

@@ -107,7 +107,6 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
     let bytes = payload.encode_into_bytes();
     handler.enqueue(OwnedDispatch::disarmed(
         <K as Kind>::ID,
-        K::NAME.to_owned(),
         None,
         Source::NONE,
         MailRef::from(bytes),
@@ -201,7 +200,6 @@ fn seize_and_run_dispatches_seed_in_place() {
     let payload = Greet { tag: 11 }.encode_into_bytes();
     let seed = OwnedDispatch::disarmed(
         <Greet as Kind>::ID,
-        Greet::NAME.to_owned(),
         None,
         Source::NONE,
         MailRef::from(payload),
@@ -777,7 +775,6 @@ fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: &str, payl
     let bytes = payload.encode_into_bytes();
     handler.enqueue(OwnedDispatch::disarmed(
         <K as Kind>::ID,
-        K::NAME.to_owned(),
         None,
         reply_to,
         MailRef::from(bytes),

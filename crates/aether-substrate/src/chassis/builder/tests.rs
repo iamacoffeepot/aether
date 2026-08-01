@@ -946,7 +946,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
 
     let payload = Ping { tag: 0xDEAD_BEEF };
     let bytes = payload.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Ping as Kind>::ID, Ping::NAME, &bytes, 1));
+    handler.enqueue(registry::test_owned_dispatch(<Ping as Kind>::ID, &bytes, 1));
 
     // Wait briefly for the dispatcher thread to dispatch.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -1056,7 +1056,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     for seq in 0..3 {
         let payload = Tick { seq };
         let bytes = payload.encode_into_bytes();
-        handler.enqueue(registry::test_owned_dispatch(<Tick as Kind>::ID, Tick::NAME, &bytes, 1));
+        handler.enqueue(registry::test_owned_dispatch(<Tick as Kind>::ID, &bytes, 1));
     }
 
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -1241,9 +1241,9 @@ fn ctx_spawn_child_routes_through_handler() {
         )
         .expect("fixture owns the authoritative conflicting route");
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, Hatch::NAME, &bytes, 1));
+    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, &bytes, 1));
     let conflict = (Hatch { tag: 2 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, Hatch::NAME, &conflict, 1));
+    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, &conflict, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while (child_received.lock().unwrap().len() < 2
@@ -1390,7 +1390,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         panic!("expected parent inbox")
     };
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, &bytes, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while !observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
@@ -1511,7 +1511,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         panic!("expected parent inbox");
     };
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, Hatch::NAME, &bytes, 1));
+    handler.enqueue(registry::test_owned_dispatch(Hatch::ID, &bytes, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while !invalid_subname_observed.load(AtomicOrdering::SeqCst) && Instant::now() < deadline {
@@ -1578,7 +1578,7 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
         panic!("expected mailbox entry for instanced actor");
     };
     let bytes = (Quit { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Quit as Kind>::ID, Quit::NAME, &bytes, 1));
+    handler.enqueue(registry::test_owned_dispatch(<Quit as Kind>::ID, &bytes, 1));
 
     // Wait for unwire to run + the registry slot to flip Dead.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -1838,9 +1838,9 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         panic!("expected spawned actor inbox");
     };
     let framework = CostTail { kind: None }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(CostTail::ID, CostTail::NAME, &framework, 1));
+    handler.enqueue(registry::test_owned_dispatch(CostTail::ID, &framework, 1));
     let ping = CostPing { tag: 1 }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(CostPing::ID, CostPing::NAME, &ping, 1));
+    handler.enqueue(registry::test_owned_dispatch(CostPing::ID, &ping, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
@@ -1867,7 +1867,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     assert!(rows.is_empty(), "framework-handled CostTail never creates a handler-cost row");
 
     let quit = CostQuit { tag: 1 }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(CostQuit::ID, CostQuit::NAME, &quit, 1));
+    handler.enqueue(registry::test_owned_dispatch(CostQuit::ID, &quit, 1));
     let deadline = Instant::now() + Duration::from_millis(500);
     while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
@@ -2056,7 +2056,7 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
         panic!("expected spawned actor inbox");
     };
     let boom = Boom { tag: 1 }.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(Boom::ID, Boom::NAME, &boom, 1));
+    handler.enqueue(registry::test_owned_dispatch(Boom::ID, &boom, 1));
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !aborted.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -2272,12 +2272,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
         panic!("expected mailbox entry for watcher");
     };
     let order = WatchOrder { target_id: target_id.0 };
-    watcher_handler.enqueue(registry::test_owned_dispatch(
-        <WatchOrder as Kind>::ID,
-        WatchOrder::NAME,
-        &order.encode_into_bytes(),
-        1,
-    ));
+    watcher_handler.enqueue(registry::test_owned_dispatch(<WatchOrder as Kind>::ID, &order.encode_into_bytes(), 1));
 
     // Wait until the registry sees the monitor entry.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -2301,7 +2296,6 @@ fn ctx_monitor_fires_notice_at_target_close() {
     };
     target_handler.enqueue(registry::test_owned_dispatch(
         <Quit as Kind>::ID,
-        Quit::NAME,
         &(Quit { tag: 1 }).encode_into_bytes(),
         1,
     ));
@@ -2493,7 +2487,6 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     for target in [host_id, alias_id] {
         watcher_handler.enqueue(registry::test_owned_dispatch(
             <WatchOrder as Kind>::ID,
-            WatchOrder::NAME,
             &(WatchOrder { target_id: target.0 }).encode_into_bytes(),
             1,
         ));
@@ -2517,7 +2510,6 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     };
     host_handler.enqueue(registry::test_owned_dispatch(
         <VacateOrder as Kind>::ID,
-        VacateOrder::NAME,
         &(VacateOrder { tag: 1 }).encode_into_bytes(),
         1,
     ));
@@ -2695,7 +2687,6 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     };
     watcher_handler.enqueue(registry::test_owned_dispatch(
         <WatchOrder as Kind>::ID,
-        WatchOrder::NAME,
         &(WatchOrder { target_id: alias_id.0 }).encode_into_bytes(),
         1,
     ));
@@ -2720,7 +2711,6 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     for target in [watcher_id, alias_id] {
         host_handler.enqueue(registry::test_owned_dispatch(
             <DespawnOrder as Kind>::ID,
-            DespawnOrder::NAME,
             &(DespawnOrder { target_id: target.0 }).encode_into_bytes(),
             1,
         ));
@@ -2895,12 +2885,7 @@ fn watcher_close_prunes_targets_forward_index() {
         panic!("expected mailbox entry for watcher");
     };
     let order = WatchOrder { target_id: target_id.0 };
-    watcher_handler.enqueue(registry::test_owned_dispatch(
-        <WatchOrder as Kind>::ID,
-        WatchOrder::NAME,
-        &order.encode_into_bytes(),
-        1,
-    ));
+    watcher_handler.enqueue(registry::test_owned_dispatch(<WatchOrder as Kind>::ID, &order.encode_into_bytes(), 1));
 
     // Wait for register to land.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -2913,7 +2898,6 @@ fn watcher_close_prunes_targets_forward_index() {
     // prunes watcher from `monitors_of[target]`.
     watcher_handler.enqueue(registry::test_owned_dispatch(
         <Quit as Kind>::ID,
-        Quit::NAME,
         &(Quit { tag: 1 }).encode_into_bytes(),
         1,
     ));
@@ -3040,12 +3024,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered") else {
         panic!("expected mailbox entry for c");
     };
-    handler.enqueue(registry::test_owned_dispatch(
-        <Quit as Kind>::ID,
-        Quit::NAME,
-        &(Quit { tag: 1 }).encode_into_bytes(),
-        1,
-    ));
+    handler.enqueue(registry::test_owned_dispatch(<Quit as Kind>::ID, &(Quit { tag: 1 }).encode_into_bytes(), 1));
 
     // Wait for c's slot to flip Dead.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -3216,7 +3195,6 @@ fn instanced_can_spawn_grandchild() {
     };
     parent_handler.enqueue(registry::test_owned_dispatch(
         <Hatch as Kind>::ID,
-        Hatch::NAME,
         &(Hatch { tag: 1 }).encode_into_bytes(),
         1,
     ));
@@ -3274,7 +3252,6 @@ fn instanced_can_spawn_grandchild() {
     // it, the grandchild keeps running.
     parent_handler.enqueue(registry::test_owned_dispatch(
         <Quit as Kind>::ID,
-        Quit::NAME,
         &(Quit { tag: 1 }).encode_into_bytes(),
         1,
     ));

@@ -293,12 +293,6 @@ impl InboundMail {
         self.env.kind
     }
 
-    /// The mail's registered kind name.
-    #[must_use]
-    pub fn kind_name(&self) -> &str {
-        &self.env.kind_name
-    }
-
     /// The mail's immediate sender (reply target + correlation).
     #[must_use]
     pub fn sender(&self) -> Source {
@@ -413,7 +407,6 @@ mod tests {
     fn armed_env(id: MailboxId, mail_id: MailId, root: MailId, sender: Source) -> Envelope {
         OwnedDispatch::armed(
             KindId(7),
-            "test.inbox.kind".to_owned(),
             None,
             sender,
             MailRef::from(Vec::new()),

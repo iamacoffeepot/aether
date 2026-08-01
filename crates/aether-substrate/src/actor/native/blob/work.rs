@@ -660,7 +660,6 @@ impl BlobWork {
                 // (`dispatch_one` / the finalized-slot seed path).
                 let seed = Envelope::armed(
                     mail.kind,
-                    lookup.kind_name_shared(),
                     None,
                     mail.reply_to,
                     mail.payload,

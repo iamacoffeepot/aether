@@ -213,7 +213,7 @@ pub struct SubstrateHarness {
     /// component-to-component mail does not show up here — those
     /// flows don't pass through outbound and are not observed by the
     /// chassis-owned sinks the harness wraps.
-    observed_kinds: Arc<Mutex<Vec<String>>>,
+    observed_kinds: Arc<Mutex<Vec<KindId>>>,
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
     /// `SubstrateHarness` drops the boot which joins the worker threads.
@@ -559,7 +559,7 @@ impl SubstrateHarness {
         let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
 
         let (events_tx, events_rx) = event_channel();
-        let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
         // ADR-0161 slice R4: the pumped render slot is booted post-`build_passive`
         // by the hook factory, so the non-knob render wiring (observation sink,
@@ -670,11 +670,17 @@ impl SubstrateHarness {
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
     /// under the guard.
     pub fn count_observed(&self, kind_name: &str) -> usize {
+        // One name-to-id resolution per assertion, against a recorder that
+        // stores ids. An unregistered name matches nothing, which is the same
+        // answer the name-comparing version gave.
+        let Some(wanted) = self.mail_registry().kind_id(kind_name) else {
+            return 0;
+        };
         self.observed_kinds
             .lock()
             .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
             .iter()
-            .filter(|n| n.as_str() == kind_name)
+            .filter(|kind| **kind == wanted)
             .count()
     }
 
@@ -687,7 +693,13 @@ impl SubstrateHarness {
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
     /// under the guard.
     pub fn observed_kinds(&self) -> Vec<String> {
-        self.observed_kinds.lock().expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)").clone()
+        let registry = self.mail_registry();
+        self.observed_kinds
+            .lock()
+            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
+            .iter()
+            .map(|kind| registry.kind_label(*kind))
+            .collect()
     }
 
     /// Borrow the registered frame hook, if any. The capture crate's

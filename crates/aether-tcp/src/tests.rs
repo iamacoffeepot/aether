@@ -109,7 +109,6 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, cap_namespace: &str, mail: &K, sou
     };
     handler.enqueue(OwnedDispatch::disarmed(
         K::ID,
-        K::NAME.to_owned(),
         None,
         source,
         MailRef::from(mail.encode_into_bytes()),
@@ -521,7 +520,6 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     let unbind = UnbindListener { listener_name: listener_name.clone() };
     handler.enqueue(OwnedDispatch::disarmed(
         UnbindListener::ID,
-        UnbindListener::NAME.to_owned(),
         None,
         Source::with_correlation(SourceAddr::Session(session), correlation_id),
         MailRef::from(unbind.encode_into_bytes()),

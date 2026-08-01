@@ -171,7 +171,6 @@ fn enqueue_with_root<K: Kind>(registry: &Registry, mailer: &Mailer, request: &K,
     };
     handler.enqueue(OwnedDispatch::disarmed(
         K::ID,
-        K::NAME.to_owned(),
         None,
         Source::with_correlation(SourceAddr::Component(sink), correlation_id),
         MailRef::from(request.encode_into_bytes()),

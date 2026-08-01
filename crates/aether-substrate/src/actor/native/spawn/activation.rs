@@ -565,7 +565,7 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
         let Self { spawner, id, token, subname, sender, strong_sender, binding, slot, finalizer, failure: _ } = *self;
         for prepared in bootstrap.into_iter().chain(parked) {
-            let PreparedMail { mail, kind_name, bootstrap } = prepared;
+            let PreparedMail { mail, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
                 Nanos(0)
             } else {
@@ -579,7 +579,6 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             let envelope = if bootstrap {
                 OwnedDispatch::disarmed(
                     mail.kind,
-                    kind_name,
                     None,
                     mail.reply_to,
                     mail.payload,
@@ -594,7 +593,6 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             } else {
                 OwnedDispatch::armed(
                     mail.kind,
-                    kind_name,
                     None,
                     mail.reply_to,
                     mail.payload,
@@ -618,8 +616,8 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             handler: Arc::new(move |dispatch: OwnedDispatch| {
                 match relay_or_transfer(dispatch, &weak_sender, &handler_wake) {
                     RelayOutcome::Delivered => {}
-                    RelayOutcome::SenderGone { kind_name } | RelayOutcome::ReceiverGone { kind_name } => {
-                        tracing::warn!(target: "aether_substrate::spawn", kind = %kind_name, "activating actor discarded mail");
+                    RelayOutcome::SenderGone { kind } | RelayOutcome::ReceiverGone { kind } => {
+                        tracing::warn!(target: "aether_substrate::spawn", kind = %kind, "activating actor discarded mail");
                     }
                 }
             }),

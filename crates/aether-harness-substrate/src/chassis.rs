@@ -164,7 +164,7 @@ pub struct RenderHookWiring {
     pub mailer: Arc<Mailer>,
     /// `SubstrateHarness` observation sink threaded into the render actor's
     /// `RenderParams`.
-    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
     /// Resolved `"assets"` root for `capture_frame` similarity references.
     pub assets_dir: Option<PathBuf>,
 }
@@ -200,7 +200,7 @@ pub struct SubstrateHarnessEnv {
     /// camera dispatchers push every inbound mail's kind name to it.
     /// In-process API uses this to assert what the sinks have seen;
     /// binary passes `None` for zero overhead.
-    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+    pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
     /// Sender side of the chassis event channel. Cloned into the
     /// `SubstrateHarnessCapability` config; the matching receiver rides on
     /// [`SubstrateHarnessBuild`].
@@ -357,14 +357,17 @@ impl SubstrateHarnessChassis {
             boot.registry.register_inline(
                 authority,
                 SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
+                // Records the kind *id*, not its name. The observer runs on
+                // every observed dispatch, so resolving a name here would put a
+                // registry lookup and a `String` allocation on that path for
+                // data no assertion reads until the run is over
+                // (iamacoffeepot/aether#4278). `count_observed` resolves the
+                // one name it is asked about instead.
                 Arc::new(move |dispatch: MailDispatch<'_>| {
-                    if dispatch.kind_name.is_empty() {
-                        return;
-                    }
                     observed_for_handler
                         .lock()
                         .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
-                        .push(dispatch.kind_name.to_owned());
+                        .push(dispatch.kind);
                 }),
             );
         }

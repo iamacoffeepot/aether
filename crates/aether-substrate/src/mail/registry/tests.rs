@@ -41,7 +41,6 @@ use crate::testing::boot_authority as auth;
 fn armed_dispatch_panics_if_dropped_without_discharge() {
     let env = OwnedDispatch::armed(
         KindId(7),
-        "aether.window.set_mode".to_owned(),
         None,
         Source::NONE,
         MailRef::from(vec![1u8, 2, 3]),
@@ -58,27 +57,42 @@ fn armed_dispatch_panics_if_dropped_without_discharge() {
     drop(env);
 }
 
-/// ADR-0094: the panic message names `mail_id` + `kind_name` so the
-/// leaking seam is locatable, not anonymous.
+/// ADR-0094: the panic message names `mail_id` + the kind so the leaking seam
+/// is locatable, not anonymous.
+///
+/// Asserted through `catch_unwind` rather than `#[should_panic(expected = ...)]`
+/// because the identifying token is now the kind *id* — a value with no literal
+/// spelling to paste into an attribute (iamacoffeepot/aether#4278). Rendering it
+/// here and asserting containment keeps the claim the test was making instead of
+/// weakening it to "something panicked".
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "aether.window.set_mode")]
 fn armed_dispatch_panic_names_the_kind() {
-    let env = OwnedDispatch::armed(
-        KindId(7),
-        "aether.window.set_mode".to_owned(),
-        None,
-        Source::NONE,
-        MailRef::from(Vec::new()),
-        1,
-        MailId::new(MailboxId(1), 1),
-        MailId::new(MailboxId(1), 1),
-        None,
-        Nanos(0),
-        0,
-        MailboxId(1),
-    );
-    drop(env);
+    let leaked = KindId(7);
+    let payload = std::panic::catch_unwind(|| {
+        let env = OwnedDispatch::armed(
+            leaked,
+            None,
+            Source::NONE,
+            MailRef::from(Vec::new()),
+            1,
+            MailId::new(MailboxId(1), 1),
+            MailId::new(MailboxId(1), 1),
+            None,
+            Nanos(0),
+            0,
+            MailboxId(1),
+        );
+        drop(env);
+    })
+    .expect_err("an armed dispatch dropped undischarged must panic");
+
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .expect("the obligation guard panics with a message");
+    assert!(message.contains(&format!("{leaked:?}")), "the leak panic must name the leaking kind; got: {message}");
 }
 
 /// ADR-0094: an armed dispatch that is `discharge()`d before drop
@@ -87,7 +101,6 @@ fn armed_dispatch_panic_names_the_kind() {
 fn discharged_dispatch_does_not_panic() {
     let env = OwnedDispatch::armed(
         KindId(7),
-        "aether.fs.read".to_owned(),
         None,
         Source::NONE,
         MailRef::from(Vec::new()),
@@ -113,7 +126,6 @@ fn dispatch_carries_routed_recipient() {
     let recipient = MailboxId(0xABCD);
     let env = OwnedDispatch::disarmed(
         KindId(7),
-        "aether.fs.read".to_owned(),
         None,
         Source::NONE,
         MailRef::from(Vec::new()),
@@ -139,7 +151,6 @@ fn dispatch_carries_routed_recipient() {
 fn transferred_dispatch_does_not_panic() {
     let env = OwnedDispatch::armed(
         KindId(7),
-        "aether.fs.write".to_owned(),
         None,
         Source::NONE,
         MailRef::from(Vec::new()),
@@ -161,7 +172,6 @@ fn transferred_dispatch_does_not_panic() {
 fn disarmed_dispatch_does_not_panic() {
     let env = OwnedDispatch::disarmed(
         KindId(7),
-        "aether.tick".to_owned(),
         None,
         Source::NONE,
         MailRef::from(Vec::new()),
@@ -185,7 +195,6 @@ fn disarmed_dispatch_does_not_panic() {
 fn clone_of_armed_dispatch_is_disarmed() {
     let env = OwnedDispatch::armed(
         KindId(7),
-        "aether.tick".to_owned(),
         None,
         Source::NONE,
         MailRef::from(vec![9u8]),
@@ -217,7 +226,6 @@ fn clone_of_armed_dispatch_is_disarmed() {
 fn armed_none_mail_id_dispatch_does_not_panic() {
     let env = OwnedDispatch::armed(
         KindId(7),
-        "aether.rpc.inbound_ready".to_owned(),
         None,
         Source::NONE,
         MailRef::from(Vec::new()),
@@ -255,7 +263,6 @@ fn standard_inbox_handler_relay_does_not_panic() {
     // Mint armed exactly as `route_mail`'s Inbox arm does.
     handler.enqueue(OwnedDispatch::armed(
         KindId(11),
-        "aether.audio.note_on".to_owned(),
         None,
         Source::NONE,
         MailRef::from(vec![0u8]),
@@ -420,10 +427,9 @@ fn closure_handler_runs_on_call() {
         panic!("expected closure entry")
     };
     // Test-side id is irrelevant — the handler ignores it.
-    h.enqueue(test_owned_dispatch(KindId(0), "aether.tick", &[], 7));
+    h.enqueue(test_owned_dispatch(KindId(0), &[], 7));
     h.enqueue(OwnedDispatch::disarmed(
         KindId(0),
-        "aether.tick".to_owned(),
         Some("physics".to_owned()),
         Source::NONE,
         MailRef::from(Vec::new()),
@@ -586,7 +592,7 @@ fn kind_name_reverse_lookup() {
 }
 
 #[test]
-fn repeated_routed_inbox_mail_shares_registered_kind_name_and_preserves_metadata() {
+fn repeated_routed_inbox_mail_preserves_per_mail_metadata() {
     let registry = Arc::new(Registry::new());
     let kind = registry.register_kind(&auth(), "aether.shared.kind");
     let (tx, rx) = mpsc::channel();
@@ -613,8 +619,10 @@ fn repeated_routed_inbox_mail_shares_registered_kind_name_and_preserves_metadata
 
     let first = rx.recv().expect("first routed dispatch");
     let second = rx.recv().expect("second routed dispatch");
-    assert!(Arc::ptr_eq(&first.kind_name, &second.kind_name));
-    assert_eq!(first.kind_name.as_ref(), "aether.shared.kind");
+    // Both carry the id they were pushed with — the routing step copies it
+    // through rather than re-deriving it from anything.
+    assert_eq!(first.kind, kind);
+    assert_eq!(second.kind, kind);
     assert_eq!(first.payload.bytes(), [1, 2]);
     assert_eq!(second.payload.bytes(), [3, 4]);
     assert_eq!(second.count, 2);
@@ -623,11 +631,6 @@ fn repeated_routed_inbox_mail_shares_registered_kind_name_and_preserves_metadata
     assert_eq!(second.parent_mail, Some(first_id));
     first.discharge();
     second.discharge();
-
-    let unknown_a = registry.route_lookup(KindId(u64::MAX - 1), recipient).kind_name_shared();
-    let unknown_b = registry.route_lookup(KindId(u64::MAX - 2), recipient).kind_name_shared();
-    assert!(unknown_a.is_empty());
-    assert!(Arc::ptr_eq(&unknown_a, &unknown_b), "unknown kinds reuse the registry's startup sentinel");
 }
 
 fn unit_desc(name: &str) -> KindDescriptor {
@@ -1188,7 +1191,7 @@ fn prepared_test_spawn(
             cancelled: Arc::clone(&cancelled),
         }),
         PreparedCostCells::new(Arc::clone(mailer.cost_table()), vec![(KindId(7), Arc::clone(&cell))]),
-        vec![PreparedMail::bootstrap(Mail::new(id, KindId(7), vec![bootstrap], 1), "test.activation")],
+        vec![PreparedMail::bootstrap(Mail::new(id, KindId(7), vec![bootstrap], 1))],
     ));
     (id, cell, cancelled, effect)
 }
@@ -2430,8 +2433,8 @@ fn inline_handler_blanket_impl_dispatches_closure_body() {
     let handler: Arc<dyn InlineHandler> = Arc::new(move |dispatch: MailDispatch<'_>| {
         c2.fetch_add(dispatch.count, Ordering::SeqCst);
     });
-    handler.dispatch(test_dispatch(KindId(0), "aether.tick", &[], 5));
-    handler.dispatch(test_dispatch(KindId(0), "aether.tick", &[], 7));
+    handler.dispatch(test_dispatch(KindId(0), &[], 5));
+    handler.dispatch(test_dispatch(KindId(0), &[], 7));
     assert_eq!(
         counter.load(Ordering::SeqCst),
         12,
@@ -2457,7 +2460,6 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
 
     handler.enqueue(OwnedDispatch::disarmed(
         KindId(0),
-        "aether.audio.note_on".to_owned(),
         None,
         Source::NONE,
         MailRef::from(vec![1, 2, 3]),
@@ -2471,7 +2473,6 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
     ));
     handler.enqueue(OwnedDispatch::disarmed(
         KindId(0),
-        "aether.audio.note_on".to_owned(),
         None,
         Source::NONE,
         MailRef::from(vec![4, 5, 6, 7]),
@@ -2513,7 +2514,6 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
     let handler: Arc<dyn InboxHandler> = Arc::new(ChannelForwarder { tx });
     handler.enqueue(OwnedDispatch::disarmed(
         KindId(42),
-        "aether.fs.write".to_owned(),
         Some("aether.fs".to_owned()),
         Source::NONE,
         MailRef::from(vec![0xAB, 0xCD]),
@@ -2528,7 +2528,6 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
 
     let received = rx.try_recv().expect("hand-rolled enqueue should send");
     assert_eq!(received.kind, KindId(42));
-    assert_eq!(received.kind_name.as_ref(), "aether.fs.write");
     assert_eq!(received.payload.into_vec(), vec![0xAB, 0xCD]);
     assert!(rx.try_recv().is_err(), "exactly one enqueue should send exactly one envelope");
 }

@@ -496,7 +496,6 @@ impl ComponentCtx {
         // docs for the contract.
         match registry.entry(mail.recipient) {
             Some(MailboxEntry::Inbox { handler, .. }) => {
-                let kind_name = registry.kind_name_or_empty_shared(mail.kind);
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any
                 // sink cares about (ADR-0011), and the same mailbox id
@@ -516,7 +515,6 @@ impl ComponentCtx {
                 // here; the recipient actor's dispatcher discharges it.
                 handler.enqueue(OwnedDispatch::armed(
                     mail.kind,
-                    kind_name,
                     origin,
                     mail.reply_to,
                     mail.payload,
@@ -536,11 +534,9 @@ impl ComponentCtx {
                 return;
             }
             Some(MailboxEntry::Inline(handler)) => {
-                let kind_name = registry.kind_name_or_empty_shared(mail.kind);
                 let origin = registry.mailbox_name(identity);
                 handler.dispatch(crate::mail::registry::MailDispatch {
                     kind: mail.kind,
-                    kind_name: &kind_name,
                     origin: origin.as_deref(),
                     sender: mail.reply_to,
                     payload: mail.payload.bytes(),

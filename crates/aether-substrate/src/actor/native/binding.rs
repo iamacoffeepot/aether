@@ -1158,13 +1158,7 @@ impl NativeBinding {
                 for mail in routed.iter_mut().skip(birth.after_mail) {
                     if mail.as_ref().is_some_and(|mail| mail.recipient == birth.recipient) {
                         let mail = mail.take().expect("matched same-flush child mail remains present");
-                        let kind_name = self
-                            .spawner
-                            .as_ref()
-                            .expect("staged births require a spawner")
-                            .registry()
-                            .kind_name_or_empty_shared(mail.kind);
-                        birth.commit.retain_after_init(mail, kind_name);
+                        birth.commit.retain_after_init(mail);
                     }
                 }
                 effects.push(RegistryEffect::PreparedSpawn(birth.commit));
@@ -1871,7 +1865,6 @@ mod tests {
         // mirrors the production route_mail Inbox arm result.
         let armed = OwnedDispatch::armed(
             KindId(7),
-            "test.binding.teardown".to_owned(),
             None,
             Source::NONE,
             MailRef::from(Vec::new()),
