@@ -226,7 +226,9 @@ where
         // native cap's `slots` are right here — wrap the cache seed in
         // `with_stamped(&resources.slots, ...)` exactly like the `init`
         // wrap above so both indexes share the same neutral cells.
-        let handler_kinds: Vec<aether_data::KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
+        // iamacoffeepot/aether#4266: seed from the dispatched set, not the
+        // advertised one — `capabilities` above still feeds the registry.
+        let handler_kinds: Vec<aether_data::KindId> = A::measured_kinds();
         let seeded = ctx.mail_send_handle().cost_table().seed(resources.mailbox_id, &handler_kinds);
         local::with_stamped(&resources.slots, || {
             use aether_actor::Local as _;

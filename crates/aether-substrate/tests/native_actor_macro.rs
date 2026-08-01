@@ -547,6 +547,52 @@ impl NativeActor for TaskRouteCap {
     }
 }
 
+/// Tripwire: an actor with a `#[handler(task)]` measures its completion arm
+/// (iamacoffeepot/aether#4266).
+///
+/// Every ADR-0093 completion arrives as one framework kind,
+/// `TaskCompletionWake`, dispatched through the typed table but absent from the
+/// ADR-0033 advertised surface — a caller cannot address it, so `capabilities`
+/// rightly omits it. Seeding the cost table from `capabilities` therefore left
+/// task handlers with no `CostCell` at all: their execution time never folded,
+/// `actor_cost` showed no row, and the #4261 undeclared-handler warning fired
+/// on the one condition its author could not act on, because the macro owns
+/// the declaration.
+///
+/// Asserts the split holds in both directions — the measured set carries the
+/// completion kind, the advertised set does not.
+#[test]
+fn a_task_handler_is_measured_but_not_advertised() {
+    use aether_data::Kind;
+    use aether_substrate::actor::native::{Dispatch, TaskCompletionWake};
+
+    let measured = <TaskRouteCap as Dispatch<TaskRouteCap>>::measured_kinds();
+    let advertised: Vec<_> =
+        <TaskRouteCap as Dispatch<TaskRouteCap>>::capabilities().handlers.iter().map(|h| h.id).collect();
+    let wake = <TaskCompletionWake as Kind>::ID;
+
+    assert!(measured.contains(&wake), "the completion arm must own a cost cell, got {measured:?}");
+    assert!(
+        !advertised.contains(&wake),
+        "a caller cannot address a completion, so it stays off the advertised surface"
+    );
+    for kind in &advertised {
+        assert!(measured.contains(kind), "every advertised handler is still measured, missing {kind:?}");
+    }
+}
+
+/// An actor with no task handler measures exactly what it advertises, so the
+/// wider set is not a blanket widening.
+#[test]
+fn an_actor_without_task_handlers_measures_exactly_its_advertised_kinds() {
+    use aether_substrate::actor::native::Dispatch;
+
+    let measured = <MacroProbeCap as Dispatch<MacroProbeCap>>::measured_kinds();
+    let advertised: Vec<_> =
+        <MacroProbeCap as Dispatch<MacroProbeCap>>::capabilities().handlers.iter().map(|h| h.id).collect();
+    assert_eq!(measured, advertised, "no task handler, no extra measured kind");
+}
+
 // ADR-0109 §5: the `#[actor]` macro submits a process-global link-time
 // `HandlerEntry` for each native `#[handler]`, carrying the owning
 // `NAMESPACE`, the input kind (id + name), and the reply kind read off

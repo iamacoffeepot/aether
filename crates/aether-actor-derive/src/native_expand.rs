@@ -593,6 +593,35 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     } else {
         quote! { ::core::option::Option::None }
     };
+    // iamacoffeepot/aether#4266: every ADR-0093 completion arrives as the single
+    // framework kind `TaskCompletionWake` (one dispatch arm, discriminated by
+    // `TaskDone<O, C>` type rather than by kind id), so an actor with any task
+    // handler dispatches one kind its advertised surface does not name. Seed the
+    // cost table from that wider set while `capabilities` keeps reporting only
+    // what a caller can actually address.
+    let measured_kinds_override = {
+        let handler_ids = handlers.iter().map(|h| {
+            let kind_ty = &h.kind_ty;
+            quote! { <#kind_ty as ::aether_data::Kind>::ID }
+        });
+        let task_completion_id = if task_handlers.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                __aether_kinds.push(
+                    <::aether_substrate::actor::native::TaskCompletionWake as ::aether_data::Kind>::ID,
+                );
+            }
+        };
+        quote! {
+            fn measured_kinds() -> ::std::vec::Vec<::aether_substrate::mail::KindId> {
+                let mut __aether_kinds = ::std::vec![#(#handler_ids),*];
+                #task_completion_id
+                __aether_kinds
+            }
+        }
+    };
+
     let capabilities_override = quote! {
         fn capabilities() -> ::aether_substrate::actor::native::ComponentCapabilities {
             ::aether_substrate::actor::native::ComponentCapabilities {
@@ -738,6 +767,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 
             #fallback_dispatch_override
 
+            #measured_kinds_override
             #capabilities_override
         }
 

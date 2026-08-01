@@ -358,7 +358,9 @@ where
     // `actor_cost` behave identically.
     let capabilities = A::capabilities();
     mailer.capability_registry().register(mailbox_id, &capabilities);
-    let handler_kinds: Vec<aether_data::KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
+    // iamacoffeepot/aether#4266: seed from the dispatched set, not the
+    // advertised one — `capabilities` above still feeds the registry.
+    let handler_kinds: Vec<aether_data::KindId> = A::measured_kinds();
     let seeded = mailer.cost_table().seed(mailbox_id, &handler_kinds);
     local::with_stamped(&slots, || {
         use aether_actor::Local as _;
