@@ -22,6 +22,7 @@
 #![allow(clippy::needless_pass_by_value, clippy::unused_self)]
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
@@ -84,75 +85,79 @@ impl WasmActor for HttpHandler {
 /// credit window so the e2e round trip exercises credit replenishment.
 const STREAM_CHUNK_COUNT: u32 = 20;
 
-/// The streaming state [`StreamingHttpHandler`] and
-/// [`RoutedStreamingHttpHandler`] share verbatim, so their e2e comparison
-/// isolates the dispatch path, not the behavior: the ADR-0133 stream slot,
-/// the arming floor, and per-request chunk progress.
-#[derive(Default)]
-struct StreamProgress {
-    /// The stream this handler is feeding (ADR-0133), captured from the
-    /// first credit mail — the counterparty that dispatched it plus the
-    /// stream id. `None` until that first grant arms it.
-    stream: Option<ResponseStream>,
-    /// The last stream id this handler armed. The cap's replenishment
-    /// grants race the terminator, so a grant for a stream this handler
-    /// already finished can arrive after the next request reset the slot
-    /// (issue 3797); stream ids are cap-minted monotonic, so only a grant
-    /// *above* this floor may arm the slot. Survives [`Self::begin_request`]
-    /// — the floor is exactly the cross-request state.
-    last_armed_id: Option<u64>,
+/// One response stream's progress: the ADR-0133 slot plus how far through
+/// [`STREAM_CHUNK_COUNT`] it has gotten.
+struct StreamState {
+    /// The stream this entry is feeding (ADR-0133), captured from its first
+    /// credit mail — the counterparty that dispatched it plus the stream id.
+    stream: ResponseStream,
     /// Index of the next chunk to emit.
     next_index: u32,
-    /// Whether the terminator has been sent.
+    /// Whether the terminator has been sent. The entry is kept past its
+    /// terminator rather than removed, because the cap's replenishment
+    /// grants race that terminator (issue 3797): a late grant for a finished
+    /// stream must find the terminal entry and be ignored, not an empty map
+    /// slot it would re-arm.
     ended: bool,
 }
 
-impl StreamProgress {
-    /// Reset for a fresh request: disarm the previous request's stream so
-    /// the slot re-arms from the new stream's own first credit grant, and
-    /// rewind the chunk progress. The arming floor stays — it is what keeps
-    /// the previous stream's stale grants from re-arming the fresh slot.
-    fn begin_request(&mut self) {
-        self.stream = None;
-        self.next_index = 0;
-        self.ended = false;
-    }
+/// The streaming state [`StreamingHttpHandler`] and
+/// [`RoutedStreamingHttpHandler`] share verbatim, so their e2e comparison
+/// isolates the dispatch path, not the behavior.
+///
+/// A response stream is per-connection, so progress is keyed per `stream_id`
+/// the way [`WebSocketHandler`]'s `connections` already keys its upgraded
+/// streams. That is only expressible since #3745 gave each response stream
+/// its own id: while the cap reused the dispatch correlation id, `stream_id`
+/// was identical across requests, so a map keyed on it found the previous
+/// request's terminal entry and emitted nothing — a slower single slot
+/// (#3730). Keying properly is also what retires the two workarounds a single
+/// slot needed: the `on_request` reset, and the monotonic arming floor that
+/// kept a finished stream's stale grants from re-arming the fresh slot.
+///
+/// Entries are never evicted. These fixtures serve a handful of requests per
+/// e2e run, so the map is bounded by the test itself; a production handler
+/// would drop an entry once the cap confirmed the stream closed.
+#[derive(Default)]
+struct StreamProgress {
+    streams: BTreeMap<u64, StreamState>,
+}
 
-    /// Spend one `HttpStreamCredit` grant: arm the stream handle on the
-    /// first grant above the floor (ADR-0133 — the counterparty that
-    /// dispatched it, so chunks flow back to whoever paced the stream
-    /// rather than a hard-coded cap singleton), emit up to `credit.credit`
-    /// more chunks, and terminate once all [`STREAM_CHUNK_COUNT`] have gone
-    /// out. A grant for any other stream — stale leftovers from an earlier
-    /// request racing the terminator (issue 3797) — is ignored: spending it
-    /// would overrun the live stream's window (the cap tears the connection
-    /// down as a flood) or arm the slot with a dead stream.
+impl StreamProgress {
+    /// Spend one `HttpStreamCredit` grant against its own stream: arm that
+    /// stream's entry on its first grant (ADR-0133 — the counterparty that
+    /// dispatched it, so chunks flow back to whoever paced the stream rather
+    /// than a hard-coded cap singleton), emit up to `credit.credit` more
+    /// chunks, and terminate once all [`STREAM_CHUNK_COUNT`] have gone out.
+    ///
+    /// A grant arriving after its own stream's terminator is ignored:
+    /// spending it would overrun the window and the cap would tear the
+    /// connection down as a flood. Grants for *other* streams are no longer a
+    /// case to defend against — each has its own entry.
     fn spend_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: &HttpStreamCredit) {
-        let stream = match self.stream {
-            Some(stream) if credit.stream_id == stream.stream_id => stream,
-            Some(_) => return,
-            None => {
-                if self.last_armed_id.is_some_and(|last| credit.stream_id <= last) {
+        let state = match self.streams.entry(credit.stream_id) {
+            Entry::Occupied(occupied) => occupied.into_mut(),
+            Entry::Vacant(vacant) => {
+                let Some(stream) = ResponseStream::from_credit(ctx, credit) else {
                     return;
-                }
-                match ResponseStream::from_credit(ctx, credit) {
-                    Some(stream) => {
-                        self.last_armed_id = Some(stream.stream_id);
-                        *self.stream.insert(stream)
-                    }
-                    None => return,
-                }
+                };
+                vacant.insert(StreamState { stream, next_index: 0, ended: false })
             }
         };
+        if state.ended {
+            return;
+        }
+
         let mut budget = credit.credit;
-        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
-            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
-            self.next_index += 1;
+        while budget > 0 && state.next_index < STREAM_CHUNK_COUNT {
+            state.stream.chunk(ctx, format!("chunk-{}\n", state.next_index).into_bytes());
+            state.next_index += 1;
             budget -= 1;
         }
-        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
-            stream.end(ctx);
-            self.ended = true;
+
+        if state.next_index >= STREAM_CHUNK_COUNT {
+            state.stream.end(ctx);
+            state.ended = true;
         }
     }
 }
@@ -192,7 +197,6 @@ impl WasmActor for StreamingHttpHandler {
     //noinspection DuplicatedCode -- actor macros require one request handler per fixture actor type.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
-        self.progress.begin_request();
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
@@ -425,7 +429,6 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// `wire`.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
-        self.progress.begin_request();
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
