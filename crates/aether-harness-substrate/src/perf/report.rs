@@ -93,6 +93,17 @@ pub struct CellJson {
     pub p99: u64,
     pub max: u64,
     pub n: usize,
+    /// Mode indicator (iamacoffeepot/aether#4265): the fraction of samples past
+    /// [`TAIL_MASS_MULTIPLE`](crate::perf::harness::TAIL_MASS_MULTIPLE) times
+    /// this cell's own `p50`. A cell whose value flips between trials is
+    /// bistable, and has no single number to compare.
+    ///
+    /// Defaulted on decode so a base trial built before this field existed
+    /// still ingests — it reads as "no tail", which is also how a cell with no
+    /// tail reports, so the comparator treats an old base as simply not
+    /// carrying the signal rather than as evidence of stability.
+    #[serde(default)]
+    pub tail_mass: f64,
 }
 
 impl CellJson {
@@ -334,6 +345,7 @@ impl TrialReport {
                         p99: s.p99,
                         max: s.max,
                         n: s.n,
+                        tail_mass: s.tail_mass,
                     });
                 }
             }
@@ -492,6 +504,16 @@ pub enum Verdict {
     Improved,
     Stable,
     Regressed,
+    /// The cell changed *mode* between trials on one side or the other, so it
+    /// has no single value to compare (iamacoffeepot/aether#4265).
+    ///
+    /// #4177 established that a cell can boot into a fast or a slow mode via
+    /// process history rather than through anything in the code under test.
+    /// Comparing a side that was slow in 9 of 12 trials against one that was
+    /// slow in 3 produces a confident delta for a quantity with two values —
+    /// which is how a mode-selection difference reads as a regression. Saying
+    /// the cell is bistable is the honest output; a delta is not available.
+    Bistable,
 }
 
 /// One compared cell — display bands per side (IQR across trials) plus
@@ -759,6 +781,12 @@ fn decode_latency_cells(name: &str, trials: &[TrialReport]) -> Vec<Vec<CellJson>
 /// cell missing from any trial of either side is dropped — preserving
 /// the pre-sections semantics exactly.
 #[allow(clippy::cast_precision_loss)]
+/// Tail mass at or above which a cell counts as having booted into its slow
+/// mode. Set an order of magnitude below the ~8.5% (17 of 200 frames) #4177
+/// measured, so the check reads the presence of a tail rather than its exact
+/// size, and well above the zero a clean cell reports.
+const MODE_PRESENT_TAIL_MASS: f64 = 0.01;
+
 fn compare_latency(
     name: &str,
     base_cells: &[Vec<CellJson>],
@@ -782,6 +810,10 @@ fn compare_latency(
             continue; // cell not present in every trial — skip
         }
 
+        // Read once per cell, not per percentile: the mode is a property of the
+        // cell's sample population, and all three percentiles are drawn from it.
+        let bistable = flipped_mode(&base_hits) || flipped_mode(&cand_hits);
+
         for p in Pct::ALL {
             let base_vals: Vec<f64> = base_hits.iter().map(|c| c.percentile(p)).collect();
             let cand_vals: Vec<f64> = cand_hits.iter().map(|c| c.percentile(p)).collect();
@@ -796,7 +828,14 @@ fn compare_latency(
             let delta_median = median_sorted(&delta_sorted);
             let delta_iqr = iqr_sorted(&delta_sorted);
 
-            let verdict = classify(&deltas, delta_median, delta_iqr, base_median, Direction::LowerIsBetter, cfg);
+            // A cell that changed mode between trials has no single value to
+            // compare, so the mode check precedes the paired classification
+            // rather than annotating it.
+            let verdict = if bistable {
+                Verdict::Bistable
+            } else {
+                classify(&deltas, delta_median, delta_iqr, base_median, Direction::LowerIsBetter, cfg)
+            };
             let delta_pct = if base_median > 0.0 {
                 delta_median / base_median * 100.0
             } else {
@@ -821,8 +860,22 @@ fn compare_latency(
 
     let improved = cells.iter().filter(|c| c.verdict == Verdict::Improved).count();
     let regressed = cells.iter().filter(|c| c.verdict == Verdict::Regressed).count();
-    let stable = cells.len() - improved - regressed;
+    let bistable = cells.iter().filter(|c| c.verdict == Verdict::Bistable).count();
+    let stable = cells.len() - improved - regressed - bistable;
     SectionReport::Compared { name: name.to_owned(), improved, stable, regressed, cells }
+}
+
+/// Did this side's trials disagree about which mode the cell was in?
+///
+/// True when some trials carry a tail and others carry essentially none —
+/// evidence the cell booted differently between runs rather than that the code
+/// changed. Compares against [`MODE_PRESENT_TAIL_MASS`] rather than looking for
+/// a spread, so a cell that is *consistently* tailed (a genuinely bimodal
+/// workload, same in every trial) is not flagged: that one has a stable
+/// distribution and its percentiles do compare.
+fn flipped_mode(trials: &[&CellJson]) -> bool {
+    let tailed = trials.iter().filter(|c| c.tail_mass >= MODE_PRESENT_TAIL_MASS).count();
+    tailed > 0 && tailed < trials.len()
 }
 
 /// Per-trial throughput cells: decode each trial's `throughput` section
@@ -1104,6 +1157,27 @@ pub fn headline_counts(report: &ComparisonReport) -> (usize, usize, usize) {
     })
 }
 
+/// Cells whose mode flipped between trials, over the same verdict-carrying
+/// sections [`headline_counts`] sums (iamacoffeepot/aether#4265).
+///
+/// Reported beside the headline rather than inside it: a bistable cell is not
+/// a regression and must not move the gate signal, but it is also not a stable
+/// result, and letting it vanish from the rollup is how a mode-selection
+/// difference gets read as a clean run.
+#[must_use]
+pub fn bistable_count(report: &ComparisonReport) -> usize {
+    report
+        .sections
+        .iter()
+        .filter_map(|sec| match sec {
+            SectionReport::Compared { name, cells, .. } if latency_section_renders_verdict(name) => Some(cells),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| c.verdict == Verdict::Bistable)
+        .count()
+}
+
 /// Render the comparison as a sticky PR-comment markdown body: headline
 /// counts (the verdict-carrying sections only — see [`headline_counts`]),
 /// then per section — a light `latency` verdict (non-stable rows up top,
@@ -1120,10 +1194,23 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
     s.push_str(&format!("{subtitle}\n\n"));
 
     let (improved, stable, regressed) = headline_counts(report);
+    let bistable = bistable_count(report);
+    let bistable_note = if bistable > 0 {
+        format!(" · **{bistable} bistable**")
+    } else {
+        String::new()
+    };
     s.push_str(&format!(
-        "**{improved} improved · {stable} stable · {regressed} regressed** ({} trials/config, paired)\n\n",
+        "**{improved} improved · {stable} stable · {regressed} regressed**{bistable_note} ({} trials/config, paired)\n\n",
         report.trials
     ));
+    if bistable > 0 {
+        s.push_str(
+            "_A bistable cell changed mode between trials on one side, so it has no single value to compare \
+             (iamacoffeepot/aether#4265). Its delta is withheld rather than reported — treat it as unmeasured, \
+             not as stable._\n\n",
+        );
+    }
 
     for sec in &report.sections {
         match sec {
@@ -1215,6 +1302,7 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
             Verdict::Improved => "improved",
             Verdict::Stable => "stable",
             Verdict::Regressed => "regressed",
+            Verdict::Bistable => "bistable",
         };
         format!(
             "| {} | {} | {} | {} | {} ±{} | {} ±{} | {} | {} |\n",
@@ -1278,6 +1366,7 @@ fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputCompar
             Verdict::Improved => "improved",
             Verdict::Stable => "stable",
             Verdict::Regressed => "regressed",
+            Verdict::Bistable => "bistable",
         };
         format!(
             "| {} | {} | {} ±{} | {} ±{} | {} | {} |\n",
@@ -1348,6 +1437,7 @@ mod tests {
             p99: (p50 as f64 * 1.5) as u64,
             max: p50 * 4,
             n: 1800,
+            tail_mass: 0.0,
         }
     }
 
@@ -1392,6 +1482,58 @@ mod tests {
             panic!("latency section not compared");
         };
         cells.iter().find(|c| c.percentile == "p50").expect("p50 cell present").verdict
+    }
+
+    /// Build a K-trial side whose cell carries a per-trial `tail_mass`, with a
+    /// fixed `p50` — so only the mode varies and the paired delta is otherwise
+    /// perfectly stable.
+    fn side_with_tails(tails: &[f64]) -> Vec<TrialReport> {
+        tails
+            .iter()
+            .map(|&tail_mass| {
+                let cells = vec![CellJson { tail_mass, ..cell_json("fanout-8", 1_500) }];
+                let body = serde_json::to_value(LatencySection { cells }).expect("encode latency body");
+                single_section_trial(LatencySection::NAME, LatencySection::VERSION, body)
+            })
+            .collect()
+    }
+
+    /// Tripwire: a cell that changed mode between trials is withheld rather
+    /// than compared (iamacoffeepot/aether#4265).
+    ///
+    /// Both sides here have an identical, perfectly stable `p50`, so the paired
+    /// classifier would call this `stable` with full confidence. It is not
+    /// stable — the base booted into its slow mode in half its trials. That is
+    /// exactly the shape #4177's comparison had, and reporting a confident
+    /// delta across it is how mode selection reads as a code change.
+    #[test]
+    fn a_cell_that_flipped_mode_is_withheld_not_compared() {
+        let base = side_with_tails(&[0.0, 0.085, 0.0, 0.085, 0.0, 0.085]);
+        let cand = side_with_tails(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+
+        assert_eq!(p50_verdict(&rep), Verdict::Bistable, "a flipped cell has no single value to compare");
+        assert_eq!(bistable_count(&rep), 3, "all three percentiles of the cell are withheld");
+
+        let SectionReport::Compared { stable, regressed, improved, .. } = latency_section(&rep) else {
+            panic!("latency section not compared");
+        };
+        assert_eq!(
+            (*improved, *stable, *regressed),
+            (0, 0, 0),
+            "a withheld cell must not be counted as stable — that is how it would disappear",
+        );
+    }
+
+    /// A cell that is *consistently* tailed has a stable distribution, so its
+    /// percentiles do compare. Only disagreement between trials is the signal.
+    #[test]
+    fn a_consistently_tailed_cell_still_compares() {
+        let base = side_with_tails(&[0.085, 0.085, 0.085, 0.085, 0.085, 0.085]);
+        let cand = side_with_tails(&[0.085, 0.085, 0.085, 0.085, 0.085, 0.085]);
+        let rep = compare(&base, &cand, CompareConfig::default());
+        assert_eq!(p50_verdict(&rep), Verdict::Stable, "a steadily bimodal workload is still measurable");
+        assert_eq!(bistable_count(&rep), 0);
     }
 
     #[test]

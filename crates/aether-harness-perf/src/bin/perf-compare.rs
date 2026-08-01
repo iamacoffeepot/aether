@@ -391,6 +391,9 @@ mod tests {
                     p99: p50,
                     max: p50,
                     n: 1800,
+                    // No tail: this fixture varies only `p50`, so the mode
+                    // check must not classify it (iamacoffeepot/aether#4265).
+                    tail_mass: 0.0,
                 }];
                 let body = serde_json::to_value(LatencySection { cells }).expect("encode latency body");
                 TrialReport {
