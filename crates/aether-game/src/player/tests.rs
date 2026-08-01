@@ -39,6 +39,16 @@ use aether_tcp::{
 const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
 
+/// Wall-clock bound on every blocking socket read and channel receive below.
+///
+/// A backstop against a hang, never a performance assertion. Everything it
+/// guards is a loopback socket or an in-process channel that answers in
+/// single-digit milliseconds, so the only thing this value decides is how long
+/// a genuinely wedged run takes to fail. It was two seconds, close enough to
+/// real scheduling latency that a loaded CI runner could cross it while the
+/// engine was still working correctly (iamacoffeepot/aether#4231).
+const HANG_BACKSTOP: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ObservedSimMail {
     Poll { mail: Poll, source: Option<MailboxId> },
@@ -264,7 +274,7 @@ fn listener_reply_target() -> Source {
 }
 
 fn await_player_listener_port(registry: &Arc<Registry>, outbound_replies: &mpsc::Receiver<EgressEvent>) -> u16 {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + HANG_BACKSTOP;
     loop {
         enqueue_with_source(
             registry,
@@ -279,10 +289,7 @@ fn await_player_listener_port(registry: &Arc<Registry>, outbound_replies: &mpsc:
             }
             Ok(other) => panic!("gateway listener list returned unexpected egress: {other:?}"),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "gateway listener did not bind within two seconds before any player Hello"
-                );
+                assert!(Instant::now() < deadline, "gateway listener did not bind before any player Hello");
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!("gateway listener reply channel disconnected"),
@@ -408,7 +415,7 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
         .build_passive()
         .expect("gateway observer chassis boots");
 
-    let bind = bind_rx.recv_timeout(Duration::from_secs(2)).expect("gateway emits bind during wire");
+    let bind = bind_rx.recv_timeout(HANG_BACKSTOP).expect("gateway emits bind during wire");
     assert_eq!(bind.addr, "127.0.0.1:0");
     assert_eq!(bind.name.as_deref(), Some(LISTENER_NAME));
     assert_eq!(bind.consumer, Some(GameGatewayCapability::resolve(0, ())));
@@ -447,7 +454,7 @@ fn player_wire_round_trips_and_rejects_malformed_bytes() {
 fn frame_racing_player_birth_is_delivered_after_the_bootstrap_frame() {
     let PlayerTestHarness { observed, chassis: _chassis, listener_port, .. } = boot_player_substrate();
     let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect racing player client");
-    client.set_read_timeout(Some(Duration::from_secs(2))).expect("set racing player timeout");
+    client.set_read_timeout(Some(HANG_BACKSTOP)).expect("set racing player timeout");
 
     write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "racing".into() })
         .expect("write racing Hello");
@@ -461,20 +468,31 @@ fn frame_racing_player_birth_is_delivered_after_the_bootstrap_frame() {
     .expect("write frame racing activation");
 
     assert!(matches!(
-        observed.recv_timeout(Duration::from_secs(2)).expect("bootstrap Hello reaches the player child first"),
+        observed.recv_timeout(HANG_BACKSTOP).expect("bootstrap Hello reaches the player child first"),
         ObservedSimMail::Poll { .. }
     ));
-    match observed.recv_timeout(Duration::from_secs(2)) {
-        Ok(ObservedSimMail::Spawn { mail, source }) => {
-            assert_eq!(source, Some(expected_player_session_mailbox("conn-0")));
-            assert_eq!((mail.cell_x, mail.cell_z), (4, 6));
+
+    // Which side of the race won is read off the session's own first frame
+    // rather than inferred from a deadline. The two outcomes write disjoint
+    // frames and nothing else reaches the socket before them: `on_poll_result`
+    // writes `HelloAck` before it turns the session `Active`, and the
+    // `CatchingUp` rejection writes `Close` and then refuses the `PollResult`,
+    // so no `HelloAck` follows it. Timing the branch instead means a loaded
+    // runner can misread a slow admission as a rejection, which is the shape
+    // iamacoffeepot/aether#4231 caught.
+    match read_frame(&mut client).expect("the session answers the handshake on either side of the race") {
+        PlayerFrame::Close { reason } => {
+            assert_eq!(reason, "player frame arrived before HelloAck", "an early second frame closes in order");
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let close: PlayerFrame = read_frame(&mut client).expect("an early second frame closes in order");
-            assert!(matches!(close, PlayerFrame::Close { reason } if reason == "player frame arrived before HelloAck"));
-        }
-        Ok(other) => panic!("unexpected simulation mail after bootstrap: {other:?}"),
-        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("simulation observation channel disconnected"),
+        PlayerFrame::HelloAck { .. } => match observed.recv_timeout(HANG_BACKSTOP) {
+            Ok(ObservedSimMail::Spawn { mail, source }) => {
+                assert_eq!(source, Some(expected_player_session_mailbox("conn-0")));
+                assert_eq!((mail.cell_x, mail.cell_z), (4, 6));
+            }
+            Ok(other) => panic!("unexpected simulation mail after HelloAck: {other:?}"),
+            Err(error) => panic!("an admitted intent never reached the simulation: {error:?}"),
+        },
+        other => panic!("unexpected first frame from the racing session: {other:?}"),
     }
 }
 
@@ -508,7 +526,7 @@ fn owner_rejected_player_birth_settles_without_a_live_session() {
         Source::with_correlation(SourceAddr::Component(source_mailbox), correlation_id),
         root,
     );
-    settled.recv_timeout(Duration::from_secs(2)).expect("owner rejection settles after the gateway task completion");
+    settled.recv_timeout(HANG_BACKSTOP).expect("owner rejection settles after the gateway task completion");
 
     let turn_sim = TestTurnSim::resolve(0, ());
     let fanout_root = MailId::new(turn_sim, correlation_id + 1);
@@ -521,7 +539,7 @@ fn owner_rejected_player_birth_settles_without_a_live_session() {
         Source::with_correlation(SourceAddr::Component(turn_sim), correlation_id + 1),
         fanout_root,
     );
-    fanout_settled.recv_timeout(Duration::from_secs(2)).expect("post-rejection live fan-out probe settles");
+    fanout_settled.recv_timeout(HANG_BACKSTOP).expect("post-rejection live fan-out probe settles");
     assert_eq!(deliveries.load(Ordering::Relaxed), 0, "rejected child never receives bootstrap or live fan-out mail");
 
     registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only player-session collision authority");
@@ -532,19 +550,16 @@ fn gateway_refuses_a_new_session_at_configured_capacity() {
     let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port, .. } =
         boot_player_substrate_with_limits(1, GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES, false);
     let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
-    first.set_read_timeout(Some(Duration::from_secs(2))).expect("set first-session timeout");
+    first.set_read_timeout(Some(HANG_BACKSTOP)).expect("set first-session timeout");
     write_frame(&mut first, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "first".into() })
         .expect("write first Hello");
-    assert!(matches!(
-        observed.recv_timeout(Duration::from_secs(2)).expect("first session polls"),
-        ObservedSimMail::Poll { .. }
-    ));
+    assert!(matches!(observed.recv_timeout(HANG_BACKSTOP).expect("first session polls"), ObservedSimMail::Poll { .. }));
     assert!(matches!(read_frame::<_, PlayerFrame>(&mut first), Ok(PlayerFrame::HelloAck { .. })));
     expect_fact(&mut first, 1);
     expect_fact(&mut first, 2);
 
     let mut refused = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect refused player client");
-    refused.set_read_timeout(Some(Duration::from_secs(2))).expect("set refused-session timeout");
+    refused.set_read_timeout(Some(HANG_BACKSTOP)).expect("set refused-session timeout");
     write_frame(&mut refused, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "refused".into() })
         .expect("write refused Hello");
     match read_frame::<_, PlayerFrame>(&mut refused) {
@@ -573,11 +588,11 @@ fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
         boot_player_substrate_with_limits(GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS, 1, true);
     let mut client =
         TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect catching-up player client");
-    client.set_read_timeout(Some(Duration::from_secs(2))).expect("set catching-up timeout");
+    client.set_read_timeout(Some(HANG_BACKSTOP)).expect("set catching-up timeout");
     write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "bounded".into() })
         .expect("write bounded Hello");
     assert!(matches!(
-        observed.recv_timeout(Duration::from_secs(2)).expect("bounded session polls"),
+        observed.recv_timeout(HANG_BACKSTOP).expect("bounded session polls"),
         ObservedSimMail::Poll { .. }
     ));
 
@@ -598,12 +613,12 @@ fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
 fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
     let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port, .. } = boot_player_substrate();
     let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect player client");
-    client.set_read_timeout(Some(Duration::from_secs(2))).expect("set player read timeout");
+    client.set_read_timeout(Some(HANG_BACKSTOP)).expect("set player read timeout");
 
     write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "loopback".into() })
         .expect("write player hello");
 
-    let poll = observed.recv_timeout(Duration::from_secs(2)).expect("session polls for catch-up");
+    let poll = observed.recv_timeout(HANG_BACKSTOP).expect("session polls for catch-up");
     let ObservedSimMail::Poll { mail, source } = poll else {
         panic!("expected catch-up poll, got {poll:?}");
     };
@@ -627,12 +642,12 @@ fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
         matches!(read_frame::<_, PlayerFrame>(&mut client), Err(FrameError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut),
         "poll/live overlap at tick 2 must be emitted once",
     );
-    client.set_read_timeout(Some(Duration::from_secs(2))).expect("restore player read timeout");
+    client.set_read_timeout(Some(HANG_BACKSTOP)).expect("restore player read timeout");
 
     let forged = Spawn { entity_id: 0xdead_beef, cell_x: 3, cell_z: -2 };
     write_frame(&mut client, &PlayerFrame::Intent { kind: Spawn::ID, payload: forged.encode_into_bytes() })
         .expect("write forged spawn");
-    let observed_spawn = observed.recv_timeout(Duration::from_secs(2)).expect("sim receives stamped spawn");
+    let observed_spawn = observed.recv_timeout(HANG_BACKSTOP).expect("sim receives stamped spawn");
     let ObservedSimMail::Spawn { mail: stamped, source } = observed_spawn else {
         panic!("expected stamped spawn, got {observed_spawn:?}");
     };
@@ -660,7 +675,7 @@ fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
     let move_intent = MoveIntent { entity_id: 7, direction: MoveDirection::West };
     write_frame(&mut client, &PlayerFrame::Intent { kind: MoveIntent::ID, payload: move_intent.encode_into_bytes() })
         .expect("write forged move intent");
-    let observed_move = observed.recv_timeout(Duration::from_secs(2)).expect("sim receives move");
+    let observed_move = observed.recv_timeout(HANG_BACKSTOP).expect("sim receives move");
     let ObservedSimMail::Move { mail: stamped, source } = observed_move else {
         panic!("expected stamped move, got {observed_move:?}");
     };
@@ -670,7 +685,7 @@ fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
 
     let mut rejected =
         TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect rejected player client");
-    rejected.set_read_timeout(Some(Duration::from_secs(2))).expect("set rejected-session read timeout");
+    rejected.set_read_timeout(Some(HANG_BACKSTOP)).expect("set rejected-session read timeout");
     write_frame(
         &mut rejected,
         &PlayerFrame::Hello { wire_version: WIRE_VERSION + 1, client_name: "wrong-version".into() },
