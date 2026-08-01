@@ -1,9 +1,5 @@
 //! Deterministic in-memory `aether.window` runtime for substrate harnesses.
 
-// The scoped runtime layout keeps this established manager file while its
-// concrete child runtime lives beneath the matching module directory.
-#![allow(clippy::self_named_module_files)]
-
 mod instance;
 
 use std::collections::{BTreeMap, HashMap};
