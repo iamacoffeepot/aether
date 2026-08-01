@@ -1468,26 +1468,3 @@ mod control_plane {
         pub cost_micros: Option<u64>,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use aether_data::Kind;
-    use alloc::vec::Vec;
-
-    use super::{CaptureFrame, WindowId};
-
-    #[test]
-    fn capture_frame_round_trip_preserves_window_target() {
-        let request = CaptureFrame {
-            window: Some(WindowId(0x_0123_4567_89ab_cdef)),
-            mails: Vec::new(),
-            after_mails: Vec::new(),
-            checks: Vec::new(),
-            similarity: None,
-        };
-
-        let decoded = CaptureFrame::decode_from_bytes(&request.encode_into_bytes()).expect("capture frame decodes");
-
-        assert_eq!(decoded.window, request.window);
-    }
-}

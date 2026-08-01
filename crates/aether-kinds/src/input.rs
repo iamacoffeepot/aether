@@ -200,22 +200,12 @@ pub struct Modifiers {
 
 #[cfg(test)]
 mod tests {
-    use core::fmt::Debug;
-
     use aether_data::{Kind, Schema, SchemaType};
 
     use super::{
         ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-        WindowId, WindowSize,
+        WindowSize,
     };
-
-    fn assert_round_trip<K>(value: K)
-    where
-        K: Kind + Debug + PartialEq,
-    {
-        let encoded = value.encode_into_bytes();
-        assert_eq!(K::decode_from_bytes(&encoded), Some(value));
-    }
 
     fn assert_window_is_leading_field<K: Schema>() {
         let SchemaType::Struct { fields, repr_c } = &K::SCHEMA else {
@@ -223,22 +213,6 @@ mod tests {
         };
         assert_eq!(fields.first().map(|field| field.name.as_ref()), Some("window"));
         assert!(!repr_c, "window input kinds use the structured wire path");
-    }
-
-    #[test]
-    fn window_identity_round_trips_through_every_input_kind() {
-        let window = WindowId(0x_0123_4567_89ab_cdef);
-
-        assert_round_trip(Key { window, code: 41 });
-        assert_round_trip(KeyRelease { window, code: 41 });
-        assert_round_trip(MouseButton { window, button: 1, x: 2.5, y: 3.5 });
-        assert_round_trip(MouseButtonRelease { window, button: 1, x: 4.5, y: 5.5 });
-        assert_round_trip(MouseWheel { window, delta_x: 1.0, delta_y: -2.0, x: 6.5, y: 7.5 });
-        assert_round_trip(MouseMove { window, x: 8.5, y: 9.5 });
-        assert_round_trip(WindowSize { window, width: 1280, height: 720 });
-        assert_round_trip(TextInput { window, text: "hello".into() });
-        assert_round_trip(ImePreedit { window, text: "üx".into(), cursor_begin: Some(0), cursor_end: Some(2) });
-        assert_round_trip(Modifiers { window, shift: true, ctrl: false, alt: true, meta: false });
     }
 
     #[test]

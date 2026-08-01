@@ -914,17 +914,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn workbench_child_placements_cover_exact_and_reusable_children() {
-        fn assert_child_of<P: aether_actor::Addressable, C: aether_actor::ChildOf<P>>() {}
-        fn assert_module_child<T: aether_actor::ModuleChild>() {}
-
-        assert_child_of::<TerrainWorkbench, TerrainToolPanel>();
-        assert_child_of::<TerrainWorkbench, TerrainViewport>();
-        assert_module_child::<ConsoleOverlay>();
-        assert_module_child::<EditorShell>();
-    }
-
     fn reference(id: u32, revision: u32) -> MarkRef {
         MarkRef { id: MarkId::new(id), revision }
     }

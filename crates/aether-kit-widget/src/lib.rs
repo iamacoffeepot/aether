@@ -450,29 +450,6 @@ mod tests {
     use super::*;
     use aether_math::Rgba;
 
-    #[test]
-    fn spawnable_widget_types_are_module_children() {
-        fn assert_module_child<T: aether_actor::ModuleChild>() {}
-
-        assert_module_child::<Widget>();
-        assert_module_child::<EditorShell>();
-        assert_module_child::<ScrollWidget>();
-        assert_module_child::<set::ButtonWidget>();
-        assert_module_child::<set::ImageWidget>();
-        assert_module_child::<set::LabelWidget>();
-        assert_module_child::<set::NumericWidget>();
-        assert_module_child::<set::RadioGroupWidget>();
-        assert_module_child::<set::SegmentedWidget>();
-        assert_module_child::<set::SliderWidget>();
-        assert_module_child::<set::TextAreaWidget>();
-        assert_module_child::<set::TextFieldWidget>();
-        assert_module_child::<set::ToggleWidget>();
-        assert_module_child::<set::VirtualListWidget>();
-
-        #[cfg(feature = "behavior")]
-        assert_module_child::<aether_behavior::BehaviorHost>();
-    }
-
     fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
         WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
     }

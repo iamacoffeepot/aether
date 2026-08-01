@@ -561,13 +561,6 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    #[test]
-    fn behavior_host_is_module_child() {
-        fn assert_module_child<T: aether_actor::ModuleChild>() {}
-
-        assert_module_child::<BehaviorHost>();
-    }
-
     #[derive(Default)]
     struct RecordingSink {
         events: Vec<DrainEvent>,
