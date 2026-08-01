@@ -52,7 +52,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::actor::native::NativeActor;
-use crate::actor::native::pumped_slot::PumpedSlot;
+use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::ctx::MailboxWakeSlot;
 use crate::mail::Mail;
 use crate::mail::mailer::Mailer;

@@ -11,7 +11,7 @@ use aether_actor::trace::ActorTraceRing;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::local;
-use crate::actor::native::pumped_slot::PumpedSlot;
+use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim, MailboxWakeSlot};

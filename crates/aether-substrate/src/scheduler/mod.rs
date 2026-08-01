@@ -17,7 +17,7 @@
 //! - [`Drainable`] is the trait [`crate::actor`]-side dispatcher slots
 //!   implement; the concrete `DispatcherSlot<A>` runs its `run_cycle`
 //!   over the shared per-envelope helpers in
-//!   `crate::actor::native::dispatch`.
+//!   `crate::actor::native::slot::dispatch`.
 //! - [`SlotState`] is the per-slot atomic that orchestrates Idle ↔
 //!   Ready ↔ Running transitions between sender-side wakeups and
 //!   worker-side drain claims.

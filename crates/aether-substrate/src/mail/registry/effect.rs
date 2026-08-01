@@ -10,7 +10,7 @@ use aether_actor::RegistryChanged;
 use aether_data::Kind;
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
-use crate::actor::native::dispatch_blocking::DeferredCompletion;
+use crate::actor::native::offload::blocking::DeferredCompletion;
 
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;

@@ -11,7 +11,7 @@ use aether_data::{
     KindDescriptor, MailboxCategory, MailboxDescriptor, ScopePathError, mailbox_id_from_path, validate_scope_path,
 };
 
-use crate::actor::native::dispatch_blocking::DeferredCompletion;
+use crate::actor::native::offload::blocking::DeferredCompletion;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::authority::BootAuthority;
 use crate::mail::registry::effect::{
@@ -39,7 +39,7 @@ use crate::scheduler::SeizeHandle;
 /// the dispatcher slot exists — the actor isn't built into a
 /// `DispatcherSlot` until after `init` / `wire` — so the cell is empty
 /// (`None`) at register time and the `Pooled`-branch wiring in
-/// `chassis/builder.rs` + `actor/native/spawn.rs` installs the handle
+/// `chassis/builder.rs` + `actor/native/spawn/builder.rs` installs the handle
 /// once the slot is constructed (mirroring the `MailboxWakeSlot`
 /// deferred-population pattern). Installation replaces the route with a
 /// populated cell so an older published snapshot remains unchanged.
@@ -1680,7 +1680,7 @@ impl Registry {
     /// demuxer can resolve recipient → slot and dispatch in place
     /// (ADR-0087 §4, iamacoffeepot/aether#1135). Called by the
     /// `Pooled`-branch wiring in `chassis/builder.rs` +
-    /// `actor/native/spawn.rs` once the dispatcher slot exists. Returns
+    /// `actor/native/spawn/builder.rs` once the dispatcher slot exists. Returns
     /// `true` on a successful install; `false` if the id isn't a live
     /// `Inbox` entry or the cell was already populated (idempotent — one
     /// install per slot in production).

@@ -9,7 +9,7 @@ use aether_actor::Root;
 use super::boot_passives::BootedPassives;
 use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
 use crate::actor::native::NativeActor;
-use crate::actor::native::pumped_slot::PumpedSlot;
+use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{MailboxWakeSlot, RelayInbox, prepare_relay_inbox};
 use crate::chassis::error::BootError;

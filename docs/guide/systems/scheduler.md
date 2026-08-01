@@ -30,8 +30,8 @@ The cast of modules, all under `crates/aether-substrate/src/`:
 | `mail/ring.rs` | `MailRing` — the per-actor outbound byte ring blobs are written into |
 | `mail/mail_ref.rs` | `MailRef` — the `InRing` / `Owned` payload handle an inbox envelope carries |
 | `actor/native/binding.rs` | the outbound buffer + `flush_outbound` at the handler boundary |
-| `actor/native/blob_work.rs` | `BlobWork` / `BlobProducer` — the cursor-shared cooperative blob |
-| `actor/native/blob_lifecycle.rs` | the packed `Lifecycle` word (cursor / len / done / seal) |
+| `actor/native/blob/work.rs` | `BlobWork` / `BlobProducer` — the cursor-shared cooperative blob |
+| `actor/native/blob/lifecycle.rs` | the packed `Lifecycle` word (cursor / len / done / seal) |
 
 ## The blob lifecycle
 
@@ -60,7 +60,7 @@ whole window then routes as a single unit. This boundary is the amortization
 point: a fan-out of N recipients costs one scheduling synchronization, never N
 queue pushes and N wakeups.
 
-**3. Group by recipient.** `BlobProducer::flush` (`actor/native/blob_work.rs`)
+**3. Group by recipient.** `BlobProducer::flush` (`actor/native/blob/work.rs`)
 folds the routed mail into the actor's **single active `BlobWork`**, grouped by
 recipient. A new recipient becomes a fresh **group**, written into the blob's
 group array and published through the packed `Lifecycle` word; a recipient seen
@@ -85,7 +85,7 @@ narrower stays local), capped by `AETHER_BLOB_RECRUIT_MAX` (default 32).
 **5. The cursor race.** A blob is published and raced, never owned. Each worker
 that picks up a copy runs `BlobWork::run_cycle`, which loops
 `Lifecycle::claim` — one CAS on the packed lifecycle word
-(`actor/native/blob_lifecycle.rs`: `[seal | done | len | cursor]` in a single
+(`actor/native/blob/lifecycle.rs`: `[seal | done | len | cursor]` in a single
 `AtomicU64`) — and each claim hands a whole recipient-group to exactly one
 worker. There is no placement decision and no load balancer: N recruited
 workers race the one cursor and split the groups between them, contending on a

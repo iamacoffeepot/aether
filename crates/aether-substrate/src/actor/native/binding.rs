@@ -57,7 +57,7 @@ use aether_data::{Kind, RequestId};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 
-use super::reservation::{ChildReservationKey, ChildReservationTable, LiveChildReservation, ParentReservation};
+use super::spawn::reservation::{ChildReservationKey, ChildReservationTable, LiveChildReservation, ParentReservation};
 
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
@@ -106,7 +106,7 @@ struct PendingMail {
 /// inline handler (ADR-0165). Recorded beside the window rather than on every
 /// [`PendingMail`] because the origin of an ordinary native send is always the
 /// binding's own mailbox: the native window keeps the exact `Vec<Mail>` shape
-/// [`BlobProducer::flush`](super::blob_work::BlobProducer::flush) consumes, and
+/// [`BlobProducer::flush`](super::blob::work::BlobProducer::flush) consumes, and
 /// no flush pays a per-mail route tag for a case only a wasm trampoline reaches
 /// (iamacoffeepot/aether#4178).
 #[derive(Clone, Copy)]
@@ -131,7 +131,7 @@ struct PendingBirthWork {
 
 struct PendingOwnerBatchWork {
     batch: RegistryBatch,
-    completion: super::dispatch_blocking::DeferredCompletion<RegistryBatchResult>,
+    completion: super::offload::blocking::DeferredCompletion<RegistryBatchResult>,
 }
 
 /// Per-actor send-side buffer that builds blobs **in place** (2c,
@@ -304,7 +304,7 @@ pub struct NativeBinding {
     /// requirements — the buffer has a single logical producer (this
     /// actor's dispatcher thread, only during its own handler dispatch),
     /// so the lock is uncontended. Spawned-worker sends
-    /// ([`super::spawn_thread`]) stay on the eager [`Self::send_mail`] route.
+    /// ([`super::offload::thread`]) stay on the eager [`Self::send_mail`] route.
     /// Wasm-guest sends are also eager while Live; staged activation retains
     /// their owned payload here without writing the native ring, preserving
     /// its single-writer discipline.
@@ -321,9 +321,9 @@ pub struct NativeBinding {
     /// test binding with no `Spawner` never builds one and stays on the
     /// eager per-mail route. `Mutex` only for `&self` interior mutability —
     /// driven solely from this actor's dispatch thread, so uncontended.
-    blob_producer: Mutex<Option<super::blob_work::BlobProducer>>,
+    blob_producer: Mutex<Option<super::blob::work::BlobProducer>>,
     /// ADR-0093: the hold-until-resolve in-flight ledger. Maps a
-    /// [`DispatchId`](super::dispatch_blocking::DispatchId) minted by
+    /// [`DispatchId`](super::offload::blocking::DispatchId) minted by
     /// [`super::ctx::NativeCtx::dispatch_blocking`] to its held
     /// `(SettlementHold, Source, context)` plus the worker's eventual
     /// output. The actor thread writes the entry at dispatch and reads +
@@ -331,7 +331,7 @@ pub struct NativeBinding {
     /// the output slot once. `Mutex` only for `&self` interior
     /// mutability — the same single-logical-writer discipline as
     /// `outbound` / `blob_producer`.
-    inflight: super::dispatch_blocking::InflightLedger,
+    inflight: super::offload::blocking::InflightLedger,
     /// ADR-0165: parent-local uniqueness reservations for staged and live
     /// children. This table is actor-local bookkeeping only; reserving or
     /// releasing a key never writes a global registry and does not imply a
@@ -382,7 +382,7 @@ impl NativeBinding {
             outbound: Mutex::new(OutboundBuffer::new()),
             activation_held: AtomicBool::new(false),
             blob_producer: Mutex::new(None),
-            inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
+            inflight: Mutex::new(super::offload::blocking::InflightTable::new()),
             child_reservations: Mutex::new(ChildReservationTable::new()),
             parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
@@ -431,7 +431,7 @@ impl NativeBinding {
             outbound: Mutex::new(OutboundBuffer::new()),
             activation_held: AtomicBool::new(false),
             blob_producer: Mutex::new(None),
-            inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
+            inflight: Mutex::new(super::offload::blocking::InflightTable::new()),
             child_reservations: Mutex::new(ChildReservationTable::new()),
             parent_child_reservation: Mutex::new(None),
             request_contexts: Mutex::new(RequestContextTable::new()),
@@ -500,7 +500,7 @@ impl NativeBinding {
     }
 
     /// Borrow the wired `Mailer`. Surfaced so cross-file producer
-    /// hooks (`dispatch`, `dispatcher_slot`, `spawn_thread`) can
+    /// hooks (`slot::dispatch`, `slot::dispatcher`, `offload::thread`) can
     /// reach the trace handle via `binding.mailer().record_*(...)`
     /// without the field having to be `pub(crate)`. Filed under
     /// iamacoffeepot/aether#953 (per-chassis trace state).
@@ -933,7 +933,7 @@ impl NativeBinding {
     pub(crate) fn stage_owner_batch(
         &self,
         batch: RegistryBatch,
-        completion: super::dispatch_blocking::DeferredCompletion<RegistryBatchResult>,
+        completion: super::offload::blocking::DeferredCompletion<RegistryBatchResult>,
     ) {
         self.outbound
             .lock()
@@ -1194,7 +1194,7 @@ impl NativeBinding {
             let mut guard = self.blob_producer.lock().expect("blob_producer poisoned; fail-fast per ADR-0063");
             let producer = guard.get_or_insert_with(|| {
                 let sink = self.spawner.as_ref().expect("spawner present in this branch").wake_sink().clone();
-                super::blob_work::BlobProducer::new(Arc::clone(&self.mailer), sink)
+                super::blob::work::BlobProducer::new(Arc::clone(&self.mailer), sink)
             });
             producer.flush(routed);
         } else {
@@ -1294,14 +1294,14 @@ impl NativeBinding {
 
 /// ADR-0093 hold-until-resolve dispatch: the `&self`-interior-mutability
 /// bridge between [`super::ctx::NativeCtx`]'s dispatch primitive and the
-/// per-actor [`super::dispatch_blocking::InflightTable`]. Each method
+/// per-actor [`super::offload::blocking::InflightTable`]. Each method
 /// takes the table lock for one operation — mint+insert at dispatch,
 /// fill-output from the worker, take at completion — matching the
 /// `outbound` / `blob_producer` locking pattern (uncontended, single
 /// logical writer).
 impl NativeBinding {
     /// Insert a freshly-minted in-flight dispatch entry and return its
-    /// [`DispatchId`](super::dispatch_blocking::DispatchId). Called on
+    /// [`DispatchId`](super::offload::blocking::DispatchId). Called on
     /// the actor thread at dispatch time, after the hold is acquired and
     /// before the worker spawns. `hold` is `None` when the dispatching
     /// context carried no chain to hold (ADR-0168 §2).
@@ -1314,7 +1314,7 @@ impl NativeBinding {
         hold: Option<SettlementHold>,
         reply_to: Source,
         context: Box<dyn Any + Send>,
-    ) -> super::dispatch_blocking::DispatchId {
+    ) -> super::offload::blocking::DispatchId {
         self.inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
@@ -1328,23 +1328,23 @@ impl NativeBinding {
         hold: Option<SettlementHold>,
         reply_to: Source,
         context: C,
-    ) -> super::dispatch_blocking::DeferredCompletion<O>
+    ) -> super::offload::blocking::DeferredCompletion<O>
     where
         C: Send + 'static,
     {
         let dispatch_id = self.dispatch_insert(hold, reply_to, Box::new(context));
-        super::dispatch_blocking::DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
+        super::offload::blocking::DeferredCompletion::new(Arc::downgrade(self), dispatch_id)
     }
 
     /// Shared deferred-completion tail. Fill the named dispatch's output
     /// slot under the ledger mutex, drop the lock, then push exactly one
-    /// [`TaskCompletionWake`](super::dispatch_blocking::TaskCompletionWake)
+    /// [`TaskCompletionWake`](super::offload::blocking::TaskCompletionWake)
     /// for the winning fill.
     ///
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_complete<O>(&self, id: super::dispatch_blocking::DispatchId, output: O)
+    pub(crate) fn dispatch_complete<O>(&self, id: super::offload::blocking::DispatchId, output: O)
     where
         O: Send + 'static,
     {
@@ -1353,19 +1353,19 @@ impl NativeBinding {
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
             .dispatch_fill_output(id, Box::new(output))
-            == super::dispatch_blocking::FillOutcome::Filled
+            == super::offload::blocking::FillOutcome::Filled
         {
             self.mailer.push(Mail::new(
                 self.self_mailbox(),
-                super::dispatch_blocking::TaskCompletionWake::ID,
-                super::dispatch_blocking::TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes(),
+                super::offload::blocking::TaskCompletionWake::ID,
+                super::offload::blocking::TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes(),
                 1,
             ));
         }
     }
 
     /// Remove the named dispatch entry and rebuild its
-    /// [`TaskDone`](super::dispatch_blocking::TaskDone). Called on the
+    /// [`TaskDone`](super::offload::blocking::TaskDone). Called on the
     /// actor thread when the completion-wake mail lands.
     ///
     /// # Panics
@@ -1373,8 +1373,8 @@ impl NativeBinding {
     /// ADR-0063.
     pub(crate) fn dispatch_take<O: 'static, C: 'static>(
         &self,
-        id: super::dispatch_blocking::DispatchId,
-    ) -> Option<super::dispatch_blocking::TaskDone<O, C>> {
+        id: super::offload::blocking::DispatchId,
+    ) -> Option<super::offload::blocking::TaskDone<O, C>> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_take(id)
     }
 
@@ -1389,14 +1389,14 @@ impl NativeBinding {
     /// ADR-0063.
     pub(crate) fn dispatch_abandon(
         &self,
-        id: super::dispatch_blocking::DispatchId,
+        id: super::offload::blocking::DispatchId,
     ) -> Option<(Option<SettlementHold>, Source)> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_abandon(id)
     }
 
     /// Non-consuming peek-then-take of the named dispatch entry: probe its
     /// boxed output + context against `O` / `C` and only remove + rebuild
-    /// the [`TaskDone`](super::dispatch_blocking::TaskDone) on a match,
+    /// the [`TaskDone`](super::offload::blocking::TaskDone) on a match,
     /// leaving the entry intact on a mismatch. The `#[handler(task)]`
     /// dispatch chain calls this to route a completion to the right
     /// output-typed handler without a wrong-type probe consuming the entry.
@@ -1406,8 +1406,8 @@ impl NativeBinding {
     /// ADR-0063.
     pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(
         &self,
-        id: super::dispatch_blocking::DispatchId,
-    ) -> Option<super::dispatch_blocking::TaskDone<O, C>> {
+        id: super::offload::blocking::DispatchId,
+    ) -> Option<super::offload::blocking::TaskDone<O, C>> {
         self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_try_take(id)
     }
 }

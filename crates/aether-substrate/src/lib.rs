@@ -75,7 +75,7 @@ pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 // iamacoffeepot/aether#2311 (composed): the identity actor trait plus the
 // native per-kind dispatch trait parameterised by the runtime state. The boot
 // lifecycle is the shared `aether_actor::Lifecycle<S>` (no native re-export).
-pub use actor::native::pumped_slot::PumpedSlot;
+pub use actor::native::slot::pumped::PumpedSlot;
 pub use actor::native::{Dispatch, NativeActor};
 pub use actor::native::{HandlerSpawnBuilder, SpawnOutcome, SpawnReceipt};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};

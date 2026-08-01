@@ -10,8 +10,8 @@ use aether_actor::trace::ActorTraceRing;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::dispatcher_slot::DispatcherSlot;
 use crate::actor::native::local;
+use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::ctx::{ChassisCtx, MailboxSender, MailboxWakeSlot};
 use crate::chassis::error::BootError;

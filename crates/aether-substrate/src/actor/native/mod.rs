@@ -62,37 +62,35 @@
 //! rejected by the macro: strict receivers shouldn't silently swallow
 //! unknown kinds.
 
-pub(crate) mod activation;
+// The vocabulary — what a native actor *is* and what it holds — sits flat
+// here; the machinery around it nests one level down, a directory per concept:
+// how an actor is born (`spawn`), where it drains (`slot`), how it moves work
+// off its own thread (`offload`), and how its outbound mail fans out (`blob`).
 pub mod binding;
-pub(crate) mod blob_lifecycle;
-pub(crate) mod blob_work;
 pub mod ctx;
-pub(crate) mod dispatch;
-pub mod dispatch_blocking;
-pub(crate) mod dispatcher_slot;
 pub mod envelope;
-mod identity;
+pub(crate) mod identity;
 pub mod local;
 pub mod mailbox;
-pub mod pumped_slot;
-mod reservation;
+
+pub(crate) mod blob;
+pub mod offload;
+pub mod slot;
 pub mod spawn;
-pub mod spawn_thread;
-pub mod task_queue;
 
 pub use crate::mail::registry::effect::{RegistryBatch, RegistryBatchError, RegistryBatchResult};
 pub use binding::NativeBinding;
 pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
-pub use dispatch_blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use envelope::Envelope;
 pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
-pub use pumped_slot::PumpedSlot;
+pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
+pub use offload::thread::{InheritCtx, RootCtx};
+pub use slot::pumped::PumpedSlot;
 pub use spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Spawner, Subname};
-pub use spawn_thread::{InheritCtx, RootCtx};
 // iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the
-// ADR-0093 `dispatch_blocking` primitive it wraps — a substrate-tier native
+// ADR-0093 `offload::blocking` primitive it wraps — a substrate-tier native
 // helper, used by the content-gen provider caps and the rpc test-echo actor.
-pub use task_queue::{DEFAULT_MAX_IN_FLIGHT, TaskQueue};
+pub use offload::task_queue::{DEFAULT_MAX_IN_FLIGHT, TaskQueue};
 
 use aether_actor::{Addressable, Lifecycle};
 

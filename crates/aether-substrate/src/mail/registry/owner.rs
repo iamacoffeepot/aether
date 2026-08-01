@@ -17,7 +17,7 @@ use super::effect::{
 };
 use super::mailbox::Registry;
 use super::metrics::{INITIAL_QUEUE_RESERVE, QueueMeter, RegistryQueueMetrics};
-use crate::actor::native::dispatch_blocking::DeferredCompletion;
+use crate::actor::native::offload::blocking::DeferredCompletion;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::{Mail, MailboxId};
