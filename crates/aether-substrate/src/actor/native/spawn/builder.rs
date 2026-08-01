@@ -15,7 +15,7 @@
 //! scheduler home and complete the same typed deferred result exactly once.
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -621,12 +621,29 @@ impl Spawner {
     {
         let StagedActor { identity, sender, transport, slots, state, after_init } = staged;
         let SpawnIdentity { id, canonical_name, subname, .. } = identity;
+        // The actor's own declared kinds are seeded on top of whatever its
+        // `init` already staged, never instead of it (iamacoffeepot/aether#4269).
+        // Most actors stage nothing, so this is the plain "seed from the
+        // declaration" it has always been. `WasmTrampoline` is the exception:
+        // it pre-seeds the *guest's* handler set from `init`, and while that
+        // pre-seed short-circuited the declaration, the trampoline's own
+        // framework arms — `ReplaceComponent`, the ADR-0093 completion wake —
+        // owned no cell, so every loaded component ran them unmeasured.
+        // Merging keeps a staged kind's exact cell (the guest's cells are
+        // already stamped into the per-actor cache) and mints one only for a
+        // declared kind that has none.
         let mut costs = local::with_stamped(&slots, || {
             use aether_actor::Local as _;
             CostCells::with(|cells| cells.entries().to_vec())
         });
-        if costs.is_empty() {
-            costs = A::measured_kinds().into_iter().map(|kind| (kind, Arc::new(CostCell::new()))).collect();
+        let staged_kinds: HashSet<KindId> = costs.iter().map(|(kind, _)| *kind).collect();
+        let missing: Vec<_> = A::measured_kinds()
+            .into_iter()
+            .filter(|kind| !staged_kinds.contains(kind))
+            .map(|kind| (kind, Arc::new(CostCell::new())))
+            .collect();
+        if !missing.is_empty() {
+            costs.extend(missing);
             local::with_stamped(&slots, || {
                 use aether_actor::Local as _;
                 CostCells::with_mut(|cells| cells.seed(costs.clone()));

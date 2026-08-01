@@ -34,7 +34,7 @@ use aether_actor::{Single, runtime};
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
-    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
+    Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
@@ -185,12 +185,23 @@ impl NativeActor for WasmTrampoline {
         // trampoline (and its mailbox name) survives as an empty
         // slot, but it has no accept-set while empty.
         state.mailer.capability_registry().remove(state.mailbox);
-        // iamacoffeepot/aether#1128: drop this mailbox's per-handler
+        // iamacoffeepot/aether#1128: drop the unloaded guest's per-handler
         // cost cells from the global table and the per-actor cache.
         // `on_drop_component` runs on the trampoline's own thread
         // inside `with_stamped`, so both indexes clear together.
+        //
+        // The trampoline's own framework arms are re-seeded rather than
+        // dropped with them (iamacoffeepot/aether#4269): the mailbox survives
+        // this as an empty refillable slot and goes on dispatching
+        // `ReplaceComponent`, `DropComponent` and its task wakes, so retiring
+        // their cells left the arms that outlive the guest unmeasured — this
+        // very handler among them, which folds into its cell just after it
+        // returns. The re-seed is neutral, which is the honest reading of an
+        // estimate whose occupant just changed.
         state.mailer.cost_table().drop_mailbox(state.mailbox);
-        CostCells::try_with_mut(|cells| cells.seed(Vec::new()));
+        let framework_kinds = <Self as Dispatch<WasmTrampolineState>>::measured_kinds();
+        let seeded = state.mailer.cost_table().seed(state.mailbox, &framework_kinds);
+        CostCells::try_with_mut(|cells| cells.seed(seeded));
         // ADR-0079 §8 (amended, issue 3741): declare the mailbox
         // vacated — drain this trampoline's watchers and fire one
         // `MonitorNotice` each, so every cap holding state keyed by

@@ -1614,6 +1614,122 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     drop(chassis);
 }
 
+/// Issue 4269: an actor whose `init` pre-seeds cost cells still gets cells for
+/// the kinds it declares. The spawn path seeds the declaration on top of
+/// whatever `init` staged rather than instead of it, so neither set shadows
+/// the other.
+///
+/// `WasmTrampoline` is the actor this is really about: it pre-seeds the loaded
+/// *guest's* handler set from `init`, and while that pre-seed short-circuited
+/// the declaration, the trampoline's own framework arms owned no cell — so
+/// every loaded component ran `ReplaceComponent` and the ADR-0093 completion
+/// wake unmeasured, and `actor_cost` reported no row for either. Reproduced
+/// here on a plain native actor because the condition is the spawn path's, not
+/// the trampoline's: any actor that pre-seeds would have hit it.
+#[test]
+fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
+    use crate::actor::native::spawn::Subname;
+    use crate::mail::CostCells;
+    use crate::mail::cost::CostCell;
+    use aether_data::{Kind, ReplyContract};
+    use aether_kinds::{ComponentCapabilities, CostTail, CostTailResult, HandlerCapability};
+
+    pod_kind!(DeclaredPing { tag: u32 }, "test.pre_seed_cost.declared", 0x4269_0001_0000_0001);
+    // Stands in for a guest kind: staged by `init`, never in the declaration.
+    pod_kind!(PreSeededPing { tag: u32 }, "test.pre_seed_cost.pre_seeded", 0x4269_0001_0000_0002);
+
+    struct PreSeedProbe;
+
+    impl Addressable for PreSeedProbe {
+        const NAMESPACE: &'static str = "test.pre_seed_cost.probe";
+        type Resolver = aether_actor::Many;
+    }
+    impl aether_actor::Root for PreSeedProbe {}
+    impl HandlesKind<DeclaredPing> for PreSeedProbe {}
+
+    impl aether_actor::Lifecycle<Self> for PreSeedProbe {
+        type Config = ();
+        type Params = ();
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+
+        fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            // The trampoline's move: stage cells for a set known only at
+            // runtime, from inside `init`, where the spawn path's own seeding
+            // has not run yet.
+            use aether_actor::Local as _;
+            CostCells::try_with_mut(|cells| cells.seed(vec![(PreSeededPing::ID, Arc::new(CostCell::new()))]));
+            Ok(Self)
+        }
+    }
+
+    impl NativeActor for PreSeedProbe {
+        type State = Self;
+    }
+
+    impl Dispatch<Self> for PreSeedProbe {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            kind: KindId,
+            payload: &[u8],
+        ) -> Option<()> {
+            if kind == DeclaredPing::ID {
+                let _ = DeclaredPing::decode_from_bytes(payload)?;
+                return Some(());
+            }
+            None
+        }
+
+        fn capabilities() -> ComponentCapabilities {
+            ComponentCapabilities {
+                handlers: [HandlerCapability {
+                    id: DeclaredPing::ID,
+                    name: DeclaredPing::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::None,
+                }]
+                .into(),
+                fallback: None,
+                doc: None,
+                config: None,
+                assets: Vec::new(),
+            }
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .build_passive()
+        .expect("empty chassis boots");
+    let id = chassis
+        .spawn_actor::<PreSeedProbe>(Subname::Named("preseeded"), (), ())
+        .finish()
+        .expect("spawn pre-seeding probe");
+
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(DeclaredPing::ID) }) else {
+        panic!("pre-seeding actor cost tail succeeds");
+    };
+    assert_eq!(
+        rows.len(),
+        1,
+        "a declared handler must own a cost cell even though `init` pre-seeded a different set; \
+         without it the handler runs unmeasured and cost-aware recruitment falls back to the width gate",
+    );
+
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(PreSeededPing::ID) }) else {
+        panic!("pre-seeding actor cost tail succeeds for the staged kind");
+    };
+    assert_eq!(
+        rows.len(),
+        1,
+        "the kinds `init` staged must survive too — the declaration is merged in, not substituted for them",
+    );
+
+    drop(chassis);
+}
+
 /// Issue 3051: spawned native actors seed their declared handler costs into
 /// both indexes before dispatch, framework kinds remain unseeded, and mailbox
 /// finalization removes the global rows after `unwire`.
