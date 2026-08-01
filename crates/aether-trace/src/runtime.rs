@@ -270,9 +270,18 @@ mod tests {
             },
         );
 
+        // The batch is refused, and the refusal names both the offending
+        // recipient and why it failed. Issue 4125 replaced a flat "unknown
+        // recipient" with the structured `AddressResolutionError`, so an
+        // ambiguous address is distinguishable from an absent one here rather
+        // than collapsing to the same sentence.
         assert!(
-            matches!(&ack, DispatchTracedAck::Err { error } if error.contains("unknown recipient")),
-            "expected Err with 'unknown recipient' message, got: {ack:?}"
+            matches!(
+                &ack,
+                DispatchTracedAck::Err { error }
+                    if error.contains("aether.test.does_not_exist") && error.contains("no live mailbox")
+            ),
+            "expected Err naming the absent recipient, got: {ack:?}"
         );
     }
 }
