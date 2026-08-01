@@ -12,4 +12,7 @@
 //! (reaching `SubstrateHarness`'s `pub(crate)` drive methods) and unit-testable.
 
 pub mod harness;
+// The real-`Registry` read-scaling + owner-ceiling benchmark
+// (iamacoffeepot/aether#4176), driven by the `perf-registry` bin.
+pub mod registry;
 pub mod report;

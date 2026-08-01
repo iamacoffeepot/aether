@@ -885,6 +885,13 @@ impl SubstrateHarness {
         self.passive.spawn_actor::<A>(subname, config, params)
     }
 
+    /// The chassis's mail [`Registry`](aether_substrate::Registry) — the real
+    /// route table, reached by `perf::registry`'s benchmark so it measures the
+    /// published view a running engine dispatches against.
+    pub(crate) fn mail_registry(&self) -> &Arc<aether_substrate::Registry> {
+        &self.registry
+    }
+
     /// Borrow the harness's [`aether_substrate::ActorRegistry`]. Used
     /// alongside `spawn_actor` so the in-crate spawn test can inspect
     /// the live entry's `MailboxId` directly. Test-only, same
