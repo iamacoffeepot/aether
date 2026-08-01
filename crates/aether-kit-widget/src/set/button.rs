@@ -16,12 +16,13 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{ActivationArms, push_border, quad, reply_if_hidden, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{SetTheme, Theme};
+use crate::theme::Theme;
 use crate::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    ButtonClicked, ButtonConfig, Collect, SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
 };
 
 /// A momentary push button. Holds its label plus the cached theme / frame /
@@ -76,13 +77,31 @@ impl ButtonWidget {
     }
 }
 
+impl WidgetDefaults for ButtonWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.clear_arms();
+    }
+}
+
 /// A push-button widget. Spawned inline by a panel root with a
 /// [`ButtonConfig`]; reports [`ButtonClicked`] up on a completed click.
 ///
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ButtonConfig` again to relabel or restyle it in place.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for ButtonWidget {
     type Config = ButtonConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.button";
@@ -110,41 +129,6 @@ impl WasmActor for ButtonWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    /// Restyle: adopt the fanned theme.
-    #[handler::single]
-    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.theme = set.theme;
-    }
-
-    /// Cache the layout rect the root assigned.
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    /// Take keyboard focus.
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    /// Release keyboard focus.
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.clear_arms();
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     /// A left press inside arms the button.

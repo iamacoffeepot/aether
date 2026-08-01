@@ -41,12 +41,88 @@ fn emit_record_copy_block(
     }
 }
 
+/// The `(length term, copy block)` pair for one handler's `aether.kinds.inputs`
+/// record. Shared by the actor-side manifest and the ADR-0169 handler-set
+/// manifest so a set's records are byte-identical to the ones the same handler
+/// would have produced declared locally.
+fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> (TokenStream2, TokenStream2) {
+    let k = &h.kind_ty;
+    let doc_expr = option_str_token(h.agent_doc.as_ref());
+    // ADR-0112 / ADR-0134: the reply class rides the handler record as a
+    // `ReplyContract` `(tag, id)` pair — `(0, 0)` for a single `-> ()`,
+    // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(2, K::ID)` for
+    // a multi handler emitting `K` (the element kind off its `Multi<K>`
+    // ctx marker), `(3, 0)` for a manual handler (no single static reply
+    // kind).
+    let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
+        (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
+        (HandlerClass::Multi, _) => {
+            let k = h.multi_kind.as_ref().expect("a multi handler carries its `Multi<K>` emit kind");
+            (quote! { 2u8 }, quote! { <#k as ::aether_actor::__macro_internals::Kind>::ID.0 })
+        }
+        (HandlerClass::Single, Some(r)) => {
+            (quote! { 1u8 }, quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 })
+        }
+        (HandlerClass::Single, None) => (quote! { 0u8 }, quote! { 0u64 }),
+    };
+    // `inputs_handler_len` / `write_inputs_handler` take a raw `u64` for the
+    // wire bytes; `Kind::ID` is `KindId` post-issue 466 so we drop into `.0`.
+    let record_len = quote! {
+        ::aether_actor::__macro_internals::canonical::inputs_handler_len(
+            <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+            <#k as ::aether_actor::__macro_internals::Kind>::NAME,
+            #doc_expr,
+            #reply_tag_expr,
+            #reply_id_expr,
+        )
+    };
+    let len_term = quote! { (1 + #record_len) };
+    let copy_block = emit_record_copy_block(
+        section_version,
+        &record_len,
+        &quote! {
+            ::aether_actor::__macro_internals::canonical::write_inputs_handler::<RECORD_LEN>(
+                <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+                <#k as ::aether_actor::__macro_internals::Kind>::NAME,
+                #doc_expr,
+                #reply_tag_expr,
+                #reply_id_expr,
+            )
+        },
+    );
+    (len_term, copy_block)
+}
+
+/// ADR-0169: the `&'static [u8]` manifest bytes for a handler set's own
+/// records. A slice rather than the actor-side `[u8; LEN]` pair because a
+/// trait cannot carry an associated const whose *type* mentions `Self::LEN`;
+/// `<[u8]>::len` is const, so an adopter still recovers the length for its own
+/// array arithmetic.
+pub fn build_handler_set_manifest_const(handlers: &[HandlerFn]) -> TokenStream2 {
+    let section_version = quote! {
+        ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION
+    };
+    let (len_terms, copy_blocks): (Vec<_>, Vec<_>) =
+        handlers.iter().map(|h| handler_record_terms(h, &section_version)).unzip();
+    quote! {
+        &{
+            const LEN: usize = #(#len_terms)+*;
+            let mut out = [0u8; LEN];
+            let mut pos: usize = 0usize;
+            #(#copy_blocks)*
+            let _ = pos;
+            out
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn build_inputs_manifest_consts(
     handlers: &[HandlerFn],
     fallback: Option<&FallbackFn>,
     component_doc: Option<&String>,
     config_kind_ty: Option<&Type>,
+    handler_set: Option<(&syn::Path, &Type)>,
 ) -> TokenStream2 {
     let mut len_terms: Vec<TokenStream2> = Vec::new();
     let mut copy_blocks: Vec<TokenStream2> = Vec::new();
@@ -55,58 +131,9 @@ pub fn build_inputs_manifest_consts(
     };
 
     for h in handlers {
-        let k = &h.kind_ty;
-        let doc_expr = option_str_token(h.agent_doc.as_ref());
-        // ADR-0112 / ADR-0134: the reply class rides the handler record as a
-        // `ReplyContract` `(tag, id)` pair — `(0, 0)` for a single `-> ()`,
-        // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(2, K::ID)` for
-        // a multi handler emitting `K` (the element kind off its `Multi<K>`
-        // ctx marker), `(3, 0)` for a manual handler (no single static reply
-        // kind).
-        let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
-            (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
-            (HandlerClass::Multi, _) => {
-                let k = h.multi_kind.as_ref().expect("a multi handler carries its `Multi<K>` emit kind");
-                (quote! { 2u8 }, quote! { <#k as ::aether_actor::__macro_internals::Kind>::ID.0 })
-            }
-            (HandlerClass::Single, Some(r)) => {
-                (quote! { 1u8 }, quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 })
-            }
-            (HandlerClass::Single, None) => (quote! { 0u8 }, quote! { 0u64 }),
-        };
-        // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
-        // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so
-        // we drop into `.0` here.
-        len_terms.push(quote! {
-            (1 + ::aether_actor::__macro_internals::canonical::inputs_handler_len(
-                <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
-                <#k as ::aether_actor::__macro_internals::Kind>::NAME,
-                #doc_expr,
-                #reply_tag_expr,
-                #reply_id_expr,
-            ))
-        });
-        copy_blocks.push(emit_record_copy_block(
-            &section_version,
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::inputs_handler_len(
-                    <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
-                    <#k as ::aether_actor::__macro_internals::Kind>::NAME,
-                    #doc_expr,
-                    #reply_tag_expr,
-                    #reply_id_expr,
-                )
-            },
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_handler::<RECORD_LEN>(
-                    <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
-                    <#k as ::aether_actor::__macro_internals::Kind>::NAME,
-                    #doc_expr,
-                    #reply_tag_expr,
-                    #reply_id_expr,
-                )
-            },
-        ));
+        let (len_term, copy_block) = handler_record_terms(h, &section_version);
+        len_terms.push(len_term);
+        copy_blocks.push(copy_block);
     }
 
     if let Some(f) = fallback {
@@ -168,6 +195,30 @@ pub fn build_inputs_manifest_consts(
                 )
             },
         ));
+    }
+
+    // ADR-0169: an adopted handler set's records join this actor's manifest, so
+    // `describe_component` reports the full receive surface and input-stream
+    // subscription (derived from the manifest post-register, issue #403) covers
+    // inherited kinds without separate plumbing. The set's bytes are already
+    // version-framed per record, so they copy in wholesale.
+    // The consts below are nested items, where `Self` does not resolve, so the
+    // adopting type is named concretely.
+    if let Some((set, self_ty)) = handler_set {
+        len_terms.push(quote! {
+            <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST.len()
+        });
+        copy_blocks.push(quote! {
+            {
+                const SET_BYTES: &'static [u8] = <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST;
+                let mut index = 0;
+                while index < SET_BYTES.len() {
+                    out[pos] = SET_BYTES[index];
+                    pos += 1;
+                    index += 1;
+                }
+            }
+        });
     }
 
     let len_expr = if len_terms.is_empty() {

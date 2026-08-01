@@ -37,6 +37,13 @@ fn ui() {
     // can't link the substrate types — the existing native fixtures here
     // are all macro-level diagnostics that fire before path resolution).
     t.pass("tests/ui/accepts_manual_handler_wasm.rs");
+    // ADR-0169: the handler-set delegation seam — the set's dispatch method
+    // must be callable from the adopter's table and its manifest const usable
+    // in the adopter's const-array arithmetic — plus the two shapes the macro
+    // refuses outright.
+    t.pass("tests/ui/accepts_handler_set_wasm.rs");
+    t.compile_fail("tests/ui/rejects_handler_set_without_body.rs");
+    t.compile_fail("tests/ui/rejects_handler_set_duplicate_adoption.rs");
     // ADR-0134: the multi reply class compiles on both expansion paths. The
     // wasm fixture type-checks the full `emit` body; the native fixture uses
     // the split + runtime-feature gate (like `accepts_actor_split_task_handler`)

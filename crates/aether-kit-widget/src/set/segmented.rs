@@ -12,12 +12,13 @@ use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{SetTheme, Theme, ThemeState};
+use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SegmentedConfig, SegmentedSelected, SetWidgetState,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetWidgetState, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -114,9 +115,27 @@ impl SegmentedWidget {
     }
 }
 
+impl WidgetDefaults for SegmentedWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.pressed_segment = None;
+    }
+}
+
 /// A segmented widget. Spawned inline by a panel root with a
 /// [`SegmentedConfig`]; reports [`SegmentedSelected`] on selection changes.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for SegmentedWidget {
     type Config = SegmentedConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.segmented";
@@ -147,32 +166,6 @@ impl WasmActor for SegmentedWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    #[handler::single]
-    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.theme = set.theme;
-    }
-
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.pressed_segment = None;
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
     }
 
     #[handler::single]

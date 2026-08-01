@@ -15,12 +15,13 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{SetTheme, Theme};
+use crate::theme::Theme;
 use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, ToggleChanged, ToggleConfig,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame,
 };
 
 /// A boolean switch with a track, knob, and optional label.
@@ -82,9 +83,27 @@ impl ToggleWidget {
     }
 }
 
+impl WidgetDefaults for ToggleWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.clear_arms();
+    }
+}
+
 /// A toggle widget. Spawned inline by a panel root with a [`ToggleConfig`];
 /// reports [`ToggleChanged`] after each completed activation.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for ToggleWidget {
     type Config = ToggleConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.toggle";
@@ -112,37 +131,6 @@ impl WasmActor for ToggleWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    #[handler::single]
-    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.theme = set.theme;
-    }
-
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.clear_arms();
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     #[handler::single]

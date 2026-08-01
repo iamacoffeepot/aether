@@ -17,12 +17,12 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{push_control_outlines, quad, release_left, reply_with_draw_items, text_origin_y};
 use crate::state::{InteractionState, emit_state_changed};
-use crate::theme::{SetTheme, Theme};
+use crate::theme::Theme;
 use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, VirtualListConfig, VirtualListSelected,
-    WidgetControlState, WidgetDrawItem, WidgetFrame,
+    Collect, SetWidgetState, VirtualListConfig, VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +189,24 @@ impl VirtualListWidget {
     }
 }
 
+impl WidgetDefaults for VirtualListWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.pressed = false;
+    }
+}
+
 /// A fixed-row virtual list. Spawned inline by a panel root with a
 /// [`VirtualListConfig`]; reports [`VirtualListSelected`] when selection
 /// changes.
@@ -196,7 +214,7 @@ impl VirtualListWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `VirtualListConfig` again to replace the item vector or viewport.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.virtual_list";
@@ -233,37 +251,6 @@ impl WasmActor for VirtualListWidget {
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
-    }
-
-    #[handler::single]
-    fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.theme = set.theme;
-    }
-
-    #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    #[handler::single]
-    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.state.gain_focus();
-    }
-
-    #[handler::single]
-    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.state.lose_focus();
-        self.pressed = false;
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     #[handler::single]

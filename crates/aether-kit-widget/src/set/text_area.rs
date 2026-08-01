@@ -14,6 +14,7 @@ use aether_kinds::{
 };
 use aether_text::FontMetricsResult;
 
+use crate::set::defaults::WidgetDefaults;
 use crate::set::{
     apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_left,
     reply_with_draw_items, text_control_theme_state, text_origin_y, update_text_modifiers,
@@ -22,8 +23,8 @@ use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
 use crate::theme::{SetTheme, Theme, ThemeState};
 use crate::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextAreaConfig, TextCommitted,
-    WidgetControlState, WidgetDrawItem, WidgetFrame,
+    Collect, FocusGained, FocusLost, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState, WidgetDrawItem,
+    WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,12 +316,32 @@ impl TextAreaWidget {
     }
 }
 
+impl WidgetDefaults for TextAreaWidget {
+    fn widget_frame(&mut self) -> &mut WidgetFrame {
+        &mut self.frame
+    }
+
+    fn widget_theme(&mut self) -> &mut Theme {
+        &mut self.theme
+    }
+
+    fn widget_state(&mut self) -> &mut InteractionState {
+        &mut self.state
+    }
+
+    fn cancel_activation(&mut self) {
+        self.dragging = false;
+        self.preferred_x_pixels = None;
+        self.edit.clear_composition();
+    }
+}
+
 /// Multiline text area with a fixed whole-line viewport.
 ///
 /// # Agent
 /// Not loaded directly — a panel spawns it from [`TextAreaConfig`]. Plain
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, handler_set(WidgetDefaults))]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_area";
@@ -374,11 +395,6 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
-    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-        self.frame = frame;
-    }
-
-    #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
         self.state.gain_focus();
         self.reconcile_scroll();
@@ -390,16 +406,6 @@ impl WasmActor for TextAreaWidget {
         self.dragging = false;
         self.preferred_x_pixels = None;
         self.edit.clear_composition();
-    }
-
-    #[handler::single]
-    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
-        self.state.set_hovered(true);
-    }
-
-    #[handler::single]
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
-        self.state.set_hovered(false);
     }
 
     #[handler::single]

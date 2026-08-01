@@ -1,0 +1,5 @@
+error: duplicate `handler_set` — an actor adopts at most one set (ADR-0169 §4)
+  --> tests/ui/rejects_handler_set_duplicate_adoption.rs:26:25
+   |
+26 | #[actor(handler_set(A), handler_set(B))]
+   |                         ^^^^^^^^^^^^^^

@@ -13,6 +13,7 @@
 mod asset;
 mod diagnostics;
 mod handler_parse;
+mod handler_set;
 mod manifest;
 mod native_expand;
 mod opts;
@@ -21,7 +22,7 @@ mod wasm_expand;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Fields, ItemImpl, ItemStruct, parse_macro_input};
+use syn::{Fields, ItemImpl, ItemStruct, ItemTrait, parse_macro_input};
 
 use native_expand::{NativeEmit, expand_native_actor_trait, expand_struct_hosted_actor};
 use opts::{ActorOpts, parse_actor_opts};
@@ -169,6 +170,44 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     syn::Error::new(proc_macro2::Span::call_site(), "#[fallback] may only appear inside a `#[actor]` impl block")
         .to_compile_error()
         .into()
+}
+
+/// `#[handler_set]` (ADR-0169): sits on a trait whose `#[handler::<class>]`
+/// methods carry shared handler bodies as trait defaults. An actor adopts the
+/// set with `#[actor(handler_set(T))]`; its local handlers are matched first
+/// and the set is consulted on a miss, so a locally-declared kind stays
+/// authoritative. A member that differs per adopter is overridden the ordinary
+/// Rust way — by implementing the trait method — which keeps local and set
+/// kinds disjoint and leaves one dispatch arm, one `HandlesKind` marker, and
+/// one manifest record per kind.
+///
+/// ```ignore
+/// #[handler_set]
+/// pub trait WidgetDefaults {
+///     fn widget_frame(&mut self) -> &mut WidgetFrame;
+///
+///     #[handler::single]
+///     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
+///         *self.widget_frame() = frame;
+///     }
+/// }
+/// ```
+///
+/// The set is wasm or native throughout (read off the handlers' ctx type) and
+/// uses one authoring shape throughout (a `self` receiver, or the split
+/// `state: &mut Self::State` first parameter).
+#[proc_macro_attribute]
+pub fn handler_set(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(proc_macro2::Span::call_site(), "#[handler_set] takes no arguments")
+            .to_compile_error()
+            .into();
+    }
+    let item = parse_macro_input!(item as ItemTrait);
+    match handler_set::expand_handler_set(item) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }
 
 /// `#[local]` — attribute macro that declares a struct as

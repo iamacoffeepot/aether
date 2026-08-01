@@ -30,6 +30,7 @@
 //! their first draw.
 
 pub mod button;
+pub mod defaults;
 pub mod image;
 pub mod label;
 pub mod numeric;
@@ -42,6 +43,7 @@ pub mod toggle;
 pub mod virtual_list;
 
 pub use button::ButtonWidget;
+pub use defaults::WidgetDefaults;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use numeric::NumericWidget;
