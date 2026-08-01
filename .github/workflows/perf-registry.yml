@@ -1,0 +1,52 @@
+name: Registry perf band
+
+# Replicated read-scaling + owner-ceiling measurement of the real `Registry`
+# (iamacoffeepot/aether#4176, #4274; ADR-0085 §1-2). Runs K trials, each in a
+# fresh process, and reports every cell as a median with an IQR band.
+#
+# Manual only. This answers a question about the registry, not about a change,
+# so there is nothing for it to gate and no reason to spend a runner on every
+# push — unlike `perf-compare.yml`, which is path-filtered because it *is*
+# per-change. It exists on CI at all because the darwin box the sweep was first
+# read on is one machine, and the dispatch lane's own bistability
+# (iamacoffeepot/aether#4177) turned out to be platform- and
+# process-history-dependent. A Linux reading is a second platform, not a
+# tiebreak: both are reported with their bands and neither overrules the other.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: Trials to replicate (K). Each is a full sweep in its own process.
+        required: false
+        default: "9"
+
+jobs:
+  band:
+    name: Replicate the registry sweep
+    runs-on: ubuntu-latest
+    # K trials x (chassis boot + 256 spawns + 10 read cells + owner phases).
+    # Generous against the release build that dominates a cold run.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+          mesa-vulkan-drivers
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build the registry benchmark
+        run: cargo build --release -p aether-harness-perf --bin aether-perf-registry
+      # The band table goes to stderr and the JSON to stdout, so the step log
+      # carries the readable result while the artifact carries every trial's raw
+      # report — which is what a surprising band has to be re-examined against.
+      - name: Run the replicated sweep
+        run: ./target/release/aether-perf-registry -k "${{ inputs.trials }}"
+          --out registry-band.json > /dev/null
+      - name: Upload the banded report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: registry-perf-band
+          path: registry-band.json
+          if-no-files-found: warn

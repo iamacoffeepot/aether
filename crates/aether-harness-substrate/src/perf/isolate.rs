@@ -67,11 +67,11 @@
 
 use std::env;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use aether_substrate::scheduler::{handoff_cost_nanos, seed_handoff_cost_nanos};
 
 use crate::perf::harness::{self, CellSamples, SweepConfig, effective_trace_ring_cap};
+use crate::perf::subprocess::run_child_json;
 
 /// Names the one cell a child process must run, as `<topology>@<workers>` —
 /// e.g. `fanout-4@2`. Set by the parent on each child; its presence is what
@@ -256,35 +256,11 @@ pub fn run_sweep_samples_isolated(cfg: &SweepConfig) -> Vec<CellSamples> {
 
 /// Run one cell as a child of `exe` and decode its result.
 ///
-/// The child inherits this process's whole environment — every
-/// `AETHER_PERF_*` / `AETHER_LATENCY_*` knob the parent parsed — plus
-/// [`CELL_ENV`] and the trial's shared [`HANDOFF_SEED_ENV`]. That inheritance
-/// is what lets only the selector cross the boundary. Its stderr is inherited
-/// too, so a child's `warn` about a failed boot or harvest reaches the same
-/// place an in-process cell's would.
+/// Beyond the two variables here the child inherits this process's whole
+/// environment — every `AETHER_PERF_*` / `AETHER_LATENCY_*` knob the parent
+/// parsed — which is what lets only the selector cross the boundary.
 fn run_cell_in_subprocess(exe: &Path, selector: &CellSelector, handoff_seed_nanos: u64) -> Result<CellSamples, String> {
-    let out = Command::new(exe)
-        .env(CELL_ENV, selector.to_env_value())
-        .env(HANDOFF_SEED_ENV, handoff_seed_nanos.to_string())
-        // Only stdout is the result channel. `output()` would capture stderr
-        // too, which would swallow the child's `warn` about a failed boot or a
-        // lapped ring — the cell would vanish from the report with no reason
-        // given. Inheriting puts those diagnostics exactly where an in-process
-        // sweep's would appear.
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("exited with {}", out.status));
-    }
-    let stdout = String::from_utf8(out.stdout).map_err(|e| format!("stdout was not utf-8: {e}"))?;
-    let json = stdout.trim();
-    if json.is_empty() {
-        // The child measured nothing and said why on the inherited stderr —
-        // the cell is dropped, exactly as the in-process sweep drops it.
-        return Err("produced no result".to_owned());
-    }
-    serde_json::from_str(json).map_err(|e| format!("undecodable result: {e}"))
+    run_child_json(exe, &[(CELL_ENV, selector.to_env_value()), (HANDOFF_SEED_ENV, handoff_seed_nanos.to_string())])
 }
 
 #[cfg(test)]

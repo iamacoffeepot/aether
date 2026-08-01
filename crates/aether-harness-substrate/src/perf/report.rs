@@ -46,6 +46,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::stats::{iqr_sorted, median_sorted, sorted};
+
 /// Which per-mail span a cell reports (iamacoffeepot/aether#1150). Each
 /// measures one property, so a regression points at a mechanism rather
 /// than a smeared rollup.
@@ -659,28 +661,6 @@ impl Default for CompareConfig {
     fn default() -> Self {
         Self { effect_floor_iqr: 1.5, rel_floor: 0.10, abs_floor_nanos: 300.0, consistency: 0.75 }
     }
-}
-
-fn sorted(mut v: Vec<f64>) -> Vec<f64> {
-    v.sort_by(f64::total_cmp);
-    v
-}
-
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn quantile_sorted(s: &[f64], q: f64) -> f64 {
-    if s.is_empty() {
-        return 0.0;
-    }
-    let idx = ((s.len() - 1) as f64 * q).round() as usize;
-    s[idx.min(s.len() - 1)]
-}
-
-fn median_sorted(s: &[f64]) -> f64 {
-    quantile_sorted(s, 0.5)
-}
-
-fn iqr_sorted(s: &[f64]) -> f64 {
-    quantile_sorted(s, 0.75) - quantile_sorted(s, 0.25)
 }
 
 /// Compare K interleaved base/candidate trials, section by section.

@@ -32,6 +32,7 @@ each file opens with one.
 
 | Workflow | Purpose |
 | --- | --- |
+| `perf-registry.yml` | Replicated real-`Registry` read-scaling + owner-ceiling band on Linux (ADR-0085) |
 | `release.yml` | Build and upload the standalone Windows game bundle |
 | `transform.yml` | ADR-0149 zero-secret transform worker lane |
 | `transform-model.yml` | ADR-0149 BYO-credential model lane (fork-run only) |
