@@ -24,6 +24,13 @@ path = "src/bin/perf-compare.rs"
 name = "aether-perf-plot"
 path = "src/bin/perf-plot.rs"
 
+# iamacoffeepot/aether#4176: drives the real `Registry` for read scaling and
+# the single-owner drain ceiling. Not part of the merge gate — it answers a
+# question about the registry, not about a change.
+[[bin]]
+name = "aether-perf-registry"
+path = "src/bin/perf-registry.rs"
+
 [dependencies]
 # The mail-latency harness + trial-report vocabulary the bins drive.
 aether-harness-substrate = { path = "../aether-harness-substrate" }

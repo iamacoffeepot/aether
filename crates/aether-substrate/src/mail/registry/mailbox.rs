@@ -256,6 +256,26 @@ where
     }
 }
 
+/// What the published route view resolves a `(kind, recipient)` pair to
+/// (ADR-0165).
+///
+/// The summary form of a `RouteLookup`, carrying the disposition without the
+/// endpoint or its seize handle — those are dispatch machinery and stay
+/// internal. Returned by
+/// [`Registry::resolve_route_state`](Registry::resolve_route_state).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteResolution {
+    /// A live endpoint is published for this recipient.
+    Live,
+    /// The recipient is reserved but not yet activated, so mail addressed here
+    /// parks rather than dropping.
+    Starting,
+    /// The recipient was registered and has since been dropped.
+    Dropped,
+    /// No route was ever published under this id.
+    Unknown,
+}
+
 /// One point-in-time route and kind-name lookup.
 pub struct RouteLookup {
     endpoint: Option<RouteEndpoint>,
@@ -1726,6 +1746,34 @@ impl Registry {
                 .get(&kind)
                 .map_or_else(|| Arc::clone(&self.empty_kind_name), |slot| Arc::clone(&slot.name)),
             generation,
+        }
+    }
+
+    /// What the published route view resolves `(kind, recipient)` to.
+    ///
+    /// Delegates to the hot-path `route_lookup`, so this reads exactly
+    /// the lock-free published snapshot the mailer's route step reads — it is
+    /// the same code, not a second walk that could drift from it. What it adds
+    /// is a summary that crosses the crate boundary: `RouteLookup` carries a
+    /// `RouteEndpoint` and its `SeizeHandle`, which are dispatch machinery no
+    /// caller outside the substrate should hold.
+    ///
+    /// Reads never touch `Registry::inner`, so this contends with nothing —
+    /// concurrent callers scale on the published view alone.
+    #[must_use]
+    pub fn resolve_route_state(&self, kind: KindId, recipient: MailboxId) -> RouteResolution {
+        let lookup = self.route_lookup(kind, recipient);
+        // Ordered as `route_lookup` builds them: a reservation wins over an
+        // absent endpoint, and `dropped` is what distinguishes a retired route
+        // from one that never existed.
+        if lookup.is_starting() {
+            RouteResolution::Starting
+        } else if lookup.endpoint.is_some() {
+            RouteResolution::Live
+        } else if lookup.dropped {
+            RouteResolution::Dropped
+        } else {
+            RouteResolution::Unknown
         }
     }
 
