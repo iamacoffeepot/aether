@@ -153,9 +153,11 @@ fn render(report: &RegistryBandReport) {
         // row so a contended cell that drove nothing is visible here rather
         // than only in the JSON.
         eprintln!(
-            "read  threads={:>2} churn={:<5} commits={:>6.0}  {}  {}{note}",
+            "read  threads={:>2} churn={:<5} kinds={:<10} routes={:<11} commits={:>6.0}  {}  {}{note}",
             cell.threads,
             cell.owner_churn,
+            cell.kind_mix.label(),
+            cell.target_spread.label(),
             cell.owner_commits_observed.median,
             mps(&cell.lookups_per_sec),
             scaling(cell),

@@ -29,8 +29,10 @@
 
 pub mod band;
 pub mod fixture;
+pub mod kinds;
 pub mod owner;
 pub mod read;
+pub mod spread;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -42,8 +44,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::SubstrateHarness;
 use crate::perf::harness::{Relay, RelayConfig, relay_id};
+use kinds::KindMix;
 use owner::OwnerCeiling;
 use read::ReadScalingCell;
+use spread::{TargetSpread, WALK_TARGETS};
 
 /// Usable cores, for reading the sweep. A cell whose readers plus the chassis's
 /// own workers exceed this is oversubscribed, and its throughput drop is the
@@ -56,10 +60,14 @@ fn usable_cores() -> usize {
 /// when deciding whether a reader count oversubscribes the box.
 const CHASSIS_WORKERS: usize = 2;
 
-/// Mailboxes populated into the table before the read sweep. Large enough that
-/// the sweep reads a table of production shape rather than a handful of rows,
-/// small enough that the populate phase stays well under a second.
-const POPULATED_MAILBOXES: usize = 256;
+/// Mailboxes populated into the table before the read sweep.
+///
+/// Sized by the widest `Disjoint` cell rather than by taste: every reader walks
+/// `WALK_TARGETS` routes at every reader count, so the widest cell needs
+/// `WALK_TARGETS × max readers` distinct routes to hand out
+/// (iamacoffeepot/aether#4276). That is also a table of production shape and
+/// still populates in well under a second.
+const POPULATED_MAILBOXES: usize = WALK_TARGETS * 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryReport {
@@ -70,6 +78,11 @@ pub struct RegistryReport {
     pub usable_cores: u64,
     pub chassis_workers: u64,
     pub read_scaling: Vec<ReadScalingCell>,
+    /// Whether every probe kind the `per-reader` arm uses was actually
+    /// registered. **False invalidates that arm** — its readers fell back to
+    /// the one shared `empty_kind_name`, so it re-created the contention it
+    /// exists to remove and its numbers say nothing (iamacoffeepot/aether#4276).
+    pub per_reader_kinds_registered: bool,
     /// The unloaded service rate, from the sequential populate phase. A
     /// **floor** on ADR-0165's denominator: blocking spawns never queue, so the
     /// drainer never batches.
@@ -117,15 +130,27 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
     });
 
     let targets: Vec<MailboxId> = (0..usize::try_from(spawned).unwrap_or(usize::MAX)).map(relay_id).collect();
+    let per_reader_kinds_registered = kinds::per_reader_kinds_registered(harness.mail_registry());
     read::warm_read_path(harness.mail_registry(), &targets);
 
+    // Every (churn × kind-mix × spread) column is swept over the same reader
+    // counts, and each column is scaled against its own single-reader cell — so
+    // the arms are read against each other at equal reader counts rather than
+    // one being a correction applied to another (iamacoffeepot/aether#4276).
     let mut read_scaling = Vec::new();
     for churn in [None, parent.as_deref()] {
-        let mut baseline = None;
-        for &threads in read::READER_THREADS {
-            let cell = read::read_cell(&mut harness, &targets, threads, churn, baseline);
-            baseline.get_or_insert(cell.lookups_per_sec);
-            read_scaling.push(cell);
+        for mix in [KindMix::Shared, KindMix::PerReader] {
+            for spread in [TargetSpread::Overlapping, TargetSpread::Disjoint] {
+                let mut baseline = None;
+                for &threads in read::READER_THREADS {
+                    if !mix.covers(threads) || !spread.covers(targets.len(), threads) {
+                        continue;
+                    }
+                    let cell = read::read_cell(&mut harness, &targets, threads, churn, mix, spread, baseline);
+                    baseline.get_or_insert(cell.lookups_per_sec);
+                    read_scaling.push(cell);
+                }
+            }
         }
     }
 
@@ -135,6 +160,7 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
         usable_cores: usable_cores() as u64,
         chassis_workers: CHASSIS_WORKERS as u64,
         read_scaling,
+        per_reader_kinds_registered,
         owner_unloaded,
         owner_loaded,
     })
