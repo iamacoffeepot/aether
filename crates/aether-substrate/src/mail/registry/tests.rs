@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::panic;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -69,7 +70,7 @@ fn armed_dispatch_panics_if_dropped_without_discharge() {
 #[test]
 fn armed_dispatch_panic_names_the_kind() {
     let leaked = KindId(7);
-    let payload = std::panic::catch_unwind(|| {
+    let payload = panic::catch_unwind(|| {
         let env = OwnedDispatch::armed(
             leaked,
             None,
