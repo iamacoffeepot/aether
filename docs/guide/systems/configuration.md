@@ -156,7 +156,7 @@ a non-empty garbage value. The remaining field hints (`env`, `cli_long`,
 `parse` names a custom parser for the rare field that needs one. Two things to
 know going in:
 
-- **Gate it on the `runtime` feature**, as above. The capabilities crate also
+- **Gate it on the `runtime` feature**, as above. A capability crate also
   cross-compiles to wasm, where the config machinery isn't available; the
   `#[cfg_attr(feature = "runtime", …)]` keeps the wasm build carrying only the
   plain struct. Clippy runs host-native and won't catch a missing gate — the

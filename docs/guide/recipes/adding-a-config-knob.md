@@ -154,7 +154,7 @@ no `.env()` source, so it's env-free and CI-safe (issue 464).
 
 > **Gotcha — the `runtime` feature gate.** Every `#[derive(...)]` and `#[config]`
 > attribute is wrapped in `#[cfg_attr(feature = "runtime", ...)]`, including the
-> struct-level derive. The capabilities crate also cross-compiles to wasm, where
+> struct-level derive. A capability crate also cross-compiles to wasm, where
 > the config machinery isn't present, so the wasm build must carry only the plain
 > struct. Clippy runs host-native and won't catch a missing gate — the wasm32
 > cross-build in CI is what fails on it. Any `parse` helper you add is

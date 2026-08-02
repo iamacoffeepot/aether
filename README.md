@@ -162,15 +162,15 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Data and wire | `aether-data`, `aether-codec`, `aether-math`, `aether-kinds` | ids, schemas, canonical encoding, framing, shared vocabulary |
 | Guest SDKs | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
-| Native services | `aether-capabilities` | render, text, audio, FS, HTTP, TCP, lifecycle, fleet, providers, and other capabilities |
+| Native services | `aether-render`, `aether-audio`, `aether-fs` and the rest of `aether-<cap>` | one crate per capability mailbox: render, text, audio, FS, HTTP, TCP, lifecycle, fleet, providers |
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
 | Product actors | `aether-kit-*`, `aether-mesh` | camera, widgets, workbench, terrain/world, simulation, geometry DSL |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
 
-Capability request/reply kinds normally live with their capability under
-`aether-capabilities/src/<capability>/kinds.rs`. `aether-kinds` is reserved for
-genuinely cross-cutting or explicitly upstream contracts.
+Capability request/reply kinds normally live with their capability, in that
+capability's own crate at `aether-<cap>/src/kinds.rs`. `aether-kinds` is
+reserved for genuinely cross-cutting or explicitly upstream contracts.
 
 ## Testing and packaging
 

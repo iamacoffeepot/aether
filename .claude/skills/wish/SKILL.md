@@ -38,7 +38,7 @@ The failure mode: a wish composes its plan from kinds, caps, mailboxes, traits, 
 
 The rule: **every concrete engine surface a wish claims already exists must be grep-confirmed against current code before it is written into the wish.** Read the file; cite `crate/path` (or `file:line`) for load-bearing references. Prefer code over `CLAUDE.md` and ADRs — docs drift, the crates are authoritative.
 
-The line between checked and invented is sharp: the *existing* pieces a wish builds on are verified facts; the *novel* thing being wished for is the design — invented, that's the point of a wish. "Build a new `X` on top of `aether.fs.read` (verified: `crates/aether-capabilities/src/fs.rs`)" — `aether.fs.read` is grep-confirmed, `X` is the wish. If you can't verify a surface you were about to lean on, that's signal, not a detail: either it doesn't exist (a deeper absence — drill it) or it's named differently (find the real name). Never paper over with a plausible guess. This is the [[verify_names_against_current_code]] discipline applied at design time.
+The line between checked and invented is sharp: the *existing* pieces a wish builds on are verified facts; the *novel* thing being wished for is the design — invented, that's the point of a wish. "Build a new `X` on top of `aether.fs.read` (verified: `crates/aether-fs/src/kinds.rs`)" — `aether.fs.read` is grep-confirmed, `X` is the wish. If you can't verify a surface you were about to lean on, that's signal, not a detail: either it doesn't exist (a deeper absence — drill it) or it's named differently (find the real name). Never paper over with a plausible guess. This is the [[verify_names_against_current_code]] discipline applied at design time.
 
 ### Wishes drill toward producibility
 
@@ -180,7 +180,7 @@ supports:                           # optional, only if branch-overlap with memo
 filed: "#NNN"                       # optional — set by /sketch --from-wish when the leaf is filed
 producible: true | false            # true means this wish IS a plan
 grounded_surfaces:                  # every pass writes re-greppable `identifier` — crates/aether-*/src/path citations
-  - "`aether.fs.read` — crates/aether-capabilities/src/fs/kinds.rs"
+  - "`aether.fs.read` — crates/aether-fs/src/kinds.rs"
 grounding_stale: true | false        # optional: --refresh writes whether any cited surface drifted
 drifted_surfaces:                   # optional: --refresh writes the citations that no longer resolve
   - "`<identifier>` — crates/aether-*/src/<path>.rs"
