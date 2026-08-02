@@ -1,7 +1,7 @@
 //! The `aether.tcp.session` runtime half (ADR-0122 identity/runtime split).
 //! Compiled only under `feature = "runtime"` (the `mod runtime;` declaration
 //! in the parent carries the gate), so a transport-only build of the
-//! [`TcpSessionActor`](super::TcpSessionActor) identity never names these
+//! [`TcpSessionActor`] identity never names these
 //! types nor pulls `aether_substrate`. The substrate / `std::net`-typed
 //! imports are gated once by this module rather than line-by-line; the
 //! `#[actor] impl` reaches the state, ctx types, and config through the
@@ -57,7 +57,7 @@ fn notify_consumer<K: Kind>(ctx: &NativeCtx<'_>, consumer: aether_data::MailboxI
 /// back to the dispatcher via the `bytes_rx` channel as `Err(reason)`. The
 /// dispatcher reassembles complete frames into targeted `SessionData` mail and
 /// reports peer close through `SessionClosed`. The addressing identity is the
-/// distinct ZST [`TcpSessionActor`](super::TcpSessionActor).
+/// distinct ZST [`TcpSessionActor`].
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,

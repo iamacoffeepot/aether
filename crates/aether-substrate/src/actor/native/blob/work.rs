@@ -758,7 +758,8 @@ impl Drop for BlobWork {
 
 /// One producing actor's blob lifecycle: keeps a single active blob,
 /// appends each flush to it (rolling a fresh one when it retires or
-/// overflows), and recruits drainers. Lives on the actor's [`NativeBinding`]
+/// overflows), and recruits drainers. Lives on the actor's
+/// [`NativeBinding`](crate::actor::native::NativeBinding)
 /// and is driven only from the actor's own thread, so `&mut self` access is
 /// single-threaded.
 pub struct BlobProducer {

@@ -9,14 +9,12 @@ use aether_data::MailboxId;
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
-use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
+use super::subscribers::{WindowSubscribers, WindowSubscriptions};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
-    SetWindowModeResult, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    SyntheticWindowCapability, SyntheticWindowInstance, UnsubscribeAllWindows, UnsubscribeWindow,
-    UnsubscribeWindowSelf, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
-    WindowMode, WindowOpened, WindowSpec,
+    SetWindowModeResult, SetWindowTitleResult, SyntheticWindowCapability, SyntheticWindowInstance, WindowCapability,
+    WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance, WindowMode, WindowOpened, WindowSpec,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
@@ -113,7 +111,7 @@ fn answer(reply: &mut Option<Box<InboundMail>>, result: &CreateWindowResult) {
     }
 }
 
-#[runtime]
+#[runtime(handler_set(WindowSubscriptions))]
 impl NativeActor for SyntheticWindowCapability {
     type State = SyntheticWindowCapabilityState;
     type Config = ();
@@ -270,57 +268,6 @@ impl NativeActor for SyntheticWindowCapability {
     }
 
     #[handler::single]
-    fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
-        }
-        state.subscribers.subscribe(ctx, mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
-    }
-
-    #[handler::single]
-    fn on_subscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: SubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match state.subscribers.subscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    #[handler::single]
-    fn on_unsubscribe(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindow,
-    ) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
-        }
-        state.subscribers.unsubscribe(mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
-    }
-
-    #[handler::single]
-    fn on_unsubscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match state.subscribers.unsubscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        state.subscribers.unsubscribe_all(mail.mailbox);
-    }
-
-    #[handler::single]
     fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: InjectWindowEvent) {
         for recipient in state.subscribers.recipients(mail.window, mail.kind) {
             let _ = ctx.send_envelope_tracked(recipient, mail.kind, &mail.payload);
@@ -334,6 +281,14 @@ impl NativeActor for SyntheticWindowCapability {
             state.publish(ctx, id, &WindowClosed { window: id });
         }
         state.subscribers.purge_departed(notice.target);
+    }
+}
+
+impl WindowSubscriptions for SyntheticWindowCapability {
+    type State = SyntheticWindowCapabilityState;
+
+    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
+        &mut state.subscribers
     }
 }
 
@@ -354,6 +309,9 @@ mod tests {
     use aether_substrate::testing::boot_authority;
 
     use super::*;
+    // The subscription request kinds moved to the `WindowSubscriptions` set,
+    // so the manager module no longer imports them for `use super::*` to carry.
+    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow};
 
     fn test_state() -> SyntheticWindowCapabilityState {
         SyntheticWindowCapabilityState {
@@ -372,6 +330,43 @@ mod tests {
 
     fn spec(name: &str, title: &str) -> WindowSpec {
         WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+    }
+
+    /// ADR-0169: an adopted set's kinds have to reach the adopter's
+    /// *advertised* surface, not only its dispatch table. The `HandlesKind`
+    /// half of that is compile-checked by every typed send, but a set whose
+    /// rows never merge into `capabilities()` strips those kinds from
+    /// `describe_handlers` and from the per-handler cost table with no
+    /// behavioural symptom at all — the actor still answers the mail.
+    ///
+    /// Both adoption shapes are exercised: the manager merges an inherited
+    /// block onto its own handlers, and the endpoint inherits its entire
+    /// receive surface, which is the shape a naive "handlers are empty"
+    /// check would report as receiving nothing.
+    #[test]
+    fn adopted_set_kinds_reach_the_advertised_receive_surface() {
+        use aether_substrate::actor::native::Dispatch;
+
+        use crate::runtime::instance::WindowInstanceState;
+
+        let manager = <SyntheticWindowCapability as Dispatch<SyntheticWindowCapabilityState>>::capabilities();
+        let advertised = manager.handlers.iter().map(|handler| handler.id).collect::<BTreeSet<_>>();
+        assert!(advertised.contains(&SubscribeWindow::ID), "inherited kinds join the manager's advertised surface");
+        assert!(advertised.contains(&UnsubscribeWindow::ID), "every inherited kind joins, not just the first");
+        assert!(advertised.contains(&InjectWindowEvent::ID), "the manager's own handlers survive the merge");
+        // Wider than `advertised` by the ADR-0093 `TaskCompletionWake`, which
+        // is dispatched but not addressable (iamacoffeepot/aether#4266).
+        let measured = <SyntheticWindowCapability as Dispatch<SyntheticWindowCapabilityState>>::measured_kinds()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(measured.is_superset(&advertised), "the cost table measures every kind the actor advertises");
+
+        let endpoint = <SyntheticWindowInstance as Dispatch<WindowInstanceState>>::capabilities();
+        let inherited = endpoint.handlers.iter().map(|handler| handler.id).collect::<BTreeSet<_>>();
+        assert!(
+            inherited.contains(&crate::CloseWindow::ID) && inherited.contains(&RetireWindow::ID),
+            "an endpoint whose whole block lives in the set still advertises it",
+        );
     }
 
     #[test]

@@ -58,7 +58,7 @@ use std::collections::HashMap;
 /// `box_minus_protruding_sphere_is_watertight` exposed 3- and 4-unit
 /// duplicate vertex pairs on the x=-0.75 cube face that the previous
 /// tolerance missed.
-const WELD_TOLERANCE_FIXED_UNITS: i32 = 4;
+pub(super) const WELD_TOLERANCE_FIXED_UNITS: i32 = 4;
 
 /// Spatial-bucket cell size: 2 × tolerance so any two points within
 /// tolerance land in the same or adjacent buckets.

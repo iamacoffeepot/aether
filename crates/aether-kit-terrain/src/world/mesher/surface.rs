@@ -118,7 +118,7 @@ impl SubPatch {
 /// of stretching down the face (the wall draws the face). On continuous
 /// ground the two forms agree and the rule is invisible. A material-break
 /// crossing does not come here — it carries its side as data and lifts
-/// through [`anchored_lift`].
+/// through [`side_anchor_lift`].
 pub(super) fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> f32 {
     let cell = cell_at(wx, wz);
     if cell != owner && world.edge_is_cliff(cell, owner) {
@@ -153,7 +153,8 @@ pub(super) fn side_anchor_lift(world: &World, anchor: SurfaceAnchor, wx: f32, wz
 /// The lift for a vertex of a clipped flap fragment: position-pure through
 /// the vertex's own (floor) subcell, except that a vertex lying exactly on
 /// a clipped break line reads the subcell on the **fragment's** side of it
-/// (`sides` per axis, from [`emit_clipped_flap`]) — the high fragment holds
+/// (`sides` per axis, supplied by the mixed-window emitter that clipped the
+/// fragment) — the high fragment holds
 /// its plate, the low fragment holds the ground, and the wall classes close
 /// the vertical gap on the same subcells. Off the break lines the two forms
 /// agree wherever the plates connect, so continuous relief stays seamless.

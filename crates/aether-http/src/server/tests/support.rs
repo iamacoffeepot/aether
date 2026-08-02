@@ -235,11 +235,6 @@ pub(super) fn dechunk(body: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Read exactly one HTTP/1.1 response off `stream` — the head up to its
-/// blank line, then its `Content-Length` body — leaving any bytes read past
-/// it (a pipelined next response) in `carry` for the following call. Panics
-/// on EOF mid-response, so a test that expects the connection to close reads
-/// one response and then asserts EOF separately.
 /// Read from `stream` into `carry` until the blank line terminating the
 /// HTTP response head is buffered; return the byte index just past it.
 /// Shared by the buffered and chunked response readers.
@@ -254,6 +249,11 @@ fn read_response_head(stream: &mut TcpStream, carry: &mut Vec<u8>, chunk: &mut [
     }
 }
 
+/// Read exactly one HTTP/1.1 response off `stream` — the head up to its
+/// blank line, then its `Content-Length` body — leaving any bytes read past
+/// it (a pipelined next response) in `carry` for the following call. Panics
+/// on EOF mid-response, so a test that expects the connection to close reads
+/// one response and then asserts EOF separately.
 pub(super) fn read_one_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> String {
     let mut chunk = [0u8; 4096];
     let head_end = read_response_head(stream, carry, &mut chunk);

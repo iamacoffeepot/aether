@@ -1,5 +1,5 @@
 //! The `aether.fleet.proxy:<id>` runtime half (ADR-0122 identity/runtime
-//! split). The [`FleetProxy`](super::FleetProxy) identity file names none of
+//! split). The [`FleetProxy`] identity file names none of
 //! these types. The substrate-typed imports are collected once by
 //! this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state, ctx types, and connect/heartbeat helpers through the single
@@ -54,7 +54,7 @@ fn fleet_cap_mailbox() -> MailboxId {
 /// `aether.fleet.proxy:<id>` runtime state (ADR-0122 split): one outbound
 /// RPC connection to one substrate, plus the in-flight reply-correlation
 /// table. The addressing identity is the distinct ZST
-/// [`FleetProxy`](super::FleetProxy); the dispatcher holds this as the
+/// [`FleetProxy`]; the dispatcher holds this as the
 /// proxy's state and routes envelopes through the macro-emitted `Dispatch`
 /// impl. Living in this private module keeps it `pub`-enough to satisfy the
 /// `NativeActor::State` interface without exposing it as crate-public API.

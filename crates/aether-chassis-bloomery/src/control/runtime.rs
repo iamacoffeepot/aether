@@ -1,4 +1,4 @@
-//! The snapshot-owning runtime of the [`ControlCore`](super::ControlCore) cap.
+//! The snapshot-owning runtime of the [`ControlCore`] cap.
 //!
 //! # The async store choreography
 //!

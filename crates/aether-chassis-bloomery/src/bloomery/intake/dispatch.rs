@@ -11,7 +11,7 @@ use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// A work order's reducer context, captured host-side at dispatch time — the
-/// typed form of an [`OutstandingOrder`](crate::store::OutstandingOrder) registry
+/// typed form of an [`OutstandingOrder`] registry
 /// row. The caller (the reducer's dispatch path in production, a test here)
 /// supplies every field; the portable core [`WorkOrder`] is unchanged.
 ///
