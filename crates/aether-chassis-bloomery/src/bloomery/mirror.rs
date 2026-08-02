@@ -134,16 +134,6 @@ pub struct GithubMirrorConfig {
     /// resolves regardless of the coordinator's cwd.
     #[config(default = ".bloomery/local-worktrees")]
     pub local_worktree_base: String,
-    /// The model the local `construct.implement` lane runs headless Claude under.
-    /// Empty (the default) threads no `--model`; the coordinator-resolved
-    /// per-revision model (#3511) is a follow-up — this config default is the
-    /// stopgap until the resolved model rides the dispatch payload.
-    #[config(default = "")]
-    pub local_construct_model: String,
-    /// The reasoning-effort tier the local `construct.implement` lane runs at.
-    /// Empty (the default) threads no `--effort`.
-    #[config(default = "")]
-    pub local_construct_effort: String,
     /// How long (in seconds) a tracked dispatch may stay unresolved before the
     /// executor reactor logs a `warn` naming the wedge ([`super::ExecutorReactorCapability`],
     /// #3635) — observability only, never a behavior change to admission or
@@ -172,8 +162,6 @@ impl Default for GithubMirrorConfig {
             local_lane_enabled: true,
             local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
-            local_construct_model: String::new(),
-            local_construct_effort: String::new(),
             stale_warn_after_secs: 1800,
         }
     }

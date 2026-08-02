@@ -70,7 +70,6 @@ jobs:
         # transcript; the credential reaches only this step.
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          AETHER_CONSTRUCT_EFFORT: ${{ inputs.effort }}
         run: >-
           cargo xtask transform construct.implement
           --out evidence

@@ -41,8 +41,8 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, ReviewPass, StageId,
-    Topic, WorkHandle, WorkOrder, WorkpieceId,
+    Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce,
+    ReviewPass, StageId, Topic, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use super::ExecutorReactorCapability;
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
+use crate::bloomery::dispatch_model;
 use crate::bloomery::intake::{
     Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
@@ -281,8 +282,9 @@ fn drain_and_dispatch(
             );
             break;
         }
-        // Thread the member's advisory work-order description onto the construct
-        // lane (#3595). Only the model-driven `construct.implement` lane reads it
+        // Thread the host-resolved axes — the stage's agent profile and the
+        // member's advisory work-order description (#3595) — onto the construct
+        // lane. Only the model-driven `construct.implement` lane reads them
         // (Construct / Refine); the mechanical verify/review lanes never name a
         // task, so neither look it up nor warn on its absence. A store read fault
         // propagates via `?` (re-drained next tick); a missing row leaves the
@@ -290,6 +292,14 @@ fn drain_and_dispatch(
         // silent blind dispatch.
         let mut transformation = payload.transformation;
         if transformation.command == CONSTRUCT_IMPLEMENT_COMMAND {
+            // The stage's calibrated agent profile (ADR-0149 §The line), resolved
+            // host-side and overlaid the same way the description below is: the
+            // reducer names the stage catalog by digest and never resolves it, so
+            // without this the lane runs under whatever model the runner's ambient
+            // default happens to be and the receipt attests a profile that never
+            // ran. `payload.stage` is what separates Construct from Refine here —
+            // both dispatch the same command at different calibrated efforts.
+            transformation.model = Some(dispatch_model(payload.stage, &ModelOverride::default()));
             if let Some(description) =
                 store.lookup_dispatch_description(payload.bloom.as_bytes(), &payload.workpiece.0)?
             {
@@ -485,6 +495,9 @@ fn drain_and_dispatch_aggregate(
         }
         let task = compose_aggregate_task(store, &payload, entry.sequence)?;
         let mut transformation = payload.transformation;
+        // The aggregate critic is a model lane too, so it takes its calibrated
+        // profile on the same overlay channel as the member lane above.
+        transformation.model = Some(dispatch_model(StageId::AggregateReview, &ModelOverride::default()));
         // The evidence-binding subject is the integrated tree the reducer
         // pinned as inputs[0] — also the displayed digest the returning
         // verdict must bind.

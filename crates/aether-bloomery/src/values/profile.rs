@@ -66,6 +66,22 @@ pub enum ReasoningEffort {
     Max,
 }
 
+impl ReasoningEffort {
+    /// The tier's harness-facing name — the exact token the model lane hands
+    /// the Claude Code CLI's `--effort` flag, so a calibrated tier reaches the
+    /// child verbatim rather than through a second spelling the runner invents.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// The tools a profile's agent may reach. Kept minimal and extensible for v1:
 /// a named bounding tier today, a finer [`Allow`](Self::Allow) list when
 /// neither tier fits. A new variant is a new digest, never a silent

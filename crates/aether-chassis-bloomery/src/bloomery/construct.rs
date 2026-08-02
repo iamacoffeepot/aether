@@ -2,15 +2,18 @@
 //! #3511).
 //!
 //! The coordinator resolves the member's effective model + reasoning effort —
-//! the Construct stage's [`AgentProfile`](aether_bloomery::AgentProfile) default
-//! (#3510) overridden by the sealed scope-revision's
-//! [`ModelOverride`](aether_bloomery::ModelOverride) (#3511) — and shapes the
-//! model-driven [`Transformation`] the executor port dispatches. The runner
-//! re-reads the same sealed scope-revision by digest and re-resolves with the
-//! identical rule, so the dispatched model is exactly the one the bloom froze
-//! and the study stage grades cost against exactly that.
+//! the stage's calibrated [`AgentProfile`](aether_bloomery::AgentProfile) default
+//! (#3510) overridden by the sealed scope-revision's [`ModelOverride`] (#3511) —
+//! and shapes the model-driven [`Transformation`] the executor port dispatches.
+//! [`dispatch_model`] is that rule; the executor reactor overlays its result onto
+//! every model lane it dispatches. The runner re-reads the same sealed
+//! scope-revision by digest and re-resolves with the identical rule, so the
+//! dispatched model is exactly the one the bloom froze and the study stage grades
+//! cost against exactly that.
 
-use aether_bloomery::{Digest, Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder};
+use aether_bloomery::{
+    Digest, ModelOverride, Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder,
+};
 
 /// The typed command id the model-driven construct lane dispatches. The runner's
 /// `xtask transform` entrypoint maps this id to a headless-Claude invocation.
@@ -18,6 +21,27 @@ use aether_bloomery::{Digest, Nonce, ResolvedModel, ScopeRevision, StageCatalog,
 /// catalog's exported constant is re-exported here for the study/dispatch
 /// consumers that name the command (#3668).
 pub use aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
+
+/// The effective model + reasoning effort a model-driven lane dispatches under:
+/// the stage's calibrated [`AgentProfile`](aether_bloomery::AgentProfile)
+/// (ADR-0149 §The line) with each set field of `model_override` winning over it.
+///
+/// The one place that rule lives. The host overlays the result onto the
+/// dispatched [`Transformation::model`] the same way it overlays the work-order
+/// description, because the reducer names the stage catalog by digest and never
+/// resolves it — so without this overlay the lane runs at whatever model the
+/// runner's ambient default happens to be, and a receipt attests a configuration
+/// that did not run.
+///
+/// The executor reactor passes an empty override: a member's sealed override
+/// lives in the typed [`ScopeRevision`] its `scope_revision` digest addresses,
+/// and no host-side store holds that content yet, so the resolution today always
+/// yields the stage's calibrated default. Threading the sealed override in is a
+/// change of this call's second argument, not of the rule.
+#[must_use]
+pub fn dispatch_model(stage: StageId, model_override: &ModelOverride) -> ResolvedModel {
+    model_override.resolve(&StageCatalog::profile_of(stage))
+}
 
 /// Build the `construct.implement` work order for a member and report the
 /// effective model + effort it resolves to.
@@ -37,9 +61,9 @@ pub use aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 /// subject binds the returned evidence, the base names the tree the work runs on.
 #[must_use]
 pub fn build_construct_order(scope_revision: &ScopeRevision, base: Digest, nonce: Nonce) -> (WorkOrder, ResolvedModel) {
-    let profile = StageCatalog::profile_of(StageId::Construct);
-    let resolved = scope_revision.model_override.resolve(&profile);
-    let transformation = Transformation::for_member_stage(StageId::Construct, scope_revision.digest(), base);
+    let resolved = dispatch_model(StageId::Construct, &scope_revision.model_override);
+    let mut transformation = Transformation::for_member_stage(StageId::Construct, scope_revision.digest(), base);
+    transformation.model = Some(resolved.clone());
     (WorkOrder { transformation, nonce }, resolved)
 }
 
