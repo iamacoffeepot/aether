@@ -228,21 +228,29 @@ impl StageCatalog {
     /// strings. `tools` is [`ToolPolicy::Full`] across the v1 line: every stage
     /// runs a real process over the full tool surface; the finer tiers exist so
     /// a later calibration can bound a stage without a vocabulary change.
+    /// The model id every opus-tier stage below resolves to. Named once so a
+    /// generation refresh is one edit rather than a sweep over the arms — the
+    /// rows carry a tier, and only this line carries an id that can age.
+    const OPUS_MODEL: &'static str = "claude-opus-5";
+    /// The model id every sonnet-tier stage below resolves to, named for the
+    /// same reason as [`Self::OPUS_MODEL`].
+    const SONNET_MODEL: &'static str = "claude-sonnet-5";
+
     #[must_use]
     pub fn profile_of(stage: StageId) -> AgentProfile {
         // Calibrated once, grouped by tier: the design-adjacent stages run opus
         // (scope/construct/study at high effort, refine at medium), review's
         // finders run sonnet@high, and the mechanical remainder runs sonnet@medium.
         let (model, effort): (&str, ReasoningEffort) = match stage {
-            StageId::Scope | StageId::Construct | StageId::Study => ("claude-opus-4-8", ReasoningEffort::High),
-            StageId::Refine => ("claude-opus-4-8", ReasoningEffort::Medium),
-            StageId::Review | StageId::AggregateReview => ("claude-sonnet-5", ReasoningEffort::High),
+            StageId::Scope | StageId::Construct | StageId::Study => (Self::OPUS_MODEL, ReasoningEffort::High),
+            StageId::Refine => (Self::OPUS_MODEL, ReasoningEffort::Medium),
+            StageId::Review | StageId::AggregateReview => (Self::SONNET_MODEL, ReasoningEffort::High),
             StageId::Sketch
             | StageId::Approve
             | StageId::Verify
             | StageId::Integrate
             | StageId::AggregateVerify
-            | StageId::Land => ("claude-sonnet-5", ReasoningEffort::Medium),
+            | StageId::Land => (Self::SONNET_MODEL, ReasoningEffort::Medium),
         };
         AgentProfile { model: String::from(model), effort, tools: ToolPolicy::Full }
     }
@@ -480,9 +488,13 @@ mod tests {
     // `process` re-point to the host-side pre-seal admission gate
     // `aether.bloomery.approve_gate`, so the merged catalog line carries all four
     // intended edits and the golden is recomputed once more.
+    // Repinned again for #4314: the four opus-tier bindings re-point from
+    // `claude-opus-4-8` to `claude-opus-5`, which changes their `AgentProfile`
+    // digests and so the line. A recalibration is an intended catalog edit — see
+    // `profile_of`, whose model and effort values are refinable without an ADR.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x86, 0xea, 0xbb, 0x50, 0xd1, 0x23, 0x97, 0x9b, 0xb6, 0x91, 0xb0, 0x7c, 0xc9, 0xf5, 0xde, 0x07, 0x35, 0xb6,
-        0xde, 0x04, 0x60, 0x2b, 0x97, 0x9e, 0xf7, 0x95, 0xbb, 0xf3, 0xb9, 0xcd, 0xe2, 0x7a,
+        0x7f, 0x16, 0xea, 0x91, 0x4e, 0xff, 0xdb, 0x24, 0xc9, 0x83, 0x1e, 0x11, 0x10, 0x7a, 0x8a, 0x95, 0x42, 0xb3,
+        0xd9, 0xd4, 0xc8, 0x8d, 0x30, 0xad, 0x66, 0x16, 0x1c, 0xaa, 0x78, 0x27, 0x50, 0xa1,
     ];
 
     #[test]
