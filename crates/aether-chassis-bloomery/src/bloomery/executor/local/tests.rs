@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Nonce, StageId, Transformation, WorkHandle,
+    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Nonce, ReasoningEffort, ResolvedModel, StageId,
+    Transformation, WorkHandle,
 };
 use aether_bloomery_github::StageVerdict;
 use tempfile::TempDir;
@@ -45,13 +46,7 @@ fn test_nonce(tag: &str) -> String {
 
 fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExecutor {
     let runner = FixedRunner { evidence: evidence.to_owned(), lifecycle, captures: true };
-    LocalExecutor::new(
-        Arc::new(runner),
-        correspondence(),
-        base.path(),
-        Some("claude-opus-4-8".to_owned()),
-        Some("high".to_owned()),
-    )
+    LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
 }
 
 fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
@@ -280,19 +275,32 @@ fn recording_executor(
 ) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
     let released = Arc::new(Mutex::new(Vec::new()));
     let runner = RecordingRunner { evidence: evidence.map(str::to_owned), lifecycle, released: Arc::clone(&released) };
-    (LocalExecutor::new(Arc::new(runner), correspondence(), base.path(), None, None), released)
+    (LocalExecutor::new(Arc::new(runner), correspondence(), base.path()), released)
 }
 
-// A spawn seam that records the `RunSpec::evidence_dir` it was handed — the value
-// the child would resolve `--out` against — so a test can assert `submit` passes an
-// absolute path across the child-cwd/relative-path seam the other stubs sidestep.
+// What a `CapturingRunner` run saw: the `--out` path the child would resolve
+// against, and the model/effort argv the lane would run under.
+#[derive(Clone, Default)]
+struct SeenSpec {
+    evidence_dir: Option<PathBuf>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+// A spawn seam that records the `RunSpec` it was handed, so a test can assert what
+// `submit` actually hands the child across seams the other stubs sidestep — the
+// absolute `--out` path, and the resolved agent profile the order carries.
 struct CapturingRunner {
-    evidence_dir: Arc<Mutex<Option<PathBuf>>>,
+    seen: Arc<Mutex<SeenSpec>>,
 }
 
 impl TransformRunner for CapturingRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
-        *self.evidence_dir.lock().unwrap() = Some(spec.evidence_dir.to_owned());
+        *self.seen.lock().unwrap() = SeenSpec {
+            evidence_dir: Some(spec.evidence_dir.to_owned()),
+            model: spec.model.map(str::to_owned),
+            effort: spec.effort.map(str::to_owned),
+        };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
     }
 
@@ -314,18 +322,57 @@ fn submit_resolves_a_relative_base_to_an_absolute_evidence_dir() {
     // out-path handed to the spawn must be absolute so the child writes where
     // `stream_evidence` reads, regardless of the coordinator's cwd or a relative
     // configured `local_worktree_base`.
-    let captured = Arc::new(Mutex::new(None));
-    let runner = CapturingRunner { evidence_dir: Arc::clone(&captured) };
-    let exec =
-        LocalExecutor::new(Arc::new(runner), correspondence(), PathBuf::from(".bloomery/local-worktrees"), None, None);
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let runner = CapturingRunner { seen: Arc::clone(&seen) };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), PathBuf::from(".bloomery/local-worktrees"));
 
     exec.submit(&construct_order(digest(5), &test_nonce("abs"))).unwrap();
 
-    let evidence_dir = captured.lock().unwrap().clone().expect("submit spawned the run");
+    let evidence_dir = seen.lock().unwrap().evidence_dir.clone().expect("submit spawned the run");
     assert!(
         evidence_dir.is_absolute(),
         "the evidence out-path handed to the spawn must be absolute, got {evidence_dir:?}"
     );
+}
+
+// Tripwire: the model lane's spawn runs under the agent profile the order carries,
+// never a backend-local default. The backend used to read the model from its own
+// config, whose empty default omitted `--model` entirely and silently handed the
+// run to the operator's ambient model — so a bloom's sealed profile and the model
+// that actually ran could differ while the receipt attested the sealed one
+// (ADR-0149 §The line, #4324). Both axes are asserted: effort regressed the same
+// way, as an env var the CLI does not read.
+#[test]
+fn submit_spawns_the_model_lane_under_the_orders_resolved_profile() {
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let runner = CapturingRunner { seen: Arc::clone(&seen) };
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path());
+
+    let mut order = construct_order(digest(5), &test_nonce("profile"));
+    order.transformation.model =
+        Some(ResolvedModel { model: "claude-opus-4-8".to_owned(), effort: ReasoningEffort::XHigh });
+    exec.submit(&order).unwrap();
+
+    let SeenSpec { model, effort, .. } = seen.lock().unwrap().clone();
+    assert_eq!(model.as_deref(), Some("claude-opus-4-8"), "the spawn names the order's resolved model");
+    assert_eq!(effort.as_deref(), Some("xhigh"), "the spawn names the order's resolved effort tier");
+}
+
+// The complement: an order carrying no resolved profile names neither flag, so the
+// child falls back to the operator's ambient defaults rather than a fabricated one.
+#[test]
+fn submit_names_no_model_when_the_order_carries_no_profile() {
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let runner = CapturingRunner { seen: Arc::clone(&seen) };
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path());
+
+    exec.submit(&construct_order(digest(5), &test_nonce("ambient"))).unwrap();
+
+    let SeenSpec { model, effort, .. } = seen.lock().unwrap().clone();
+    assert_eq!(model, None, "no resolved profile means no model is named");
+    assert_eq!(effort, None, "no resolved profile means no effort is named");
 }
 
 #[test]
@@ -422,7 +469,7 @@ fn a_passing_construct_run_captures_its_candidate() {
         lifecycle: RunLifecycle::Exited { success: true },
         captures: true,
     };
-    let exec = LocalExecutor::new(Arc::new(runner), Arc::clone(&store) as _, base.path(), None, None);
+    let exec = LocalExecutor::new(Arc::new(runner), Arc::clone(&store) as _, base.path());
 
     let handle = exec.submit(&construct_order(digest(5), "n-cap")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
@@ -458,7 +505,7 @@ fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
         lifecycle: RunLifecycle::Exited { success: true },
         captures: false,
     };
-    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path(), None, None);
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path());
 
     let handle = exec.submit(&construct_order(digest(5), "n-void")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();

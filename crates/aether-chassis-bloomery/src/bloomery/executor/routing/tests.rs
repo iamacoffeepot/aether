@@ -65,6 +65,7 @@ fn order(command: &str, nonce: &str) -> WorkOrder {
             limits: Budget::default(),
             network: NetworkProfile::None,
             description: None,
+            model: None,
         },
         nonce: Nonce(nonce.to_owned()),
     }

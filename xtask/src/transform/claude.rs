@@ -12,17 +12,21 @@ use crate::transform::TransformArgs;
 
 /// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
 /// non-interactive, emitting the stream-json transcript the in-repo
-/// result-record derivation reads. `--model` is included only when `model` is
-/// `Some` — when the caller resolves no model, the flag is omitted and `claude
-/// -p` falls back to the operator's ambient default model (#3592). Pure so the
-/// model wiring is testable without spawning Claude; the reasoning effort rides
-/// the `AETHER_CONSTRUCT_EFFORT` env (a worker-side knob), not an argv flag, and
-/// the assembled prompt is piped on the child's stdin (not an argv positional).
-fn construct_argv(model: Option<&str>) -> Vec<String> {
+/// result-record derivation reads. `--model` and `--effort` are the CLI's own
+/// flags for the two axes an agent profile calibrates, each included only when
+/// the caller resolved one — when the caller resolves neither, both are omitted
+/// and `claude -p` falls back to the operator's ambient defaults (#3592). Pure
+/// so the profile wiring is testable without spawning Claude; the assembled
+/// prompt is piped on the child's stdin (not an argv positional).
+fn construct_argv(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
     let mut argv = vec!["-p".to_owned()];
     if let Some(model) = model {
         argv.push("--model".to_owned());
         argv.push(model.to_owned());
+    }
+    if let Some(effort) = effort {
+        argv.push("--effort".to_owned());
+        argv.push(effort.to_owned());
     }
     argv.push("--output-format".to_owned());
     argv.push("stream-json".to_owned());
@@ -154,13 +158,11 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
 pub(super) fn run_headless_claude(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
-    // Run headless Claude at the resolved model; the reasoning effort rides an
-    // env knob.
+    // Run headless Claude at the resolved model and reasoning effort — both the
+    // CLI's own flags, so the calibrated profile reaches the child rather than an
+    // env knob nothing on the other side reads.
     let mut claude = Command::new("claude");
-    claude.args(construct_argv(args.model.as_deref()));
-    if let Some(effort) = &args.effort {
-        claude.env("AETHER_CONSTRUCT_EFFORT", effort);
-    }
+    claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref()));
     claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = claude.spawn().context("run headless claude")?;
     // Pipe the prompt on a separate thread and reap the child unconditionally: if
@@ -217,21 +219,28 @@ mod tests {
         assert_eq!(tail("aébc", 3), "bc");
     }
 
+    // Tripwire: both calibrated axes reach the child as CLI flags. The effort used
+    // to be exported as an `AETHER_CONSTRUCT_EFFORT` env var that neither this
+    // repository nor the Claude Code CLI reads, so the lane ran at the operator's
+    // ambient effort however the profile was calibrated (#4324).
     #[test]
-    fn construct_argv_carries_the_resolved_model_and_stream_json() {
-        let argv = construct_argv(Some("claude-opus-4-8"));
+    fn construct_argv_carries_the_resolved_model_and_effort_and_stream_json() {
+        let argv = construct_argv(Some("claude-opus-4-8"), Some("high"));
         assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
         let model_at = argv.iter().position(|a| a == "--model").expect("argv pins the model");
         assert_eq!(argv[model_at + 1], "claude-opus-4-8", "the resolved model rides argv");
+        let effort_at = argv.iter().position(|a| a == "--effort").expect("argv pins the effort tier");
+        assert_eq!(argv[effort_at + 1], "high", "the resolved effort rides argv, not an unread env var");
         // The stream-json transcript is what the result-record derivation reads.
         assert!(argv.windows(2).any(|w| w == ["--output-format", "stream-json"]), "emits the stream-json transcript");
     }
 
     #[test]
-    fn construct_argv_omits_model_when_none_falls_back_to_ambient() {
-        let argv = construct_argv(None);
+    fn construct_argv_omits_the_profile_flags_when_none_falls_back_to_ambient() {
+        let argv = construct_argv(None, None);
         assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
         assert!(!argv.iter().any(|a| a == "--model"), "no resolved model means no --model flag (ambient default)");
+        assert!(!argv.iter().any(|a| a == "--effort"), "no resolved effort means no --effort flag (ambient default)");
         assert!(
             argv.windows(2).any(|w| w == ["--output-format", "stream-json"]),
             "still emits the stream-json transcript"

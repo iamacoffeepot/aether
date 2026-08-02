@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
-use crate::values::{AgentProfile, Budget, ReasoningEffort, ToolPolicy};
+use crate::values::{AgentProfile, Budget, ReasoningEffort, ResolvedModel, ToolPolicy};
 
 /// The declared output name every dispatched attempt uploads its result record
 /// under — the study/verdict envelope the intake broker binds to the displayed
@@ -311,6 +311,18 @@ pub struct Transformation {
     /// than a blind dispatch.
     #[serde(default)]
     pub description: Option<String>,
+    /// The effective model + reasoning effort the attempt runs under — the
+    /// stage's calibrated [`AgentProfile`] resolved through the member's sealed
+    /// [`ModelOverride`](crate::values::ModelOverride) (ADR-0149 §The line).
+    /// Carried on the same host-overlay channel as
+    /// [`description`](Self::description): the reducer holds digests, not the
+    /// catalog's resolution, so it authors this `None`
+    /// ([`for_member_stage`](Self::for_member_stage)) and the host resolves it
+    /// at dispatch. `None` leaves the executor backend with no model to name, so
+    /// the lane falls back to the runner's ambient default — legible, but
+    /// unattested, so a model lane always carries one.
+    #[serde(default)]
+    pub model: Option<ResolvedModel>,
 }
 
 impl Transformation {
@@ -369,8 +381,11 @@ impl Transformation {
             limits: Budget::default(),
             network,
             // The reducer holds only digests; the operator's work-order text is
-            // advisory context the host threads on at dispatch, never here.
+            // advisory context the host threads on at dispatch, never here. The
+            // effective model rides the same channel for the same reason — the
+            // reducer names the catalog by digest, the host resolves it.
             description: None,
+            model: None,
         }
     }
 
@@ -392,6 +407,7 @@ impl Transformation {
             limits: Budget::default(),
             network: NetworkProfile::Restricted,
             description: None,
+            model: None,
         }
     }
 }

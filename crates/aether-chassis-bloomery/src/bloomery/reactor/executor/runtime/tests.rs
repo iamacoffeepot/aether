@@ -146,11 +146,24 @@ fn track(handles: Vec<WorkHandle>) -> Vec<TrackedHandle> {
 // reducer's `DispatchAttempt` projection would enqueue), returning its outbox
 // sequence and the subject digest the attempt runs against.
 fn enqueue_construct_dispatch(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, subject: u8) -> (u64, u8) {
+    enqueue_dispatch_at(store, bloom, workpiece, subject, StageId::Construct)
+}
+
+// The same enqueue at an explicit stage — Construct and Refine dispatch the *same*
+// `construct.implement` command at different calibrated profiles, so a test that
+// separates them needs the stage as an axis.
+fn enqueue_dispatch_at(
+    store: &mut SqliteStore,
+    bloom: BloomId,
+    workpiece: &str,
+    subject: u8,
+    stage: StageId,
+) -> (u64, u8) {
     let payload = DispatchPayload {
         bloom: bloom.0,
         workpiece: WorkpieceId(workpiece.to_owned()),
-        stage: StageId::Construct,
-        transformation: Transformation::for_member_stage(StageId::Construct, digest(subject), digest(0xC0)),
+        stage,
+        transformation: Transformation::for_member_stage(stage, digest(subject), digest(0xC0)),
         scope_revision: digest(subject),
         candidate: None,
     };
@@ -294,6 +307,38 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     // Acking the prefix means the entry does not re-drain.
     store.ack_topic(Topic::Dispatch, sequence).unwrap();
     assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the acked dispatch does not re-drain");
+}
+
+// Tripwire: the dispatched construct order runs under the stage catalog's
+// calibrated agent profile. The model used to come from a config knob whose empty
+// default omitted `--model` altogether, so the lane silently ran at the operator's
+// ambient model while the sealed catalog — the thing a receipt attests (ADR-0149
+// §The line) — was never consulted (#4324). Pinned against `profile_of` rather
+// than a literal so a recalibration moves both together; what trips it is the
+// dispatch dropping back to ambient or to a dispatch-time choice.
+//
+// The stage, not the command, is what selects the profile: Construct and Refine
+// dispatch the same `construct.implement` command at different calibrated efforts,
+// so resolving off the command would collapse them.
+#[test]
+fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    enqueue_dispatch_at(&mut store, bloom, "wp-construct", 5, StageId::Construct);
+    enqueue_dispatch_at(&mut store, bloom, "wp-refine", 6, StageId::Refine);
+
+    drain_and_dispatch(&mut store, &shell).unwrap();
+
+    let orders = backend.orders();
+    let construct = StageCatalog::profile_of(StageId::Construct);
+    let refine = StageCatalog::profile_of(StageId::Refine);
+    let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
+    assert_eq!(dispatched(0).model, construct.model, "the construct order runs the calibrated Construct model");
+    assert_eq!(dispatched(0).effort, construct.effort, "at the calibrated Construct effort");
+    assert_eq!(dispatched(1).effort, refine.effort, "the refine order runs at its own calibrated effort");
+    assert_ne!(dispatched(0).effort, dispatched(1).effort, "the stage, not the shared command, picks the profile");
 }
 
 #[test]
@@ -495,7 +540,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         lifecycle: RunLifecycle::Exited { success: true },
         captures: true,
     };
-    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path(), None, None));
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path()));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
 

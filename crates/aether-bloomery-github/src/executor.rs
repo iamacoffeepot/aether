@@ -299,6 +299,7 @@ mod tests {
                 limits: Budget::default(),
                 network: NetworkProfile::None,
                 description: None,
+                model: None,
             },
             nonce: Nonce(nonce.to_owned()),
         }

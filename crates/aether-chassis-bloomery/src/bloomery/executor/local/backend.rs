@@ -50,8 +50,6 @@ pub struct LocalExecutor {
     runner: Arc<dyn TransformRunner>,
     correspondence: SharedCorrespondence,
     base_dir: PathBuf,
-    construct_model: Option<String>,
-    construct_effort: Option<String>,
     runs: Mutex<HashMap<String, Run>>,
 }
 
@@ -66,32 +64,18 @@ impl LocalExecutor {
         runner: Arc<dyn TransformRunner>,
         correspondence: SharedCorrespondence,
         base_dir: impl Into<PathBuf>,
-        construct_model: Option<String>,
-        construct_effort: Option<String>,
     ) -> Self {
-        Self {
-            runner,
-            correspondence,
-            base_dir: base_dir.into(),
-            construct_model,
-            construct_effort,
-            runs: Mutex::new(HashMap::new()),
-        }
+        Self { runner, correspondence, base_dir: base_dir.into(), runs: Mutex::new(HashMap::new()) }
     }
 
     /// Build the production backend from resolved config: the real git + cargo
     /// [`ProcessTransformRunner`], the shared `correspondence` the checkout
-    /// resolves through, the config'd scratch-worktree base dir, and the config'd
-    /// construct model/effort (empty strings resolve to `None`).
+    /// resolves through, and the config'd scratch-worktree base dir. The model a
+    /// run executes under is not config — it rides each order as the resolved
+    /// agent profile the host overlaid at dispatch (ADR-0149 §The line).
     #[must_use]
     pub fn from_config(config: &GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
-        Self::new(
-            Arc::new(ProcessTransformRunner),
-            correspondence,
-            config.local_worktree_base.clone(),
-            non_empty(&config.local_construct_model),
-            non_empty(&config.local_construct_effort),
-        )
+        Self::new(Arc::new(ProcessTransformRunner), correspondence, config.local_worktree_base.clone())
     }
 
     // Lock the registry, recovering the guard on a poisoned mutex rather than
@@ -222,14 +206,20 @@ impl ExecutorBackend for LocalExecutor {
         // which the review lane's `status`-stamped evidence must not ride.
         let is_construct = order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND;
         let is_model_lane = is_construct || order.transformation.command == REVIEW_CRITIC_COMMAND;
+        // The stage's resolved agent profile, overlaid onto the order by the
+        // dispatching host (ADR-0149 §The line) — never a backend-local config
+        // knob, which would let a run's model diverge from the profile its bloom
+        // sealed and the receipt attests. An order that carries none names no
+        // model, and the child falls back to the operator's ambient default.
+        let profile = is_model_lane.then_some(order.transformation.model.as_ref()).flatten();
         let spec = RunSpec {
             command: &order.transformation.command,
             checkout_hex: &checkout_hex,
             worktree_dir: &worktree_dir,
             evidence_dir: &evidence_dir,
             nonce: &nonce,
-            model: is_model_lane.then_some(self.construct_model.as_deref()).flatten(),
-            effort: is_model_lane.then_some(self.construct_effort.as_deref()).flatten(),
+            model: profile.map(|resolved| resolved.model.as_str()),
+            effort: profile.map(|resolved| resolved.effort.as_str()),
             // The work-order description rides the order's transformation (#3595),
             // populated at dispatch from durable state; the model lanes name it
             // (the critic judges the candidate against it), mirroring the
@@ -393,11 +383,6 @@ impl ExecutorBackend for LocalExecutor {
             findings: parse_findings(&bytes),
         }])
     }
-}
-
-/// `Some(s)` for a non-empty config string, `None` for the empty default.
-fn non_empty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// Read the verify lane's `status` field from an `evidence.json` byte string:
