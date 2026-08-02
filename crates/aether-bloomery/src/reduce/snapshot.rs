@@ -62,7 +62,7 @@ pub struct BloomRecord {
     /// The open pending-decision holds — the digests of the [`Question`](crate::Question)
     /// artifacts a parked attempt raised that no adopting answer has released
     /// yet (ADR-0151). Derived member state, folded from the evidence log: an
-    /// admitted [`EvidenceKind::Question`](crate::EvidenceKind::Question) inserts its `detail` digest here, and
+    /// admitted [`EvidenceKind::Question`] inserts its `detail` digest here, and
     /// an adopting answer removes it. A non-empty set blocks the bloom from
     /// resolving; the [`Question`](crate::Question)'s own `workpiece` (resolved from the digest)
     /// is what binds a hold to its member in the outward view. Journal-derived,
@@ -78,7 +78,7 @@ pub struct BloomRecord {
     /// never does in V1; the record is discarded whole on supersession).
     pub progress: BTreeMap<WorkpieceId, StageProgress>,
     /// The integration fold's output held while the bloom's aggregate review
-    /// runs (ADR-0153): set when [`Fact::Resolve`](crate::Fact::Resolve) verifies the claim set and
+    /// runs (ADR-0153): set when [`Fact::Resolve`] verifies the claim set and
     /// dispatches the review, consumed by a passing
     /// [`Fact::AggregateReviewCompleted`] (which resolves from it), and
     /// cleared when a failing verdict re-opens members — the fold is stale the
@@ -103,7 +103,7 @@ pub struct BloomRecord {
     pub superseded_by: Option<BloomId>,
 }
 
-/// The integration fold's output — the axes [`Fact::Resolve`](crate::Fact::Resolve) carries, held on
+/// The integration fold's output — the axes [`Fact::Resolve`] carries, held on
 /// the bloom record while the whole-bloom aggregate review judges the
 /// integrated head (ADR-0153).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

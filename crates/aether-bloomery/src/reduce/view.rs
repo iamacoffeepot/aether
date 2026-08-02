@@ -19,11 +19,11 @@ use crate::values::Question;
 /// carrying the member's scope revision, approval evidence, — matched by
 /// workpiece from the record's accumulated claims — its resolution claim once
 /// integrated (`None` until then), and — matched by workpiece from the
-/// [`Question`](crate::Question) each open hold resolves to — its pending-decision hold (`None`
+/// [`Question`] each open hold resolves to — its pending-decision hold (`None`
 /// when the member is not held).
 ///
 /// `resolve_question` resolves an open hold's question digest to its
-/// [`Question`](crate::Question) bytes, the same injected read-only resolver
+/// [`Question`] bytes, the same injected read-only resolver
 /// [`grade`](crate::study_report::grade) uses for study records: the reducer's
 /// snapshot holds question *digests*, not the rendered prompt/options or the
 /// member the hold binds to, so a snapshot-only signature could carry neither.
