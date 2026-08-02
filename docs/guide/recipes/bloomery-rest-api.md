@@ -11,21 +11,20 @@ this API is the human/shell surface.
 ## Booting the coordinator with the API
 
 The HTTP ingress binds `AETHER_HTTP_PORT` (default `8910`) on localhost. The
-write and live-read routes need the control-core reducer, so autoload it with
-`AETHER_CONTROL_CORE_WASM`:
+write and live-read routes need the control-core reducer, which is a native
+capability the chassis boots for you — there is nothing to point it at:
 
 ```bash
 AETHER_HTTP_PORT=8910 \
 AETHER_STORE_PATH=bloomery.db \
-AETHER_CONTROL_CORE_WASM=target/wasm32-unknown-unknown/release/aether_bloomery.wasm \
   cargo run -p aether-chassis-bloomery --bin bloomery
 ```
 
 The ingress is an internal, unversioned, localhost-only control surface — no
 auth (a versioned public protocol is a later arc). The read routes that hit
-the store (`/journal`) and artifacts (`/artifacts/{digest}`) work without the
-control core; the seal / supersede / live-read routes (`/blooms`, `/view`)
-need it loaded.
+the store (`/journal`) and artifacts (`/artifacts/{digest}`) answer from those
+capabilities alone; the seal / supersede / live-read routes (`/blooms`,
+`/view`) go through the control core.
 
 ## The route table
 
