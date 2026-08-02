@@ -53,7 +53,7 @@ impl NativeBinding {
 
     /// Seal the open blob, mint a [`MailRef`] per buffered mail, and
     /// route. Folds the blob into this actor's cursor-shared
-    /// [`BlobWork`] when a pool [`Spawner`](crate::Spawner) is wired,
+    /// [`BlobWork`](crate::actor::native::blob::work::BlobWork) when a pool [`Spawner`](crate::Spawner) is wired,
     /// else routes per mail (test bindings without a spawner); a no-op
     /// when nothing is buffered.
     ///

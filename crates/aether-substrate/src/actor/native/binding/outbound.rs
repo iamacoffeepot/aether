@@ -15,7 +15,7 @@ use crate::mail::{MailId, Source, SourceAddr};
 /// Per-actor outbound ring capacity (ADR-0087). Sized to hold a typical
 /// handler's small-mail fan-out as one blob; a mail that doesn't fit (a
 /// large payload, or a very wide fan-out that fills the ring) degrades to
-/// the [`MailRef::Owned`] copy-out valve in
+/// the [`MailRef::Owned`](crate::mail::MailRef::Owned) copy-out valve in
 /// [`NativeBinding::flush_outbound`] / `push_envelope_buffered` rather
 /// than blocking — the large-payload zero-copy path is the deferred fork
 /// on iamacoffeepot/aether#1101.
@@ -40,7 +40,7 @@ pub(super) struct OutboundBuffer {
     /// while the hold is set.
     pub(super) activation_held: bool,
     /// Lazily created on the first buffered send. `Arc` so each minted
-    /// [`MailRef::InRing`] carries the ring's lifetime by refcount.
+    /// [`MailRef::InRing`](crate::mail::MailRef::InRing) carries the ring's lifetime by refcount.
     pub(super) ring: Option<Arc<MailRing>>,
     /// Whether a ring blob is currently open — between the first send of
     /// a flush window and the flush's `seal`.

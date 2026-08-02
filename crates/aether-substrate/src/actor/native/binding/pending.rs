@@ -27,7 +27,7 @@ pub(super) enum PendingPayload {
 /// already in the ring (`InRing`) or copied out (`Owned`); a component payload
 /// is retained as its prebuilt [`MailRef`]. The rest is route metadata
 /// (correlation-derived `reply_to`/`mail_id`, inherited lineage) the flush
-/// stamps onto the [`Mail`] it builds.
+/// stamps onto the [`Mail`](crate::mail::Mail) it builds.
 pub(super) struct PendingMail {
     pub(super) recipient: u64,
     pub(super) kind: u64,

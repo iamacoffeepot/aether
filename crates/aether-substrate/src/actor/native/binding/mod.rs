@@ -110,7 +110,7 @@ pub struct NativeBinding {
     /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] —
     /// invoked by [`Self::fatal_abort`] when a wasm guest traps so a
     /// faulty component brings the substrate down cleanly. Cloned from
-    /// [`ChassisCtx::fatal_aborter`] at boot.
+    /// [`ChassisCtx::fatal_aborter`](crate::chassis::ctx::ChassisCtx::fatal_aborter) at boot.
     aborter: Arc<dyn FatalAborter>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's [`crate::Spawner`]
     /// cloned into every booted actor's transport so per-handler
@@ -132,7 +132,7 @@ pub struct NativeBinding {
     /// this (via [`Self::push_envelope_buffered`]); the handler-end
     /// flush ([`Self::flush_outbound`], driven by `NativeCtx`'s `Drop`)
     /// forms one ring blob and routes a
-    /// [`MailRef::InRing`] per mail.
+    /// [`MailRef::InRing`](crate::mail::MailRef::InRing) per mail.
     ///
     /// `Mutex` only for the `&self` interior-mutability + `Sync`
     /// requirements — the buffer has a single logical producer (this
