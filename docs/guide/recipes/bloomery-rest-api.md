@@ -27,7 +27,7 @@ capabilities alone; the seal / supersede / live-read routes (`/blooms`,
 `/view`) go through the control core.
 
 Sealing consults the tier policy the pre-seal approve gate loads at boot from
-`AETHER_APPROVAL_POLICY_FILE` — `bloomery/approval-policy.yml` by default,
+`AETHER_APPROVAL_POLICY_FILE` — `approval-policy.yml` by default,
 resolved against the working directory, so launch from the repository root. The
 startup line `bloomery REST control api mounted policy_loaded=true` confirms the
 gate has it. A policy the gate cannot read leaves it with nothing to decide

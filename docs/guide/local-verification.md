@@ -64,7 +64,7 @@ When that happens, work the loop:
 2. Identify which changed path should have selected which package. The
    failing test names the consumer.
 3. Add one `[[path-rule]]` block (`globs` → `mark-changed`) to
-   `PATH_RULES_TOML`, mirroring the existing `bloomery/**` →
+   `PATH_RULES_TOML`, mirroring the existing `approval-policy.yml` →
    `aether-chassis-bloomery` rule, with a comment naming the coupling. The rule
    PR self-validates: `xtask/` is in `RUN_ALL_PREFIXES`, so it runs the full
    suite.

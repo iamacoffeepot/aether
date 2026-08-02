@@ -251,11 +251,14 @@ mod tests {
             "a library change in the same package keeps its reverse-dependency closure"
         );
 
-        // The bloomery/** rule maps the cross-boundary test input to its
-        // reader instead of falling back to run-everything.
-        let policy = select(&graph, &strings(&["bloomery/approval-policy.yml"]), &no_wasm_sources, &no_wasm_consumers)
-            .expect("select over bloomery config change");
-        assert!(policy.run_all.is_none(), "bloomery config maps to a package, not run_all");
-        assert!(policy.packages.contains("aether-chassis-bloomery"), "bloomery config change must select its reader");
+        // The approval-policy.yml rule maps the cross-boundary test input to
+        // its reader instead of falling back to run-everything.
+        let policy = select(&graph, &strings(&["approval-policy.yml"]), &no_wasm_sources, &no_wasm_consumers)
+            .expect("select over approval policy change");
+        assert!(policy.run_all.is_none(), "the approval policy maps to a package, not run_all");
+        assert!(
+            policy.packages.contains("aether-chassis-bloomery"),
+            "an approval policy change must select its reader"
+        );
     }
 }

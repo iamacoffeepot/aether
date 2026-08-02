@@ -93,7 +93,7 @@ use crate::store::{RecordDispatchDescriptionResult, StoreCapability};
 /// silently `auto`.
 pub struct ApiParams {
     /// Repository-relative path to the Bloomery-owned tier policy
-    /// (`bloomery/approval-policy.yml`).
+    /// (`approval-policy.yml`).
     pub approval_policy_file: String,
 }
 
