@@ -26,6 +26,14 @@ the store (`/journal`) and artifacts (`/artifacts/{digest}`) answer from those
 capabilities alone; the seal / supersede / live-read routes (`/blooms`,
 `/view`) go through the control core.
 
+Sealing consults the tier policy the pre-seal approve gate loads at boot from
+`AETHER_APPROVAL_POLICY_FILE` — `bloomery/approval-policy.yml` by default,
+resolved against the working directory, so launch from the repository root. The
+startup line `bloomery REST control api mounted policy_loaded=true` confirms the
+gate has it. A policy the gate cannot read leaves it with nothing to decide
+over, and every seal is refused with `approval policy unavailable; seal fails
+closed`.
+
 ## The route table
 
 | Method & path | Effect |
@@ -35,15 +43,16 @@ capabilities alone; the seal / supersede / live-read routes (`/blooms`,
 | `POST /drafts` | Open an empty draft; returns its handle (`draft_id`). |
 | `GET /drafts` · `GET /drafts/{id}` | List / read open drafts. |
 | `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, stage catalog, toolchain, policy, budget, forecast). |
-| `POST /drafts/{id}/seal` | Freeze the draft to a `BloomSpec` and admit `Fact::Seal`; returns the reducer outcome. |
+| `POST /drafts/{id}/seal` | Run the approve gate over every proposal (the body carries one scope projection per member), freeze the draft to a `BloomSpec`, and admit `Fact::Seal`; returns the reducer outcome. |
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
+| `POST /blooms/{id}/answer` | Adopt an owner-signed answer statement to a parked question, releasing the hold it took. |
 | `GET /blooms` · `GET /view` | The whole live view document. |
 | `GET /blooms/{id}` | One bloom's live view (`{id}` is the bloom's hex digest). |
 | `GET /journal` | The whole journal, decoded, oldest first. |
 | `GET /artifacts/{digest}` | The content-addressed artifact bytes, or `404`. |
 
 Request and response bodies are JSON over the `aether-bloomery` value types
-(`Workpiece`, `BloomDraft`, `Membership`, `ViewDocument`, …) via serde. Two
+(`Workpiece`, `BloomDraft`, `Membership`, `ViewDocument`, …) via serde. Three
 representation notes carry from those types:
 
 - **Digests** (a workpiece intent, a bloom's `base`, a `BloomId`) serialize as
@@ -52,15 +61,37 @@ representation notes carry from those types:
 - **Bloom ids in a URL path** (`/blooms/{id}`) are the lowercase **hex** of that
   digest. The seal outcome hands the id back as the byte array, so hex-encode
   it before addressing the bloom by path.
+- **The stage catalog** a draft freezes has exactly one admissible value: the
+  content address of the stage line the pipeline runs. Every other digest — the
+  all-zero default a fresh draft opens with included — is refused as
+  `UnknownStageCatalog`. The catalog is authored in Rust and re-digests whenever
+  a stage binding or an agent profile changes, so read the current value instead
+  of copying one out of a document:
+
+  ```bash
+  cargo run -q -p aether-bloomery --example stage-catalog-digest
+  # → [127,22,234,145,78,255,219,36,…]
+  ```
 
 ## A curl walkthrough
+
+The walkthrough reuses a handful of digests, so bind them once — three
+placeholder byte arrays and the one stage catalog the reducer admits:
+
+```bash
+intent='[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]'
+revision='[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]'
+detail='[9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9]'
+base='[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'
+catalog=$(cargo run -q -p aether-bloomery --example stage-catalog-digest)
+```
 
 Stage a workpiece (its `intent` / `scope_revision` are digest byte arrays):
 
 ```bash
 curl -s -X POST localhost:8910/workpieces \
   -H 'content-type: application/json' \
-  -d '{"id":"wp-1","intent":[2,2,...,2],"scope_revision":[3,3,...,3]}'
+  -d "{\"id\":\"wp-1\",\"intent\":$intent,\"scope_revision\":$revision}"
 ```
 
 Open a draft and read the handle it mints:
@@ -69,20 +100,88 @@ Open a draft and read the handle it mints:
 curl -s -X POST localhost:8910/drafts        # → {"draft_id":"1","draft":{…}}
 ```
 
-Shape the draft into an admissible bloom — one approved member and the one
-stage-catalog line the reducer requires (`PATCH` fields mirror `BloomDraft`):
+Shape the draft into an admissible bloom — one member and the stage catalog
+(`PATCH` fields mirror `BloomDraft`):
 
 ```bash
-curl -s -X PATCH localhost:8910/drafts/1 \
-  -H 'content-type: application/json' \
-  -d '{"proposals":[{"workpiece":"wp-1","scope_revision":[7,…],"approval":{"subject":[7,…],"kind":"Approval","detail":[9,…]}}],"base":[1,…],"stage_catalog":[…]}'
+curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' -d @- <<JSON
+{
+  "proposals": [
+    {
+      "workpiece": "wp-1",
+      "scope_revision": $revision,
+      "approval": { "subject": $revision, "kind": "Approval", "detail": $detail }
+    }
+  ],
+  "base": $base,
+  "stage_catalog": $catalog
+}
+JSON
 ```
 
-Seal it — the outcome names the sealed bloom id:
+The `approval` here is a placeholder that only has to be reducer-shaped
+(an `Approval` binding the member's own `scope_revision`) — the seal replaces it
+with the approval its gate forms, so the sealed bloom carries a policy-authored
+approval rather than the operator's assertion.
+
+Seal it. The body carries one **scope projection** per proposal, which is what
+the gate decides over; the outcome names the sealed bloom id:
 
 ```bash
-curl -s -X POST localhost:8910/drafts/1/seal   # → {"outcome":{"Sealed":[…32 bytes…]}}
+curl -s -X POST localhost:8910/drafts/1/seal -H 'content-type: application/json' -d @- <<JSON
+{
+  "projections": [
+    {
+      "workpiece": "wp-1",
+      "scope_revision": $revision,
+      "declared_surface": ["docs/guide/recipes/bloomery-rest-api.md"],
+      "completeness": {
+        "has_problem_statement": true,
+        "has_design_notes": true,
+        "has_implementation_plan": true,
+        "referenced_adr_prs_merged": true,
+        "model_routing_count": 1,
+        "blocked": false,
+        "declared_surface_fresh": true,
+        "dependencies_all_closed": true,
+        "umbrella_integrity": true
+      },
+      "adr_touch": "None",
+      "pre_approved": false
+    }
+  ],
+  "descriptions": { "wp-1": "Correct the seal walkthrough." }
+}
+JSON
+# → {"outcome":{"Sealed":[19,165,76,49,…]}}
 ```
+
+A projection is matched to its proposal by `{workpiece, scope_revision}`, and
+both halves have to equal the proposal's exactly. The rest of the entry is the
+evidence the gate rules on:
+
+- `declared_surface` — the paths the change touches. The tier policy resolves
+  them most-restrictive-match-wins; an `auto` surface (`docs/guide/**` among
+  them) lets the gate form the approval itself.
+- `completeness` — the nine facts the gate fails closed on. Every boolean must
+  hold, `blocked` must be false, and `model_routing_count` must be exactly `1`.
+- `adr_touch` — `"None"`, `"ProposedOnly"`, or `"NewOrEstablished"`. The last
+  routes to the owner unconditionally, ahead of any policy lookup.
+- `pre_approved` — an owner-verified override that waives the tier to `auto`
+  and none of the checks above.
+- `signed_statement` — the owner-signed statement an above-`auto` member needs.
+  The seal defers on an `aether.signing` verification of it and admits only once
+  every such member verifies.
+
+The gate fails closed at every branch, so a `422` names what fell short —
+`member wp-1 has no scope projection; seal fails closed` for a proposal the
+`projections` list does not cover, and a seal carrying an empty list refuses any
+draft that has members.
+
+`descriptions` is the one advisory field on the body: per-member work-order
+text, keyed by workpiece id, which the construct lane's prompt names as its
+`## Task`. A member absent from the map dispatches without one, and never
+blocks the seal.
 
 Read the sealed bloom back — the whole view document, then one bloom by its
 hex id:
@@ -96,7 +195,7 @@ Read the journal (the seal is now a durable record) and fetch a referenced
 artifact by its digest:
 
 ```bash
-curl -s localhost:8910/journal                 # → {"records":[{"sequence":0,"idempotency_key":"…","event":{…}}]}
+curl -s localhost:8910/journal                 # → {"records":[{"sequence":1,"idempotency_key":"…","event":{…}}]}
 curl -s localhost:8910/artifacts/<digest>      # → the raw bytes, or 404
 ```
 
@@ -108,6 +207,9 @@ curl -s -X POST localhost:8910/blooms/<predecessor-hex>/supersede \
   -H 'content-type: application/json' \
   -d '{"successor_draft":"2"}'                 # → {"outcome":{"Superseded":{…}}}
 ```
+
+Supersession seals the successor from the draft as it stands, on the approval
+evidence that draft already carries, so its body takes no projections.
 
 ## How it works
 
