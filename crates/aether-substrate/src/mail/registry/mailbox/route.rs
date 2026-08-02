@@ -1,5 +1,11 @@
 //! The route record itself: what the registry stores under a `MailboxId`,
 //! the lifecycle it is in, and the endpoint a live one dispatches to.
+//!
+//! Records only. Which lifecycle a route is in and when it may change is
+//! decided by the writers in [`super::apply`], and the endpoint's two
+//! conversions below are total maps between the same two shapes, so
+//! there is no behaviour here to pin that its readers and writers do not
+//! already own.
 
 use std::sync::Arc;
 
