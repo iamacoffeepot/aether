@@ -1,0 +1,149 @@
+//! The live-bloom routes — read the projection, supersede a bloom, adopt a
+//! signed answer — and the renderers for the two control-core replies those
+//! routes (and the seal routes next door) defer on. Every route here reaches
+//! durable state through the control core, so each one defers.
+
+use aether_actor::Manual;
+use aether_bloomery::{
+    Admit, AdmitResult, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult, Statement,
+    ViewDocument, digest_of,
+};
+use aether_data::wire::{from_bytes, to_vec};
+use aether_http::HttpServerResponse;
+use aether_substrate::actor::native::NativeCtx;
+
+use super::hex::{digest_from_hex, hex_encode};
+use super::response::{error_response, json};
+use super::state::{ApiCapabilityState, Routed, VerifyPending};
+use crate::api::dto::{OutcomeView, SupersedeRequest};
+use crate::control::ControlCore;
+use crate::signing::{SigningCapability, Verify, VerifyResult};
+
+impl ApiCapabilityState {
+    /// `POST /blooms/{id}/supersede` — seal the named successor draft and admit
+    /// `Fact::Supersede` against the `{id}` predecessor bloom.
+    pub(super) fn supersede(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+        let predecessor = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "predecessor id is not a 32-byte hex bloom id")),
+        };
+        let request: SupersedeRequest = match serde_json::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid supersede body: {error}"))),
+        };
+        let (_, draft) = match self.lookup_draft(&request.successor_draft) {
+            Ok(found) => found,
+            Err(response) => return Routed::Reply(response),
+        };
+        let successor = draft.seal();
+        let key = request.idempotency_key.unwrap_or_else(|| hex_encode(successor.id().0.as_bytes()));
+        self.admit(
+            ctx,
+            &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Supersede { predecessor, successor } },
+        )
+    }
+
+    /// `POST /blooms/{id}/answer` — adopt an answer to a parked question,
+    /// releasing its hold and re-dispatching the held stage (ADR-0151).
+    ///
+    /// The body is the native author-signed answer statement. The route is the
+    /// cryptographic trust gate: it dials the `aether.signing` capability to
+    /// verify the signature against the host-custodied authorized-signer
+    /// allowlist (ADR-0149 step 3, ADR-0150/ADR-0151) before admitting — the
+    /// reducer holds no key material and only re-checks the structural adoption.
+    /// A body that is not a decodable statement is a `400`; one whose signature
+    /// does not verify is a `400` (answered from the verify reply); a valid
+    /// answer admits `Fact::AdoptAnswer` and defers on the reducer outcome the
+    /// same way seal / supersede do. Custody lives behind the port, so the fake
+    /// always-valid provider no longer appears at the live gate.
+    pub(super) fn answer_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let answer: Statement = match serde_json::from_slice(body) {
+            Ok(answer) => answer,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid answer statement: {error}"))),
+        };
+        let statement = match to_vec(&answer) {
+            Ok(bytes) => bytes,
+            Err(error) => return Routed::Reply(error_response(500, &format!("answer encode failed: {error}"))),
+        };
+        // Build the adoption event up front and hold it across the verify round
+        // trip; it admits only if the signature verifies (`resolve_verify`).
+        let key = format!("aether.bloomery.answer:{}", hex_encode(digest_of(&answer).as_bytes()));
+        let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } };
+        let correlation = self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement });
+        Routed::DeferredVerify { correlation, event: Box::new(event) }
+    }
+
+    /// Resolve a held answer request from the `aether.signing` verify reply: a
+    /// verified signature admits the stashed adoption event (re-deferring on the
+    /// reducer reply); a `verified: false` verdict or an undecodable-statement
+    /// error is a `400`.
+    pub(super) fn resolve_verify(&mut self, ctx: &NativeCtx<'_, Manual>, result: VerifyResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(VerifyPending { inbound, event }) = self.verifying.remove(&correlation) else {
+            return;
+        };
+        match result {
+            VerifyResult::Ok { verified: true } => match to_vec(&event) {
+                Ok(bytes) => {
+                    let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes });
+                    self.pending.insert(correlation, inbound);
+                }
+                Err(error) => {
+                    inbound.reply(&error_response(500, &format!("event encode failed: {error}")));
+                }
+            },
+            VerifyResult::Ok { verified: false } => {
+                inbound.reply(&error_response(400, "answer statement is not an author signature or did not verify"));
+            }
+            VerifyResult::Err { error } => {
+                inbound.reply(&error_response(400, &format!("answer statement did not verify: {error}")));
+            }
+        }
+    }
+
+    /// `GET /blooms` and `GET /view` — read the whole live projection.
+    pub(super) fn query(&self, ctx: &NativeCtx<'_, Manual>, bloom: Option<Vec<u8>>) -> Routed {
+        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Query { bloom }))
+    }
+
+    /// `GET /blooms/{id}` — read one bloom's live view by hex id.
+    pub(super) fn query_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str) -> Routed {
+        digest_from_hex(id).map_or_else(
+            || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
+            |digest| self.query(ctx, Some(digest.as_bytes().to_vec())),
+        )
+    }
+}
+
+/// Render a write route's [`AdmitResult`] into its HTTP response: the reducer
+/// outcome (decoded from the wire bytes the admit reply carries), or the error.
+pub(super) fn admit_response(result: AdmitResult) -> HttpServerResponse {
+    match result {
+        AdmitResult::Ok { outcome } => match from_bytes::<Outcome>(&outcome) {
+            Ok(outcome) => json(200, &OutcomeView { outcome }),
+            Err(error) => error_response(500, &format!("outcome decode failed: {error}")),
+        },
+        AdmitResult::Err { error } => error_response(500, &error),
+    }
+}
+
+/// Render a live-read route's [`QueryResult`] into its HTTP response: the whole
+/// view document, one bloom view, a `404`, or the error.
+pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
+    match result {
+        QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
+            Ok(document) => json(200, &document),
+            Err(error) => error_response(500, &format!("view document decode failed: {error}")),
+        },
+        QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
+            Ok(view) => json(200, &view),
+            Err(error) => error_response(500, &format!("bloom view decode failed: {error}")),
+        },
+        QueryResult::NotFound => error_response(404, "no bloom with that id"),
+        QueryResult::Err { error } => error_response(500, &error),
+    }
+}
