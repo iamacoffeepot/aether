@@ -406,6 +406,8 @@ fn heavy_topologies(work_iters: u64) -> Vec<Topology> {
 /// ([`REAL_FANOUT_N`] / [`REAL_CODEC_WORK_ITERS`] / [`REAL_LOGIC_WORK_ITERS`]);
 /// they are tuned + fidelity-capped in PR 3 (iamacoffeepot/aether#1222), which
 /// also wires the env so the tier runs in CI.
+///
+/// [`drive_for_tier`]: crate::perf::harness::drive_for_tier
 #[must_use]
 fn real_topologies() -> Vec<Topology> {
     vec![
