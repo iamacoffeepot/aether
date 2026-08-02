@@ -20,13 +20,15 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    Budget, Conclusion, Digest, ExecutionStatus, NetworkProfile, Nonce, Transformation, WorkHandle, WorkOrder,
+    Budget, Conclusion, Digest, ExecutionStatus, NetworkProfile, Nonce, ReasoningEffort, ResolvedModel, Transformation,
+    WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus};
+use aether_bloomery_github::{ActionsExecutor, Artifact, LaneWorkflows, RunConclusion, RunStatus};
 use aether_chassis_bloomery::bloomery::ExecutorShell;
 
 const WORKFLOW: &str = "bloomery-transform.yml";
+const MODEL_WORKFLOW: &str = "bloomery-transform-model.yml";
 const PINNED_REF: &str = "refs/heads/main";
 
 fn work_order(nonce: &str) -> WorkOrder {
@@ -40,7 +42,9 @@ fn work_order(nonce: &str) -> WorkOrder {
             limits: Budget::default(),
             network: NetworkProfile::None,
             description: None,
-            model: None,
+            // A model lane carries the profile the host resolved onto it; the
+            // backend refuses to dispatch one that does not.
+            model: Some(ResolvedModel { model: "claude-opus-5".to_owned(), effort: ReasoningEffort::High }),
         },
         nonce: Nonce(nonce.to_owned()),
     }
@@ -52,7 +56,8 @@ fn demo() -> (ExecutorShell, FakeGithub) {
     let fake = FakeGithub::new();
     // Seed the order's checkout correspondence so `submit` resolves the subject.
     fake.seed_git_object(&Digest::from_bytes([0xC0; 32]));
-    let backend = ActionsExecutor::new(fake.clone(), Arc::new(fake.clone()), WORKFLOW, PINNED_REF);
+    let lanes = LaneWorkflows { mechanical: WORKFLOW.to_owned(), model: MODEL_WORKFLOW.to_owned() };
+    let backend = ActionsExecutor::new(fake.clone(), Arc::new(fake.clone()), lanes, PINNED_REF);
     (ExecutorShell::new(Arc::new(backend)), fake)
 }
 

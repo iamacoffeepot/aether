@@ -13,7 +13,7 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
-    ActionsExecutor, Artifact, ExecutorError, GithubError, RunConclusion, RunStatus, StageVerdict,
+    ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus, StageVerdict,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -89,13 +89,18 @@ impl CandidatePush for RecordingPush {
 }
 
 const WORKFLOW: &str = "bloomery-transform.yml";
+const MODEL_WORKFLOW: &str = "bloomery-transform-model.yml";
 const PINNED_REF: &str = "refs/heads/main";
+
+fn lanes() -> LaneWorkflows {
+    LaneWorkflows { mechanical: WORKFLOW.to_owned(), model: MODEL_WORKFLOW.to_owned() }
+}
 
 fn shell(fake: FakeGithub) -> ExecutorShell {
     // The dispatched orders check out `digest(0xC0)`; seed its correspondence so
     // `submit` resolves the subject (the fake's store is shared across clones).
     fake.seed_git_object(&digest(0xC0));
-    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), WORKFLOW, PINNED_REF)))
+    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), lanes(), PINNED_REF)))
 }
 
 /// A backend whose `submit` always refuses with a fixed HTTP status, for
@@ -567,7 +572,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         fake.seed_git_object(&digest(0xC0));
         Arc::new(fake)
     };
-    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), WORKFLOW, PINNED_REF));
+    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
     let runner = FixedRunner {
         evidence: r#"{"command":"construct.implement","nonce":"x","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#.to_owned(),
         lifecycle: RunLifecycle::Exited { success: true },

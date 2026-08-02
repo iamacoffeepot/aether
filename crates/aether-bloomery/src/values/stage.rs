@@ -33,6 +33,24 @@ pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
 /// [`CONSTRUCT_IMPLEMENT_COMMAND`] (#3668).
 pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
 
+/// Whether a typed command names a **model lane** — a lane whose worker runs a
+/// model and therefore needs a credential, a resolved model, and a reasoning
+/// effort, as opposed to the mechanical lanes that run a compiler and nothing
+/// else.
+///
+/// The one spelling of that question, over the sealed
+/// [`Transformation::command`] rather than any host-side overlay or routing
+/// knob: the command id is content the bloom sealed, so a mechanical lane can
+/// never acquire model-lane treatment through a mis-set config or an unfilled
+/// dispatch field. Every executor backend asks here — the local one to decide
+/// which argv the child gets, the Actions one to decide which wrapper workflow
+/// the dispatch fires, and only the model wrapper carries a credential
+/// (ADR-0149 §Execution on Actions).
+#[must_use]
+pub fn is_model_lane(command: &str) -> bool {
+    command == CONSTRUCT_IMPLEMENT_COMMAND || command == REVIEW_CRITIC_COMMAND
+}
+
 /// One stage's declared contract (ADR-0149 §The line).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageBinding {

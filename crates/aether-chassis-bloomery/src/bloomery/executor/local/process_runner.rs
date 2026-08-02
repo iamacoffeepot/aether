@@ -6,12 +6,11 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::{fs, io};
 
-use aether_bloomery::REVIEW_CRITIC_COMMAND;
+use aether_bloomery::is_model_lane;
 use aether_bloomery_github::GitObjectId;
 
 use super::error::LocalExecutorError;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
-use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 
 /// The production spawn seam: `git worktree add` the checkout, then spawn
 /// `cargo xtask transform` in that worktree — the same two steps the wrapper
@@ -49,7 +48,7 @@ impl TransformRunner for ProcessTransformRunner {
             .args(["xtask", "transform", spec.command, "--out"])
             .arg(spec.evidence_dir)
             .args(["--nonce", spec.nonce]);
-        if spec.command == CONSTRUCT_IMPLEMENT_COMMAND || spec.command == REVIEW_CRITIC_COMMAND {
+        if is_model_lane(spec.command) {
             cargo.args(["--subject", spec.checkout_hex]);
             if let Some(model) = spec.model {
                 cargo.args(["--model", model]);
