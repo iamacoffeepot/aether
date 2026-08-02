@@ -136,7 +136,8 @@ impl fmt::Display for SubstrateHarnessError {
 }
 
 /// Per-round settlement patience: the re-arm interval of the escalating
-/// wait, i.e. how often [`await_internal_signal`] logs `gate … slow …
+/// wait, i.e. how often
+/// [`aether_substrate::chassis::settlement::await_internal_signal`] logs `gate … slow …
 /// extending` while a slow-but-healthy chain is still settling. The log
 /// heartbeat, not the gate — a chain that settles is unaffected by its
 /// value; only the backstop cap (see [`SubstrateHarness::settlement_cap`])
@@ -175,7 +176,7 @@ pub struct SubstrateHarness {
     /// stage subscriber set per ADR-0082 (issue 1490 retired the
     /// `Tick → aether.input` relay).
     lifecycle_mailbox: MailboxId,
-    /// Kind id of [`LifecycleAdvance`], pre-resolved so the advance
+    /// Kind id of [`aether_kinds::LifecycleAdvance`], pre-resolved so the advance
     /// loop body stays alloc-free per tick.
     kind_lifecycle_advance: KindId,
 

@@ -1,7 +1,7 @@
 //! The `aether.process` runtime half (ADR-0122 identity/runtime split).
 //! Compiled only under `feature = "runtime"` (the `mod runtime;`
 //! declaration in the parent carries the gate), so a transport-only build
-//! of the [`ProcessCapability`](super::ProcessCapability) identity never
+//! of the [`ProcessCapability`] identity never
 //! names these types nor pulls `aether_substrate`.
 //!
 //! Each `run` request dispatches the blocking spawn-and-capture through

@@ -89,7 +89,7 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     passives: Vec<Box<dyn PassiveBoot>>,
     driver: Option<DriverBoot>,
     aborter: Arc<dyn FatalAborter>,
-    /// Issue 745: override [`PoolConfig::workers`]. `None` means
+    /// Issue 745: override [`PoolConfig::workers`](crate::scheduler::PoolConfig::workers). `None` means
     /// [`PoolConfig::default`](crate::scheduler::PoolConfig::default)
     /// (`available_parallelism() - 1`, min 1);
     /// `Some(n)` plumbs `n` into the pool at boot. Production chassis

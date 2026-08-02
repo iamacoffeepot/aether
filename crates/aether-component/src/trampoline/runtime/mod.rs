@@ -1,7 +1,7 @@
 //! The wasm-trampoline runtime half (ADR-0122 identity/runtime split).
 //! Compiled only under `feature = "runtime"` (the `mod runtime;` declaration
 //! in the parent carries the gate), so a transport-only build of the
-//! [`WasmTrampoline`](crate::trampoline::WasmTrampoline) identity never names
+//! [`WasmTrampoline`] identity never names
 //! these `aether_substrate` / `wasmtime`-typed types. The substrate-typed
 //! imports are gated once by this module rather than line-by-line; the
 //! `#[actor] impl` in the parent reaches the state, ctx, config, and replace

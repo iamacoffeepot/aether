@@ -1,5 +1,5 @@
 //! The `aether.fleet` engines-cap runtime half (ADR-0122 identity/runtime
-//! split). The [`FleetServer`](super::FleetServer) identity file names none
+//! split). The [`FleetServer`] identity file names none
 //! of these types. The substrate-typed imports are collected once by
 //! this module rather than line-by-line; the `#[actor] impl` reaches the
 //! state, ctx types, artifact/fleet helpers, and result kinds through the
@@ -48,7 +48,7 @@ pub use super::artifacts::{
 };
 pub use super::fleet::{free_local_port, resolve_fleet_store_root, settle_err};
 
-/// How many recently-died engines [`FleetServer`](super::FleetServer)
+/// How many recently-died engines [`FleetServer`]
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
 /// bound: the surface is "what just left and why", not an audit log —
 /// the oldest record is dropped once the ring is full.
@@ -116,7 +116,7 @@ pub enum EngineDeathDisposition {
 
 /// `aether.fleet` runtime state (ADR-0122 split): supervises a fleet of
 /// [`FleetProxy`] actors, one per spawned substrate. The addressing identity
-/// is the distinct ZST [`FleetServer`](super::FleetServer); the dispatcher
+/// is the distinct ZST [`FleetServer`]; the dispatcher
 /// holds this as the cap's state and routes envelopes through the
 /// macro-emitted `Dispatch` impl. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing

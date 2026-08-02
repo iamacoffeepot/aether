@@ -5,9 +5,9 @@
 //! git-side fold that produces the landable head:
 //!
 //! 1. **Drain.** Each tick drains the store's
-//!    [`Topic::Integrate`](aether_bloomery::Topic::Integrate) outbox
+//!    [`Topic::Integrate`] outbox
 //!    topic (its own connection, mirroring the land reactor's store ownership) and
-//!    decodes each [`IntegratePayload`](aether_bloomery::IntegratePayload) — the
+//!    decodes each [`IntegratePayload`] — the
 //!    bloom whose members all carry claims, its sealed base, and every member's
 //!    claimed candidate tree in member order.
 //! 2. **Fold.** It bootstraps the integration namespace

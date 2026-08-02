@@ -5,10 +5,10 @@
 //! work and matched results back into admitted facts:
 //!
 //! 1. **Drain + submit.** Each tick drains the store's
-//!    [`Topic::Dispatch`](aether_bloomery::Topic::Dispatch)
+//!    [`Topic::Dispatch`]
 //!    outbox topic (its own connection, so the intake registry the pull side
 //!    reads/consumes is one store), decodes each
-//!    [`DispatchPayload`](aether_bloomery::DispatchPayload), submits it through the
+//!    [`DispatchPayload`], submits it through the
 //!    [`ExecutorShell`] with a sequence-derived idempotency nonce, and records the
 //!    intake context ([`dispatch_and_record`]). The delivered prefix is acked so a
 //!    dispatch is submitted once; a submit failure stops the prefix so the entry

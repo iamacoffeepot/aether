@@ -218,12 +218,12 @@ pub struct ConnState {
     /// socket to wake the blocked `read()`.
     pub shutdown: Arc<AtomicBool>,
     /// Per-connection reader control channel (ADR-0128 + keep-alive). Carries
-    /// the dispatcher's streaming decision ([`ReaderControl::Buffered`] /
-    /// [`ReaderControl::Stream`]), mid-stream credit replenishment
-    /// ([`ReaderControl::Credit`]), and the keep-alive resume signal
-    /// ([`ReaderControl::Resume`]) to the parked reader. Dropping this sender
-    /// (on [`Self::close_connection`]) makes the reader's `recv_timeout` return
-    /// `Disconnected`, its close-path exit.
+    /// the dispatcher's streaming go-ahead ([`ReaderControl::Stream`] — a
+    /// buffered request never takes that round trip), mid-stream credit
+    /// replenishment ([`ReaderControl::Credit`]), and the keep-alive resume
+    /// signal ([`ReaderControl::Resume`]) to the parked reader. Dropping this
+    /// sender (on [`HttpShardState::close_connection`]) makes the reader's
+    /// `recv_timeout` return `Disconnected`, its close-path exit.
     pub control_tx: mpsc::Sender<ReaderControl>,
     /// The `stream_id` of this connection's in-progress inbound request stream
     /// (ADR-0128), if any — the reverse index the dispatcher uses to route a
@@ -267,7 +267,7 @@ pub struct PendingRequest {
     pub method: HttpMethod,
     /// Whether the reply path keeps the connection alive (renders
     /// `Connection: keep-alive` and resumes the reader) rather than
-    /// closing it. Set from the [`ParsedRequest`] at dispatch.
+    /// closing it. Set from the [`ParsedHead`] at dispatch.
     pub keep_alive: bool,
     /// The handler this request dispatched to. Carried so a `WebSocketAccept`
     /// reply (ADR-0129) resolves the same handler for the upgraded
