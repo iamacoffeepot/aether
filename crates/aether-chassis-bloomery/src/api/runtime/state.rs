@@ -136,9 +136,9 @@ pub(super) struct SealVerify {
 }
 
 /// The pre-wired parts of a deferred seal, handed from [`ApiCapabilityState::seal_draft`]
-/// to [`finish`] so the handle mint and map inserts (which need `&mut ApiCapabilityState`)
-/// happen there, mirroring how `DeferredVerify` defers its map insert to the same
-/// settler.
+/// to [`finish`] so the handle mint and map inserts (which need
+/// `&mut ApiCapabilityState`) happen there, mirroring how `DeferredVerify` defers
+/// its map insert to the same adapter.
 pub(super) struct PendingSealSetup {
     pub(super) gated: BloomDraft,
     pub(super) descriptions: BTreeMap<String, String>,
