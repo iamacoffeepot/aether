@@ -61,7 +61,7 @@ pub use client::{
 };
 pub use config::GithubConfig;
 pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
-pub use executor::{ActionsExecutor, ExecutorError};
+pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
     normalize_study_result, parse_study_cost,

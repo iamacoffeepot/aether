@@ -94,5 +94,5 @@ pub use values::{
     Evidence, EvidenceKind, Forecast, LandingReceipt, Membership, ModelOverride, NetworkProfile, Observation,
     Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedModel,
     ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy,
-    Transformation, Workpiece,
+    Transformation, Workpiece, is_model_lane,
 };

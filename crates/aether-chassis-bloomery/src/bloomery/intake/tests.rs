@@ -12,7 +12,7 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
-    ActionsExecutor, Artifact, ExecutorError, GithubError, RunConclusion, RunStatus, StageVerdict,
+    ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus, StageVerdict,
 };
 
 use super::{
@@ -23,6 +23,7 @@ use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutorError};
 use crate::store::{SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
+const MODEL_WORKFLOW: &str = "bloomery-transform-model.yml";
 const PINNED_REF: &str = "refs/heads/main";
 
 fn store() -> SqliteStore {
@@ -33,7 +34,8 @@ fn shell(fake: FakeGithub) -> ExecutorShell {
     // The dispatched orders check out `[0xC0; 32]`; seed its correspondence so
     // `submit` resolves the subject (the fake's store is shared across clones).
     fake.seed_git_object(&Digest::from_bytes([0xC0; 32]));
-    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), WORKFLOW, PINNED_REF)))
+    let lanes = LaneWorkflows { mechanical: WORKFLOW.to_owned(), model: MODEL_WORKFLOW.to_owned() };
+    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), lanes, PINNED_REF)))
 }
 
 fn work_order(nonce: &str) -> WorkOrder {

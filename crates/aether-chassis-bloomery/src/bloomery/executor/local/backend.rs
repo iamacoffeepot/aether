@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, REVIEW_CRITIC_COMMAND,
-    WorkHandle, WorkOrder, digest_of,
+    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
+    digest_of, is_model_lane,
 };
 use aether_bloomery_github::{GitObjectId, SharedCorrespondence, StageVerdict};
 use serde::Serialize;
@@ -205,7 +205,7 @@ impl ExecutorBackend for LocalExecutor {
         // construct-specific evidence gate (substantive-conclusion, #3596),
         // which the review lane's `status`-stamped evidence must not ride.
         let is_construct = order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND;
-        let is_model_lane = is_construct || order.transformation.command == REVIEW_CRITIC_COMMAND;
+        let is_model_lane = is_model_lane(&order.transformation.command);
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
         // knob, which would let a run's model diverge from the profile its bloom

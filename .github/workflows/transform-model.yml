@@ -1,13 +1,14 @@
 name: Transform (model lane, BYO)
+run-name: transform-model ${{ inputs.command }} ${{ inputs.nonce }}
 
 # ADR-0149 §Execution's WORKER-SIDE model lane (#3511) — the sibling of the
-# zero-secret mechanical `transform.yml`. The `construct.implement` lane runs
-# headless Claude, so it needs a Claude credential; that credential is
-# non-delegable and holder-restricted (BYO-worker). A contributor runs THIS
-# wrapper in their own fork with their own Claude secret: it checks out the exact
-# digest a resolved work order names, runs the same `cargo xtask transform
-# construct.implement` entrypoint at the coordinator-resolved model + effort, and
-# uploads the nonce-tagged result-record evidence.
+# zero-secret mechanical `transform.yml`. The model lanes — `construct.implement`
+# and `review.critic` — run headless Claude, so they need a Claude credential;
+# that credential is non-delegable and holder-restricted (BYO-worker). A
+# contributor runs THIS wrapper in their own fork with their own Claude secret:
+# it checks out the exact digest a resolved work order names, runs the same
+# `cargo xtask transform <command>` entrypoint at the coordinator-resolved model
+# + effort, and uploads the nonce-tagged result-record evidence.
 #
 # The BYO boundary is the whole point: the coordinator dispatches by nonce+digest
 # and validates the returned evidence by nonce+digest — it never sets this
@@ -27,6 +28,13 @@ name: Transform (model lane, BYO)
 on:
   workflow_dispatch:
     inputs:
+      command:
+        # The model lane is not one command: `construct.implement` and
+        # `review.critic` both run a model, and the coordinator dispatches
+        # whichever the order names. Hardcoding one here would silently run the
+        # constructor for a review order.
+        description: "Typed model-lane command id (construct.implement / review.critic)"
+        required: true
       subject:
         # The checkout TARGET (invariants 1 & 2) — the exact git commit the
         # resolved work order names, distinct from the pinned dispatch ref the
@@ -44,6 +52,14 @@ on:
       effort:
         description: "Coordinator-resolved reasoning effort tier"
         required: false
+      displayed:
+        # The same evidence binding `transform.yml` carries: the intake decodes
+        # the attempt artifact's NAME and admits nothing else, so a model-lane
+        # run that uploaded the legacy `evidence-<nonce>` name would be skipped
+        # as a stray upload and its work never counted.
+        description: "Scope-revision digest hex the returned evidence names (attempt-artifact binding); empty = legacy evidence-<nonce> name"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -64,21 +80,44 @@ jobs:
           node-version: "20"
       - name: Install the Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
-      - name: Run the construct lane (worker-side, BYO credential)
+      - name: Run the model lane (worker-side, BYO credential)
+        id: transform
+        continue-on-error: true
         # The worker's own Claude secret, set in the worker's fork — never the
         # coordinator's. The result-record derivation runs node over the
         # transcript; the credential reaches only this step.
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: >-
-          cargo xtask transform construct.implement
+          cargo xtask transform ${{ inputs.command }}
           --out evidence
           --subject ${{ inputs.subject }}
           --nonce ${{ inputs.nonce }}
           --model ${{ inputs.model }}
           --effort ${{ inputs.effort }}
+      - name: Compose the attempt artifact name
+        id: artifact
+        env:
+          DISPLAYED: ${{ inputs.displayed }}
+          NONCE: ${{ inputs.nonce }}
+          OUTCOME: ${{ steps.transform.outcome }}
+        run: |
+          if [ -z "$DISPLAYED" ]; then
+            echo "name=evidence-$NONCE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$OUTCOME" = "success" ]; then verdict=pass; else verdict=fail; fi
+          if [ -f evidence/evidence.json ]; then
+            detail=$(sha256sum evidence/evidence.json | cut -d' ' -f1)
+          else
+            detail=$(printf '0%.0s' $(seq 64))
+          fi
+          echo "name=attempt.$verdict.$DISPLAYED.$detail.$NONCE" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: evidence-${{ inputs.nonce }}
+          name: ${{ steps.artifact.outputs.name }}
           path: evidence
+      - name: Propagate the transform's failure to the run conclusion
+        if: steps.transform.outcome == 'failure'
+        run: exit 1

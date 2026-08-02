@@ -21,15 +21,28 @@
 //! order's checkout target, #3572), the run-name nonce embedding, and the
 //! workflow filename; either issue can land first with the other conforming.
 //!
+//! # Two wrappers, one per lane class
+//!
+//! The lane an order belongs to picks which wrapper the dispatch fires, from
+//! [`LaneWorkflows`]: the mechanical lanes fire the zero-secret `transform.yml`,
+//! the model lanes fire the credential-bearing `transform-model.yml` and carry
+//! the model + effort the order was resolved at. The classification is
+//! [`is_model_lane`] over the sealed [`Transformation::command`] — the same
+//! question the local backend asks, so the split has one spelling and the
+//! zero-secret property rests on sealed content rather than on host
+//! configuration.
+//!
+//! [`Transformation::command`]: aether_bloomery::Transformation::command
 //! [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
 //! [#3501]: https://github.com/iamacoffeepot/aether/issues/3501
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
-    Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
+    Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder, is_model_lane,
 };
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
@@ -49,6 +62,15 @@ pub const INPUT_NONCE: &str = "nonce";
 
 /// The input key carrying the displayed digest — see [`INPUT_COMMAND`].
 pub const INPUT_DISPLAYED: &str = "displayed";
+
+/// The input key carrying the coordinator-resolved model. Only the model
+/// wrapper declares it, so only a model-lane dispatch sends it — see
+/// [`INPUT_COMMAND`].
+pub const INPUT_MODEL: &str = "model";
+
+/// The input key carrying the resolved reasoning-effort tier — the model
+/// wrapper's sibling of [`INPUT_MODEL`].
+pub const INPUT_EFFORT: &str = "effort";
 use crate::correspondence::CorrespondenceError;
 use crate::source::SharedCorrespondence;
 
@@ -70,6 +92,12 @@ pub enum ExecutorError {
     /// executor refuses cleanly rather than dispatching a `subject` git cannot
     /// check out.
     UnresolvedCheckout(Nonce),
+    /// A model-lane order reached the dispatch carrying no resolved model. The
+    /// model wrapper declares `model` as a required input, and the lane's whole
+    /// point is running the calibrated profile a receipt attests, so the
+    /// executor refuses rather than firing a dispatch the API rejects — or, worse,
+    /// one that silently runs at the runner's ambient default.
+    UnresolvedModel(Nonce),
     /// The correspondence store itself faulted while resolving the checkout.
     Correspondence(CorrespondenceError),
 }
@@ -88,6 +116,9 @@ impl fmt::Display for ExecutorError {
                     nonce.0
                 )
             }
+            Self::UnresolvedModel(nonce) => {
+                write!(f, "actions executor backend: model lane order `{}` carries no resolved model", nonce.0)
+            }
             Self::Correspondence(error) => write!(f, "actions executor backend: {error}"),
         }
     }
@@ -98,7 +129,7 @@ impl Error for ExecutorError {
         match self {
             Self::Github(error) => Some(error),
             Self::Correspondence(error) => Some(error),
-            Self::NoRunForNonce(_) | Self::UnresolvedCheckout(_) => None,
+            Self::NoRunForNonce(_) | Self::UnresolvedCheckout(_) | Self::UnresolvedModel(_) => None,
         }
     }
 }
@@ -115,27 +146,64 @@ impl From<GithubError> for ExecutorError {
     }
 }
 
+/// Which wrapper class an order dispatched at — the recorded form of
+/// [`is_model_lane`], kept per submitted nonce so the three handle-only
+/// messages can resolve the run against the workflow their dispatch chose.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lane {
+    /// The zero-secret mechanical wrapper.
+    Mechanical,
+    /// The credential-bearing model wrapper.
+    Model,
+}
+
+/// The two wrapper workflows this backend dispatches, one per lane class
+/// (ADR-0149 §Execution on Actions).
+///
+/// Named fields rather than a positional pair because the pairing *is* the
+/// security boundary: [`mechanical`](Self::mechanical) carries
+/// `permissions: { contents: read }` and no secrets, while
+/// [`model`](Self::model) carries a Claude credential. An inverted mapping
+/// would put an untrusted mechanical lane on a secret-bearing job, so the two
+/// names never reduce to argument order at a call site.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LaneWorkflows {
+    /// The zero-secret wrapper every mechanical lane fires
+    /// (`.github/workflows/transform.yml`).
+    pub mechanical: String,
+    /// The credential-bearing wrapper only a model lane fires
+    /// (`.github/workflows/transform-model.yml`).
+    pub model: String,
+}
+
 /// The Actions executor backend over an [`ActionsApi`] client. Holds the
-/// dispatch target: the wrapper's `workflow_file` and the protected `git_ref`
-/// it is pinned at.
+/// dispatch targets: the per-lane wrapper [`LaneWorkflows`] and the protected
+/// `git_ref` they are all pinned at.
 pub struct ActionsExecutor<C: ActionsApi> {
     client: C,
     correspondence: SharedCorrespondence,
-    workflow_file: String,
+    workflows: LaneWorkflows,
     git_ref: String,
+    // Which wrapper each submitted nonce dispatched at. `find_run` is
+    // workflow-scoped (the runs endpoint hangs off one workflow file), but
+    // `inspect` / `cancel` / `stream_evidence` carry only the nonce handle and
+    // never the command that chose the wrapper — so the choice is recorded here
+    // at submit and replayed on resolution, the way `RoutingExecutor` records
+    // which backend a nonce routed to.
+    dispatched: Mutex<HashMap<String, Lane>>,
 }
 
 impl<C: ActionsApi> ActionsExecutor<C> {
     /// Build an executor over `client` and the shared `correspondence` (the seam
-    /// the `subject` checkout resolves through, ADR-0150), dispatching
-    /// `workflow_file` at the protected `git_ref`.
+    /// the `subject` checkout resolves through, ADR-0150), dispatching each
+    /// lane's wrapper from `workflows` at the protected `git_ref`.
     pub fn new(
         client: C,
         correspondence: SharedCorrespondence,
-        workflow_file: impl Into<String>,
+        workflows: LaneWorkflows,
         git_ref: impl Into<String>,
     ) -> Self {
-        Self { client, correspondence, workflow_file: workflow_file.into(), git_ref: git_ref.into() }
+        Self { client, correspondence, workflows, git_ref: git_ref.into(), dispatched: Mutex::new(HashMap::new()) }
     }
 
     /// Borrow the underlying client (test introspection).
@@ -144,13 +212,50 @@ impl<C: ActionsApi> ActionsExecutor<C> {
         &self.client
     }
 
+    // The wrapper a lane dispatches at — the only place a lane class becomes a
+    // workflow file, so an order reaches the credential-bearing wrapper only by
+    // `is_model_lane` answering yes for its command.
+    fn workflow_of(&self, lane: Lane) -> &str {
+        match lane {
+            Lane::Mechanical => &self.workflows.mechanical,
+            Lane::Model => &self.workflows.model,
+        }
+    }
+
+    // The wrappers to resolve a handle's nonce against, most likely first. A
+    // nonce this executor submitted resolves against exactly the wrapper it
+    // dispatched; one it did not — a coordinator restarted since the dispatch,
+    // so the record is gone — probes both, since the run exists under one of
+    // them and only the dispatch knew which.
+    fn resolution_order(&self, nonce: &str) -> Vec<&str> {
+        let recorded = self.lock().get(nonce).copied();
+
+        recorded.map_or_else(
+            || vec![self.workflow_of(Lane::Mechanical), self.workflow_of(Lane::Model)],
+            |lane| vec![self.workflow_of(lane)],
+        )
+    }
+
+    // The run for a nonce across its candidate wrappers, or `None` when none of
+    // them holds one yet.
+    fn find_run(&self, nonce: &str) -> Result<Option<WorkflowRun>, ExecutorError> {
+        for workflow in self.resolution_order(nonce) {
+            if let Some(run) = self.client.find_run(workflow, nonce)? {
+                return Ok(Some(run));
+            }
+        }
+        Ok(None)
+    }
+
     // Resolve the run for a handle's nonce, or the port-specific
     // no-run-for-nonce error — the shared resolution `cancel` and
     // `stream_evidence` both need before they can act on a run.
     fn resolve(&self, handle: &WorkHandle) -> Result<WorkflowRun, ExecutorError> {
-        self.client
-            .find_run(&self.workflow_file, &handle.nonce.0)?
-            .ok_or_else(|| ExecutorError::NoRunForNonce(handle.nonce.clone()))
+        self.find_run(&handle.nonce.0)?.ok_or_else(|| ExecutorError::NoRunForNonce(handle.nonce.clone()))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Lane>> {
+        self.dispatched.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -222,18 +327,44 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         if let Some(displayed) = order.transformation.inputs.first() {
             inputs.insert(INPUT_DISPLAYED.to_owned(), digest_hex(displayed));
         }
-        self.client.dispatch_workflow(&self.workflow_file, &self.git_ref, &inputs)?;
+        // The lane class picks the wrapper, read off the sealed command through
+        // the same `is_model_lane` the local backend asks — not off a routing
+        // knob or the presence of a host-filled field, either of which could flip
+        // a mechanical lane onto the credential-bearing wrapper. A model lane
+        // additionally names the model and effort it runs at, resolved host-side
+        // onto the order (ADR-0149 §The line) and carried straight through:
+        // the backend re-resolves nothing, so the dispatched profile is the one
+        // the bloom sealed and the receipt attests.
+        let lane = if is_model_lane(&order.transformation.command) {
+            Lane::Model
+        } else {
+            Lane::Mechanical
+        };
+        if lane == Lane::Model {
+            let resolved = order
+                .transformation
+                .model
+                .as_ref()
+                .ok_or_else(|| ExecutorError::UnresolvedModel(order.nonce.clone()))?;
+            inputs.insert(INPUT_MODEL.to_owned(), resolved.model.clone());
+            inputs.insert(INPUT_EFFORT.to_owned(), resolved.effort.as_str().to_owned());
+        }
+        self.client.dispatch_workflow(self.workflow_of(lane), &self.git_ref, &inputs)?;
+        self.lock().insert(order.nonce.0.clone(), lane);
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
-        let run = self.client.find_run(&self.workflow_file, &handle.nonce.0)?;
+        let run = self.find_run(&handle.nonce.0)?;
         Ok(run.as_ref().map_or(ExecutionStatus::Unknown, map_status))
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
         let run = self.resolve(handle)?;
         self.client.cancel_run(run.id)?;
+        // A cancel is terminal — drop the wrapper record so `dispatched` tracks
+        // in-flight orders rather than the lifetime total.
+        self.lock().remove(&handle.nonce.0);
         Ok(())
     }
 
@@ -245,6 +376,12 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         // unrelated concern sharing the run does not leak into this order's set.
         // The match is delimiter-bounded (see `name_carries_nonce`) so a nonce
         // that is a prefix of a longer one does not pull the wrong artifacts.
+        //
+        // This is the last message the intake cycle sends for a completed order,
+        // so the wrapper record is evicted here for the same reason the routing
+        // record is: eviction on `inspect` would misroute the stream that follows
+        // a `Completed` inspect onto the both-wrappers probe.
+        self.lock().remove(&handle.nonce.0);
         Ok(artifacts
             .into_iter()
             .filter(|a| name_carries_nonce(&a.name, &handle.nonce.0))
@@ -267,18 +404,21 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation,
-        WorkHandle, WorkOrder,
+        Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, REVIEW_CRITIC_COMMAND,
+        ReasoningEffort, ResolvedModel, Transformation, WorkHandle, WorkOrder,
     };
 
     use std::sync::Arc;
 
-    use super::{ActionsExecutor, ExecutorError};
+    use super::{ActionsExecutor, ExecutorError, LaneWorkflows};
     use crate::client::{Artifact, RunConclusion, RunStatus};
     use crate::source::to_hex;
     use crate::testing::FakeGithub;
 
     const WORKFLOW: &str = "bloomery-transform.yml";
+    // The credential-bearing sibling — distinct from WORKFLOW so a dispatch that
+    // lands on the wrong one is visible by name.
+    const MODEL_WORKFLOW: &str = "bloomery-transform-model.yml";
     const PINNED_REF: &str = "refs/heads/main";
     // A distinctive checkout target so the dispatched `subject` input is
     // recognizable — hex-rendered, this is `"22"` repeated 32 times.
@@ -305,12 +445,26 @@ mod tests {
         }
     }
 
+    // A model-lane order: the `review.critic` command with a resolved profile,
+    // the shape the dispatching host hands the backend (ADR-0149 §The line).
+    fn model_order(nonce: &str) -> WorkOrder {
+        let mut order = order(nonce);
+        order.transformation.command = REVIEW_CRITIC_COMMAND.to_owned();
+        order.transformation.model =
+            Some(ResolvedModel { model: "claude-opus-5".to_owned(), effort: ReasoningEffort::XHigh });
+        order
+    }
+
+    fn lanes() -> LaneWorkflows {
+        LaneWorkflows { mechanical: WORKFLOW.to_owned(), model: MODEL_WORKFLOW.to_owned() }
+    }
+
     fn executor(fake: FakeGithub) -> ActionsExecutor<FakeGithub> {
         // Every order in these tests checks out CHECKOUT; seed its correspondence
         // to a real sha1 so `submit` resolves the `subject`.
         fake.seed_correspondence(&Digest::from_bytes(CHECKOUT), CHECKOUT_SHA1);
         let correspondence = Arc::new(fake.clone());
-        ActionsExecutor::new(fake, correspondence, WORKFLOW, PINNED_REF)
+        ActionsExecutor::new(fake, correspondence, lanes(), PINNED_REF)
     }
 
     #[test]
@@ -320,7 +474,16 @@ mod tests {
 
         assert_eq!(handle, WorkHandle::new(Nonce("n-1".to_owned())));
         assert_eq!(fake.dispatched_nonces(), vec!["n-1".to_owned()]);
+        // The zero-secret split (ADR-0149 §Execution on Actions): a mechanical
+        // lane is untrusted, so it must land on the wrapper that carries
+        // `permissions: { contents: read }` and no secrets — never the
+        // credential-bearing model wrapper. An inverted lane→workflow mapping
+        // would put this order on a job holding a Claude token.
         assert_eq!(fake.dispatched_workflow("n-1").as_deref(), Some(WORKFLOW));
+        assert_ne!(fake.dispatched_workflow("n-1").as_deref(), Some(MODEL_WORKFLOW));
+        // …and it names no model, so a mechanical dispatch cannot even satisfy
+        // the model wrapper's required input.
+        assert!(!fake.dispatched_inputs("n-1").unwrap().contains_key("model"));
         // Invariant 1 (#3572): the dispatch itself fires at the protected pinned
         // ref — the workflow *definition* that runs is always the reviewed one.
         assert_eq!(fake.dispatched_ref("n-1").as_deref(), Some(PINNED_REF));
@@ -369,13 +532,50 @@ mod tests {
     }
 
     #[test]
+    fn submit_dispatches_a_model_lane_at_the_model_wrapper_carrying_its_resolved_profile() {
+        // A model lane fires the credential-bearing wrapper and names the model
+        // and effort the host resolved onto the order. Before this, every lane
+        // fired the one configured wrapper with four fixed inputs, so a model
+        // order dispatched the mechanical wrapper and named no model at all —
+        // and `transform-model.yml` declares `model` as required, so the lane
+        // could not have run even at the right wrapper.
+        let fake = FakeGithub::new();
+        executor(fake.clone()).submit(&model_order("n-model")).unwrap();
+
+        assert_eq!(fake.dispatched_workflow("n-model").as_deref(), Some(MODEL_WORKFLOW));
+        let inputs = fake.dispatched_inputs("n-model").unwrap();
+        assert_eq!(inputs.get("model").map(String::as_str), Some("claude-opus-5"));
+        assert_eq!(inputs.get("effort").map(String::as_str), Some("xhigh"));
+        assert_eq!(inputs.get("command").map(String::as_str), Some(REVIEW_CRITIC_COMMAND));
+        assert_eq!(inputs.get("subject").map(String::as_str), Some(CHECKOUT_SHA1));
+    }
+
+    #[test]
+    fn submit_refuses_a_model_lane_that_carries_no_resolved_model() {
+        // The host overlays the resolved profile at dispatch; an order that
+        // reached the backend without one would dispatch a `model`-less run at a
+        // wrapper that requires it. Refusing names the gap, where forwarding it
+        // would surface as an opaque 422 — or, if the wrapper's input were ever
+        // relaxed, as a silent run at the runner's ambient model while the
+        // receipt attests the sealed profile.
+        let fake = FakeGithub::new();
+        let mut unresolved = model_order("n-no-model");
+        unresolved.transformation.model = None;
+        match executor(fake.clone()).submit(&unresolved) {
+            Err(ExecutorError::UnresolvedModel(nonce)) => assert_eq!(nonce, Nonce("n-no-model".to_owned())),
+            other => panic!("expected UnresolvedModel, got {other:?}"),
+        }
+        assert!(fake.dispatched_nonces().is_empty(), "a refused model lane dispatches nothing");
+    }
+
+    #[test]
     fn submit_errors_cleanly_when_the_checkout_is_unrecorded() {
         // A checkout whose sealed source has no recorded correspondence is the
         // clean `UnresolvedCheckout`, never a dispatched `subject` git cannot
         // check out (ADR-0150 boundary).
         let fake = FakeGithub::new();
         let correspondence = Arc::new(fake.clone());
-        let exec = ActionsExecutor::new(fake, correspondence, WORKFLOW, PINNED_REF);
+        let exec = ActionsExecutor::new(fake, correspondence, lanes(), PINNED_REF);
         match exec.submit(&order("n-unrecorded")) {
             Err(ExecutorError::UnresolvedCheckout(nonce)) => assert_eq!(nonce, Nonce("n-unrecorded".to_owned())),
             other => panic!("expected UnresolvedCheckout, got {other:?}"),

@@ -68,6 +68,20 @@ pub struct GithubMirrorConfig {
     /// [#3501]: https://github.com/iamacoffeepot/aether/issues/3501
     #[config(default = "transform.yml")]
     pub executor_workflow_file: String,
+    /// The wrapper workflow the executor port dispatches a **model** lane at —
+    /// the credential-bearing sibling of
+    /// [`executor_workflow_file`](Self::executor_workflow_file) (ADR-0149
+    /// §Execution on Actions). Two knobs rather than one because the two
+    /// wrappers are not interchangeable: `transform.yml` runs zero-secret on an
+    /// untrusted lane, `transform-model.yml` holds a Claude credential, and a
+    /// lane that needs a model needs the latter. Which of the two an order fires
+    /// is never this config's call — the executor reads it off the sealed
+    /// command (`is_model_lane`), so pointing either knob at a different file
+    /// moves where a lane runs and never which lane may hold a secret. The
+    /// default must name the wrapper that actually exists at
+    /// `.github/workflows/transform-model.yml`.
+    #[config(default = "transform-model.yml")]
+    pub executor_model_workflow_file: String,
     /// The protected git ref the executor pins the wrapper dispatch at.
     #[config(default = "refs/heads/main")]
     pub executor_dispatch_ref: String,
@@ -152,6 +166,7 @@ impl Default for GithubMirrorConfig {
             cas_land_enabled: true,
             poll_interval_secs: 5,
             executor_workflow_file: "transform.yml".to_owned(),
+            executor_model_workflow_file: "transform-model.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),
             store_path: ":memory:".to_owned(),
             approval_policy_file: "approval-policy.yml".to_owned(),

@@ -31,7 +31,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError};
+use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
 use super::mirror::GithubMirrorConfig;
 
@@ -156,7 +156,10 @@ impl ExecutorShell {
         let actions = Arc::new(ActionsExecutor::new(
             client,
             Arc::clone(&correspondence),
-            config.executor_workflow_file.clone(),
+            LaneWorkflows {
+                mechanical: config.executor_workflow_file.clone(),
+                model: config.executor_model_workflow_file.clone(),
+            },
             config.executor_dispatch_ref.clone(),
         ));
         if config.local_lane_enabled {

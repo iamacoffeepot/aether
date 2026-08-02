@@ -20,7 +20,7 @@ pub use question::Question;
 pub use scope_revision::{ModelOverride, ResolvedModel, ScopeRevision};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, NetworkProfile, REVIEW_CRITIC_COMMAND, StageBinding,
-    StageCatalog, Transformation,
+    StageCatalog, Transformation, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};
