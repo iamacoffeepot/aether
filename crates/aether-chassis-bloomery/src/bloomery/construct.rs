@@ -2,13 +2,14 @@
 //! #3511).
 //!
 //! The coordinator resolves the member's effective model + reasoning effort —
-//! the Construct stage's [`AgentProfile`](aether_bloomery::AgentProfile) default
-//! (#3510) overridden by the sealed scope-revision's
-//! [`ModelOverride`] (#3511) — and shapes the
-//! model-driven [`Transformation`] the executor port dispatches. The runner
-//! re-reads the same sealed scope-revision by digest and re-resolves with the
-//! identical rule, so the dispatched model is exactly the one the bloom froze
-//! and the study stage grades cost against exactly that.
+//! the stage's calibrated [`AgentProfile`](aether_bloomery::AgentProfile) default
+//! (#3510) overridden by the sealed scope-revision's [`ModelOverride`] (#3511) —
+//! and shapes the model-driven [`Transformation`] the executor port dispatches.
+//! [`dispatch_model`] is that rule; the executor reactor overlays its result onto
+//! every model lane it dispatches. The runner re-reads the same sealed
+//! scope-revision by digest and re-resolves with the identical rule, so the
+//! dispatched model is exactly the one the bloom froze and the study stage grades
+//! cost against exactly that.
 
 use aether_bloomery::{
     Digest, ModelOverride, Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder,
