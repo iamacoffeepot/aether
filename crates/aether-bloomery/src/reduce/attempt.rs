@@ -32,7 +32,8 @@ pub(super) fn move_effects(
     ]
 }
 
-/// Reduce a per-member attempt completion (ADR-0149 §The line, [`Fact::AttemptCompleted`]).
+/// Reduce a per-member attempt completion (ADR-0149 §The line,
+/// [`Fact::AttemptCompleted`](crate::Fact::AttemptCompleted)).
 ///
 /// The reducer alone advances line position: it reads the member's cursor,
 /// evaluates the stage's completion gate against the host-reported `passed`
@@ -47,7 +48,7 @@ pub(super) fn move_effects(
 /// member stops dispatching — a supersession is the escape). The attempt's
 /// evidence is recorded in the bloom's evidence log either way. The terminal
 /// `Verify` is the exception to same-stage retry: a *passing* `Verify` integrates
-/// the member through [`Fact::Integrate`] and never completes here (a passing
+/// the member through [`Fact::Integrate`](crate::Fact::Integrate) and never completes here (a passing
 /// terminal completion is a mis-route,
 /// [`AttemptCompletedError::TerminalStage`]); a *failing* `Verify` re-enters
 /// `Refine` — the findings-directed fix, since re-running the mechanical gate on

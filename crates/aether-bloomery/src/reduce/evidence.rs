@@ -10,13 +10,16 @@ use crate::values::{Evidence, EvidenceKind, Statement, Transformation};
 /// Admit non-integrating evidence into a bloom's evidence log (ADR-0151). Runs
 /// the same active-bloom guard `reduce_integrate` does — evidence records only
 /// against a `Sealed` bloom, before it resolves — and the same
-/// bind-to-its-own-class refusal: a resolving [`ResolutionClaim`] enters through
-/// [`Fact::Integrate`] and an [`EvidenceKind::Approval`] seals a member, so
+/// bind-to-its-own-class refusal: a resolving
+/// [`ResolutionClaim`](crate::ResolutionClaim) enters through
+/// [`Fact::Integrate`](crate::Fact::Integrate) and an [`EvidenceKind::Approval`]
+/// seals a member, so
 /// neither is bound to the free evidence-log door. The four non-integrating
 /// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`, `Question`)
 /// are what this log records; a mis-routed integrating/approval class is
 /// [`AdmitEvidenceError::EvidenceNotBound`]. A `Question` entry additionally
-/// derives a pending-decision hold in the fold (see [`BloomRecord::holds`]).
+/// derives a pending-decision hold in the fold (see
+/// [`BloomRecord::holds`](crate::BloomRecord::holds)).
 /// The evidence carries its own
 /// subject digest, so no separate candidate binding is threaded through the
 /// fact (unlike integrate, which binds a claim's evidence to its candidate).
@@ -53,7 +56,8 @@ pub(super) fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, eviden
     Decisions { outcome: Outcome::EvidenceAdmitted { bloom: *bloom, subject: evidence.subject }, effects }
 }
 
-/// Adopt an answer to a parked question (ADR-0151, [`Fact::AdoptAnswer`]).
+/// Adopt an answer to a parked question (ADR-0151,
+/// [`Fact::AdoptAnswer`](crate::Fact::AdoptAnswer)).
 ///
 /// The reducer's structural gate: the bloom is active, the answer is
 /// instruction-capable (an author signature — only that provenance becomes

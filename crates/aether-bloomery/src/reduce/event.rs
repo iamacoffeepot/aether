@@ -44,7 +44,7 @@ pub enum Fact {
     /// [`EvidenceKind`](crate::EvidenceKind) discriminant separates the classes; admission binds the
     /// evidence to its own subject and never advances a member toward
     /// resolution. A resolving [`ResolutionClaim`] never enters here — that is
-    /// [`Fact::Integrate`](crate::Fact::Integrate)'s terminal.
+    /// [`Fact::Integrate`]'s terminal.
     AdmitEvidence {
         /// The bloom the evidence is admitted against.
         bloom: BloomId,
@@ -110,7 +110,7 @@ pub enum Fact {
     /// `Refine` re-dispatches the same stage while the `retry_budget` allows
     /// and wedges the member once it is exhausted; a failing `Verify` re-enters
     /// `Refine` under the repair ceiling. The terminal `Verify` stage's passing
-    /// result integrates the member through [`Fact::Integrate`](crate::Fact::Integrate) instead — the
+    /// result integrates the member through [`Fact::Integrate`] instead — the
     /// intake is stage-aware and never routes a passing `Verify` result here.
     ///
     /// `passed` is the completion gate's outcome as the intake broker read it from
