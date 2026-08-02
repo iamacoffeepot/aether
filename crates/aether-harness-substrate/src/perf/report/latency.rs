@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::perf::stats::{iqr_sorted, median_sorted, sorted};
 
-use super::compare::{CompareConfig, Direction, SectionReport, Verdict, classify};
+use super::comparison::{CompareConfig, Direction, SectionReport, Verdict, classify};
 use super::metric::{CellJson, CellKey, Metric, Pct, find_cell};
 use super::trial::TrialReport;
 

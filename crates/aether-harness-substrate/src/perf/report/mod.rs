@@ -44,7 +44,7 @@
 //! than serde-hard-failing the decode of the sections that *can* be
 //! read.
 
-mod compare;
+mod comparison;
 #[cfg(test)]
 mod fixture;
 mod keep_up;
@@ -54,7 +54,7 @@ mod render;
 mod throughput;
 mod trial;
 
-pub use compare::{CompareConfig, ComparisonReport, Direction, SectionReport, UncomparedReason, Verdict, compare};
+pub use comparison::{CompareConfig, ComparisonReport, Direction, SectionReport, UncomparedReason, Verdict, compare};
 pub use keep_up::{KeepUpCell, KeepUpComparison, KeepUpSection};
 pub use latency::{CellComparison, LatencySection, is_latency_section};
 pub use metric::{CellJson, Metric};

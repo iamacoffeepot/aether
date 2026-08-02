@@ -2,7 +2,7 @@
 //! real tiers' no-verdict trend grid, and the per-section plot anchor the plot
 //! publisher find-replaces.
 
-use super::super::compare::Verdict;
+use super::super::comparison::Verdict;
 use super::super::latency::{CellComparison, latency_section_renders_verdict};
 use super::{paired_delta_us, push_section_tables, us};
 

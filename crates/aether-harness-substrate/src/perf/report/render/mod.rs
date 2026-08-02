@@ -9,7 +9,7 @@ mod keep_up;
 mod latency;
 mod throughput;
 
-use super::compare::{ComparisonReport, SectionReport, Verdict};
+use super::comparison::{ComparisonReport, SectionReport, Verdict};
 use super::latency::latency_section_renders_verdict;
 use keep_up::push_keepup_section;
 use latency::push_latency_section;

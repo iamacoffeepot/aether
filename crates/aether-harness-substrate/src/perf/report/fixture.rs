@@ -3,7 +3,7 @@
 //! K-trial side are common to several of them, so they sit here rather than
 //! being rebuilt per module.
 
-use super::compare::{ComparisonReport, SectionReport, Verdict};
+use super::comparison::{ComparisonReport, SectionReport, Verdict};
 use super::keep_up::{KeepUpCell, KeepUpSection};
 use super::latency::LatencySection;
 use super::metric::{CellJson, Metric};

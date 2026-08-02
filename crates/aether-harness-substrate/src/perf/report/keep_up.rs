@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::perf::stats::{median_sorted, sorted};
 
-use super::compare::SectionReport;
+use super::comparison::SectionReport;
 use super::trial::TrialReport;
 
 /// One real-tier cell's keep-up characterisation (iamacoffeepot/aether#1233):

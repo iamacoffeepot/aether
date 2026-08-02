@@ -1,7 +1,7 @@
 //! The throughput section's markdown: the higher-is-better verdict grid, in
 //! thousands of mails/sec.
 
-use super::super::compare::Verdict;
+use super::super::comparison::Verdict;
 use super::super::throughput::ThroughputComparison;
 use super::push_section_tables;
 

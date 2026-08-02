@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::perf::stats::{iqr_sorted, median_sorted, sorted};
 
-use super::compare::{CompareConfig, Direction, SectionReport, Verdict, classify};
+use super::comparison::{CompareConfig, Direction, SectionReport, Verdict, classify};
 use super::trial::TrialReport;
 
 /// One cell's measured throughput in a single trial
