@@ -12,7 +12,7 @@ use crate::handler_parse::{
     parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
     rewrite_self_state_first_param, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
-use crate::opts::{ActorCardinality, ActorOpts};
+use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NativeEmit {
@@ -267,11 +267,14 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // misses, so per-handler `HandlesKind<K>` markers are still
     // authoritative at the type system — `ctx.actor::<X>().send(K)`
     // compiles only for declared K.
-    if handlers.is_empty() && fallback.is_none() && task_handlers.is_empty() {
+    // ADR-0169: an adopted handler set is a receive surface too, so an actor
+    // whose whole block moved into a set (the window instance runtimes) is not
+    // an empty receiver.
+    if handlers.is_empty() && fallback.is_none() && task_handlers.is_empty() && opts.handler_set.is_none() {
         return Err(syn::Error::new_spanned(
             self_ty,
-            "#[actor] impl NativeActor requires at least one #[handler] method \
-             or a #[fallback] method",
+            "#[actor] impl NativeActor requires at least one #[handler] method, \
+             a #[fallback] method, or an adopted `handler_set(...)`",
         ));
     }
 
@@ -336,7 +339,19 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // name-inventory entry (a completion is not inbound mail).
             let handler_kinds: Vec<HandlerMarker> =
                 handlers.iter().map(|h| (h.kind_ty.clone(), h.reply.manifest_kind().cloned())).collect();
-            emit_native_identity_markers(self_ty, generics, namespace_expr, opts, &handler_kinds, fallback.is_some())
+            let identity = emit_native_identity_markers(
+                self_ty,
+                generics,
+                namespace_expr,
+                opts,
+                &handler_kinds,
+                fallback.is_some(),
+            );
+            let set_markers = emit_handler_set_markers(opts.handler_set.as_ref(), self_ty);
+            quote! {
+                #identity
+                #set_markers
+            }
         }
         NativeEmit::RuntimeOnly => quote! {},
     };
@@ -449,6 +464,26 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     }
                     return ::core::option::Option::None;
                 }
+            }
+        }
+    });
+
+    // ADR-0169 §2: after the local chain misses, consult the adopted handler
+    // set. Local-first is what keeps a locally-declared kind authoritative over
+    // an inherited one. The set's handlers never name the actor in their ctx —
+    // they are written once for a family — so they take the erased view, the
+    // same downgrade `erase_unless_ctx_names_actor` applies to a local handler
+    // that did not ask for the typed ctx.
+    let set_delegation = opts.handler_set.as_ref().map(|set| {
+        quote! {
+            if <Self as #set>::__aether_handler_set_dispatch(
+                __aether_state,
+                __aether_ctx.erase(),
+                __aether_kind,
+                __aether_payload,
+            ) == ::aether_actor::DISPATCH_HANDLED
+            {
+                return ::core::option::Option::Some(());
             }
         }
     });
@@ -599,10 +634,28 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // handler dispatches one kind its advertised surface does not name. Seed the
     // cost table from that wider set while `capabilities` keeps reporting only
     // what a caller can actually address.
+    // ADR-0169: an adopted set's kinds are dispatched by this actor, so they
+    // belong in both surfaces the local handlers feed. The set reports them at
+    // runtime rather than at macro time — `#[actor]` sees only the trait path,
+    // never the trait body.
+    let set_capabilities = opts.handler_set.as_ref().map(|set| {
+        quote! {
+            __aether_handlers.extend(<Self as #set>::__aether_handler_set_capabilities());
+        }
+    });
     let measured_kinds_override = {
         let handler_ids = handlers.iter().map(|h| {
             let kind_ty = &h.kind_ty;
             quote! { <#kind_ty as ::aether_data::Kind>::ID }
+        });
+        let set_ids = opts.handler_set.as_ref().map(|set| {
+            quote! {
+                __aether_kinds.extend(
+                    <Self as #set>::__aether_handler_set_capabilities()
+                        .into_iter()
+                        .map(|__aether_handler| __aether_handler.id),
+                );
+            }
         });
         let task_completion_id = if task_handlers.is_empty() {
             quote! {}
@@ -616,6 +669,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         quote! {
             fn measured_kinds() -> ::std::vec::Vec<::aether_substrate::mail::KindId> {
                 let mut __aether_kinds = ::std::vec![#(#handler_ids),*];
+                #set_ids
                 #task_completion_id
                 __aether_kinds
             }
@@ -624,8 +678,10 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 
     let capabilities_override = quote! {
         fn capabilities() -> ::aether_substrate::actor::native::ComponentCapabilities {
+            let mut __aether_handlers = ::std::vec![#(#capability_handler_entries),*];
+            #set_capabilities
             ::aether_substrate::actor::native::ComponentCapabilities {
-                handlers: ::std::vec![#(#capability_handler_entries),*],
+                handlers: __aether_handlers,
                 fallback: #capability_fallback,
                 doc: ::core::option::Option::None,
                 // ADR-0090 (issue 1257): native chassis caps don't carry
@@ -761,6 +817,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
                 #(#dispatch_arms)*
+                #set_delegation
                 #task_completion_arm
                 ::core::option::Option::None
             }
@@ -796,6 +853,26 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 /// One mail handler's marker payload: its inbound kind type plus the manifest
 /// reply kind read off the handler's return type (`None` for `-> ()`).
 type HandlerMarker = (Type, Option<Type>);
+
+/// ADR-0169: invoke the adopted set's generated marker bridge, which pastes one
+/// `impl HandlesKind<K> for #self_ty {}` and one `HandlerEntry` inventory row
+/// per set kind. `#[actor]` reads a trait *path*, never the trait body, so the
+/// kinds can only reach it through a macro the set itself emitted.
+///
+/// The invocation is deliberately unqualified. `#[macro_export]` publishes the
+/// bridge into the crate-root macro prelude, which resolves order-independently
+/// — an adopter above the set's own `mod` line still sees it — whereas naming it
+/// as `crate::__aether_handler_set_markers_…!` trips
+/// `macro_expanded_macro_exports_accessed_by_absolute_paths` (rust-lang issue
+/// 52234) for every same-crate adopter, which is all of them today.
+fn emit_handler_set_markers(handler_set: Option<&syn::Path>, self_ty: &Type) -> TokenStream2 {
+    let Some(set) = handler_set else {
+        return quote! {};
+    };
+    let set_ident = &set.segments.last().expect("syn::Path has at least one segment").ident;
+    let bridge = quote::format_ident!("__aether_handler_set_markers_{}", set_ident);
+    quote! { #bridge!(#self_ty); }
+}
 
 /// Emit ADR-0166 placement marker impls and their native link-time inventory
 /// records. Generic identities with lineage declarations are rejected before
@@ -1049,11 +1126,22 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
         None => (vec!["runtime".to_string()], ident.span()),
     };
 
-    let (namespace_expr, handler_kinds, has_fallback, runtime_path) =
-        harvest_runtime_identity(&module_segments, module_span)?;
+    let harvested = harvest_runtime_identity(&module_segments, module_span)?;
 
-    let markers =
-        emit_native_identity_markers(&self_ty, &item.generics, &namespace_expr, opts, &handler_kinds, has_fallback);
+    let identity = &harvested.identity;
+    let markers = emit_native_identity_markers(
+        &self_ty,
+        &item.generics,
+        &identity.namespace,
+        opts,
+        &identity.handler_kinds,
+        identity.has_fallback,
+    );
+    // ADR-0169: the set the runtime block adopts is named once, on the
+    // `#[runtime]` attribute the harvest just read. The dispatch delegation is
+    // emitted there; the markers have to be emitted here, against the struct
+    // that carries the identity.
+    let set_markers = emit_handler_set_markers(identity.handler_set.as_ref(), &self_ty);
 
     // ADR-0123 gap 3: a compile-time dependency edge on the runtime file so a
     // transport-only (runtime-off) build — where `mod runtime` is cfg-stripped
@@ -1063,13 +1151,22 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
     // emitted ungated so it rides the transport build where the staleness lives
     // (in a runtime-on build the module is already a fingerprint input, so the
     // edge is redundant but harmless).
-    let runtime_path_lit = syn::LitStr::new(&runtime_path, proc_macro2::Span::call_site());
+    let runtime_path_lit = syn::LitStr::new(&harvested.runtime_path, proc_macro2::Span::call_site());
 
     Ok(quote! {
         #item
         #markers
+        #set_markers
         const _: &[u8] = include_bytes!(#runtime_path_lit);
     })
+}
+
+/// What one struct-hosted `#[actor]` lifts out of its runtime module: the
+/// identity the markers are built from, plus the on-disk path of the file it
+/// came from (the `include_bytes!` rebuild edge).
+struct HarvestedRuntime {
+    identity: HarvestedIdentity,
+    runtime_path: String,
 }
 
 /// Read the runtime module file off disk and lift the native cap's
@@ -1087,7 +1184,7 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
 fn harvest_runtime_identity(
     module_segments: &[String],
     module_span: proc_macro2::Span,
-) -> syn::Result<(Expr, Vec<HandlerMarker>, bool, String)> {
+) -> syn::Result<HarvestedRuntime> {
     // `Span::local_file()` (stable since 1.88) → the on-disk path of the file
     // holding the `#[actor]` invocation. It is `None` only under path remapping
     // (`--remap-path-prefix`), where the runtime file can't be located — a hard
@@ -1140,7 +1237,7 @@ fn harvest_runtime_identity(
     // cfg-gated `impl NativeActor` blocks in one file are indistinguishable to
     // this parse; collect every qualifying impl and refuse rather than silently
     // pick the first.
-    let mut qualifying: Vec<(Expr, Vec<HandlerMarker>, bool)> = Vec::new();
+    let mut qualifying: Vec<HarvestedIdentity> = Vec::new();
     for syn_item in &parsed.items {
         let syn::Item::Impl(imp) = syn_item else {
             continue;
@@ -1165,14 +1262,12 @@ fn harvest_runtime_identity(
         (None, _) => Err(syn::Error::new(
             module_span,
             format!(
-                "#[actor]: no `#[handler]`-bearing impl found in runtime module `{module_name}` — \
+                "#[actor]: no receive-bearing impl found in runtime module `{module_name}` — \
                  the struct-hosted form expects a sibling `#[runtime] impl NativeActor` with at \
-                 least one `#[handler]` (or a `#[fallback]`)"
+                 least one `#[handler]`, a `#[fallback]`, or an adopted `handler_set(...)`"
             ),
         )),
-        (Some((namespace_expr, handler_kinds, has_fallback)), None) => {
-            Ok((namespace_expr, handler_kinds, has_fallback, runtime_path))
-        }
+        (Some(identity), None) => Ok(HarvestedRuntime { identity, runtime_path }),
         (Some(_), Some(_)) => Err(syn::Error::new(
             module_span,
             format!(
@@ -1184,21 +1279,37 @@ fn harvest_runtime_identity(
     }
 }
 
+/// One runtime impl's lifted identity, before it is paired with the on-disk
+/// path in [`HarvestedRuntime`].
+struct HarvestedIdentity {
+    namespace: Expr,
+    handler_kinds: Vec<HandlerMarker>,
+    has_fallback: bool,
+    handler_set: Option<syn::Path>,
+}
+
 /// Scan a single `impl NativeActor` block for the cap identity: the per-mail
 /// handler kinds (`(kind, reply)`, task completions skipped), whether a
-/// `#[fallback]` is present, and the `const NAMESPACE` expression. `Ok(None)`
-/// means the impl hosts neither a `#[handler]` nor a `#[fallback]`, so it lifts
-/// no identity; `Err` means it is handler-bearing but omits `const NAMESPACE`
-/// (or a handler signature is malformed). `module_span` anchors diagnostics back
-/// at the `#[actor]` invocation.
+/// `#[fallback]` is present, the `handler_set(...)` its `#[runtime]` attribute
+/// adopts, and the `const NAMESPACE` expression. `Ok(None)` means the impl hosts
+/// no `#[handler]`, no `#[fallback]`, and no set, so it lifts no identity; `Err`
+/// means it is receive-bearing but omits `const NAMESPACE` (or a handler
+/// signature is malformed). `module_span` anchors diagnostics back at the
+/// `#[actor]` invocation.
 fn harvest_native_actor_impl(
     imp: &ItemImpl,
     module_name: &str,
     module_span: proc_macro2::Span,
-) -> syn::Result<Option<(Expr, Vec<HandlerMarker>, bool)>> {
+) -> syn::Result<Option<HarvestedIdentity>> {
     let remap = |e: syn::Error| {
         syn::Error::new(module_span, format!("#[actor]: harvesting runtime module `{module_name}`: {e}"))
     };
+
+    // ADR-0169: the set is named on the `#[runtime]` attribute of the block
+    // being harvested, so the author names it once and both halves — the
+    // dispatch delegation `#[runtime]` emits and the markers `#[actor]` emits —
+    // read the same declaration.
+    let handler_set = harvest_runtime_handler_set(imp).map_err(remap)?;
 
     let mut handler_kinds: Vec<(Type, Option<Type>)> = Vec::new();
     let mut has_fallback = false;
@@ -1224,23 +1335,39 @@ fn harvest_native_actor_impl(
         handler_kinds.push((kind_ty, reply));
     }
 
-    // A `NativeActor` impl with neither a `#[handler]` nor a `#[fallback]`
-    // carries no identity to lift.
-    if !saw_handler && !has_fallback {
+    // A `NativeActor` impl with no `#[handler]`, no `#[fallback]`, and no
+    // adopted set carries no identity to lift.
+    if !saw_handler && !has_fallback && handler_set.is_none() {
         return Ok(None);
     }
     let namespace_expr = imp.items.iter().find_map(|impl_item| match impl_item {
         ImplItem::Const(c) if c.ident == "NAMESPACE" => Some(c.expr.clone()),
         _ => None,
     });
-    let Some(namespace_expr) = namespace_expr else {
+    let Some(namespace) = namespace_expr else {
         return Err(syn::Error::new(
             module_span,
             format!(
-                "#[actor]: the runtime impl in module `{module_name}` has #[handler]s but \
-                 no `const NAMESPACE` to lift into Addressable"
+                "#[actor]: the runtime impl in module `{module_name}` has a receive surface \
+                 but no `const NAMESPACE` to lift into Addressable"
             ),
         ));
     };
-    Ok(Some((namespace_expr, handler_kinds, has_fallback)))
+    Ok(Some(HarvestedIdentity { namespace, handler_kinds, has_fallback, handler_set }))
+}
+
+/// Read the `handler_set(...)` argument off the `#[runtime]` attribute of a
+/// harvested impl. The attribute is matched on its last path segment so any
+/// import style (`#[runtime]`, `#[aether_actor::runtime]`) resolves, mirroring
+/// how the trait itself is matched.
+fn harvest_runtime_handler_set(imp: &ItemImpl) -> syn::Result<Option<syn::Path>> {
+    let Some(attr) =
+        imp.attrs.iter().find(|attr| attr.path().segments.last().is_some_and(|seg| seg.ident == "runtime"))
+    else {
+        return Ok(None);
+    };
+    let syn::Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    Ok(parse_actor_opts(list.tokens.clone())?.handler_set)
 }

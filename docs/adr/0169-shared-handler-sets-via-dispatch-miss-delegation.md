@@ -1,6 +1,6 @@
 # ADR-0169: Shared Handler Sets via Dispatch-Miss Delegation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-01
 
 Adds a composition axis to the `#[actor]` / `#[runtime]` authoring surface of **ADR-0033** (handler-driven inputs manifest) and **ADR-0074** (unified actor model), leaving the reply classes of **ADR-0112** / **ADR-0134** and the addressing of **ADR-0119** / **ADR-0166** untouched.
@@ -71,8 +71,8 @@ pub trait WidgetDefaults {
 Handler methods are parsed by the same `handler_parse` code path `#[actor]` uses, so reply classes, `Multi<K>` markers, and the ADR-0134 class rules apply unchanged inside a set. The expansion emits the trait with the `#[handler::*]` attributes stripped, plus three hidden items:
 
 - a provided method `__aether_handler_set_dispatch(&mut self, ctx, mail) -> u32` whose body is the set's own if-chain, returning `DISPATCH_HANDLED` or `DISPATCH_UNKNOWN_KIND`;
-- the associated const pair `__AETHER_HANDLER_SET_MANIFEST_LEN` / `__AETHER_HANDLER_SET_MANIFEST`, the set's inputs-manifest bytes in the same record encoding;
-- an exported `macro_rules!` bridge emitting the set's `impl HandlesKind<K> for $ty {}` markers, which exists solely because the orphan rule forecloses the blanket impl.
+- the set's receive surface in the form its transport reads — for a wasm set the associated const `__AETHER_HANDLER_SET_MANIFEST`, its inputs-manifest bytes in the same record encoding; for a native set the provided method `__aether_handler_set_capabilities`, the `HandlerCapability` rows an adopter splices into its own `capabilities` / `measured_kinds`;
+- for a native set, an exported `macro_rules!` bridge emitting the set's `impl HandlesKind<K> for $ty {}` markers and matching `HandlerEntry` inventory records, which exists solely because the orphan rule forecloses the blanket impl. A wasm set emits none: nothing on that transport reads the marker.
 
 ### 2. Adoption is `#[actor(handler_set(T))]`, and the local block is matched first
 
@@ -137,9 +137,9 @@ A set's handlers are written in whichever shape its adopters use: the `&mut self
 
 - **A new authoring concept.** An actor's receive surface can now live in two places, and a reader who sees only the `#[actor]` block no longer sees every handler. The `handler_set(..)` term in the attribute is the signpost, and `describe_component` still reports the merged surface.
 - **Re-declaring a set kind locally fails as E0119 rather than as a pointed macro diagnostic.** `#[actor]` cannot read the set's kinds, so it cannot say "`FocusLost` is owned by `WidgetDefaults` — override it there." The conflicting-implementations error does name the trait and the kind, so the failure is real and locatable, but it is not the message the macro would write.
-- **A `macro_rules!` bridge in the expansion.** It exists only to route around the orphan rule for the marker impls. It is generated, hidden, and invoked by generated code, but it is a second expansion mechanism in a crate that otherwise emits plain items.
+- **A `macro_rules!` bridge in the expansion.** It exists only to route around the orphan rule for the marker impls. It is generated, hidden, and invoked by generated code, but it is a second expansion mechanism in a crate that otherwise emits plain items. Two consequences ride with it. The invocation must be unqualified — a macro-expanded `#[macro_export]` macro named as `crate::name!` from inside its own crate trips `macro_expanded_macro_exports_accessed_by_absolute_paths` (rust-lang issue 52234), which is the case every in-tree adopter is in; the unqualified form resolves through the crate-root macro prelude and is order-independent, so an adopter declared above the set's own `mod` line still sees it. And a `macro_rules!` pastes paths at the use site, so a native set's kind types need spellings that resolve from every adopter.
 - **Accessor boilerplate replaces handler boilerplate for the widget family.** A widget trades roughly six handler declarations for three accessor methods. The window family pays nothing, since its shared bodies already delegate to free functions.
-- **Non-generic adopters only, initially.** The manifest length is const arithmetic over `<Self as T>::__AETHER_HANDLER_SET_MANIFEST_LEN`; a generic adopter is out of scope here. Every actor in the tree today is a concrete type.
+- **Non-generic adopters only, initially.** A wasm adopter's manifest length is const arithmetic over `<Self as T>::__AETHER_HANDLER_SET_MANIFEST.len()`; a generic adopter is out of scope here. Every actor in the tree today is a concrete type.
 
 ### Neutral / forward
 
