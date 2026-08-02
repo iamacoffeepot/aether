@@ -329,15 +329,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
     // ADR-0169 leaves an adopted set's `HandlesKind` markers unemitted on this
     // path. The orphan rule forbids the set declaring them itself (`Self`
-    // precedes the first local type in the trait reference), so they have to
-    // travel through a generated `macro_rules!` — and a macro-expanded
-    // `#[macro_export]` macro cannot be named by absolute path from inside its
-    // own crate, which is exactly the same-crate case every adopter is. A wasm
-    // set's kinds are therefore not sendable through the typed resolver
-    // (`ctx.actor::<R>().send(&k)`); parent-to-child sends, which is how the
-    // widget family addresses its members, go by name through
-    // `RelativeMailbox::send<K: Kind>` and carry no such bound. Tracked, with
-    // the native adopters that do need markers, in issue 4282.
+    // precedes the first local type in the trait reference), so they travel
+    // through a generated `macro_rules!` bridge — which a native set emits and
+    // its adopters invoke. A wasm set does not, because nothing on this
+    // transport reads the marker: the widget family addresses its members
+    // parent-to-child by name through `RelativeMailbox::send<K: Kind>`, which
+    // carries no `HandlesKind` bound. The scoped consequence is that a wasm
+    // set's kinds are not sendable through the typed resolver
+    // (`ctx.actor::<R>().send(&k)`).
     let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
