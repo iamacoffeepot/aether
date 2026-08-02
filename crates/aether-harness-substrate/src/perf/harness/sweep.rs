@@ -277,7 +277,7 @@ mod tests {
     // the sweep path can no longer lap a ring — its premise is unreachable.
     // The truncation contract (a `None`-rate cell is surfaced flagged, not
     // dropped) is now report-side; the assertion moved to
-    // `report::tests::truncated_cell_is_flagged_not_dropped`.
+    // `report::trial::tests::truncated_cell_is_flagged_not_dropped`.
 
     /// Run a single (workers × topology) cell under the cell's *per-tier*
     /// drive ([`drive_for_tier`]) — so a real topology runs paced — and return
@@ -285,6 +285,8 @@ mod tests {
     /// box skips cleanly). Mirrors [`saturate_cell`] but lets the tier select
     /// the drive, so a real cell exercises the paced path the same way the
     /// `perf-trial` bin will.
+    ///
+    /// [`drive_for_tier`]: crate::perf::harness::drive_for_tier
     fn real_cell(workers: usize, topo: Topology) -> Option<CellSamples> {
         let cfg = SweepConfig {
             workers: vec![workers],
