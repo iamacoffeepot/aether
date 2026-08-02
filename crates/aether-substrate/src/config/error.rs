@@ -1,5 +1,5 @@
 //! The boot-time config fault (ADR-0090 §4) — distinct from
-//! [`BootError`](crate::BootError) so a chassis env resolver can surface a
+//! [`BootError`] so a chassis env resolver can surface a
 //! config-specific error before the generic boot path.
 
 use std::error::Error as StdError;
