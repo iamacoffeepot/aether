@@ -341,6 +341,39 @@ fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
     assert_ne!(dispatched(0).effort, dispatched(1).effort, "the stage, not the shared command, picks the profile");
 }
 
+// The sharper half of the same tripwire: the review lane resolves *its own*
+// calibrated profile, sonnet, while the construct lane resolves opus. The backend
+// used to hand one `local_construct_model` config value to both model lanes, so no
+// setting of that knob could make both correct — which is why the fix resolves the
+// profile per dispatched stage rather than swapping one global value for another
+// (#4324). What trips it is a resolution that re-collapses the two lanes onto one
+// model.
+#[test]
+fn drain_dispatches_the_review_lane_under_sonnet_not_the_construct_model() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let payload = AggregateReviewPayload {
+        bloom: digest(1),
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        pass: ReviewPass::Full,
+    };
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+
+    drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+
+    let orders = backend.orders();
+    let dispatched = orders[0].transformation.model.clone().expect("a model lane names its profile");
+    let review = StageCatalog::profile_of(StageId::AggregateReview);
+    assert_eq!(dispatched.model, review.model, "the critic runs the calibrated AggregateReview model");
+    assert_eq!(dispatched.effort, review.effort, "at its calibrated effort");
+    assert_ne!(
+        dispatched.model,
+        StageCatalog::profile_of(StageId::Construct).model,
+        "the review and construct lanes are calibrated to different models; one value cannot serve both",
+    );
+}
+
 #[test]
 fn drain_threads_the_persisted_description_onto_the_construct_order() {
     // The #3595 seal → dispatch seam over a real store + executor shell: the

@@ -4,7 +4,7 @@
 //! The coordinator resolves the member's effective model + reasoning effort —
 //! the Construct stage's [`AgentProfile`](aether_bloomery::AgentProfile) default
 //! (#3510) overridden by the sealed scope-revision's
-//! [`ModelOverride`](aether_bloomery::ModelOverride) (#3511) — and shapes the
+//! [`ModelOverride`] (#3511) — and shapes the
 //! model-driven [`Transformation`] the executor port dispatches. The runner
 //! re-reads the same sealed scope-revision by digest and re-resolves with the
 //! identical rule, so the dispatched model is exactly the one the bloom froze
