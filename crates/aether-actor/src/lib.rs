@@ -55,6 +55,7 @@ pub mod local;
 pub mod log;
 pub mod mail;
 pub mod model;
+pub mod params;
 pub mod request_context;
 pub mod trace;
 pub mod wasm;
@@ -78,6 +79,10 @@ pub use request_context::{
 // native actors.
 pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
+// ADR-0170: the params-injection surface. `InjectedParams` is what a
+// `#[derive(InjectedParams)]` struct implements and what `WasmActor::Params`
+// is bounded by; the free functions are the generated code's decode helpers.
+pub use params::{InjectedParams, ParamsError, decode_params_bag, resolve_params, take_param};
 
 // Wasm surface promoted to the crate root so consumers see
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
@@ -118,7 +123,11 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub mod __macro_internals {
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_data::{ActorId, Kind, Schema, mailbox_id_from_name};
+    pub use aether_data::{ActorId, Kind, ParamEntry, ParamRequest, Schema, mailbox_id_from_name};
+    // ADR-0170: `#[derive(InjectedParams)]` emits an `impl InjectedParams`
+    // whose body decodes each field through `take_param`; rooting both here
+    // keeps the emitted paths on one `__macro_internals` prefix.
+    pub use crate::params::{InjectedParams, ParamsError, param_name_matches, take_param};
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.
@@ -153,7 +162,9 @@ pub mod __macro_internals {
 /// sourced by `aether-data` from `aether-data-derive`. Component and
 /// capability authors need only `aether-actor` in their dep list; the
 /// full macro surface is available from here.
-pub use aether_actor_derive::{actor, capability, export_asset, fallback, handler, handler_set, local, runtime};
+pub use aether_actor_derive::{
+    InjectedParams, actor, capability, export_asset, fallback, handler, handler_set, local, runtime,
+};
 pub use aether_data::{Kind, KindId as DataKindId, MailboxId, RequestId, Schema};
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the

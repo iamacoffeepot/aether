@@ -34,6 +34,10 @@ pub(super) fn project_capabilities(caps: &ComponentCapabilities, full: bool) -> 
         // no rustdoc to summarize, so it passes through both the full and
         // projected views unchanged.
         assets: caps.assets.clone(),
+        // ADR-0170: the requires-list is kind name + field name — already the
+        // shortest form of what it says, and the whole point of surfacing it
+        // is that a caller sees every request, so it never projects down.
+        params: caps.params.clone(),
     }
 }
 

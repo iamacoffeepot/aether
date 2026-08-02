@@ -383,9 +383,13 @@ where
     <A as WasmActor>::State: ErasedWasmActor,
 {
     let mut ctx = WasmInitCtx::__new(alias.0);
-    // ADR-0156 §2: inline children resolve `Params` to the compiled default
-    // (empty params for now), mirroring the `()`-config round-trip.
-    let params = <A::Params as Default>::default();
+    // ADR-0170: an inline child is constructed in-process by its parent, not
+    // by the component host, so no provider registry is in reach and its bag
+    // is empty. A request-free `Params` (every inline child today) resolves
+    // fine; one that declares a request fails the spawn naming the field
+    // rather than booting half-injected.
+    let params = aether_actor::resolve_params::<A::Params>(&[])
+        .map_err(|err| SpawnError::InitFailed(ActorInitError::new(err.message())))?;
     let child = A::init(config, params, &mut ctx).map_err(SpawnError::InitFailed)?;
     registry.insert_child(alias, type_tag, full_subname, is_counter, parent, config_bytes, Box::new(child));
     // Run the fresh child's `wire` (issue 2746). Take it back onto the stack

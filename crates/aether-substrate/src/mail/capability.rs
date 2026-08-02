@@ -177,6 +177,7 @@ mod tests {
             doc: None,
             config: None,
             assets: Vec::new(),
+            params: Vec::new(),
         }
     }
 

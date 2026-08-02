@@ -104,6 +104,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
                     name: Some("panel".to_owned()),
                     config: panel_config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])

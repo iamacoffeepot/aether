@@ -37,6 +37,7 @@ fn load_mark_book(harness: &mut SubstrateHarness, wasm_path: &Path) -> aether_da
                     name: Some(MARK_COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("aether.kit.mark".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -62,6 +63,7 @@ fn load_terra(harness: &mut SubstrateHarness, wasm_path: &Path, mark_book_mailbo
                     name: Some(TERRA_COMPONENT_NAME.to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.terra".to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -60,7 +60,13 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent {
+                    wasm,
+                    name: Some(PROBE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -88,7 +94,13 @@ fn list_components_reports_loaded_probe_lineage() {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent {
+                    wasm,
+                    name: Some(PROBE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -163,6 +175,7 @@ fn multi_actor_module_loads_entry_export() {
                     config: Vec::new(),
                     // No selector: load the entry export (Probe).
                     export: None,
+                    replica: None,
                 },
             ),
         )])
@@ -209,6 +222,7 @@ fn multi_actor_module_loads_selected_export() {
                     name: None,
                     config: Vec::new(),
                     export: Some("test.ui.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -244,7 +258,13 @@ fn multi_actor_unknown_export_errors() {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("ui.does_not_exist".to_owned()) },
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("ui.does_not_exist".to_owned()),
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -282,7 +302,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
+                &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None, replica: None },
             ),
         )])
         .expect("bare load sequence");
@@ -309,6 +329,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
                     name: None,
                     config: Vec::new(),
                     export: Some("test.defaultless.alpha".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -355,6 +376,7 @@ fn multi_actor_sibling_spawn() {
                     // it by its `test.ui.root` export.
                     config: Vec::new(),
                     export: Some("test.ui.root".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -410,7 +432,13 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.ui.root".to_owned()) },
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.ui.root".to_owned()),
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -584,6 +612,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("test.stateful.counter".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -665,7 +694,13 @@ fn replace_preserves_state_via_typed_state_kind() {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -754,6 +789,7 @@ fn typed_state_decode_miss_boots_fresh() {
                     name: Some(TYPED_NAME.to_owned()),
                     config: Vec::new(),
                     export: None,
+                    replica: None,
                 },
             ),
         )])
@@ -844,6 +880,7 @@ fn childless_component_hot_reloads_unchanged() {
                     config: Vec::new(),
                     // `Counter` is a non-entry actor in the bundle.
                     export: Some("test.stateful.counter".to_owned()),
+                    replica: None,
                 },
             ),
         )])

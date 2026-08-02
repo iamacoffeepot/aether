@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
-use aether_kinds::ComponentCapabilities;
+use aether_kinds::{ComponentCapabilities, ReplicaIdentity};
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
+
+use crate::component::ParamProviderRegistry;
 
 /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
 /// path. Carries the wasmtime engine / linker plus the parsed
@@ -51,4 +53,17 @@ pub struct WasmTrampolineConfig {
     /// own window. Shared `Arc` — the module bytes are indexed, never
     /// mutated.
     pub wasm_bytes: Arc<[u8]>,
+    /// ADR-0170: the host's provider registry, retained so this trampoline can
+    /// build its params bag at instantiate — and rebuild it for the
+    /// replacement module on `replace_component`, whose requests may differ
+    /// from the ones loaded — and so a sibling spawned from the same resident
+    /// module inherits it.
+    pub param_providers: Arc<ParamProviderRegistry>,
+    /// ADR-0170: the name this instance registers under, one of the load-time
+    /// facts providers read (`LoadContext::instance_name`).
+    pub instance_name: String,
+    /// ADR-0170: which instance of a `replicas: N` fan-out this is, threaded
+    /// from `LoadComponent::replica`. [`ReplicaIdentity::SOLE`] for an
+    /// unreplicated load.
+    pub replica: ReplicaIdentity,
 }

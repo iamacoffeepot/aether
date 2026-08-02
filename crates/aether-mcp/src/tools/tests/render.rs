@@ -66,6 +66,7 @@ fn project_capabilities_trims_docs_unless_full() {
         doc: Some(multi.to_owned()),
         config: None,
         assets: Vec::new(),
+        params: Vec::new(),
     };
 
     let summary = project_capabilities(&caps, false);

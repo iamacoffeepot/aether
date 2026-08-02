@@ -137,6 +137,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])

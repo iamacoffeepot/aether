@@ -52,6 +52,7 @@ fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &st
                     config: Vec::new(),
                     // `SourceObserver` is a non-entry actor in the bundle.
                     export: Some("test.source_observer".to_owned()),
+                    replica: None,
                 },
             ),
         )])

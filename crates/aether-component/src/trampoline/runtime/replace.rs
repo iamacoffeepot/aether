@@ -98,6 +98,14 @@ impl WasmTrampolineState {
             // ADR-0163 §3 (#3984): the sibling shares this module's bytes, so
             // it indexes its own asset load window from the same content.
             wasm_bytes: Arc::clone(&self.wasm_bytes),
+            // ADR-0170: the sibling injects from the same registry, against
+            // its own requests and its own name. A sibling is spawned by its
+            // parent rather than fanned out by a manifest, so it inherits the
+            // parent's replica identity — it is part of the same instance of
+            // whatever fan-out produced the parent.
+            param_providers: Arc::clone(&self.param_providers),
+            instance_name: pending.subname.clone(),
+            replica: self.replica,
         };
         if let Err(e) = ctx
             .spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config, ())
@@ -229,6 +237,21 @@ impl WasmTrampolineState {
         };
         capabilities.assets = load_window.catalog();
 
+        // ADR-0170: the replacement declares its own param requests, which
+        // need not match the loaded module's — a hot swap can add or drop a
+        // request. Re-validate and rebuild the bag against the *new*
+        // capability group, before the old instance is drained, so a
+        // replacement asking for a fact this chassis cannot supply leaves the
+        // live component untouched instead of emptying the trampoline.
+        let load_context = self.load_context();
+        if let Err(missing) = self.param_providers.validate(&capabilities.params) {
+            return ReplaceResult::Err { error: missing.to_string() };
+        }
+        let params_bytes = match self.param_providers.encode_bag(&capabilities.params, &load_context) {
+            Ok(bytes) => bytes,
+            Err(error) => return ReplaceResult::Err { error },
+        };
+
         // Run unwire then on_dehydrate on the old instance and lift
         // any saved-state bundle. If the trampoline is currently
         // empty (post-DropComponent — load-after-drop refill),
@@ -280,6 +303,7 @@ impl WasmTrampolineState {
             &module,
             substrate_ctx,
             &payload.config,
+            &params_bytes,
             effective_tag,
         ) {
             Ok(c) => c,

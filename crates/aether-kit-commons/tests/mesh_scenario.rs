@@ -83,6 +83,7 @@ fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) {
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("aether.kit.mesh".to_owned()),
+                    replica: None,
                 },
             ),
         )])

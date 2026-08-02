@@ -129,6 +129,56 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   §5). Boot config arrives at `init`; *runtime* reconfiguration, if a component
   wants it, is ordinary mail — the same kind can serve both.
 
+## Params: what the component asks the host for
+
+Config answers "what would an operator type". A component also needs facts only
+its host knows — where it sits in a `replicas: N` fan-out, what name it
+registered under — and no operator can supply those. That is the second
+construction channel, `Params`, and a component declares what it wants rather
+than being handed a bag and hoping
+([ADR-0170](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0170-declared-params-injection-and-the-host-provider-registry.md)):
+
+```rust
+#[derive(aether_actor::InjectedParams)]
+struct ShardParams {
+    #[param("aether.component.replica_identity")]
+    replica: ReplicaIdentity,
+}
+
+#[actor]
+impl WasmActor for Shard {
+    type Params = ShardParams;
+    const NAMESPACE: &'static str = "demo.shard";
+
+    fn init(params: ShardParams, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Shard { slot: params.replica.index, of: params.replica.count })
+    }
+}
+```
+
+Each field is one request: the field's type names the kind, the string restates
+it for the reader, and the derive holds the two together at compile time. The
+requests ride the component's `aether.kinds.inputs` section, so
+`describe_component` reports them as a requires-list — a chassis is either able
+to satisfy a component or it is not, and you can see which before loading.
+
+Every request is required. The component host validates the whole list against
+its provider registry *before* it instantiates anything, so a fact the chassis
+cannot supply is a `LoadResult::Err` naming the kind and the field rather than a
+component that boots and behaves differently than it would elsewhere. There is
+deliberately no inject-if-available form.
+
+`ReplicaIdentity { index, count }` is the fact that motivated the channel.
+`replicas: N` fans one entry into N instances that share one config by contract,
+so nothing in the config channel can tell instance 3 from instance 4; the index
+and count are stamped by whichever site did the fan-out and delivered here. An
+unreplicated load is `{ index: 0, count: 1 }` — a lone instance is replica 0 of
+1, so sharding arithmetic needs no special case.
+
+Which channel a value belongs to follows one rule. Operator-typable is `Config`.
+A host-derived fact is a `Params` request. Neither — an actor you need to talk
+to — is addressing, resolved in `wire`, not construction.
+
 ## Adding a knob
 
 Author-side, a new knob is a field on the subsystem's resolved-config struct, not
@@ -190,5 +240,8 @@ cap, the per-request timeout — is the subject of [HTTP egress](http.md).
   context — [The MCP harness](../mcp-harness.md).
 - How a component declares and receives `type Config` —
   [Components & lifecycle](components.md).
+- The params-injection manifest, the host provider registry, and why every
+  request is required —
+  [ADR-0170](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0170-declared-params-injection-and-the-host-provider-registry.md).
 - The exact resolved knob inventory — the target chassis's `--print-config`
   output and its current config structs.

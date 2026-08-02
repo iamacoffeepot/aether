@@ -17,7 +17,7 @@ use std::path::Path;
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind as _, mailbox_id_from_name};
-use aether_kinds::LoadComponent;
+use aether_kinds::{LoadComponent, ReplicaIdentity};
 use aether_substrate::Mail;
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::config::ConfigError;
@@ -34,11 +34,17 @@ pub struct AutoloadComponent {
     pub config: Vec<u8>,
     pub name: Option<String>,
     pub export: Option<String>,
+    /// ADR-0170: which instance of a `replicas: N` fan-out this entry is.
+    /// [`expand_replicas`] stamps it — the expansion site is the only place
+    /// that knows both the index and the count, since what reaches the
+    /// component host is N independent loads. `None` for an unreplicated
+    /// entry, which the host reads as [`ReplicaIdentity::SOLE`].
+    pub replica: Option<ReplicaIdentity>,
 }
 
 impl From<PackedComponent> for AutoloadComponent {
     fn from(packed: PackedComponent) -> Self {
-        Self { wasm: packed.wasm, config: packed.config, name: packed.name, export: packed.export }
+        Self { wasm: packed.wasm, config: packed.config, name: packed.name, export: packed.export, replica: None }
     }
 }
 
@@ -133,6 +139,10 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
             config: packed.config.clone(),
             name: Some(format!("{base}-{index}")),
             export: packed.export.clone(),
+            // ADR-0170: the shared config cannot tell instance 3 from instance
+            // 4 — that is the whole reason params injection exists — so stamp
+            // the identity here, where both halves of it are known.
+            replica: Some(ReplicaIdentity { index, count: replicas }),
         })
         .collect())
 }
@@ -147,6 +157,7 @@ pub fn autoload_mail(component: AutoloadComponent) -> Mail {
         name: component.name,
         config: component.config,
         export: component.export,
+        replica: component.replica,
     }
     .encode_into_bytes();
     Mail::new(
@@ -177,6 +188,7 @@ mod tests {
             config: Vec::new(),
             name: Some("loco-motion".to_owned()),
             export: None,
+            replica: None,
         });
         assert_eq!(mail.recipient, mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE));
         assert_eq!(mail.kind, LoadComponent::ID);

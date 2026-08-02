@@ -118,7 +118,13 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent {
+                    wasm,
+                    name: Some(PROBE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -146,6 +152,7 @@ fn load_cube(harness: &mut SubstrateHarness, wasm_path: &Path) {
                     config: Vec::new(),
                     // `Cube` is a non-entry actor in the bundle.
                     export: Some("test.cube".to_owned()),
+                    replica: None,
                 },
             ),
         )])

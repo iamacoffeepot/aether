@@ -41,7 +41,7 @@ pub use inline_child::{
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
-pub use probe::{Probe, ProbeWithConfig};
+pub use probe::{Probe, ProbeWithConfig, ProbeWithParams, ProbeWithUnprovidedParam};
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
@@ -54,6 +54,8 @@ pub use ui_widget::UiWidget;
 aether_actor::export!(
     default = Probe,
     ProbeWithConfig,
+    ProbeWithParams,
+    ProbeWithUnprovidedParam,
     RootManager,
     Panel,
     Cube,

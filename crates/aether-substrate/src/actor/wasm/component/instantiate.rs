@@ -45,6 +45,16 @@ pub struct Component {
     pub(super) self_mailbox_id: u64,
 }
 
+/// The two channels an init call delivers (ADR-0090 config, ADR-0170 params),
+/// carried as one value because they occupy one contiguous delivery region:
+/// `[config][params]` at the pointer the init shim receives. Either half may
+/// be empty.
+#[derive(Clone, Copy)]
+pub(super) struct InitPayload<'a> {
+    pub config: &'a [u8],
+    pub params: &'a [u8],
+}
+
 /// Result of choosing a destination region for a host→guest payload
 /// ([`Component::place`]).
 pub(super) enum Placement {
@@ -103,43 +113,50 @@ impl Component {
         Ok(Placement::At(*large_ptr))
     }
 
-    /// Place + write the init config into a delivery region (ADR-0095) and
-    /// return the guest pointer to hand `init_with_config_p32`. Mirrors
-    /// [`Self::deliver`]'s routing; a config past the ceiling, or to a guest
+    /// Place + write the init payload into a delivery region (ADR-0095) and
+    /// return the guest pointer the init shim receives. Mirrors
+    /// [`Self::deliver`]'s routing; a payload past the ceiling, or to a guest
     /// with no allocator, is a clean boot `Err` (surfaces as `LoadResult::Err`)
     /// rather than a write or trap. Factored out of [`Self::instantiate`].
-    fn place_init_config(
+    ///
+    /// ADR-0170: the config bytes and the params bag ride **one** region,
+    /// written back to back — `[config][params]` — so both channels cost one
+    /// placement and the params-bearing init export adds only a length
+    /// argument. `place` manages a small and a large region, so a second
+    /// independent placement would have to overwrite one of them; splitting a
+    /// single region by length avoids that without a third.
+    fn place_init_payload(
         store: &mut Store<ComponentCtx>,
         memory: &Memory,
         realloc: Option<&ReallocFunc>,
         small_ptr: u32,
         large_ptr: &mut u32,
         large_cap: &mut u32,
-        config_bytes: &[u8],
+        payload: InitPayload<'_>,
     ) -> wasmtime::Result<u32> {
-        match Self::place(store, realloc, small_ptr, large_ptr, large_cap, config_bytes.len())? {
+        let InitPayload { config, params } = payload;
+        let total = config.len() + params.len();
+        match Self::place(store, realloc, small_ptr, large_ptr, large_cap, total)? {
             Placement::At(ptr) => {
-                if !config_bytes.is_empty() {
-                    memory.write(store, ptr as usize, config_bytes)?;
+                if !config.is_empty() {
+                    memory.write(&mut *store, ptr as usize, config)?;
+                }
+                if !params.is_empty() {
+                    memory.write(&mut *store, ptr as usize + config.len(), params)?;
                 }
                 Ok(ptr)
             }
             Placement::Oversize => {
-                Self::log_oversize_config(store, config_bytes.len(), "exceeds the absolute deliverable bound");
+                Self::log_oversize_config(store, total, "exceeds the absolute deliverable bound");
                 Err(wasmtime::Error::msg(format!(
-                    "guest init config of {} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
-                    config_bytes.len(),
+                    "guest init payload of {total} bytes exceeds the \
+                     {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
                 )))
             }
             Placement::NoAllocator => {
-                Self::log_oversize_config(
-                    store,
-                    config_bytes.len(),
-                    "guest exports no realloc_p32 allocator (raw-FFI guest)",
-                );
+                Self::log_oversize_config(store, total, "guest exports no realloc_p32 allocator (raw-FFI guest)");
                 Err(wasmtime::Error::msg(format!(
-                    "guest init config of {} bytes cannot be delivered: guest exports no realloc_p32 allocator",
-                    config_bytes.len(),
+                    "guest init payload of {total} bytes cannot be delivered: guest exports no realloc_p32 allocator",
                 )))
             }
         }
@@ -166,11 +183,18 @@ impl Component {
     ///
     /// ADR-0096: `type_tag` selects which exported actor type a
     /// multi-actor module instantiates. `Some(tag)` calls the guest's
-    /// `init_typed_p32(mailbox_id, tag, ptr, len)` — a missing export is
-    /// a clean boot error (the module isn't multi-actor, or doesn't
-    /// export the selected type). `None` is the entry-type / single-actor
-    /// path: the substrate probes `init_with_config_p32`, then the legacy
-    /// `init` shapes, exactly as before.
+    /// typed init export — a missing export is a clean boot error (the
+    /// module isn't multi-actor, or doesn't export the selected type).
+    /// `None` is the entry-type / single-actor path.
+    ///
+    /// ADR-0170: `params_bytes` is the wire-encoded `Vec<ParamEntry>` bag the
+    /// component host assembled from its provider registry, empty when the
+    /// actor requested nothing. Each path probes the params-bearing export
+    /// (`init_with_params_p32` / `init_typed_with_params_p32`) first and falls
+    /// back to the config-only one, so a guest built before ADR-0170 keeps
+    /// loading. A non-empty bag against a guest with no params export is a
+    /// clean boot error rather than a silent drop: the actor asked for facts
+    /// the fallback path cannot carry.
     #[allow(
         clippy::too_many_lines,
         reason = "one cohesive instantiate sequence: build instance, probe the \
@@ -184,6 +208,7 @@ impl Component {
         module: &Module,
         ctx: ComponentCtx,
         config_bytes: &[u8],
+        params_bytes: &[u8],
         type_tag: Option<u64>,
     ) -> wasmtime::Result<Self> {
         let mut store = Store::new(engine, ctx);
@@ -200,12 +225,13 @@ impl Component {
         // so raw-FFI components predating the Phase 2 ABI still load —
         // they just don't get auto-subscribe, which they never did.
         //
-        // ADR-0090 (issue 1256): the substrate probes `init_with_config_p32`
-        // first (the post-#1256 ABI that carries config bytes), then
-        // the `(u64) -> u32` shape (Phase 2), then the legacy `()` shape.
-        // The order is deliberate — a `#[actor]`-built guest exports
-        // both `init_with_config_p32` and the legacy `init(u64)`, so a substrate
-        // that probes `init` first would silently skip the config path.
+        // ADR-0090 (issue 1256) / ADR-0170: the substrate probes the widest
+        // shim first and narrows — `init_with_params_p32` (config + params),
+        // then `init_with_config_p32` (config only), then the `(u64) -> u32`
+        // shape (Phase 2), then the legacy `()` shape. The order is
+        // deliberate: a `#[actor]`-built guest exports every one of them, so
+        // probing a narrower shape first would silently drop the channels the
+        // wider one carries.
         //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
         // means the guest's `WasmActor::init` returned `Err(ActorInitError)`
@@ -239,54 +265,75 @@ impl Component {
         };
         let mut large_ptr: u32 = 0;
         let mut large_cap: u32 = 0;
-        // Wasm32 ABI carries `u32` byte lengths; config bytes are
+        // Wasm32 ABI carries `u32` byte lengths; both payloads are
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
         let config_len = config_bytes.len() as u32;
-        let init_rc = if let Some(type_tag) = type_tag {
-            // ADR-0096: a multi-actor module loaded with an export
-            // selector. The module exports `init_typed_p32`
-            // (mailbox_id, type_tag, ptr, len); the tag picks which
-            // exported type to construct. A guest without that export
-            // either isn't a multi-actor module or was built against an
-            // older SDK — a clean boot error, never a silent fall-through
-            // to the entry-only `init_with_config_p32`.
-            let init_typed =
-                instance.get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32").map_err(|e| {
-                    wasmtime::Error::msg(format!(
-                        "export selector set but guest exports no `init_typed_p32` \
-                         (not a multi-actor module?): {e}"
-                    ))
-                })?;
-            // ADR-0095: same allocator-backed config write as the
-            // entry path below.
-            let config_ptr = Self::place_init_config(
-                &mut store,
+        #[allow(clippy::cast_possible_truncation)]
+        let params_len = params_bytes.len() as u32;
+        // ADR-0170: the config-only fallback exports cannot carry a bag, so a
+        // guest without a params export can only be reached with nothing to
+        // inject. Named once here rather than re-derived at each fallback arm.
+        let params_dropped = || {
+            wasmtime::Error::msg(format!(
+                "guest exports no params-bearing init shim but the host has {} bytes of \
+                 requested params to deliver; rebuild the component against an ADR-0170 SDK",
+                params_bytes.len(),
+            ))
+        };
+        let place = |store: &mut Store<ComponentCtx>, large_ptr: &mut u32, large_cap: &mut u32| {
+            Self::place_init_payload(
+                store,
                 &memory,
                 realloc.as_ref(),
                 small_ptr,
-                &mut large_ptr,
-                &mut large_cap,
-                config_bytes,
-            )?;
-            Some(init_typed.call(&mut store, (mailbox_id, type_tag, config_ptr, config_len))?)
+                large_ptr,
+                large_cap,
+                InitPayload { config: config_bytes, params: params_bytes },
+            )
+        };
+        let init_rc = if let Some(type_tag) = type_tag {
+            // ADR-0096: a multi-actor module loaded with an export selector;
+            // the tag picks which exported type to construct. A guest with
+            // neither typed export either isn't a multi-actor module or was
+            // built against an older SDK — a clean boot error, never a silent
+            // fall-through to the entry-only init.
+            let ptr = place(&mut store, &mut large_ptr, &mut large_cap)?;
+            if let Ok(init_typed_with_params) =
+                instance.get_typed_func::<(u64, u64, u32, u32, u32), u32>(&mut store, "init_typed_with_params_p32")
+            {
+                Some(init_typed_with_params.call(&mut store, (mailbox_id, type_tag, ptr, config_len, params_len))?)
+            } else {
+                let init_typed = instance
+                    .get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32")
+                    .map_err(|e| {
+                        wasmtime::Error::msg(format!(
+                            "export selector set but guest exports no `init_typed_with_params_p32` \
+                             or `init_typed_p32` (not a multi-actor module?): {e}"
+                        ))
+                    })?;
+                if !params_bytes.is_empty() {
+                    return Err(params_dropped());
+                }
+                Some(init_typed.call(&mut store, (mailbox_id, type_tag, ptr, config_len))?)
+            }
+        } else if let Ok(init_with_params) =
+            instance.get_typed_func::<(u64, u32, u32, u32), u32>(&mut store, "init_with_params_p32")
+        {
+            // ADR-0095: route the payload write through the allocator-backed
+            // two-region path `deliver` uses. An empty payload still needs a
+            // valid (non-null) pointer for the guest's slice construction,
+            // which the cached small region provides.
+            let ptr = place(&mut store, &mut large_ptr, &mut large_cap)?;
+            Some(init_with_params.call(&mut store, (mailbox_id, ptr, config_len, params_len))?)
         } else if let Ok(init_with_config) =
             instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_with_config_p32")
         {
-            // ADR-0095: route the config write through the allocator-backed
-            // two-region path `deliver` uses. An empty config still needs a
-            // valid (non-null) pointer for the guest's slice construction,
-            // which the cached small region provides.
-            let config_ptr = Self::place_init_config(
-                &mut store,
-                &memory,
-                realloc.as_ref(),
-                small_ptr,
-                &mut large_ptr,
-                &mut large_cap,
-                config_bytes,
-            )?;
-            Some(init_with_config.call(&mut store, (mailbox_id, config_ptr, config_len))?)
+            if !params_bytes.is_empty() {
+                return Err(params_dropped());
+            }
+            let ptr = place(&mut store, &mut large_ptr, &mut large_cap)?;
+            Some(init_with_config.call(&mut store, (mailbox_id, ptr, config_len))?)
         } else if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
             // Legacy Phase 2 fallback. Discards config bytes — only
             // safe for `Config = ()`. A typed-config guest that lands

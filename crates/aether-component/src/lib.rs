@@ -64,6 +64,11 @@ pub use component::{ComponentHostCapability, resolve_embedded};
 // addressing without dragging the wasmtime stack in.
 #[cfg(feature = "runtime")]
 pub use component::ComponentHostParams;
+// ADR-0170: the params provider registry a chassis seeds and extends, plus the
+// load-time context its providers read. Same gate as `ComponentHostParams` —
+// the registry rides it into the cap.
+#[cfg(feature = "runtime")]
+pub use component::{DuplicateParamProvider, LoadContext, MissingParamProvider, ParamProvider, ParamProviderRegistry};
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]
 pub use trampoline::WasmTrampolineConfig;

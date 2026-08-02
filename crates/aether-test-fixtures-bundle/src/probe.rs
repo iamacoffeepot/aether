@@ -61,13 +61,13 @@
 use aether_actor::{
     ActorInitError, AssetWindow, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_kinds::{Key, TextInput, Tick};
+use aether_kinds::{Key, ReplicaIdentity, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
-    AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig,
+    AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ParamsEcho, ParamsQuery, ProbeConfig,
     SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender, TextInputObserved, TickObserved,
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
@@ -228,5 +228,86 @@ impl WasmActor for ProbeWithConfig {
         if ctx.reply_target().is_some() {
             ctx.reply(&ConfigEcho { seed: self.seed, label: self.label.clone() });
         }
+    }
+}
+
+/// ADR-0170 params-injection fixture's `Params`: one request for the
+/// replica identity the component host derives from the load.
+///
+/// Note what this is *not*: a wire kind. The struct is assembled from the
+/// host's bag field by field, so only `ReplicaIdentity` needs to be a kind —
+/// which is the property that lets a real component gather facts from
+/// unrelated kind families into one `Params`.
+#[derive(aether_actor::InjectedParams)]
+pub struct ProbeParams {
+    #[param("aether.component.replica_identity")]
+    replica: ReplicaIdentity,
+}
+
+/// ADR-0170 params-injection fixture. Declares a `type Params` requesting
+/// `ReplicaIdentity`, stashes what `init` was handed, and echoes it back on
+/// [`ParamsQuery`] — so a scenario reads the value the *guest* received
+/// rather than the one the host computed.
+///
+/// Consumers load this actor from the `probe` bundle with
+/// `export: Some("test.probe_with_params")`.
+pub struct ProbeWithParams {
+    replica: ReplicaIdentity,
+}
+
+#[actor]
+impl WasmActor for ProbeWithParams {
+    type Params = ProbeParams;
+    const NAMESPACE: &'static str = "test.probe_with_params";
+
+    fn init(params: ProbeParams, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ProbeWithParams { replica: params.replica })
+    }
+
+    /// Reply with the replica identity injected at `init`.
+    #[handler::manual]
+    fn on_params_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: ParamsQuery) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&ParamsEcho { index: self.replica.index, count: self.replica.count });
+        }
+    }
+}
+
+/// ADR-0170 negative fixture's `Params`: a request for a kind no provider
+/// serves. `ConfigEcho` is a fixture reply kind — a perfectly good wire kind,
+/// and exactly the sort of thing a chassis has no load-time value for.
+#[derive(aether_actor::InjectedParams)]
+pub struct UnprovidedParams {
+    // The field is never read: every load of the owning actor is rejected at
+    // the host, so nothing ever constructs this value. That unreachability is
+    // the fixture's whole point.
+    #[allow(dead_code)]
+    #[param("aether.test_fixtures.config_echo")]
+    unprovided: ConfigEcho,
+}
+
+/// ADR-0170 negative fixture: requests a host fact nothing provides, so
+/// **every** load of it must fail — before instantiation, with the kind and
+/// field named. The actor body is unreachable by construction; it exists so a
+/// scenario can prove the host refuses rather than booting the guest and
+/// discovering the gap inside `init`.
+///
+/// Reachable only by `export: Some("test.probe_unprovided_param")`, so its
+/// permanent unloadability never touches the bundle's other scenarios.
+pub struct ProbeWithUnprovidedParam;
+
+#[actor]
+impl WasmActor for ProbeWithUnprovidedParam {
+    type Params = UnprovidedParams;
+    const NAMESPACE: &'static str = "test.probe_unprovided_param";
+
+    fn init(params: UnprovidedParams, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let _ = params;
+        Ok(ProbeWithUnprovidedParam)
+    }
+
+    #[handler::manual]
+    fn on_params_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: ParamsQuery) {
+        let _ = ctx;
     }
 }

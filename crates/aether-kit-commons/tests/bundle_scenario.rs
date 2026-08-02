@@ -62,6 +62,7 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("aether.kit.bundle".to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -71,7 +71,7 @@ fn instantiate(wat: &str) -> Component {
     host_fns::register(&mut linker).expect("register host fns");
     let wasm = wat::parse_str(wat).expect("compile WAT");
     let module = Module::new(&engine, &wasm).expect("compile module");
-    Component::instantiate(&engine, &linker, &module, ctx(), &[], None).expect("instantiate")
+    Component::instantiate(&engine, &linker, &module, ctx(), &[], &[], None).expect("instantiate")
 }
 
 /// ADR-0090 helper: instantiate with explicit config bytes so a
@@ -86,12 +86,19 @@ fn instantiate_with_config(wat: &str, config_bytes: &[u8]) -> Component {
 /// substrate returns (which `dispatch_load_component` surfaces as
 /// `LoadResult::Err`) instead of unwrapping it.
 fn try_instantiate_with_config(wat: &str, config_bytes: &[u8]) -> wasmtime::Result<Component> {
+    try_instantiate_with_payload(wat, config_bytes, &[])
+}
+
+/// ADR-0170 sibling of [`try_instantiate_with_config`]: instantiate with an
+/// explicit params bag as well, so a WAT-level guest can be given (or denied)
+/// the params-bearing init export and the substrate's probe order asserted.
+fn try_instantiate_with_payload(wat: &str, config_bytes: &[u8], params_bytes: &[u8]) -> wasmtime::Result<Component> {
     let engine = Engine::default();
     let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
     host_fns::register(&mut linker).expect("register host fns");
     let wasm = wat::parse_str(wat).expect("compile WAT");
     let module = Module::new(&engine, &wasm).expect("compile module");
-    Component::instantiate(&engine, &linker, &module, ctx(), config_bytes, None)
+    Component::instantiate(&engine, &linker, &module, ctx(), config_bytes, params_bytes, None)
 }
 
 /// WAT where `on_dehydrate` writes 0x11 to offset 200 — same pattern
@@ -471,6 +478,44 @@ fn init_with_config_p32_threads_config_ptr_len_through() {
     // land at 212 + 213.
     assert_eq!(component.read_u32(212) & 0xFF, u32::from(payload[0]));
     assert_eq!(component.read_u32(213) & 0xFF, u32::from(payload[1]));
+}
+
+/// ADR-0170 back-compat: a guest that exports only the config-only
+/// `init_with_config_p32` — no `init_with_params_p32` — still instantiates,
+/// with its config delivered exactly as before.
+///
+/// The bug this catches: the params-bearing probe becoming a requirement
+/// rather than a preference (a `get_typed_func(...)?` where the fallback chain
+/// belongs), which would turn every pre-ADR-0170 guest and every hand-written
+/// raw-FFI module into a load failure.
+#[test]
+fn a_guest_without_the_params_export_still_instantiates_through_the_config_only_shim() {
+    let payload: &[u8] = &[0x77, 0x88];
+    let mut component = try_instantiate_with_payload(&wat_init_with_config(), payload, &[])
+        .expect("a config-only guest instantiates when there are no params to deliver");
+
+    assert_eq!(component.read_u32(204), component.small_ptr, "config still lands in the small delivery region");
+    assert_eq!(component.read_u32(208) as usize, payload.len(), "config length still reaches the config-only shim");
+}
+
+/// The mirror of the case above: a config-only guest *with* params to deliver
+/// is a clean boot error, not a silent drop.
+///
+/// The bug this catches: the fallback arm calling the narrow shim regardless,
+/// so a component that declared required requests boots without them and
+/// fails somewhere later — the exact host-dependent behaviour ADR-0170's
+/// all-requests-required rule exists to rule out. The bag content is
+/// irrelevant here; only its non-emptiness drives the decision.
+#[test]
+fn a_config_only_guest_handed_params_is_a_boot_error_not_a_silent_drop() {
+    let Err(error) = try_instantiate_with_payload(&wat_init_with_config(), &[], &[0x01, 0x02, 0x03]) else {
+        panic!("params cannot be delivered through the config-only shim");
+    };
+
+    assert!(
+        error.to_string().contains("params-bearing init shim"),
+        "the error explains the missing shim; was: {error}"
+    );
 }
 
 /// Companion: empty config (the trait-default `Config = ()` path) still
@@ -926,7 +971,7 @@ fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
     host_fns::register(&mut linker).expect("register host fns");
     let wasm = wat::parse_str(wat).unwrap();
     let module = Module::new(&engine, &wasm).unwrap();
-    Component::instantiate(&engine, &linker, &module, ctx, &[], None).unwrap()
+    Component::instantiate(&engine, &linker, &module, ctx, &[], &[], None).unwrap()
 }
 
 #[test]

@@ -40,6 +40,7 @@ fn load_mark_book(harness: &mut SubstrateHarness, wasm_path: &Path) -> aether_da
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("aether.kit.mark".to_owned()),
+                    replica: None,
                 },
             ),
         )])

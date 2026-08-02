@@ -12,7 +12,8 @@ use aether_data::{EngineId, Kind, SchemaType, wire};
 use aether_kinds::{
     BinaryEntry, ComponentCapabilities, ComponentEntry, KindDescriptorWire, ListComponentBinaries,
     ListComponentBinariesResult, ListEngineBinaries, ListEngineBinariesResult, LoadComponent, LoadResult,
-    ReplaceComponent, ReplaceResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+    ReplaceComponent, ReplaceResult, ReplicaIdentity, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
 };
 use rmcp::ErrorData as McpError;
 use serde::Serialize;
@@ -466,6 +467,14 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
                     name: Some(name),
                     config: config.clone(),
                     export: export.clone(),
+                    // ADR-0170: this loop is a fan-out site, so it is the only
+                    // place that knows both halves of the identity — the
+                    // instances share one config by contract and cannot
+                    // otherwise tell themselves apart.
+                    replica: Some(ReplicaIdentity {
+                        index: u32::try_from(index).expect("replicas is a u32, so its indices fit one"),
+                        count: replicas,
+                    }),
                 },
             ))
             .await
@@ -518,7 +527,7 @@ async fn load_single_component(
 ) -> Result<String, McpError> {
     let reply = mcp
         .session
-        .call_one(engine_envelope(engine, COMPONENT_CAP, &LoadComponent { wasm, name, config, export }))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &LoadComponent { wasm, name, config, export, replica: None }))
         .await
         .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
     match LoadResult::decode_from_bytes(&reply.payload) {

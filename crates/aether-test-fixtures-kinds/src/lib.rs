@@ -126,6 +126,23 @@ pub struct ConfigEcho {
 #[kind(name = "aether.test_fixtures.config_query")]
 pub struct ConfigQuery;
 
+/// ADR-0170 driver kind: ask the params-injection fixture to report the
+/// `ReplicaIdentity` its host injected. Unit struct, like [`ConfigQuery`].
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.test_fixtures.params_query")]
+pub struct ParamsQuery;
+
+/// Reply to [`ParamsQuery`]: the replica index and count the fixture read out
+/// of its injected `Params` at `init`. Distinct from `ReplicaIdentity` itself
+/// so a test asserting the round trip is reading what the *guest* stored, not
+/// re-decoding the host's own value.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.test_fixtures.params_echo")]
+pub struct ParamsEcho {
+    pub index: u32,
+    pub count: u32,
+}
+
 /// ADR-0163 §3 (#3984) driver kind: ask the `Probe` fixture to report
 /// what it pulled from its asset load window during `wire`. No-payload
 /// query; the reply is an [`AssetProbeResult`]. Structured unit struct so

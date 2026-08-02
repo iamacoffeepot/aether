@@ -210,9 +210,13 @@ where
         return false;
     };
     let mut init_ctx = WasmInitCtx::__new(to_reconstruct.alias.0);
-    // ADR-0156 §2: empty params for now — resolve `Params` to the compiled
-    // default, mirroring the real-config decode above.
-    let params = <A::Params as Default>::default();
+    // ADR-0170: an inline child reconstructs with an empty params bag — the
+    // component host injects into hosted actors, not into in-process children
+    // (see `spawn_one_child`). A request-bearing child fails the
+    // reconstruction here rather than restoring half-injected.
+    let Ok(params) = crate::resolve_params::<A::Params>(&[]) else {
+        return false;
+    };
     let Ok(mut child) = A::init(config, params, &mut init_ctx) else {
         return false;
     };

@@ -634,6 +634,11 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 // ADR-0163 §3: assets ride wasm custom sections, so a
                 // native cap always has an empty catalog.
                 assets: ::std::vec![],
+                // ADR-0170: params injection is the wasm channel. A native
+                // actor's composer is a person at a `with_actor` call site,
+                // who hands it live values directly, so it declares no
+                // requests.
+                params: ::std::vec![],
             }
         }
     };

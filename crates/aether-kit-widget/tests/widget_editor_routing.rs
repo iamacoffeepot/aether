@@ -40,6 +40,7 @@ fn load_actor<K: Kind>(
                     name: Some(name.to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some(export.to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -70,6 +70,7 @@ fn load_export(
                     name: Some(name.to_owned()),
                     config,
                     export: Some(export.to_owned()),
+                    replica: None,
                 },
             ),
         )])

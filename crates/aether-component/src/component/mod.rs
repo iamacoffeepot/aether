@@ -62,6 +62,14 @@ pub use route::{ComponentHostWasmExt, resolve_embedded};
 #[cfg(feature = "runtime")]
 pub use runtime::ComponentHostParams;
 
+// ADR-0170: the params provider registry. It rides `ComponentHostParams`, so
+// it sits beside the runtime half under the same gate — a chassis names these
+// types to seed and extend the registry it hands the cap.
+#[cfg(feature = "runtime")]
+mod providers;
+#[cfg(feature = "runtime")]
+pub use providers::{DuplicateParamProvider, LoadContext, MissingParamProvider, ParamProvider, ParamProviderRegistry};
+
 // Handler-signature kinds resolve at file root always-on: `#[actor]` emits the
 // `impl HandlesKind<K>` markers AND the `aether.kinds.inputs` handler-inventory
 // (which names each handler's reply kind via `<R as Kind>::ID`) against the

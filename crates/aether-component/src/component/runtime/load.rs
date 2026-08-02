@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use aether_actor::{Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{Kind, KindDescriptor};
-use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{
+    ComponentCapabilities, DropComponent, LoadComponent, ReplaceComponent, ReplaceResult, ReplicaIdentity,
+};
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{
@@ -41,6 +43,7 @@ pub(super) struct PreparedLoad {
     wasm_bytes: Arc<[u8]>,
     config: Vec<u8>,
     name: String,
+    replica: ReplicaIdentity,
 }
 
 impl PreparedLoad {
@@ -56,6 +59,9 @@ impl PreparedLoad {
             type_tag: self.type_tag,
             actor_caps: self.actors.clone(),
             wasm_bytes: Arc::clone(&self.wasm_bytes),
+            param_providers: Arc::clone(&state.param_providers),
+            instance_name: self.name.clone(),
+            replica: self.replica,
         }
     }
 
@@ -99,6 +105,11 @@ impl PreparedBoot {
             type_tag: Some(aether_data::mailbox_id_from_name(&self.namespace).0),
             actor_caps: self.actors.clone(),
             wasm_bytes: Arc::clone(&self.wasm_bytes),
+            param_providers: Arc::clone(&state.param_providers),
+            instance_name: self.namespace.clone(),
+            // ADR-0147/ADR-0170: a module boot is one singleton per module,
+            // never a fan-out member, so it is replica 0 of 1 by construction.
+            replica: ReplicaIdentity::SOLE,
         }
     }
 }
@@ -111,7 +122,10 @@ pub(super) struct KindRegistration {
 #[derive(Clone)]
 pub(super) enum BootSuccessor {
     Load(Arc<PreparedLoad>),
-    Replacement { pending: PendingReplace, result: ReplaceResult },
+    // ADR-0170 grew `ComponentCapabilities` (and so `ReplaceResult`) past the
+    // point where the two variants are comparable in size; box the reply so
+    // the enum stays the size of its cheap arm.
+    Replacement { pending: PendingReplace, result: Box<ReplaceResult> },
 }
 
 struct BootWaiter {
@@ -231,6 +245,17 @@ impl ComponentHostCapabilityState {
             },
         };
 
+        // ADR-0170: validate every declared param request against the
+        // provider registry here — before any trampoline is spawned and long
+        // before the guest is instantiated — so a request nothing provides is
+        // a clean `LoadResult::Err` naming the kind and field rather than a
+        // failure surfacing from inside the guest's `init`. Only the selected
+        // actor's requests are checked: a sibling export nobody loaded may ask
+        // for facts this chassis lacks without blocking this load.
+        if let Err(missing) = self.param_providers.validate(&capabilities.params) {
+            return Err(LoadResult::Err { error: missing.to_string() });
+        }
+
         Ok((
             descriptors,
             Arc::new(PreparedLoad {
@@ -242,6 +267,7 @@ impl ComponentHostCapabilityState {
                 wasm_bytes,
                 config: payload.config,
                 name,
+                replica: payload.replica.unwrap_or(ReplicaIdentity::SOLE),
             }),
         ))
     }
@@ -389,7 +415,7 @@ impl ComponentHostCapabilityState {
             }
             BootSuccessor::Replacement { pending, result } => {
                 self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, Some(hash.to_owned()));
-                owed.reply(ctx, &result);
+                owed.reply(ctx, result.as_ref());
             }
         }
     }
@@ -414,7 +440,7 @@ impl ComponentHostCapabilityState {
                     %error,
                     "replace succeeded but the replacement module boot failed",
                 );
-                owed.reply(ctx, &result);
+                owed.reply(ctx, result.as_ref());
             }
         }
     }
@@ -548,9 +574,11 @@ impl ComponentHostCapabilityState {
 
         let owed = ctx.defer_reply_to(pending.source);
         if let Some(inflight) = self.pending_boots.get_mut(&plan.hash) {
-            inflight.waiters.push(BootWaiter { owed, successor: BootSuccessor::Replacement { pending, result } });
+            inflight
+                .waiters
+                .push(BootWaiter { owed, successor: BootSuccessor::Replacement { pending, result: Box::new(result) } });
         } else {
-            self.stage_module_boot(ctx, owed, plan, BootSuccessor::Replacement { pending, result });
+            self.stage_module_boot(ctx, owed, plan, BootSuccessor::Replacement { pending, result: Box::new(result) });
         }
     }
 
@@ -616,6 +644,7 @@ mod tests {
     use wasmtime::{Engine, Linker};
 
     use super::*;
+    use crate::component::ParamProviderRegistry;
 
     fn state() -> ComponentHostCapabilityState {
         let registry = Arc::new(Registry::new());
@@ -628,6 +657,7 @@ mod tests {
             registry,
             mailer,
             outbound,
+            param_providers: Arc::new(ParamProviderRegistry::with_substrate_facts()),
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,

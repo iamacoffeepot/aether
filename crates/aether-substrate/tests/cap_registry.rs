@@ -43,7 +43,7 @@ fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> M
             "load",
             HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
-                &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None, replica: None },
             ),
         )])
         .expect("load sequence");

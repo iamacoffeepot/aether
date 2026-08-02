@@ -609,6 +609,49 @@ mod control_plane {
         /// export that the module doesn't declare is likewise a clean
         /// `LoadResult::Err`.
         pub export: Option<String>,
+        /// ADR-0170: which instance of a `replicas: N` fan-out this load
+        /// is. The fan-out happens above the component host — the boot
+        /// manifest / package expander and the MCP `replicas` loop each
+        /// issue N independent loads sharing one wasm and one config — so
+        /// the index and count are facts only the fan-out site knows, and
+        /// they ride here rather than being re-derived from the `{base}-{index}`
+        /// name. `None` is an unreplicated load, which the host reads as the
+        /// degenerate `{ index: 0, count: 1 }`; nothing downstream branches on
+        /// the difference.
+        pub replica: Option<ReplicaIdentity>,
+    }
+
+    /// `aether.component.replica_identity` — a loaded instance's position in
+    /// its `replicas: N` fan-out (ADR-0170). The motivating host fact for
+    /// params injection: replicated instances share one config by contract,
+    /// so nothing in the config channel can tell instance 3 from instance 4.
+    /// A component requests it with a `#[param("aether.component.replica_identity")]`
+    /// field on its `Params` type and receives it as a constructor argument.
+    ///
+    /// `index` is zero-based and always less than `count`. An unreplicated
+    /// load is `{ index: 0, count: 1 }` — a single instance is replica 0 of 1,
+    /// so a component that shards work by index needs no "am I replicated"
+    /// branch.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    #[kind(name = "aether.component.replica_identity")]
+    pub struct ReplicaIdentity {
+        pub index: u32,
+        pub count: u32,
+    }
+
+    impl ReplicaIdentity {
+        /// The identity of an unreplicated load: the sole instance is replica
+        /// 0 of 1.
+        pub const SOLE: Self = Self { index: 0, count: 1 };
+    }
+
+    /// [`ReplicaIdentity::SOLE`], not the field-wise zero — a `count` of 0
+    /// describes no instance at all, so the derived default would be a
+    /// constructible invalid value.
+    impl Default for ReplicaIdentity {
+        fn default() -> Self {
+            Self::SOLE
+        }
     }
 
     /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id,
@@ -656,6 +699,27 @@ mod control_plane {
         /// `AssetWindow` ctx surface (`init` + `wire`), never this list.
         #[serde(default)]
         pub assets: Vec<AssetInfo>,
+        /// ADR-0170: the host facts the component's `Params` type requests,
+        /// one per `#[param]` field, in declaration order. Empty for a
+        /// component that declares no `Params` (the overwhelming majority).
+        /// Every entry is **required**: the component host validates the
+        /// whole list against its provider registry before instantiating, so
+        /// a load either injects all of them or fails naming the first kind
+        /// nothing provides.
+        #[serde(default)]
+        pub params: Vec<ParamRequirement>,
+    }
+
+    /// One host fact a component's `Params` type requests (ADR-0170). `id` /
+    /// `name` are the requested kind's `Kind::ID` / `NAME`; `field` is the
+    /// `Params` field it is injected into, carried so a missing-provider
+    /// error and `describe_component`'s requires-list can point at the
+    /// declaration rather than only at the kind.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct ParamRequirement {
+        pub id: aether_data::KindId,
+        pub name: String,
+        pub field: String,
     }
 
     /// One `#[handler]` method's advertised capability. `id` is the

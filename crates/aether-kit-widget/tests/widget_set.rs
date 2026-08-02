@@ -80,6 +80,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -308,6 +309,7 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])
