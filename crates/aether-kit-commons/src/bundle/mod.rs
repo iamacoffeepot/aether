@@ -67,7 +67,7 @@ pub const TILE_HEIGHT: u32 = 16;
 
 /// The `aether.asset.<name>` section suffix the bundle pulls in `wire` —
 /// the exact string `export_asset!` keyed the section on, matched against
-/// the catalog by [`AssetWindow::asset`].
+/// the catalog by [`AssetWindow::asset`](aether_actor::AssetWindow::asset).
 const TILE_ASSET_NAME: &str = "tile.rgba";
 
 /// On-screen size the tile draws at, in window pixels. Larger than the

@@ -36,7 +36,7 @@ pub(super) struct TwinEdgeViolation {
 /// guarantee broke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PostWeldViolation {
-    /// Polygon \[`poly_idx`\] references `vertex_id ≥ pool_size`.
+    /// Polygon[`poly_idx`] references `vertex_id ≥ pool_size`.
     OrphanedId { poly_idx: usize, vertex_id: VertexId, pool_size: usize },
     /// Two distinct pool ids share identical coordinates — the welding
     /// pass's tolerance lookup missed them.

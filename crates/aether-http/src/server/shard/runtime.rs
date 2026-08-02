@@ -158,7 +158,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — a streaming handler sends this after replying
     /// [`HttpResponseStreamOpen`], paced by the cap's
-    /// [`HttpStreamCredit`] grants.
+    /// [`HttpStreamCredit`](crate::kinds::HttpStreamCredit) grants.
     #[handler::single]
     fn on_response_chunk(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, chunk: HttpResponseChunk) {
         state.push_chunk(chunk.stream_id, chunk.body);
@@ -183,8 +183,8 @@ impl NativeActor for HttpDispatchShard {
     ///
     /// # Agent
     /// Not user-callable — a streaming handler sends this after receiving
-    /// [`HttpRequestStreamOpen`], as
-    /// it drains [`HttpRequestChunk`]
+    /// [`HttpRequestStreamOpen`](crate::kinds::HttpRequestStreamOpen), as
+    /// it drains [`HttpRequestChunk`](crate::kinds::HttpRequestChunk)
     /// mails, to let the cap deliver more of the request body.
     ///
     /// [`HttpStreamCredit`]: crate::kinds::HttpStreamCredit

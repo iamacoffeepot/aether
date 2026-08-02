@@ -54,7 +54,7 @@ pub struct Mailer {
     /// `with_outbound` pair below replaces that.
     outbound: Option<Arc<HubOutbound>>,
     /// ADR-0080 §5 chassis-mail router. When mail is addressed to
-    /// [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`], `route_mail` short-circuits
+    /// [`MailboxId::CHASSIS_MAILBOX_ID`], `route_mail` short-circuits
     /// the registry lookup and invokes this closure instead. Today
     /// the chassis installs a router that decodes `Settled { root }`
     /// and signals the [`SettlementRegistry`]

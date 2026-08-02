@@ -1,5 +1,5 @@
 //! The `aether.rpc.server` runtime half (ADR-0122 identity/runtime split).
-//! The [`RpcServerCapability`] identity file
+//! The [`RpcServerCapability`](super::RpcServerCapability) identity file
 //! names none of these types. The substrate-typed
 //! imports are collected once by this module rather than line-by-line; the
 //! `#[actor] impl` in the parent reaches the state, ctx types, the
@@ -79,7 +79,7 @@ pub struct InFlight {
 /// listener's bookkeeping plus per-connection state. The dispatcher holds
 /// this as the cap's state and routes envelopes through the macro-emitted
 /// `Dispatch` impl; the addressing identity is the distinct ZST
-/// [`RpcServerCapability`]. Living in this
+/// [`RpcServerCapability`](super::RpcServerCapability). Living in this
 /// private module keeps it `pub`-enough to satisfy the `NativeActor::State`
 /// interface without exposing it as crate-public API; fields are
 /// `pub` so the parent's handlers / `init` / `unwire` reach them.

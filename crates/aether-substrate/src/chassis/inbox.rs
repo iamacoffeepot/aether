@@ -151,7 +151,7 @@ impl SettlingInbox {
     /// stage (ADR-0155 §4) through `claim_mailbox`, which builds the
     /// [`SettlingInbox`] with its own fresh [`ReplyLineage`]; when the
     /// pumped boot recovers that claim and installs the inbox on a
-    /// [`NativeBinding`](crate::actor::native::NativeBinding), the two must draw reply ids from one coherent
+    /// [`NativeBinding`], the two must draw reply ids from one coherent
     /// disjoint space — otherwise the inbox's counter and the binding's
     /// both start at [`ReplyLineage::BASE`] and collide (the issue 1695
     /// invariant). This mirrors what the standard

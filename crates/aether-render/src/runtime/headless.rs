@@ -83,7 +83,7 @@ impl NativeActor for HeadlessRenderCapability {
     /// `CreateTexture` replies `Err` so an agent that creates a texture
     /// against a headless chassis fails fast instead of waiting on a reply
     /// that never comes (ADR-0105). Declared `#[handler::single]` with a
-    /// returned reply — matching the pumped [`crate::RenderCapability`]'s
+    /// returned reply — matching the pumped [`RenderCapability`]'s
     /// `create_texture` declaration so live `describe_handlers` reports a
     /// single deduped row set for `aether.render`.
     #[handler::single]

@@ -334,7 +334,7 @@ where
 /// Shutdown adapter for a `Pooled` [`NativeActor`] (issue 635 PR C).
 /// On chassis shutdown:
 /// 1. Sets the binding's `should_shutdown` flag so the next
-///    [`crate::scheduler::Drainable::run_cycle`] observes the
+///    [`crate::scheduler::DispatcherSlot::run_cycle`] observes the
 ///    signal and runs `unwire` + registry finalize.
 /// 2. Drops the [`MailboxSender`] so subsequent
 ///    sends warn-and-discard.

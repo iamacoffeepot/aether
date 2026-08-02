@@ -20,8 +20,7 @@ pub(super) const OCTIMETERS_PER_METER: f32 = 256.0;
 /// the border-skirt fallback for the one void case with no far rim within
 /// the fill-over march bound (a void that reaches the world border). A
 /// bounded void joint closes instead as a real groove: wall down to the void
-/// floor, floor across, wall back up (see [`super::voids::emit_void_floors`]).
-/// The skirt
+/// floor, floor across, wall back up (see [`emit_void_floors`]). The skirt
 /// reads as thick ground rather than a paper-thin lip.
 pub(super) const WALL_VOID_SKIRT_OCTIMETERS: i32 = 512;
 

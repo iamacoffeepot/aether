@@ -12,7 +12,7 @@
 //! out as interior edges; survivors form the boundary, walked into
 //! closed loops by [`extract_loops`]. One [`IndexedPolygon`] is emitted
 //! per loop (per ADR-0057). No triangulation here — CDT runs in
-//! [`crate::tessellate`] (pass 4) on the post-T-junction loops so
+//! [`super::tessellate`] (pass 4) on the post-T-junction loops so
 //! T-junction repair operates on n-gon edges.
 //!
 //! ## Why bucket-wide and not per-component

@@ -17,10 +17,10 @@ use std::time::Instant;
 
 /// Issue 552 stage 1: end-to-end smoke for the new
 /// [`Builder::with_actor`] boot path. Boots a hand-rolled
-/// `NativeActor` fixture, looks its mailbox up in the
-/// [`registry`], pushes one envelope at that mailbox, and
-/// asserts the dispatcher routed it to the right handler.
-/// Stage 1 lands the infrastructure; stage 2 migrates
+/// `NativeActor` fixture, looks it up via
+/// [`PassiveChassis::actor`], pushes one envelope at the cap's
+/// mailbox, and asserts the dispatcher routed it to the right
+/// handler. Stage 1 lands the infrastructure; stage 2 migrates
 /// real caps onto it. This test is the load-bearing acceptance
 /// gate.
 #[test]
@@ -118,7 +118,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
 }
 
 /// Issue 582: the chassis dispatcher trampoline stamps the
-/// per-actor [`ActorSlots`](aether_actor::local::ActorSlots) into TLS
+/// per-actor [`ActorSlots`] into TLS
 /// for the duration of `init` and each handler call. A cap that
 /// reaches for `Local::with_mut` from inside both lifecycle
 /// stages must see its own state — verified end-to-end here so

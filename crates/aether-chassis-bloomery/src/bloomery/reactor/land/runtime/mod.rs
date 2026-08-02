@@ -6,7 +6,7 @@
 //!
 //! 1. **Drain.** Each tick drains the store's `aether.bloomery.land` outbox topic
 //!    (its own connection, mirroring the executor reactor's store ownership) and
-//!    decodes each [`LandPayload`] — the resolving
+//!    decodes each [`LandPayload`](aether_bloomery::LandPayload) — the resolving
 //!    bloom, its sealed `expected_base`, and the `new_head` mainline advances to.
 //! 2. **Land.** It issues the [`SourceShell::land`] compare-and-swap against
 //!    `expected_base`. On [`LandOutcome::Landed`] it admits a [`Fact::Land`] back

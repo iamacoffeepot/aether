@@ -603,11 +603,12 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool) {
 /// Issue 576: native-side `#[fallback]` collected on a
 /// `#[actor] impl NativeActor for X` block. Mirrors the wasm-side
 /// [`FallbackFn`] but the native handler signature pivots on
-/// `aether_substrate::actor::native::envelope::Envelope` — it carries
-/// the kind id, kind name, origin, sender, and payload in one borrow so
-/// catch-all caps (broadcast, future hub-as-actor) can lift the whole
-/// envelope into a downstream call without rebuilding fields the
-/// trampoline already has.
+/// [`Envelope`] — it carries the kind id, kind name, origin, sender,
+/// and payload in one borrow so catch-all caps (broadcast, future
+/// hub-as-actor) can lift the whole envelope into a downstream call
+/// without rebuilding fields the trampoline already has.
+///
+/// [`Envelope`]: aether_substrate::actor::native::envelope::Envelope
 pub struct NativeFallbackFn {
     pub method: syn::ImplItemFn,
 }

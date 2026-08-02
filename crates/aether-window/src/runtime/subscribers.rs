@@ -1,15 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
 
-use aether_actor::{ReplyMode, handler_set};
+use aether_actor::ReplyMode;
 use aether_data::{KindId, MailboxId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::mail::MailboxEntry;
 
-use crate::{
-    SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow,
-    UnsubscribeWindowSelf, WindowId, WindowSelector,
-};
+use crate::{WindowId, WindowSelector};
 
 /// Selector-aware subscriptions for events originating at windows.
 ///
@@ -146,75 +143,6 @@ pub fn validate_subscriber_mailbox(ctx: &NativeCtx<'_>, mailbox: MailboxId) -> R
         Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
         Some(MailboxEntry::Dropped) => Err(format!("mailbox {mailbox:?} already dropped")),
         None => Err(format!("unknown mailbox id {mailbox:?}")),
-    }
-}
-
-/// The subscription mail surface every window manager carries (ADR-0169).
-///
-/// Who may subscribe, how a selector is stored, and which errors come back are
-/// properties of [`WindowSubscribers`] rather than of any one manager, so a
-/// concrete manager contributes only the accessor that reaches its table. Event
-/// *publication* stays with the manager: what counts as an event, and when, is
-/// exactly where desktop and synthetic differ.
-#[handler_set]
-pub trait WindowSubscriptions {
-    /// The manager's subscription table.
-    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
-
-    /// Subscribe an explicit mailbox to one kind for one selector.
-    #[handler::single]
-    fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
-        }
-        Self::subscribers(state).subscribe(ctx, mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
-    }
-
-    /// Subscribe the calling actor to one kind for one selector.
-    #[handler::single]
-    fn on_subscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: SubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match Self::subscribers(state).subscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    /// Drop an explicit mailbox's subscription to one kind for one selector.
-    #[handler::single]
-    fn on_unsubscribe(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindow,
-    ) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
-        }
-        Self::subscribers(state).unsubscribe(mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
-    }
-
-    /// Drop the calling actor's subscription to one kind for one selector.
-    #[handler::single]
-    fn on_unsubscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match Self::subscribers(state).unsubscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    /// Drop a mailbox from every window-event subscription it holds.
-    #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        Self::subscribers(state).unsubscribe_all(mail.mailbox);
     }
 }
 

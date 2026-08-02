@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use aether_actor::runtime;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_actor::{Manual, ReplyMode, handler_set};
+use aether_actor::{Manual, ReplyMode};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_data::{Kind, MailId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
@@ -120,66 +120,6 @@ pub(super) fn unwire(state: &mut WindowInstanceState) {
             }
             _ => {}
         }
-    }
-}
-
-/// The whole receive surface of a pooled window endpoint (ADR-0169).
-///
-/// A concrete endpoint — desktop or synthetic — differs from its sibling only
-/// in which manager it forwards to, and the manager is reached through
-/// [`WindowCapability`], the neutral alias. So the seven handlers are identical
-/// across the family down to the token, and an adopter contributes only its
-/// identity plus the one accessor below.
-#[cfg(any(feature = "desktop", feature = "synthetic"))]
-#[handler_set]
-pub trait WindowEndpoint {
-    /// The retained-request state these handlers forward through.
-    fn endpoint(state: &mut Self::State) -> &mut WindowInstanceState;
-
-    /// Ask the manager to close this window.
-    #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CloseWindow) {
-        forward(Self::endpoint(state), ctx, WindowCommand::Close);
-    }
-
-    /// Ask the manager to change this window's presentation mode.
-    #[handler::manual]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMode) {
-        forward(
-            Self::endpoint(state),
-            ctx,
-            WindowCommand::SetMode { mode: mail.mode, width: mail.width, height: mail.height },
-        );
-    }
-
-    /// Ask the manager to retitle this window.
-    #[handler::manual]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowTitle) {
-        forward(Self::endpoint(state), ctx, WindowCommand::SetTitle { title: mail.title });
-    }
-
-    /// Ask the manager to bring this window to the foreground.
-    #[handler::manual]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: FocusWindow) {
-        forward(Self::endpoint(state), ctx, WindowCommand::Focus);
-    }
-
-    /// Ask the manager to schedule this window for redraw.
-    #[handler::manual]
-    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: RequestWindowRedraw) {
-        forward(Self::endpoint(state), ctx, WindowCommand::RequestRedraw);
-    }
-
-    /// Answer the retained public request the manager just resolved.
-    #[handler::single]
-    fn on_command_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ApplyWindowCommandResult) {
-        complete(Self::endpoint(state), ctx, result);
-    }
-
-    /// Shut down: the manager is retiring this endpoint.
-    #[handler::single]
-    fn on_retire(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: RetireWindow) {
-        retire(Self::endpoint(state), ctx, mail);
     }
 }
 

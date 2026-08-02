@@ -283,7 +283,7 @@ pub struct BankAssembly {
 /// Completion context the bank-assembly dispatch carries so the
 /// `#[handler(task)]` arm can build the `Err` reply (`Ok` carries the
 /// assembled bank's own name / id / bytes). Mirrors
-/// [`super::TrackDecodeContext`] for the load path.
+/// [`TrackDecodeContext`] for the load path.
 pub struct BankAssemblyContext {
     pub namespace: String,
     pub path: String,

@@ -13,15 +13,17 @@ use crate::testing::boot_authority as auth;
 #[test]
 fn kind_ids_are_derived_from_name_and_schema() {
     let r = Registry::new();
-    // Tripwire: `register_kind` must reach the same canonical
-    // `(name, schema)` derivation the `#[derive(Kind)]` const path
-    // uses. Registering through the registry and pinning the result
-    // against `aether_data`'s own `kind_id_from_parts` is the only
-    // place the two producers are held against each other; they
-    // drifting apart would make a component's compile-time `Kind::ID`
-    // unroutable against its runtime-registered id.
-    let id = r.register_kind(&auth(), "aether.tick");
-    assert_eq!(id, KindId(kind_id_from_parts("aether.tick", &SchemaType::Bytes)));
+    let a = r.register_kind(&auth(), "aether.tick");
+    let b = r.register_kind(&auth(), "aether.key");
+    let c = r.register_kind(&auth(), "hello.npc_health");
+    // Ids are the fnv1a hash of canonical (name, schema) bytes —
+    // distinct names under the same default schema must produce
+    // distinct ids, and matching the expected const derivation
+    // pins the hash contract with the derive.
+    assert_ne!(a, b);
+    assert_ne!(b, c);
+    assert_ne!(a, c);
+    assert_eq!(a, KindId(kind_id_from_parts("aether.tick", &SchemaType::Bytes)));
 }
 
 #[test]
@@ -30,6 +32,9 @@ fn kind_registration_is_idempotent() {
     let first = r.register_kind(&auth(), "aether.tick");
     let second = r.register_kind(&auth(), "aether.tick");
     assert_eq!(first, second);
+    // Different name produces a different id — the id is a pure
+    // function of the input, not an allocation order.
+    assert_ne!(r.register_kind(&auth(), "aether.key"), first);
 }
 
 #[test]

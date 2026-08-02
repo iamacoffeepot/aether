@@ -12,13 +12,13 @@
 //! ([`ExecutorError`]) and local ([`LocalExecutorError`]) backend faults — not
 //! either backend's own error. Any backend whose error converts into
 //! `ExecutorPortError` mounts through [`ExecutorShell::new`], which wraps it in a
-//! small error-mapping adapter, so the [`RoutingExecutor`]
+//! small error-mapping adapter, so the [`RoutingExecutor`](super::RoutingExecutor)
 //! (which already speaks `ExecutorPortError`), a bare `ActionsExecutor`, and a
 //! bare `LocalExecutor` all mount the same way.
 //!
 //! The connection knobs — token, owner/name, API base — plus the executor-only
 //! knobs ride the same ADR-0090 derive-`Config`
-//! [`GithubMirrorConfig`] the mirror and source
+//! [`GithubMirrorConfig`](super::GithubMirrorConfig) the mirror and source
 //! shells use: one GitHub-connection config serves all three caps. When the
 //! local model lane is enabled (the default, ADR-0150), [`connect`](ExecutorShell::connect)
 //! mounts a `RoutingExecutor` fronting both backends; otherwise the bare Actions
@@ -140,7 +140,7 @@ impl ExecutorShell {
 
     /// Connect a live executor port from resolved config. When the local model
     /// lane is enabled (the ADR-0150 default), mounts a
-    /// [`RoutingExecutor`] fronting both the Actions
+    /// [`RoutingExecutor`](super::RoutingExecutor) fronting both the Actions
     /// (shared-runner verify lanes) and local (model lane) backends; otherwise
     /// the bare Actions backend dispatching the configured wrapper workflow at
     /// the protected pinned ref.

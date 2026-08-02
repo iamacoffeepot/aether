@@ -12,8 +12,7 @@ use super::surface::point_surface_level_at;
 /// smoothing-disabled params (zero iterations — the base render is crisp,
 /// no chamfer), and the frozen mask — a sample flanking a point-height
 /// break freezes so any future smoothing pass could never move the paint
-/// boundary across a physical cliff ([`super::contour::repartition`]'s
-/// barrier). `None`
+/// boundary across a physical cliff ([`repartition`]'s barrier). `None`
 /// when the whole area is Void — nothing to mesh.
 pub(super) fn partition_inputs(
     world: &World,

@@ -1,5 +1,5 @@
 //! Disk-budget eviction for [`ContentStore`], gated by its
-//! [`EvictionPolicy`].
+//! [`EvictionPolicy`](super::EvictionPolicy).
 
 use std::collections::HashSet;
 use std::fs;

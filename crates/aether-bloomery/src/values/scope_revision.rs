@@ -9,7 +9,7 @@
 //! pins the exact digest) and therefore attestable. The runner lane and the
 //! coordinator both resolve the effective model + effort the same way — each
 //! field of the override falls through to the stage's
-//! [`AgentProfile`] default when unset — so "the
+//! [`AgentProfile`](crate::values::AgentProfile) default when unset — so "the
 //! model that ran is the model the bloom promised" holds by construction.
 
 use alloc::string::String;
@@ -22,7 +22,7 @@ use crate::values::{AgentProfile, ReasoningEffort};
 /// A per-workpiece override of the construct lane's model + reasoning effort
 /// (ADR-0149 §The line, #3511) — the successor of today's free-text `model:*`
 /// label. Each field is optional: an unset field falls through to the stage
-/// [`AgentProfile`] default at
+/// [`AgentProfile`](crate::values::AgentProfile) default at
 /// [resolution](Self::resolve), so an empty override changes nothing and a set
 /// field pins exactly that value into the sealed bloom.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

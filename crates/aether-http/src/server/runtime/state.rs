@@ -127,7 +127,7 @@ pub struct HttpSupervisorState {
 /// tables, websocket state — over the 1/N slice of connections the
 /// supervisor assigned here. The dispatcher holds this as the shard actor's
 /// state; the addressing identity is the distinct ZST
-/// [`HttpDispatchShard`].
+/// [`HttpDispatchShard`](crate::server::shard::HttpDispatchShard).
 pub struct HttpShardState {
     /// The supervisor's shared route table (ADR-0130/0135); this shard only
     /// reads it, at request-dispatch time.

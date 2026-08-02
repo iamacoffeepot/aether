@@ -264,7 +264,7 @@ impl ActorRegistry {
     /// the spawn primitive after init succeeds.
     ///
     /// `subname` is the per-instance segment Phase 5
-    /// [`crate::chassis::builder::PassiveChassis::resolve_actors`] iterates over;
+    /// [`super::PassiveChassis::resolve_actors`] iterates over;
     /// callers that don't originate from the spawn path (today: none;
     /// tests use empty strings) pass `""` and accept they won't show
     /// up in the `resolve_actors` iterator.
@@ -327,8 +327,8 @@ impl ActorRegistry {
 
     /// Issue 607 Phase 5 (ADR-0079): walk every `Live` slot whose
     /// `TypeId` matches `T` and hand the caller `(subname, MailboxId)`.
-    /// Used by [`crate::chassis::builder::PassiveChassis::resolve_actors`] /
-    /// [`crate::chassis::builder::BuiltChassis::resolve_actors`] for chassis-level
+    /// Used by [`super::PassiveChassis::resolve_actors`] /
+    /// [`super::BuiltChassis::resolve_actors`] for chassis-level
     /// enumeration of instanced actors.
     ///
     /// **Crate-private on purpose.** Cap handlers should not introspect
@@ -477,9 +477,8 @@ impl ActorRegistry {
     /// Issue 607 Phase 4b (ADR-0079): undo a prior `register_monitor`
     /// call. Idempotent — removing a monitor that was already pruned
     /// (e.g. because the target closed and the close path drained the
-    /// forward index) is a no-op. Called by
-    /// [`crate::actor::monitor::MonitorHandle`]'s `Drop` when the handle
-    /// goes out of scope.
+    /// forward index) is a no-op. Called by [`crate::actor::monitor::MonitorHandle::Drop`]
+    /// when the handle goes out of scope.
     pub(crate) fn deregister_monitor(&self, watcher: MailboxId, target: MailboxId) {
         if let Some(entries) =
             self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063").get_mut(&target)

@@ -180,7 +180,7 @@ pub struct Spawner {
     /// observe the flag.
     instanced_slots: Mutex<HashMap<MailboxId, InstancedSlotEntry>>,
     /// Issue 1990: the per-actor ring capacities resolved at chassis
-    /// boot. Every actor spawned through [`Self::build`] seeds its
+    /// boot. Every actor spawned through [`Self::spawn_actor`] seeds its
     /// `ActorLogRing` / `ActorTraceRing` at these caps right after
     /// `ActorSlots::new()`, so the chassis-wide knob reaches instanced
     /// actors (and the wasm trampolines that spawn through this same
@@ -318,7 +318,7 @@ impl Spawner {
     /// completion channel until every slot has finished or `timeout`
     /// elapses.
     ///
-    /// Called from the chassis builder's `BootedPassives::shutdown_in_place`
+    /// Called from [`crate::chassis::builder::BootedPassives::shutdown_in_place`]
     /// before the singleton shutdowns walk. The ordering matters:
     /// spawned actors close *first* so their `MonitorNotice` mail
     /// reaches singleton watchers while they're still alive. The

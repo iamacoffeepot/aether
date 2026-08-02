@@ -5,7 +5,7 @@
 //! draft membership is resolved against the tier policy (Pass 1), and a draft
 //! whose members all resolve `auto` seals synchronously. Any above-`auto` member
 //! turns the route into an N-way deferral (Pass 2) — one `aether.signing`
-//! `Verify` per member, a held [`PendingSeal`] that
+//! `Verify` per member, a held [`PendingSeal`](super::state::PendingSeal) that
 //! admits only once every signature verifies, and a fail-closed teardown the
 //! moment one does not.
 
@@ -38,7 +38,7 @@ impl ApiCapabilityState {
     /// library).
     ///
     /// For each draft proposal the operator supplies a
-    /// [`MemberProjection`] in the `SealRequest`,
+    /// [`MemberProjection`](crate::api::MemberProjection) in the `SealRequest`,
     /// matched by `{workpiece, scope_revision}`. The host builds a
     /// [`Gate::AdmissionRequest`](crate::bloomery::AdmissionRequest) from it and
     /// runs [`Gate::evaluate`], replacing the proposal's operator-set `approval`

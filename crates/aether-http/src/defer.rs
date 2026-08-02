@@ -11,10 +11,9 @@
 //!
 //! Peers are addressed by their marker type, so the `send_with_context`
 //! `HandlesKind<K>` gate compile-checks the request against the peer:
-//! [`Ctx::peer`] names the singleton and [`Peer::defer`] forwards to it. One
-//! entry point serves both a native root singleton and an embedded/wasm
-//! component, because `peer` resolves against the component host's carry — the
-//! carry an embedded id folds in and the caller's own cannot supply. Native,
+//! [`Ctx::defer`] for a native singleton peer, [`Ctx::defer_at`] for a peer
+//! reached by a resolved [`MailboxId`] (an embedded/wasm component, whose id
+//! folds the host's carry and so can't be derived from the caller). Native,
 //! because the reply obligation and `reply_to` are native; behind the
 //! `runtime` feature.
 //!

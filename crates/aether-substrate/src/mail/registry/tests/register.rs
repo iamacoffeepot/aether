@@ -15,6 +15,7 @@ use super::support::{InventorySubscriber, inventory_subscription_fixture};
 fn register_and_lookup_closure_mailbox() {
     let r = Registry::new();
     let id = r.register_inbox(&auth(), "physics", noop_handler());
+    assert_eq!(id, MailboxId::from_name("physics"));
     assert_eq!(r.lookup("physics"), Some(id));
     assert!(matches!(r.entry(id), Some(MailboxEntry::Inbox { .. })));
 }
@@ -103,6 +104,22 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
         "the installed handle survives both alternating buffers being reused"
     );
     let _ = slot_dyn;
+}
+
+#[test]
+fn mailbox_ids_are_name_derived() {
+    let r = Registry::new();
+    let a = r.register_inbox(&auth(), "a", noop_handler());
+    let b = r.register_inbox(&auth(), "b", noop_handler());
+    let c = r.register_inbox(&auth(), "c", noop_handler());
+    assert_eq!(a, MailboxId::from_name("a"));
+    assert_eq!(b, MailboxId::from_name("b"));
+    assert_eq!(c, MailboxId::from_name("c"));
+    // All three distinct names produce distinct ids.
+    assert_ne!(a, b);
+    assert_ne!(b, c);
+    assert_ne!(a, c);
+    assert_eq!(r.len(), 3);
 }
 
 #[test]

@@ -11,8 +11,7 @@
 //! # Reuse #3502's accept-gate, but match without consuming
 //!
 //! Admission reuses #3502's broker predicate: a study upload is admitted only
-//! when its idempotency nonce names a live
-//! [`OutstandingOrder`](crate::store::OutstandingOrder) **and** its
+//! when its idempotency nonce names a live [`OutstandingOrder`] **and** its
 //! bound digest equals the digest that order displayed. A fabricated or
 //! wrong-digest upload is refused and the store is untouched — the value
 //! vocabulary's "no evidence grades a digest it does not name" invariant,

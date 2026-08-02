@@ -3,7 +3,7 @@
 //!
 //! Every native actor — singleton chassis cap or instanced spawn —
 //! drains cooperatively on the chassis worker pool via
-//! [`crate::scheduler::Drainable::run_cycle`].
+//! [`super::dispatcher::DispatcherSlot::run_cycle`].
 //! That loop owns the lifecycle (recv → per-envelope `local::with_stamped`
 //! dispatch → drain-on-shutdown → `unwire` → registry close + monitor
 //! fan-out); this module holds the per-envelope helpers it calls:

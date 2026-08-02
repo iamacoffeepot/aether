@@ -22,8 +22,7 @@
 //! ## Capture bridge notes (ADR-0161):
 //! - **Settlement bridge.** [`on_capture_frame`](RenderCapability::on_capture_frame)
 //!   bridges each pre-mail settlement to a [`PreSettled`] mail through
-//!   [`aether_substrate::chassis::settlement::SettlementRegistry::subscribe_settlement_mail`],
-//!   which pushes a
+//!   [`SettlementRegistry::subscribe_settlement_mail`], which pushes a
 //!   settlement-notice mail from whatever thread the settlement fires on. A
 //!   render handler must never block on a pre-mail settlement (the ADR
 //!   deadlock: pre-chains terminate back at this mailbox), so the bridge only
