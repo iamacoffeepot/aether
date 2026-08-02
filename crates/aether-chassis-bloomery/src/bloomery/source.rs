@@ -9,7 +9,7 @@
 //!
 //! The connection knobs — token, owner/name, API base, and the CAS-land enable
 //! flag — ride the same ADR-0090 derive-`Config`
-//! [`GithubMirrorConfig`](super::GithubMirrorConfig) the mirror shell uses:
+//! [`GithubMirrorConfig`] the mirror shell uses:
 //! that config already carries `cas_land_enabled` for exactly this port, so one
 //! GitHub-connection config serves both caps rather than duplicating the knobs.
 //!

@@ -117,13 +117,18 @@ jobs:
       # set to hard failures here without poisoning local `cargo doc`
       # runs. Phase 5c (iamacoffeepot/aether#913) swept the broken /
       # private intra-doc-link backlog so all three can deny now.
+      # `--document-private-items` extends link resolution to private
+      # items (iamacoffeepot/aether#4308), so a refactor that moves a
+      # private item across a module boundary breaks the build instead
+      # of silently dangling. `#[cfg(test)]` modules stay undocumented
+      # and therefore stay unchecked even under the flag.
       - name: cargo doc with tracked rustdoc lints denied
         env:
           RUSTDOCFLAGS: >-
             -D rustdoc::redundant_explicit_links
             -D rustdoc::broken_intra_doc_links
             -D rustdoc::private_intra_doc_links
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --document-private-items
 
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,

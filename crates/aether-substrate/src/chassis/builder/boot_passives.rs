@@ -19,15 +19,17 @@ pub(super) struct BootedPassives {
     pub(super) shutdowns: Vec<Box<dyn DynShutdown>>,
     pub(super) fallback: Option<FallbackRouter>,
     /// Issue 629 / Phase A: cap-published handle bundles. Populated
-    /// during each cap's `init` via [`NativeInitCtx::publish_handle`].
-    /// Borrowed (read-only) into [`DriverCtx::handle`] so drivers
+    /// during each cap's `init` via
+    /// [`NativeInitCtx::publish_handle`](crate::actor::native::NativeInitCtx::publish_handle).
+    /// Borrowed (read-only) into [`super::DriverCtx::handle`] so drivers
     /// retrieve a clone of the published bundle. Replaces the pre-629
     /// type-keyed actor map; the actor itself never escapes its
     /// dispatcher thread.
     pub(super) handles: ExportedHandles,
     /// Cloned into every `ChassisCtx` and onto every booted
-    /// [`NativeBinding`] so a wasm-guest trap can fatal-abort the
-    /// substrate cleanly. The [`Builder`]'s configured aborter wrapped in
+    /// [`NativeBinding`](crate::actor::native::NativeBinding) so a wasm-guest
+    /// trap can fatal-abort the
+    /// substrate cleanly. The [`Builder`](super::Builder)'s configured aborter wrapped in
     /// a [`RecordingAborter`], so every abort this chassis takes leaves
     /// its reason in [`Self::abort_record`] on the way through.
     pub(super) aborter: Arc<dyn FatalAborter>,
@@ -83,7 +85,7 @@ pub(super) struct BootedPassives {
     settlement_registry: Arc<SettlementRegistry>,
     /// Issue #2509: cumulative patience the instanced-actor teardown
     /// close-done gate waits before declaring a slot wedged. Threaded from
-    /// [`Builder::with_teardown_budget`] and handed to
+    /// [`super::Builder::with_teardown_budget`] and handed to
     /// `Spawner::shutdown_instanced` in `Self::shutdown_in_place`.
     teardown_budget: Duration,
 }

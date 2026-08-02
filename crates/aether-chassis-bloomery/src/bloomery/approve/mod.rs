@@ -38,7 +38,10 @@
 //! populate the approval ([`approval_from_statement`]) — the tier policy (*what*
 //! tier) and the signing key policy (*who* may sign) stay distinct readers.
 //!
+//! [`Evidence`]: aether_bloomery::Evidence
+//! [`EvidenceKind::Approval`]: aether_bloomery::EvidenceKind::Approval
 //! [`Fact::Seal`]: aether_bloomery::Fact::Seal
+//! [`Statement`]: aether_bloomery::Statement
 
 mod gate;
 mod policy;

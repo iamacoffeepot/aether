@@ -805,7 +805,7 @@ type HandlerMarker = (Type, Option<Type>);
 /// carried by two different artifacts (iamacoffeepot/aether#4121):
 ///
 /// - **Placement permission** — "this identity may exist with no actor parent"
-///   — is the [`Root`](::aether_actor::Root) impl, read as a bound by the
+///   — is the `aether_actor::Root` impl, read as a bound by the
 ///   chassis spawn surfaces. It is emitted for every `root` declaration.
 /// - **Anchoring** — "this namespace can anchor an abbreviated
 ///   `namespace://relative` address" — is the `RootEntry` inventory record,

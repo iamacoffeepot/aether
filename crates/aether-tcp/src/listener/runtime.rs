@@ -1,7 +1,7 @@
 //! The `aether.tcp.listener` runtime half (ADR-0122 identity/runtime split).
 //! Compiled only under `feature = "runtime"` (the `mod runtime;` declaration
 //! in the parent carries the gate), so a transport-only build of the
-//! [`TcpListenerActor`](super::TcpListenerActor) identity never names these
+//! [`TcpListenerActor`] identity never names these
 //! types nor pulls `aether_substrate`. The substrate / `std::net`-typed
 //! imports are gated once by this module rather than line-by-line; the
 //! `#[actor] impl` reaches the state, ctx types, and config / session types
@@ -32,10 +32,10 @@ use super::TcpListenerActor;
 /// `aether.tcp.listener` runtime state (issue 607 Phase 6b, ADR-0079). The
 /// accept thread can't call `ctx.spawn_child` (no dispatcher ctx), so it
 /// pushes accepted streams over `connection_rx` and fires a
-/// [`ConnectionReady`](super::ConnectionReady) wake mail. The dispatcher's
+/// [`ConnectionReady`] wake mail. The dispatcher's
 /// `on_connection_ready` handler drains the mpsc and spawns one
 /// `TcpSessionActor` per pending stream. The addressing identity is the
-/// distinct ZST [`TcpListenerActor`](super::TcpListenerActor).
+/// distinct ZST [`TcpListenerActor`].
 pub struct TcpListenerState {
     pub local_port: u16,
     pub consumer: Option<aether_data::MailboxId>,

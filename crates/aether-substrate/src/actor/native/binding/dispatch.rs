@@ -12,7 +12,7 @@ use aether_data::Kind;
 
 /// ADR-0093 hold-until-resolve dispatch: the `&self`-interior-mutability
 /// bridge between [`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)'s dispatch primitive and the
-/// per-actor [`super::offload::blocking::InflightTable`]. Each method
+/// per-actor `InflightTable` (crate-internal). Each method
 /// takes the table lock for one operation — mint+insert at dispatch,
 /// fill-output from the worker, take at completion — matching the
 /// `outbound` / `blob_producer` locking pattern (uncontended, single

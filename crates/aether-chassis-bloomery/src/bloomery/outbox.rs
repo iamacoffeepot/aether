@@ -3,7 +3,7 @@
 //! [`StoreBackend`]'s outbox methods take `&str` because the store's mail
 //! surface is open — any caller-defined topic enqueues, drains, and acks by
 //! name. The reactors that consume the *reducer's* topics scope through this
-//! extension instead: the [`Topic`](aether_bloomery::Topic)-to-string
+//! extension instead: the [`Topic`]-to-string
 //! conversion happens here, once, so a reactor call site cannot scope by an
 //! arbitrary string — the hole the `Topic` type exists to close.
 

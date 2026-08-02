@@ -1,7 +1,7 @@
 //! The `aether.tcp` cap runtime half (ADR-0122 identity/runtime split).
 //! Compiled only under `feature = "runtime"` (the `mod runtime;` declaration
 //! in the parent carries the gate), so a transport-only build of the
-//! [`TcpCapability`](super::TcpCapability) identity never names these types
+//! [`TcpCapability`] identity never names these types
 //! nor pulls `aether_substrate`. The substrate / `std::net`-typed imports are
 //! gated once by this module rather than line-by-line; the `#[actor] impl`
 //! reaches the state, ctx types, and supervisor structs through the single
@@ -47,7 +47,7 @@ use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor,
 /// monitor on the new listener and inserts a [`ListenerEntry`] into
 /// `listeners`; `on_monitor_notice` removes the entry on listener close.
 /// The addressing identity is the distinct ZST
-/// [`TcpCapability`](super::TcpCapability). Living in this private module keeps
+/// [`TcpCapability`]. Living in this private module keeps
 /// it `pub`-enough to satisfy the `NativeActor::State` interface without
 /// exposing it as crate-public API.
 ///
