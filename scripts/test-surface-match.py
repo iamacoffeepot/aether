@@ -138,12 +138,12 @@ class MatcherTests(unittest.TestCase):
         # real policy file would silently stop every auto dispatch — this is the
         # one place that failure is loud. The guarded paths pin the
         # constitutional carve-outs against an accidental policy edit.
-        policy = surface_match.load_policy(str(SCRIPT.parent.parent / ".github" / "approval-policy.yml"))
+        policy = surface_match.load_policy(str(SCRIPT.parent.parent / "approval-policy.yml"))
         self.assertIsNotNone(policy)
         for guarded in [
-            "scripts/surface-match.py",
-            "scripts/test-surface-match.py",
-            ".github/approval-policy.yml",
+            "approval-policy.yml",
+            "AGENTS.md",
+            "CLAUDE.md",
             ".github/workflows/ci.yml",
             ".agents/skills/approve/scripts/resolve_approval_tier.py",
             ".claude/hooks/check-no-divider-comments.sh",

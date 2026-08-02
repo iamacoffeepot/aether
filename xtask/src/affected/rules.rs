@@ -24,17 +24,17 @@ const RUN_ALL_PREFIXES: &[&str] = &[".cargo/", ".config/", "xtask/"];
 /// test outcome: prose, agent/pipeline state, non-`ci.yml` workflows
 /// (`ci.yml` itself is screened to `run_all` before rules run), and the
 /// `fuzz/` tree, which is its own cargo workspace built only by
-/// fuzz-nightly. `bloomery/**` is the opposite case — a cross-boundary
-/// test input: the `aether-chassis-bloomery` approve tests read
-/// `bloomery/approval-policy.yml` from the repo root, so a change there
-/// marks that package (and its reverse closure) changed.
+/// fuzz-nightly. `approval-policy.yml` is the opposite case — a
+/// cross-boundary test input: the `aether-chassis-bloomery` approve tests
+/// read it from the repo root, so a change there marks that package (and
+/// its reverse closure) changed.
 pub(super) const PATH_RULES_TOML: &str = r#"
 [[path-rule]]
 globs = ["docs/**", "scripts/**", ".claude/**", ".agents/**", ".codex/**", ".github/**", "fuzz/**", ".jscpd.json", ".mcp.json", "CLAUDE.md", "AGENTS.md"]
 mark-changed = []
 
 [[path-rule]]
-globs = ["bloomery/**"]
+globs = ["approval-policy.yml"]
 mark-changed = ["aether-chassis-bloomery"]
 "#;
 

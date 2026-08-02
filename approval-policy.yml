@@ -5,11 +5,11 @@
 # an approval tier over a workpiece's declared surface (the `## Declared surface`
 # glob block the scope revision carries). ADR-0149 / ADR-0151.
 #
-# This is the Bloomery-owned successor to `.github/approval-policy.yml`: the host
-# gate (`crates/aether-chassis-bloomery/src/bloomery/approve.rs`) reimplements the
-# `--tier` resolution over these rules in Rust (the `scripts/surface-match.py`
-# resolver is ported into the gate), so the semantics below are the contract the
-# gate honours, not a script's.
+# The policy is Bloomery-owned: the host gate
+# (`crates/aether-chassis-bloomery/src/bloomery/approve/`) carries the `--tier`
+# resolution over these rules in Rust, matching the `scripts/surface-match.py`
+# resolver, so the semantics below are the contract the gate honours, not a
+# script's.
 #
 # Resolution is most-restrictive-match-wins (human > judge > auto): a path's
 # tier is the most restrictive rule that matches it, and a path matched by no
@@ -32,8 +32,8 @@
 # malformed policy is a gate FAILURE (never a silent `auto`).
 #
 # Relaxing a tier is a one-line, owner-signed diff to this file, so the file's
-# git history is the delegation ladder's audit trail. `bloomery/approval-policy.yml`
-# is itself a `human`-tier glob below, so a relaxation can never auto-approve its
+# git history is the delegation ladder's audit trail. `approval-policy.yml` is
+# itself a `human`-tier glob below, so a relaxation can never auto-approve its
 # own relaxation.
 #
 # The ADR hard gate lives ABOVE this file, in the host gate's Rust (maturity-aware,
@@ -96,11 +96,9 @@ rules:
     tier: human
   - glob: ".github/workflows/**"
     tier: human
-  - glob: ".github/approval-policy.yml"
-    tier: human
-  # This policy file is its own successor's home; relaxing a tier here is an
-  # owner-signed one-line diff, so it self-lists as human.
-  - glob: "bloomery/approval-policy.yml"
+  # Relaxing a tier here is an owner-signed one-line diff, so this policy file
+  # self-lists as human.
+  - glob: "/approval-policy.yml"
     tier: human
 
   # Submitted-and-expected-to-come-back-right. These advance on their own.
@@ -126,8 +124,41 @@ rules:
   # The engine's substantive middle. These take the `judge` default anyway; they
   # are spelled out because this is where a new capability or a chassis change
   # lands, and a reader should not have to infer the tier of the busiest tree in
-  # the repo.
-  - glob: "crates/aether-capabilities/**"
+  # the repo. Every native capability owns its own `aether-<cap>` crate, so the
+  # list below names them one by one; a capability crate added later and not yet
+  # listed is never unpoliced by the omission — it takes the same `judge` default
+  # these entries restate.
+  - glob: "crates/aether-audio/**"
+    tier: judge
+  - glob: "crates/aether-clipboard/**"
+    tier: judge
+  - glob: "crates/aether-component/**"
+    tier: judge
+  - glob: "crates/aether-fleet/**"
+    tier: judge
+  - glob: "crates/aether-fs/**"
+    tier: judge
+  - glob: "crates/aether-game/**"
+    tier: judge
+  - glob: "crates/aether-http/**"
+    tier: judge
+  - glob: "crates/aether-inventory/**"
+    tier: judge
+  - glob: "crates/aether-lifecycle/**"
+    tier: judge
+  - glob: "crates/aether-process/**"
+    tier: judge
+  - glob: "crates/aether-render/**"
+    tier: judge
+  - glob: "crates/aether-rpc/**"
+    tier: judge
+  - glob: "crates/aether-tcp/**"
+    tier: judge
+  - glob: "crates/aether-text/**"
+    tier: judge
+  - glob: "crates/aether-trace/**"
+    tier: judge
+  - glob: "crates/aether-window/**"
     tier: judge
   - glob: "crates/aether-chassis-desktop/**"
     tier: judge

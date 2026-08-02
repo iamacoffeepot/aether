@@ -138,7 +138,7 @@ artifacts and is the explicit Plan-to-Ready gate; it does not repair incomplete
 scope.
 
 For non-ADR work, `approve` resolves the declared paths against
-`.github/approval-policy.yml` with most-restrictive-wins semantics over every
+`approval-policy.yml` with most-restrictive-wins semantics over every
 path the declaration permits. A crate-wide subtree therefore includes its
 manifest tier even when the planned edit names only source today. `auto` work
 may advance without a new owner decision. `judge` work receives an independent

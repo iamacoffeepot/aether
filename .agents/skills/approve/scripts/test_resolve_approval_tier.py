@@ -32,7 +32,7 @@ rules:
     tier: auto
   - glob: "crates/aether-kit/**"
     tier: auto
-  - glob: "crates/aether-capabilities/**"
+  - glob: "crates/aether-render/**"
     tier: judge
 """
 
@@ -50,10 +50,10 @@ class ResolverFixture:
 
         files = {
             ".agents/skills/approve/SKILL.md": "approve\n",
-            "bloomery/approval-policy.yml": policy,
+            "approval-policy.yml": policy,
             "Cargo.toml": "[workspace]\n",
             "Cargo.lock": "# lock\n",
-            "crates/aether-capabilities/src/lib.rs": "cap\n",
+            "crates/aether-render/src/lib.rs": "cap\n",
             "crates/aether-data/src/lib.rs": "data\n",
             "crates/aether-kit/Cargo.toml": "[package]\n",
             "crates/aether-kit/src/lib.rs": "kit\n",
@@ -136,7 +136,7 @@ class ResolverTests(unittest.TestCase):
     def test_auto_judge_human_and_default(self) -> None:
         cases = [
             (["docs/guide/**"], ["docs/guide/page.md"], "auto"),
-            (["crates/aether-capabilities/src/**"], ["crates/aether-capabilities/src/lib.rs"], "judge"),
+            (["crates/aether-render/src/**"], ["crates/aether-render/src/lib.rs"], "judge"),
             ([".agents/skills/approve/SKILL.md"], [".agents/skills/approve/SKILL.md"], "human"),
             (["unclassified.txt"], ["unclassified.txt"], "judge"),
         ]

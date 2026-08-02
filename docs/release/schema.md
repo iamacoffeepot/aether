@@ -39,7 +39,7 @@ The ADR link lives in the issue's `## Design notes` section; per-issue auth budg
 
 At Plan, `/scope` emits a fenced `## Declared surface` glob list. `/approve`
 validates that it covers the planned targets and resolves the most restrictive
-`auto|judge|human` tier from `.github/approval-policy.yml` over every path
+`auto|judge|human` tier from `approval-policy.yml` over every path
 each declaration can permit, including higher-tier files inside a declared
 subtree. An explicit `ADR flag:` or declared ADR edit makes the issue
 ADR-bearing; the maturity-aware ADR hard gate (ADR-0146 §6) human-routes a new

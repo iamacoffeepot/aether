@@ -152,7 +152,7 @@ fn well_formed_policy_with_single_star_and_default_parses() {
 
 /// The repository's real seeded policy artifact.
 fn seeded_policy_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bloomery/approval-policy.yml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../approval-policy.yml")
 }
 
 #[test]
@@ -163,8 +163,7 @@ fn the_seeded_repository_policy_parses_and_guards_itself() {
     // policy file's own self-listing) against an accidental edit.
     let policy = ApprovalPolicy::load(&seeded_policy_path()).expect("seeded policy parses");
     for guarded in [
-        "bloomery/approval-policy.yml",
-        ".github/approval-policy.yml",
+        "approval-policy.yml",
         ".github/workflows/ci.yml",
         "CLAUDE.md",
         "AGENTS.md",
