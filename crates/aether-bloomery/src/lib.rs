@@ -1,19 +1,24 @@
 //! aether-bloomery: the canonical value vocabulary and pure control core
 //! of Bloomery (ADR-0149).
 //!
-//! This is the second slice of ADR-0149 — an rlib now, the cdylib actors
-//! later — and it provides the two things the whole control plane rests
-//! on: a canonical, immutable value vocabulary that everything durable is
+//! A pure rlib providing the two things the whole control plane rests on: a
+//! canonical, immutable value vocabulary that everything durable is
 //! expressed in, and the one pure function that owns every state
 //! transition.
 //!
-//! # Wasm-safe by construction
+//! # A `std` crate with an `alloc`-only vocabulary
 //!
-//! The crate is `#![no_std]` + `alloc`, matching `aether-data`'s dual-target
-//! shape, so the later cdylib-actors slice compiles the same types to wasm
-//! and the native host ([#3458]) links them without a fork. Native `std`
-//! appears only under `#[cfg(test)]` — the integration tests in `tests/`
-//! are ordinary std crates.
+//! The crate compiles as `std`. Nothing here requires `#![no_std]`: the
+//! control core is a native capability rather than a wasm component
+//! (ADR-0149 §The boundary), so this crate emits no wasm and carries no
+//! guest-SDK dependency, and the native host ([#3458]) and the GitHub
+//! adapter link it directly.
+//!
+//! The vocabulary is nonetheless written against `alloc` paths — `alloc::vec`
+//! and friends, never their `std` re-exports — so the types stay portable to
+//! a `no_std` consumer without a fork. That is what the `extern crate alloc`
+//! below buys; `std` beyond it appears only under `#[cfg(test)]`, since the
+//! integration tests in `tests/` are ordinary std crates.
 //!
 //! # The shape
 //!
@@ -44,12 +49,9 @@
 //!
 //! [#3458]: https://github.com/iamacoffeepot/aether/issues/3458
 
-// `std`, not `#![no_std]` (issue #3497): the crate emits a `cdylib` control-core
-// wasm component (ADR-0149 §Packaging, the `aether-kit-commons` precedent), and a
-// `cdylib` target must build for the native host — where a `#![no_std]` crate has
-// no global allocator. `std` compiles to `wasm32` like every component here, and
-// no consumer requires `no_std`. The pure core still leans on `alloc` paths, so
-// the crate is kept `alloc`-explicit for a clean wasm-safe surface.
+// Declared even though the crate is `std`, so the vocabulary's imports name
+// `alloc` directly and a `std`-only type cannot reach the value types unnoticed.
+// See the crate docs above for why the crate is `std` at all (issue #3497).
 extern crate alloc;
 
 pub mod control;
