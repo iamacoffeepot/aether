@@ -142,7 +142,7 @@ const WISH_MD_SHAPE =
   'parent: ../wish.md            # omit if this node is a root\n' +
   'producible: true | false      # true means this wish IS a plan\n' +
   'grounded_surfaces:             # re-greppable `identifier` — crates/aether-*/src/path citations\n' +
-  '  - "`aether.fs.read` — crates/aether-capabilities/src/fs/kinds.rs"\n' +
+  '  - "`aether.fs.read` — crates/aether-fs/src/kinds.rs"\n' +
   '---\n\n' +
   '<prose body, no headers: the wish + the adversity that grounds it + the goal it serves;\n' +
   ' the shape that would satisfy it at THIS level of depth (coarse near the root, fine near leaves);\n' +

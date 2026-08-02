@@ -4,9 +4,9 @@
 # every component that links against this surface. Most new substrate
 # capabilities should land as a native capability instead — see
 # `docs/guide/capability-anatomy.md` (the normative shape, ADR-0121 /
-# ADR-0122) and `crates/aether-capabilities/src/fs/` for the precedent:
-# the capability owns the resource, its paired request/result kinds live
-# in the capability's own `kinds.rs`, and a guest addresses it by type
+# ADR-0122) and `crates/aether-fs/src/` for the precedent: the
+# capability owns the resource, its paired request/result kinds live in
+# the capability's own `kinds.rs`, and a guest addresses it by type
 # through `ctx.actor::<FsCapability>()`.
 #
 # This hook fires on Edit/Write to `host_fns.rs` and rejects diffs
@@ -40,9 +40,9 @@ emit_message() {
         printf '\n'
         printf 'Adding a host fn is a deliberate capability decision (ADR-0002).\n'
         printf 'Most new substrate capabilities should land as a native capability.\n'
-        printf 'See docs/guide/capability-anatomy.md and crates/aether-capabilities/\n'
-        printf 'src/fs/ for the precedent: the capability owns the resource, its\n'
-        printf 'paired request/result kinds live in its own kinds.rs, and a guest\n'
+        printf 'See docs/guide/capability-anatomy.md and crates/aether-fs/src/ for\n'
+        printf 'the precedent: the capability owns the resource, its paired\n'
+        printf 'request/result kinds live in its own kinds.rs, and a guest\n'
         printf 'addresses it by type through ctx.actor::<FsCapability>().\n'
         printf '\n'
         printf 'If a host fn is genuinely the right tool, override by including\n'

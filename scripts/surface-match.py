@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The declared-surface matcher — the one place gitwildmatch semantics are decided.
 
-An issue's `## Declared surface` is a block of globs; `.github/approval-policy.yml`
+An issue's `## Declared surface` is a block of globs; `approval-policy.yml`
 maps globs to approval tiers. Three consumers need to evaluate those globs with
 identical semantics, and a second copy of the matcher would drift from the first:
 

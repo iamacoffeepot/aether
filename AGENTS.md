@@ -73,7 +73,7 @@ in the active Codex surface with `/mcp`.
 - Avoid section-divider banner comments in source.
 - Chain calls when a value flows through them (no single-use `let` intermediates, no mut local driven one call at a time); separate logical units of code with blank lines; leave line width to `cargo fmt` (`max_width = 120`).
 - In load-bearing code, prefer iterative algorithms over recursion unless depth is structurally bounded or capped.
-- In `aether-capabilities/src`, visibility is either `pub` or private; avoid scoped forms such as `pub(crate)`.
+- In a capability crate (`aether-<cap>`, one per capability mailbox), visibility is either `pub` or private; avoid scoped forms such as `pub(crate)`.
 - Spell units out in identifiers (`millis`, `nanos`, `micros`, `bytes`) and do not encode Rust primitive types in names.
 
 ## Review Posture
