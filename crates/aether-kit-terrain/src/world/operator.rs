@@ -1,5 +1,5 @@
 //! Bounded terrain-operator execution shared by live commits and proposal
-//! staging. The core mutates only the supplied [`World`], reports exact
+//! staging. The core mutates only the supplied [`super::World`], reports exact
 //! accounting, and contains no actor-mail or render-cache policy.
 
 // Brush interpolation stays between already-validated i32 endpoints, and the

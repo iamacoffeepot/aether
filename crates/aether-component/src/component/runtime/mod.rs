@@ -393,7 +393,8 @@ impl NativeActor for ComponentHostCapability {
     /// Introspect one loaded component's ADR-0033 receive-side
     /// `ComponentCapabilities` by lineage `name` (iamacoffeepot/aether#2421).
     /// Resolves `name` to its mailbox id through the routing registry, then
-    /// reads the full caps the [`CapabilityRegistry`] retains for that
+    /// reads the full caps the [`aether_substrate::mail::CapabilityRegistry`]
+    /// retains for that
     /// mailbox.
     ///
     /// # Agent

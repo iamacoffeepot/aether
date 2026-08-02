@@ -36,12 +36,12 @@
 //!
 //! ## In-place demux seed (iamacoffeepot/aether#1135)
 //!
-//! [`Self::seize_and_run`] is the demux-direct counterpart to
-//! [`Self::run_cycle`]: a [`crate::actor::native::blob::work::BlobWork`]
+//! [`Drainable::seize_and_run`] is the demux-direct counterpart to
+//! [`Drainable::run_cycle`]: a [`crate::actor::native::blob::work::BlobWork`]
 //! that has **seized** this slot (`Idle → Running`) hands it one
 //! envelope to dispatch in place — skipping the inbox deposit +
 //! `try_recv` repop the deposit-then-wake path paid. Both methods share
-//! the same drain tail ([`Self::drain_after_seed`]).
+//! the same drain tail ([`DispatcherSlot::drain_after_seed`]).
 
 use std::any::Any;
 use std::sync::{Arc, Mutex};

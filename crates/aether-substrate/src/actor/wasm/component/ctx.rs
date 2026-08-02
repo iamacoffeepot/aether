@@ -87,10 +87,10 @@ pub struct ComponentCtx {
     /// Current inbound reply correlation exposed through
     /// `reply_correlation_p32`. Set only for reply envelopes
     /// (`SourceAddr::None` plus a non-zero correlation) during
-    /// [`Component::deliver`], then cleared after the guest returns.
+    /// [`super::Component::deliver`], then cleared after the guest returns.
     reply_correlation: Cell<u64>,
     /// ADR-0080 §5 in-flight inbound `MailId`. Set by
-    /// [`Component::deliver`] before invoking the guest's
+    /// [`super::Component::deliver`] before invoking the guest's
     /// `receive_p32` shim so any [`ComponentCtx::send`] the guest
     /// triggers stamps `parent_mail = Some(in_flight_mail_id)` and
     /// `inherited_root = Some(in_flight_root)`. Cleared back to
@@ -572,7 +572,7 @@ impl ComponentCtx {
 
     /// Set the in-flight `(mail_id, root)` context the next
     /// [`Self::send`] will read for `parent_mail` + `inherited_root`.
-    /// Called by [`Component::deliver`] right before the guest's
+    /// Called by [`super::Component::deliver`] right before the guest's
     /// `receive_p32` shim runs. Pre-issue-722 `ComponentCtx::send`
     /// stamped [`MailId::NONE`]; setting these cells ahead of the call
     /// makes guest-triggered sends visible to the trace observer with

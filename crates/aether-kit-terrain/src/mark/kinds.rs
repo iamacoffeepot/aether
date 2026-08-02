@@ -143,7 +143,7 @@ pub struct MarkListResult {
     pub marks: Vec<Mark>,
 }
 
-/// Hot-swap snapshot for [`super::MarkBook`](super::MarkBook).
+/// Hot-swap snapshot for [`super::MarkBook`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.saved_state")]
 pub struct SavedMarks {

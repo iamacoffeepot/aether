@@ -106,9 +106,18 @@ Choose the smallest command that crosses the changed boundary:
 | One crate | `cargo test -p <crate>` or `cargo check -p <crate>` |
 | Formatting | `cargo fmt -- --check` |
 | Lints | `cargo clippy --all-targets -- -D warnings` |
+| Doc comments and intra-doc links | `cargo doc --workspace --no-deps --document-private-items` |
 | Wasm/component boundary | the owning fixture/build command from CI |
 | SubstrateHarness behavior | focused integration test target |
 | Hub/process boundary | focused FleetHarness test with required dist artifacts |
+
+The rustdoc row carries `--document-private-items` because rustdoc resolves
+intra-doc links only on items it documents. Without the flag a link between two
+private items is never resolved, so moving a private item across a module
+boundary can dangle every link that named it and no gate notices. CI's `Rustdoc`
+job runs the same command under `RUSTDOCFLAGS='-D rustdoc::…'`, so keep the two
+identical. One gap remains under the flag: `#[cfg(test)]` modules are not
+documented at all, and a doc link inside one stays unchecked.
 
 Do not run the full expensive matrix merely to appear thorough. Do not skip a
 focused boundary test when it is the only proof of the changed contract.

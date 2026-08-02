@@ -124,13 +124,18 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// addressing markers; those come from the struct. The runtime impls ride the
 /// `#[cfg]` on the `mod runtime;` line, so this attribute adds no gate of its
 /// own.
+///
+/// `#[runtime(handler_set(T))]` (ADR-0169) adopts a native handler set here,
+/// where the dispatch table that delegates to it is emitted. The struct-side
+/// `#[actor]` reads the same argument back off this attribute when it harvests
+/// the file, so the set is named once and both halves — the delegation and the
+/// `HandlesKind` markers — follow from one declaration.
 #[proc_macro_attribute]
 pub fn runtime(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if !attr.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "#[runtime] takes no arguments")
-            .to_compile_error()
-            .into();
-    }
+    let opts = match parse_runtime_opts(attr.into()) {
+        Ok(opts) => opts,
+        Err(e) => return e.to_compile_error().into(),
+    };
     let item = parse_macro_input!(item as ItemImpl);
     let is_native_actor =
         item.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).is_some_and(|s| s.ident == "NativeActor");
@@ -143,10 +148,32 @@ pub fn runtime(attr: TokenStream, item: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    match expand_native_actor_trait(item, &ActorOpts::default(), NativeEmit::RuntimeOnly) {
+    match expand_native_actor_trait(item, &opts, NativeEmit::RuntimeOnly) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// `#[runtime]`'s argument surface: `handler_set(T)` and nothing else. Every
+/// other `#[actor]` argument declares part of the *identity* — cardinality,
+/// lineage, the runtime module — which under ADR-0123 belongs on the struct, so
+/// accepting one here would silently split the identity across two files.
+fn parse_runtime_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
+    let opts = parse_actor_opts(attr)?;
+    let identity_declared = opts.cardinality.is_some()
+        || opts.runtime_feature.is_some()
+        || opts.runtime_module.is_some()
+        || opts.root
+        || !opts.child_of.is_empty()
+        || opts.composable;
+    if identity_declared {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[runtime] accepts only `handler_set(TraitPath)` — cardinality, lineage, and the \
+             runtime module are declared on the capability struct's #[actor] (ADR-0123)",
+        ));
+    }
+    Ok(opts)
 }
 
 /// Parsed `#[actor(...)]` attribute arguments. `singleton` / `instanced`

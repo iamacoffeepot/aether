@@ -5,12 +5,13 @@
 //! ([`status_to_error`]). What changes is the boundary: the native adapter
 //! surfaced failures as a free-form `Result<_, String>` that `error.rs` then
 //! re-parsed through `status=` / `timeout=` / `cli-not-found` sentinels. The
-//! guest reads the *typed* [`FetchResult`] / [`RunResult`] edge replies, so the
+//! guest reads the *typed* [`aether_http::FetchResult`] /
+//! [`aether_process::RunResult`] edge replies, so the
 //! sentinel round-trip is gone — each typed arm maps straight into the
 //! taxonomy.
 //!
 //! The CLI re-fold is the one semantic subtlety ADR-0157 records: a non-zero
-//! `claude` exit arrives as [`RunResult::Ok`] (a completed run the caller
+//! `claude` exit arrives as [`aether_process::RunResult::Ok`] (a completed run the caller
 //! judges), so the guest re-folds a non-success exit into a provider
 //! [`AnthropicError::AdapterError`] exactly as the native `cli.rs` did.
 

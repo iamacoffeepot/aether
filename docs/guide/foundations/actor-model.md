@@ -376,6 +376,50 @@ native throughout, uses one authoring shape throughout, does not nest, and an
 actor adopts at most one — a family that outgrows one set wants a second set,
 not a chain.
 
+A native capability adopts a set the same way, with two differences that follow
+from how native actors are authored. Handlers are written against `NativeCtx`,
+and a capability with a `type State` writes them in the split shape — the state
+arrives as the first parameter rather than as a `self` receiver, so the
+accessors are associated functions over `Self::State`:
+
+```rust
+#[handler_set]
+pub trait WindowSubscriptions {
+    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers;
+
+    #[handler::single]
+    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
+        Self::subscribers(state).unsubscribe_all(mail.mailbox);
+    }
+}
+```
+
+And under the [split identity / runtime shape](../capability-anatomy.md) the
+adoption is declared on `#[runtime]`, in the runtime file where the dispatch
+table is emitted — the capability struct's `#[actor]` reads it back off that
+attribute when it harvests the file, so the set is named once:
+
+```rust
+#[runtime(handler_set(WindowSubscriptions))]
+impl NativeActor for DesktopWindowCapability {
+    // only desktop-specific handlers here
+}
+
+impl WindowSubscriptions for DesktopWindowCapability {
+    type State = DesktopWindowCapabilityState;
+
+    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
+        &mut state.subscribers
+    }
+}
+```
+
+A native set's kinds carry `HandlesKind` markers, so typed sends to an adopter
+(`ctx.actor::<DesktopWindowInstance>().send(&k)`) compile for inherited kinds
+too. The markers travel through a `macro_rules!` bridge the set generates, which
+means a set's kind types need spellings that resolve at each adopter's `#[actor]`
+— for a capability crate, the names re-exported at its crate root.
+
 Put in a set only what is genuinely uniform. When bodies disagree on something
 load-bearing — the widgets' `SetWidgetState` handlers disagree about which
 predicate cancels an activation — a shared body has to pick one reading and

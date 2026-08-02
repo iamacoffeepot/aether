@@ -1,7 +1,7 @@
 //! The `aether.audio` runtime half (ADR-0122 identity/runtime split).
 //! Compiled only under `feature = "runtime"` (the `mod runtime;`
 //! declaration in the parent carries the gate), so a marker-only / wasm build
-//! of the [`AudioCapability`](super::AudioCapability) identity never names
+//! of the [`AudioCapability`] identity never names
 //! these types nor pulls cpal / the synth pipeline. The substrate-typed +
 //! native-only imports are gated once by this module rather than line-by-line;
 //! the `#[actor] impl` reaches the state, ctx types, worker, and fan-out
@@ -99,7 +99,7 @@ pub fn sender_mailbox_id(sender: Source) -> MailboxId {
 /// Owns the producer side of the synth event queue plus the cpal worker
 /// thread + its shutdown sender, and the in-flight bookkeeping for the
 /// deferred `play_track` / `load_instrument` flows. The addressing identity is
-/// the distinct ZST [`AudioCapability`](super::AudioCapability); the
+/// the distinct ZST [`AudioCapability`]; the
 /// dispatcher holds this as the cap's state and routes envelopes through the
 /// macro-emitted `Dispatch` impl. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing

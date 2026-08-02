@@ -8,7 +8,7 @@
 //! and returns the packed `(ptr << 32) | len`. The bridge copies that
 //! buffer into an owned `Vec` and frees it symmetrically through the same
 //! allocator — the host allocated it via `realloc_p32` (which routes to
-//! [`guest_alloc::realloc_bytes`]), so the guest frees it the same way.
+//! [`realloc_bytes`]), so the guest frees it the same way.
 //!
 //! This is the transport backing [`crate::AssetWindow`] / [`crate::AssetCatalog`]
 //! on the guest ctxs. A payload access after the window closed traps

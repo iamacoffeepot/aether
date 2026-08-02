@@ -31,13 +31,12 @@ use winit::monitor::{MonitorHandle as WinitMonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId as WinitWindowId};
 
 use self::input::{TextSource, ime_cursor_span, map_mouse_button, map_winit_keycode, normalize_wheel, text_input_gate};
-use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
+use super::subscribers::{WindowSubscribers, WindowSubscriptions};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     DesktopWindowCapability, DesktopWindowInstance, FocusWindowResult, ListWindows, ListWindowsResult,
-    RequestWindowRedrawResult, RetireWindow, SetWindowModeResult, SetWindowTitleResult, SubscribeWindow,
-    SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeAllWindows, UnsubscribeWindow, UnsubscribeWindowSelf,
-    WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance, WindowOpened, WindowSpec,
+    RequestWindowRedrawResult, RetireWindow, SetWindowModeResult, SetWindowTitleResult, WindowCapability, WindowClosed,
+    WindowCommand, WindowId, WindowInfo, WindowInstance, WindowOpened, WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
@@ -608,7 +607,7 @@ fn predicted_window_id(name: &str) -> WindowId {
     WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
 }
 
-#[runtime]
+#[runtime(handler_set(WindowSubscriptions))]
 impl NativeActor for DesktopWindowCapability {
     type State = DesktopWindowCapabilityState;
 
@@ -773,63 +772,20 @@ impl NativeActor for DesktopWindowCapability {
     }
 
     #[handler::single]
-    fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
-        }
-        state.subscribers.subscribe(ctx, mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
-    }
-
-    #[handler::single]
-    fn on_subscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: SubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match state.subscribers.subscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    #[handler::single]
-    fn on_unsubscribe(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindow,
-    ) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
-        }
-        state.subscribers.unsubscribe(mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
-    }
-
-    #[handler::single]
-    fn on_unsubscribe_self(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: UnsubscribeWindowSelf,
-    ) -> SubscribeWindowResult {
-        match state.subscribers.unsubscribe_self(ctx, mail.selector, mail.kind) {
-            Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
-        }
-    }
-
-    #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        state.subscribers.unsubscribe_all(mail.mailbox);
-    }
-
-    #[handler::single]
     fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
         let id = WindowId(notice.target.0);
         if state.child_monitors.remove(&id).is_some() {
             let _ = state.queue_close(id, None);
         }
         state.subscribers.purge_departed(notice.target);
+    }
+}
+
+impl WindowSubscriptions for DesktopWindowCapability {
+    type State = DesktopWindowCapabilityState;
+
+    fn subscribers(state: &mut Self::State) -> &mut WindowSubscribers {
+        &mut state.subscribers
     }
 }
 
@@ -877,6 +833,9 @@ mod tests {
     use aether_substrate::testing::boot_authority;
 
     use super::*;
+    // The subscription request kinds moved to the `WindowSubscriptions` set,
+    // so the manager module no longer imports them for `use super::*` to carry.
+    use crate::{SubscribeWindow, SubscribeWindowResult, UnsubscribeWindow};
 
     fn test_state() -> DesktopWindowCapabilityState {
         DesktopWindowCapabilityState {

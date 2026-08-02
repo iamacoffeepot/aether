@@ -568,7 +568,7 @@ impl NativeActor for LifecycleCapability {
     }
 
     /// Settlement notice for the broadcast root pending in
-    /// [`Self::pending`] (ADR-0082 §6). Advances the state pointer,
+    /// [`LifecycleCapabilityState::pending`] (ADR-0082 §6). Advances the state pointer,
     /// flips `terminal_reached` if the settling broadcast was a
     /// terminal, and replies [`LifecycleAdvanceComplete`] to the
     /// chassis main loop that issued the [`LifecycleAdvance`].

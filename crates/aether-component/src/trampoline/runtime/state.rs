@@ -27,7 +27,7 @@ pub struct WasmTrampolineState {
     /// Mail arriving in the `None` state warn-drops via the
     /// fallback (the trampoline is just an empty named slot).
     pub component: Option<Component>,
-    /// Held for [`Self::on_replace_component`] so a fresh
+    /// Held for [`Self::handle_replace`] so a fresh
     /// `Component::instantiate` against the same engine + linker
     /// is reachable from the handler.
     pub engine: Arc<Engine>,
@@ -52,7 +52,7 @@ pub struct WasmTrampolineState {
     /// compiled code) without a re-compile, and refreshed on replace.
     pub module: Module,
     /// ADR-0097: every exported type's capability group (see
-    /// [`WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
+    /// [`super::WasmTrampolineConfig::actor_caps`]). A spawned sibling looks
     /// up its own handler set here by actor-type tag.
     pub actor_caps: Vec<ActorInputs>,
     /// ADR-0163 §3 (#3984): the resident module's raw wasm bytes, retained
@@ -66,9 +66,9 @@ pub struct WasmTrampolineState {
     /// module's), and a sibling spawned from this module inherits it.
     pub param_providers: Arc<ParamProviderRegistry>,
     /// ADR-0170: this instance's load-time facts, replayed into every
-    /// [`LoadContext`] this trampoline builds — at init, at replace, and for a
-    /// spawned sibling. Held because they outlive the load mail that carried
-    /// them.
+    /// [`LoadContext`] this trampoline builds —
+    /// at init, at replace, and for a spawned sibling. Held because they
+    /// outlive the load mail that carried them.
     pub instance_name: String,
     /// ADR-0170: this instance's position in its `replicas: N` fan-out.
     pub replica: ReplicaIdentity,

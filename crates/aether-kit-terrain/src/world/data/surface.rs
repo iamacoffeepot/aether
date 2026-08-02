@@ -138,7 +138,7 @@ impl World {
     /// `(px / SUB, pz / SUB)`), seen from the incident subcell whose position
     /// in the corner's cyclic incidence is `anchor`. The subcell analogue of
     /// [`World::corner_plate`]: the four incident subcells partition into
-    /// plates by the same non-cliff walk over their [`point_surface_level`]s
+    /// plates by the same non-cliff walk over their [`World::point_surface_level`]s
     /// (with `STEP_MAX_OCTIMETERS` tested between adjacent points), and the
     /// plate containing `anchor` averages its members. Water members pin the
     /// plate to the water level exactly as at cell scale.
