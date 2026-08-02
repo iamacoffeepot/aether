@@ -29,6 +29,7 @@ pub use std::io;
 pub use std::sync::Arc;
 
 use super::WasmTrampoline;
+pub use crate::component::LoadContext;
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
@@ -83,6 +84,20 @@ impl NativeActor for WasmTrampoline {
         let load_window = asset_manifest::LoadWindow::index(Arc::clone(&config.wasm_bytes))
             .map_err(|e| BootError::Other(io::Error::other(format!("asset index failed: {e}")).into()))?;
         substrate_ctx.install_load_window(load_window);
+        // ADR-0170: build the params bag from the host's provider registry
+        // before instantiating. The cap already validated that every request
+        // has a provider, so an error here means the registry changed under
+        // the load; either way the guest is never reached with a partially
+        // filled `Params`. `mailbox` is why this runs in the trampoline rather
+        // than at the cap: the instance's own lineage-folded id is a load-time
+        // fact that only exists once its spawn has an identity.
+        let load_context =
+            LoadContext { instance_name: &config.instance_name, mailbox_id: mailbox, replica: config.replica };
+        let params_bytes = config
+            .param_providers
+            .encode_bag(&config.capabilities.params, &load_context)
+            .map_err(|e| BootError::Other(io::Error::other(e).into()))?;
+
         // ADR-0090 (issue 1257): thread the load mail's config bytes
         // into the guest's typed `init`. An empty slice ("no config")
         // is decoded uniformly by a `Config = ()` guest via
@@ -94,6 +109,7 @@ impl NativeActor for WasmTrampoline {
             &config.module,
             substrate_ctx,
             &config.config,
+            &params_bytes,
             config.type_tag,
         )
         .map_err(|e| BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into()))?;
@@ -126,6 +142,9 @@ impl NativeActor for WasmTrampoline {
             module: config.module,
             actor_caps: config.actor_caps,
             wasm_bytes: config.wasm_bytes,
+            param_providers: config.param_providers,
+            instance_name: config.instance_name,
+            replica: config.replica,
         })
     }
 

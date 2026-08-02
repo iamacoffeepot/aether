@@ -44,8 +44,9 @@ mod schema;
 
 pub use inputs::{
     inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_fallback_len, inputs_handler_len,
-    reply_contract_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
-    write_inputs_fallback, write_inputs_handler, write_reply_contract,
+    inputs_param_request_len, param_requests_len, reply_contract_len, write_inputs_actor_boundary,
+    write_inputs_component, write_inputs_config, write_inputs_fallback, write_inputs_handler,
+    write_inputs_param_request, write_param_requests, write_reply_contract,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use schema::{

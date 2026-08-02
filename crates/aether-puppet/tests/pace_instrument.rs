@@ -189,6 +189,7 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
                     name: None,
                     config: Vec::new(),
                     export: Some(PUPPET_EXPORT.to_owned()),
+                    replica: None,
                 },
             ),
         )])

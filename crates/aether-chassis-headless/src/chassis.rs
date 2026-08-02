@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_clipboard::HeadlessClipboardCapability;
-use aether_component::ComponentHostParams;
+use aether_component::{ComponentHostParams, ParamProviderRegistry};
 use aether_data::Kind;
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
@@ -167,6 +167,10 @@ impl BootableChassis for HeadlessChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            // ADR-0170: headless composes no capability that knows a load-time
+            // fact beyond the substrate's own, so it hands the cap the seeded
+            // registry unextended.
+            param_providers: Arc::new(ParamProviderRegistry::with_substrate_facts()),
         };
 
         // Audio nop sink — NoteOn/NoteOff fall through silently;

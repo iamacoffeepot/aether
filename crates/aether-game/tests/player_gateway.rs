@@ -82,6 +82,7 @@ fn load_turn_sim(harness: &mut SubstrateHarness, wasm: Vec<u8>) {
                     name: Some(SIM_NAME.into()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.sim".into()),
+                    replica: None,
                 },
             ),
         )])

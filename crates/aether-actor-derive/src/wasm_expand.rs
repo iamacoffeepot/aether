@@ -332,11 +332,15 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `config_type.is_some()` at macro time, NOT on `Config != ()` at
     // runtime, keeps `aether.unit` out of every component's capability).
     let config_kind_ty: Option<&Type> = config_type.as_ref().map(|it| &it.ty);
+    // ADR-0170: the declared `type Params`, gated the same way — the
+    // synthesized `= ()` case emits no request records.
+    let params_ty: Option<&Type> = params_type.as_ref().map(|it| &it.ty);
     let inputs_manifest_consts = build_inputs_manifest_consts(
         &handlers,
         fallback.as_ref(),
         component_doc.as_ref(),
         config_kind_ty,
+        params_ty,
         opts.handler_set.as_ref().map(|set| (set, &**self_ty)),
     );
 

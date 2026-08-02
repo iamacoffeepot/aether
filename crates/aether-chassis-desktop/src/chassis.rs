@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use aether_audio::AudioCapability;
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
-use aether_component::ComponentHostParams;
+use aether_component::{ComponentHostParams, ParamProviderRegistry};
 use aether_harness_substrate::UnsupportedSubstrateHarnessCapability;
 use aether_http::HttpServerCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
@@ -183,6 +183,10 @@ impl BootableChassis for DesktopChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            // ADR-0170: desktop composes no capability that knows a load-time
+            // fact beyond the substrate's own, so it hands the cap the seeded
+            // registry unextended.
+            param_providers: Arc::new(ParamProviderRegistry::with_substrate_facts()),
         };
         // ADR-0161 R3: render no longer composes on the pooled `with_actor`
         // path on desktop — the driver boots the pumped `aether.render` actor

@@ -313,9 +313,9 @@ pub trait Lifecycle<S> {
     /// is the ADR-0090 argv/env/default-resolved settings, `Params` is the
     /// second, orthogonal channel: values the composer computes and hands in
     /// at boot. `Send + 'static` only here; [`crate::WasmActor`] tightens it
-    /// to `Kind + Default` (FFI params cross the wasm boundary as bytes, an
-    /// empty slice resolving to the default), while a native cap shares the
-    /// composer's address space and keeps `Params` a live Rust value.
+    /// to [`crate::InjectedParams`] (FFI params cross the wasm boundary as a
+    /// kind-tagged bag), while a native cap shares the composer's address
+    /// space and keeps `Params` a live Rust value.
     ///
     /// The `#[actor]` macro synthesizes `type Params = ();` when the author
     /// omits it (stable Rust has no associated-type defaults), mirroring the

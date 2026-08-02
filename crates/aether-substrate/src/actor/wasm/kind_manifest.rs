@@ -47,7 +47,7 @@ use aether_data::{
     KindLabels, KindShape, LABELS_SECTION_VERSION, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType,
     VariantLabel, canonical::kind_id_from_shape, wire,
 };
-use aether_kinds::{ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability};
+use aether_kinds::{ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability, ParamRequirement};
 use serde::de::DeserializeOwned;
 use std::str;
 use wasmparser::{BinaryReader, Parser, Payload, ProducersSectionReader};
@@ -385,6 +385,16 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                     ));
                 }
                 caps.config = Some(ConfigCapability { id, name: name.into_owned() });
+            }
+            InputsRecord::ParamRequest { id, name, field } => {
+                let caps = current_capabilities(&mut groups);
+                if caps.params.iter().any(|existing| existing.field == field) {
+                    return Err(format!(
+                        "{INPUTS_SECTION}: duplicate ParamRequest for field {field:?} — \
+                         a Params field requests exactly one kind"
+                    ));
+                }
+                caps.params.push(ParamRequirement { id, name: name.into_owned(), field: field.into_owned() });
             }
         }
     }

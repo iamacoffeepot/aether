@@ -54,7 +54,13 @@ fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PUPPET_EXPORT.to_owned()) },
+                &LoadComponent {
+                    wasm,
+                    name: None,
+                    config: Vec::new(),
+                    export: Some(PUPPET_EXPORT.to_owned()),
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");

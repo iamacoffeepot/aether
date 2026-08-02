@@ -114,6 +114,7 @@ fn load_widgets(
                         config: config.clone(),
                         // `UiWidget` is a non-entry actor in the bundle.
                         export: Some("test.ui_widget".to_owned()),
+                        replica: None,
                     },
                 ),
             )])

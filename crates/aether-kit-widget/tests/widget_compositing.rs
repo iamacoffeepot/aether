@@ -162,6 +162,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -195,6 +196,7 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -96,6 +96,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
                 doc: None,
                 config: None,
                 assets: Vec::new(),
+                params: Vec::new(),
             }
         }
     }
@@ -215,6 +216,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
                 doc: None,
                 config: None,
                 assets: Vec::new(),
+                params: Vec::new(),
             }
         }
     }

@@ -26,6 +26,7 @@ use super::{ComponentHostCapability, LoadResult};
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
+use crate::component::ParamProviderRegistry;
 
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
@@ -80,6 +81,10 @@ pub struct ComponentHostCapabilityState {
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
+    /// ADR-0170: the composer-supplied provider registry every load validates
+    /// its param requests against, and every trampoline evaluates its bag
+    /// from. Read-only after Compose.
+    pub param_providers: Arc<ParamProviderRegistry>,
     /// Retained registry-inventory subscription. `wire` installs the weak sink
     /// before the registry issues its initial wake, then this handle keeps that
     /// sink live for the host's lifetime.
@@ -205,6 +210,7 @@ impl NativeActor for ComponentHostCapability {
             registry,
             mailer,
             outbound: params.hub_outbound,
+            param_providers: params.param_providers,
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,
@@ -467,6 +473,7 @@ mod tests {
             registry: Arc::clone(&registry),
             mailer: Arc::clone(&mailer),
             outbound,
+            param_providers: Arc::new(ParamProviderRegistry::with_substrate_facts()),
             registry_subscription: Some(registry.subscribe_inventory::<ComponentHostCapability>(subscriber, mailer)),
             last_egressed_inventory: None,
             default_name_counter: 0,

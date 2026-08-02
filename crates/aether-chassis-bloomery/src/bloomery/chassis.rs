@@ -8,7 +8,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use aether_component::{ComponentHostCapability, ComponentHostParams};
+use aether_component::{ComponentHostCapability, ComponentHostParams, ParamProviderRegistry};
 use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -208,6 +208,10 @@ impl BootableChassis for BloomeryChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            // ADR-0170: bloomery composes no capability that knows a load-time
+            // fact beyond the substrate's own, so it hands the cap the seeded
+            // registry unextended.
+            param_providers: Arc::new(ParamProviderRegistry::with_substrate_facts()),
         };
 
         // #3947's explicit `with_aborter` is superseded by the seam inversion:

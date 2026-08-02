@@ -70,6 +70,7 @@ fn boot_and_load(config: &GeminiComponentConfig) -> SubstrateHarness {
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: config.encode_into_bytes(),
                     export: None,
+                    replica: None,
                 },
             ),
         )])

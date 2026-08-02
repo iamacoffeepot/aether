@@ -38,7 +38,13 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
             "load",
             HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
-                &LoadComponent { wasm, name: Some("cost-probe".to_owned()), config: Vec::new(), export: None },
+                &LoadComponent {
+                    wasm,
+                    name: Some("cost-probe".to_owned()),
+                    config: Vec::new(),
+                    export: None,
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");

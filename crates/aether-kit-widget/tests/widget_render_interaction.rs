@@ -246,6 +246,7 @@ fn load_panel_with_children_and_ownership(
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -275,6 +276,7 @@ fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> Loaded
                     name: Some("region-b".to_owned()),
                     config: EditorRegionProbeConfig { name: "region-b".to_owned() }.encode_into_bytes(),
                     export: Some("test.editor_region_probe".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -332,6 +334,7 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: Mailbox
                     name: Some("editor".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.editor".to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -376,6 +376,7 @@ mod tests {
                 name: Some(HANDLER_NAMESPACE.to_owned()),
                 // `HttpHandler` is a non-entry actor in the bundle.
                 export: Some(HANDLER_NAMESPACE.to_owned()),
+                replica: None,
             }],
         };
 
@@ -485,6 +486,7 @@ mod tests {
                 config: Vec::new(),
                 name: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
                 export: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
+                replica: None,
             }],
         };
 
@@ -590,6 +592,7 @@ mod tests {
                 config: Vec::new(),
                 name: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
                 export: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
+                replica: None,
             }],
         };
 
@@ -700,6 +703,7 @@ mod tests {
                 config: Vec::new(),
                 name: Some(WS_HANDLER_NAMESPACE.to_owned()),
                 export: Some(WS_HANDLER_NAMESPACE.to_owned()),
+                replica: None,
             }],
         };
 
@@ -925,12 +929,14 @@ mod tests {
                     config: Vec::new(),
                     name: Some(HANDLER_NAMESPACE.to_owned()),
                     export: Some(HANDLER_NAMESPACE.to_owned()),
+                    replica: None,
                 },
                 AutoloadComponent {
                     wasm,
                     config: Vec::new(),
                     name: Some(ROUTED_NAMESPACE.to_owned()),
                     export: Some(ROUTED_NAMESPACE.to_owned()),
+                    replica: None,
                 },
             ],
         };

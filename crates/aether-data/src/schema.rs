@@ -780,6 +780,50 @@ pub enum InputsRecord {
     /// single-actor module emits no boundary and decodes byte-identically
     /// under the existing reader, so no section-version bump is needed.
     ActorBoundary { namespace: Cow<'static, str> },
+    /// ADR-0170: one host fact the actor's `Params` type requests, from a
+    /// `#[param("…")]` field. `id` / `name` identify the requested kind
+    /// (`<FieldTy as Kind>::ID` / `NAME`); `field` names the `Params` field
+    /// the decoded value is injected into, so a load error can point at the
+    /// declaration rather than only at the kind. Emitted by `#[actor]` once
+    /// per request, in field-declaration order, only when the author
+    /// declared a `type Params` other than the synthesized `()`. Appended
+    /// after `ActorBoundary` for the same additive reason: a module with no
+    /// requests emits none and decodes byte-identically.
+    ParamRequest { id: KindId, name: Cow<'static, str>, field: Cow<'static, str> },
+}
+
+/// One compile-time param request as the `#[derive(InjectedParams)]` macro
+/// records it: the requested kind's id and name plus the `Params` field it
+/// lands in (ADR-0170).
+///
+/// A guest's `InjectedParams::REQUESTS` is a `&'static [ParamRequest]`, and
+/// the `#[actor]` macro walks that slice at const-eval time to write the
+/// [`InputsRecord::ParamRequest`] run into the `aether.kinds.inputs` section.
+/// It carries `&'static str` (not `Cow`) because it only ever exists as
+/// derive-emitted static data on the guest side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParamRequest {
+    /// `<FieldTy as Kind>::ID` of the requested host fact.
+    pub id: KindId,
+    /// `<FieldTy as Kind>::NAME` — the readable kind name.
+    pub name: &'static str,
+    /// The `Params` struct field this request is injected into.
+    pub field: &'static str,
+}
+
+/// One kind-tagged entry in the params bag the component host ships across
+/// the FFI (ADR-0170). The bag is the aether-wire encoding of a
+/// `Vec<ParamEntry>`; the guest's generated `InjectedParams::from_entries`
+/// looks each field's request up by `kind` and decodes `bytes` into it.
+///
+/// A load with no requests ships zero params bytes rather than an encoded
+/// empty vec, so the no-request path stays byte-free end to end.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParamEntry {
+    /// The provided fact's `Kind::ID`.
+    pub kind: KindId,
+    /// The provider's wire-encoded value for that kind.
+    pub bytes: Vec<u8>,
 }
 
 /// Custom-section name for the inputs manifest (ADR-0033). Paired

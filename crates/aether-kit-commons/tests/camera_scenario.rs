@@ -73,6 +73,7 @@ fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) {
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("aether.kit.camera".to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -17,12 +17,15 @@ mod handler_set;
 mod manifest;
 mod native_expand;
 mod opts;
+mod params;
 mod wasm_expand;
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Field, Fields, ItemImpl, ItemStruct, ItemTrait, Token, parse_macro_input, punctuated::Punctuated};
+use syn::{
+    DeriveInput, Field, Fields, ItemImpl, ItemStruct, ItemTrait, Token, parse_macro_input, punctuated::Punctuated,
+};
 
 use native_expand::{NativeEmit, expand_native_actor_trait, expand_struct_hosted_actor};
 use opts::{ActorOpts, parse_actor_opts};
@@ -407,6 +410,38 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
 pub fn export_asset(input: TokenStream) -> TokenStream {
     let path_lit = parse_macro_input!(input as syn::LitStr);
     match asset::expand_export_asset(&path_lit) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// ADR-0170: derive `aether_actor::InjectedParams` on a wasm actor's
+/// `type Params` struct — the declare-needs channel for host facts.
+///
+/// Each named field is one request, annotated `#[param("<kind name>")]` and
+/// typed as the kind it asks for. The derive emits a `REQUESTS` slice that
+/// `#[actor]` copies into the `aether.kinds.inputs` custom section, so the
+/// component host reads the whole list off the wasm and validates it against
+/// its provider registry *before* instantiating; and a `from_entries` that
+/// decodes the host's kind-tagged bag into the struct, which `init` then
+/// receives whole.
+///
+/// ```ignore
+/// #[derive(aether_actor::InjectedParams)]
+/// struct ShardParams {
+///     #[param("aether.component.replica_identity")]
+///     replica: ReplicaIdentity,
+/// }
+/// ```
+///
+/// Every request is required: there is no inject-if-available form, because a
+/// component whose behaviour silently changes with its host is a footgun. A
+/// value that is not a host fact — anything an operator could type — belongs
+/// in `Config` instead (ADR-0156 §3).
+#[proc_macro_derive(InjectedParams, attributes(param))]
+pub fn injected_params(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match params::expand_injected_params(&input) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }

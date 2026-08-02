@@ -71,6 +71,7 @@ fn load_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: 
                     name: Some(name.to_owned()),
                     config,
                     export: Some(export.to_owned()),
+                    replica: None,
                 },
             ),
         )])

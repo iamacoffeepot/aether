@@ -126,6 +126,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
                     name: Some("panel".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),
+                    replica: None,
                 },
             ),
         )])

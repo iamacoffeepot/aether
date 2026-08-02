@@ -90,6 +90,7 @@ fn load_console_with_config(harness: &mut SubstrateHarness, wasm: &[u8], config:
                     name: Some("console".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.console".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -130,6 +131,7 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], target: Mailbo
                     name: Some("editor".to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.editor".to_owned()),
+                    replica: None,
                 },
             ),
         )])

@@ -49,6 +49,7 @@ fn load_world(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("aether.kit.world".to_owned()),
+                    replica: None,
                 },
             ),
         )])

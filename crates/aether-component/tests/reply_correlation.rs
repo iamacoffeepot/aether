@@ -33,6 +33,7 @@ fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (
                     name: Some(name.to_owned()),
                     config: Vec::new(),
                     export: Some("test.fs_demux".to_owned()),
+                    replica: None,
                 },
             ),
         )])

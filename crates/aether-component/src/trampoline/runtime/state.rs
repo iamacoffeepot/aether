@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use aether_kinds::ReplicaIdentity;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::MailboxId;
@@ -7,6 +8,8 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
+
+use crate::component::{LoadContext, ParamProviderRegistry};
 
 /// Per-component trampoline **runtime state** (ADR-0122 identity/runtime
 /// split — the addressing identity is the distinct ZST
@@ -57,4 +60,24 @@ pub struct WasmTrampolineState {
     /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
     /// never mutated.
     pub wasm_bytes: Arc<[u8]>,
+    /// ADR-0170: the host's provider registry. Retained rather than consumed
+    /// at init because a `replace_component` re-derives the bag against the
+    /// *replacement* module's requests (which need not match the loaded
+    /// module's), and a sibling spawned from this module inherits it.
+    pub param_providers: Arc<ParamProviderRegistry>,
+    /// ADR-0170: this instance's load-time facts, replayed into every
+    /// [`LoadContext`](crate::component::LoadContext) this trampoline builds —
+    /// at init, at replace, and for a spawned sibling. Held because they
+    /// outlive the load mail that carried them.
+    pub instance_name: String,
+    /// ADR-0170: this instance's position in its `replicas: N` fan-out.
+    pub replica: ReplicaIdentity,
+}
+
+impl WasmTrampolineState {
+    /// The load-time context this instance's providers read (ADR-0170).
+    #[must_use]
+    pub fn load_context(&self) -> LoadContext<'_> {
+        LoadContext { instance_name: &self.instance_name, mailbox_id: self.mailbox, replica: self.replica }
+    }
 }

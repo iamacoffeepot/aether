@@ -30,7 +30,7 @@ fn one_artifact_serves_all_three_explicit_exports() {
             "bare",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
+                &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None, replica: None },
             ),
         )])
         .expect("bare load sequence");
@@ -58,6 +58,7 @@ fn one_artifact_serves_all_three_explicit_exports() {
                         name: None,
                         config: Vec::new(),
                         export: Some(export.to_owned()),
+                        replica: None,
                     },
                 ),
             )])

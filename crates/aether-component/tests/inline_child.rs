@@ -103,6 +103,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("test.inline.stateful_parent".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -208,6 +209,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("test.inline.tag_parent".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -336,6 +338,7 @@ fn despawn_inline_child_retires_the_alias_address() {
                     name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
                     export: Some("test.inline.despawn_parent".to_owned()),
+                    replica: None,
                 },
             ),
         )])
@@ -431,6 +434,7 @@ fn settled_load_covers_the_inline_child_alias_publication() {
                         name: Some(FIXTURE_NAME.to_owned()),
                         config: Vec::new(),
                         export: Some("test.inline.despawn_parent".to_owned()),
+                        replica: None,
                     },
                 ),
             ),

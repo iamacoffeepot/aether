@@ -94,6 +94,7 @@ fn load_kit_export_with_config(
                     name: Some(name.to_owned()),
                     config,
                     export: Some(export.to_owned()),
+                    replica: None,
                 },
             ),
         )])

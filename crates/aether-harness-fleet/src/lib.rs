@@ -478,7 +478,7 @@ impl FleetHarness {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent { wasm, name: None, config: Vec::new(), export },
+            &LoadComponent { wasm, name: None, config: Vec::new(), export, replica: None },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
@@ -558,7 +558,7 @@ impl FleetHarness {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
+            &LoadComponent { wasm, name: None, config: Vec::new(), export: None, replica: None },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
@@ -577,7 +577,7 @@ impl FleetHarness {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(export.to_owned()) },
+            &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(export.to_owned()), replica: None },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
@@ -864,7 +864,7 @@ impl FleetHarness {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: None },
+            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: None, replica: None },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
@@ -887,7 +887,13 @@ impl FleetHarness {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: Some(export.to_owned()) },
+            &LoadComponent {
+                wasm,
+                name: None,
+                config: config.encode_into_bytes(),
+                export: Some(export.to_owned()),
+                replica: None,
+            },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {

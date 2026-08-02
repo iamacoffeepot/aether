@@ -59,6 +59,7 @@ fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, export: &str, n
                     name: Some(name.to_owned()),
                     config: Vec::new(),
                     export: Some(export.to_owned()),
+                    replica: None,
                 },
             ),
         )])

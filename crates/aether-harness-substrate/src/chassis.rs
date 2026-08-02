@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_component::{ComponentHostCapability, ComponentHostParams};
+use aether_component::{ComponentHostCapability, ComponentHostParams, ParamProviderRegistry};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
@@ -408,6 +408,10 @@ impl SubstrateHarnessChassis {
                 engine: Arc::clone(&boot.engine),
                 linker: Arc::clone(&boot.linker),
                 hub_outbound: Arc::clone(&boot.outbound),
+                // ADR-0170: the harness injects the same substrate facts a
+                // real chassis does, so a scenario exercises the production
+                // provider set rather than a stand-in.
+                param_providers: Arc::new(ParamProviderRegistry::with_substrate_facts()),
             });
         }
         // ADR-0161 R4/R5: the pumped render path composes no build-time

@@ -54,6 +54,7 @@ fn load_sim(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> Str
                     name: Some(name.to_owned()),
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.sim".to_owned()),
+                    replica: None,
                 },
             ),
         )])

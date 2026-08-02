@@ -46,7 +46,13 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: Some(export.to_owned()) },
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some(export.to_owned()),
+                    replica: None,
+                },
             ),
         )])
         .expect("load sequence");
@@ -125,6 +131,7 @@ fn concurrent_same_hash_loads_share_the_pending_boot() {
                 name: None,
                 config: Vec::new(),
                 export: Some("aether.test.boot.widget_a".to_owned()),
+                replica: None,
             },
         )
         .expect("queue first load without pumping");
@@ -136,6 +143,7 @@ fn concurrent_same_hash_loads_share_the_pending_boot() {
                 name: None,
                 config: Vec::new(),
                 export: Some("aether.test.boot.widget_b".to_owned()),
+                replica: None,
             },
         )
         .expect("queue second same-hash load before the first boot completion");
@@ -171,6 +179,7 @@ fn boot_actor_is_not_selectable_by_export() {
                     name: None,
                     config: Vec::new(),
                     export: Some("aether.test.boot.boot".to_owned()),
+                    replica: None,
                 },
             ),
         )])

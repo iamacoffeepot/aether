@@ -122,6 +122,7 @@ pub fn build_inputs_manifest_consts(
     fallback: Option<&FallbackFn>,
     component_doc: Option<&String>,
     config_kind_ty: Option<&Type>,
+    params_ty: Option<&Type>,
     handler_set: Option<(&syn::Path, &Type)>,
 ) -> TokenStream2 {
     let mut len_terms: Vec<TokenStream2> = Vec::new();
@@ -195,6 +196,40 @@ pub fn build_inputs_manifest_consts(
                 )
             },
         ));
+    }
+
+    // ADR-0170: emit one `ParamRequest` record per `#[param]` field of the
+    // declared `type Params`. The macro never sees `Params`' fields (it reads
+    // only `type Params = P` off the impl block), so the whole run is sized
+    // and written by one const fn walking `<P as InjectedParams>::REQUESTS` —
+    // unlike every record above, which the macro enumerates itself. Gated on
+    // `params_ty.is_some()` at macro time for the same reason `Config` is:
+    // the synthesized `= ()` case contributes nothing.
+    if let Some(params) = params_ty {
+        len_terms.push(quote! {
+            ::aether_actor::__macro_internals::canonical::param_requests_len(
+                <#params as ::aether_actor::__macro_internals::InjectedParams>::REQUESTS,
+            )
+        });
+        copy_blocks.push(quote! {
+            {
+                const REQUESTS_LEN: usize =
+                    ::aether_actor::__macro_internals::canonical::param_requests_len(
+                        <#params as ::aether_actor::__macro_internals::InjectedParams>::REQUESTS,
+                    );
+                const REQUESTS_BYTES: [u8; REQUESTS_LEN] =
+                    ::aether_actor::__macro_internals::canonical::write_param_requests::<REQUESTS_LEN>(
+                        <#params as ::aether_actor::__macro_internals::InjectedParams>::REQUESTS,
+                        ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION,
+                    );
+                let mut index = 0;
+                while index < REQUESTS_LEN {
+                    out[pos] = REQUESTS_BYTES[index];
+                    pos += 1;
+                    index += 1;
+                }
+            }
+        });
     }
 
     // ADR-0169: an adopted handler set's records join this actor's manifest, so

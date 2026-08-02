@@ -12,6 +12,7 @@ use super::primitives::{
     U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str, write_u32_le,
     write_u64_le,
 };
+use crate::schema::ParamRequest;
 
 /// Byte length of a [`ReplyContract`](crate::ReplyContract)'s aether-wire
 /// encoding from its `(tag, id)` pair. The selector is a fixed `u32`; the
@@ -142,6 +143,70 @@ pub const fn write_inputs_actor_boundary<const N: usize>(namespace: &str) -> [u8
     let mut out = [0u8; N];
     let mut pos = write_u32_le(4, &mut out, 0); // variant selector: ActorBoundary
     pos = write_str(namespace, &mut out, pos);
+    let _ = pos;
+    out
+}
+
+/// Byte length of a `ParamRequest` record's aether-wire encoding (ADR-0170).
+/// A `u32` LE variant selector (`5`) + the `KindId` id (bare `u64`) +
+/// `wire(name)` + `wire(field)`.
+#[must_use]
+pub const fn inputs_param_request_len(_id: u64, name: &str, field: &str) -> usize {
+    U32_WIDTH + U64_WIDTH + str_len(name) + str_len(field)
+}
+
+/// Serialize an `InputsRecord::ParamRequest` into a fixed-size array sized
+/// by [`inputs_param_request_len`].
+#[must_use]
+pub const fn write_inputs_param_request<const N: usize>(id: u64, name: &str, field: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = write_u32_le(5, &mut out, 0); // variant selector: ParamRequest
+    pos = write_u64_le(id, &mut out, pos);
+    pos = write_str(name, &mut out, pos);
+    pos = write_str(field, &mut out, pos);
+    let _ = pos;
+    out
+}
+
+/// Total byte length of the version-framed `ParamRequest` run for one actor
+/// (ADR-0170) — one `[version][record]` frame per entry in `requests`.
+///
+/// Unlike the per-handler encoders above, a `Params` type's requests are a
+/// `&'static [ParamRequest]` the `#[actor]` macro cannot destructure at
+/// expansion time (it sees only `type Params = P`, never `P`'s fields), so
+/// the whole run is sized and written by one const fn walking the slice.
+#[must_use]
+pub const fn param_requests_len(requests: &[ParamRequest]) -> usize {
+    let mut total = 0usize;
+    let mut index = 0usize;
+    while index < requests.len() {
+        let request = &requests[index];
+        total += 1 + inputs_param_request_len(request.id.0, request.name, request.field);
+        index += 1;
+    }
+    total
+}
+
+/// Write the version-framed `ParamRequest` run for one actor into a
+/// fixed-size array sized by [`param_requests_len`]. `version` is the
+/// caller's [`INPUTS_SECTION_VERSION`](crate::INPUTS_SECTION_VERSION), passed
+/// in so this crate's section-version constant stays the single source the
+/// macro references.
+#[must_use]
+pub const fn write_param_requests<const N: usize>(requests: &[ParamRequest], version: u8) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = 0usize;
+    let mut index = 0usize;
+    while index < requests.len() {
+        let request = &requests[index];
+        out[pos] = version;
+        pos += 1;
+        pos = write_u32_le(5, &mut out, pos); // variant selector: ParamRequest
+        pos = write_u64_le(request.id.0, &mut out, pos);
+        pos = write_str(request.name, &mut out, pos);
+        pos = write_str(request.field, &mut out, pos);
+        index += 1;
+    }
     let _ = pos;
     out
 }

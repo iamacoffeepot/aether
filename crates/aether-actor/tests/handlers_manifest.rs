@@ -223,6 +223,11 @@ fn manifest_const_round_trips_to_expected_records() {
             InputsRecord::ActorBoundary { .. } => {
                 panic!("unexpected ActorBoundary record for a single-actor module")
             }
+            // ADR-0170: this fixture declares no `type Params`, so the macro
+            // emits no request records.
+            InputsRecord::ParamRequest { .. } => {
+                panic!("unexpected ParamRequest record for a component that declares no Params")
+            }
         }
     }
 

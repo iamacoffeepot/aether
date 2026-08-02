@@ -72,6 +72,7 @@ fn load_component(harness: &mut SubstrateHarness, wasm_path: &Path, config: &Ant
                     name: Some(COMPONENT_NAME.to_owned()),
                     config: config.encode_into_bytes(),
                     export: None,
+                    replica: None,
                 },
             ),
         )])

@@ -38,7 +38,7 @@ mod tests {
         let load_replies = harness.send::<LoadComponent>(
             engine,
             "aether.component",
-            &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
+            &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None, replica: None },
         );
         let mailbox_id = match decode_reply::<LoadResult>(&load_replies) {
             LoadResult::Ok { mailbox_id, .. } => mailbox_id,
