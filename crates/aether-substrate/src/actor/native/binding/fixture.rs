@@ -15,7 +15,7 @@ use crate::mail::mailer::Mailer;
 #[cfg(feature = "wasm")]
 use crate::mail::{HubOutbound, Registry};
 
-/// Build a registry handler that forwards every [`MailDispatch`]
+/// Build a registry handler that forwards every [`OwnedDispatch`]
 /// it receives onto `tx` as an owned [`Envelope`]. Used by tests
 /// that need a registered recipient but only care about
 /// observing — or just not warn-dropping — the mail.
