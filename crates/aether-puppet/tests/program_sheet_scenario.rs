@@ -9,8 +9,8 @@
 //! oracle are drawn as adjacent 1:1 rects in the same captured frame,
 //! so both ride the identical nearest-sampled overlay -> sRGB surface
 //! -> capture path and any difference between the rects is the op's
-//! own, not the readback's. The R32Float ops append a test-only viz
-//! entry to the module (the overlay pass warn-drops R32Float batches)
+//! own, not the readback's. The `R32Float` ops append a test-only viz
+//! entry to the module (the overlay pass warn-drops `R32Float` batches)
 //! that lifts the data plane into gray RGBA8 through the same one
 //! quantizer the oracle's gray upload uses.
 //!
@@ -28,6 +28,10 @@
 // and quantizes `[0, 1]` values to `u8` the same bounded way the easel
 // does.
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+// The oracle restates the CPU wash formulas verbatim; `mul_add` / `hypot`
+// rewrites would change the float semantics the parity is measured
+// against.
+#![allow(clippy::suboptimal_flops, clippy::imprecise_flops)]
 
 use core::f32::consts::{SQRT_2, TAU};
 use std::env;
@@ -213,14 +217,14 @@ fn assert_rect_parity(img: &Image, gpu_left: u32, oracle_left: u32, side: u32, t
 /// Dispatch the program and capture both observation rects in one frame.
 fn capture_side_by_side(
     harness: &mut SubstrateHarness,
-    dispatch: ProgramDispatch,
-    gpu_rect: DrawTexturedQuads,
-    oracle_rect: DrawTexturedQuads,
+    dispatch: &ProgramDispatch,
+    gpu_rect: &DrawTexturedQuads,
+    oracle_rect: &DrawTexturedQuads,
 ) -> Image {
     let pre = vec![
-        envelope("aether.render", &dispatch),
-        envelope("aether.render", &gpu_rect),
-        envelope("aether.render", &oracle_rect),
+        envelope("aether.render", dispatch),
+        envelope("aether.render", gpu_rect),
+        envelope("aether.render", oracle_rect),
     ];
     let captured =
         harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture program output");
@@ -285,7 +289,7 @@ fn care_mix_matches_the_cpu_ramp() {
     let dispatch =
         ProgramDispatch { program_id, bindings: vec![tight_id, loose_id, care_id, output_id], uniforms: Vec::new() };
     let img =
-        capture_side_by_side(&mut harness, dispatch, overlay(output_id, 4.0, side), overlay(oracle_id, 36.0, side));
+        capture_side_by_side(&mut harness, &dispatch, &overlay(output_id, 4.0, side), &overlay(oracle_id, 36.0, side));
 
     assert_rect_parity(&img, 4, 36, side as u32, 2, "care mix");
 }
@@ -372,7 +376,7 @@ fn lost_edge_gives_way_where_the_cpu_does() {
         uniforms: LostEdgeParams { centre: Vec2::new(15.5, 15.5), angle: 3.0 }.encode().to_vec(),
     };
     let img =
-        capture_side_by_side(&mut harness, dispatch, overlay(output_id, 4.0, side), overlay(oracle_id, 44.0, side));
+        capture_side_by_side(&mut harness, &dispatch, &overlay(output_id, 4.0, side), &overlay(oracle_id, 44.0, side));
 
     assert_rect_parity(&img, 4, 44, side as u32, 4, "lost edge");
 }
@@ -475,7 +479,7 @@ fn palette_composite_matches_the_cpu_sheet() {
         uniforms: coats.iter().flat_map(|coat| CoatParams { pigment: coat.pigment, cap: coat.cap }.encode()).collect(),
     };
     let img =
-        capture_side_by_side(&mut harness, dispatch, overlay(sheet_id, 4.0, side), overlay(oracle_id, 36.0, side));
+        capture_side_by_side(&mut harness, &dispatch, &overlay(sheet_id, 4.0, side), &overlay(oracle_id, 36.0, side));
 
     assert_rect_parity(&img, 4, 36, side as u32, 6, "palette composite");
 }
