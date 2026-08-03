@@ -202,16 +202,12 @@ const UNREACHED: f32 = 1e9;
 /// Approximate distance, in pixels, from every pixel to the nearest seeded
 /// one — two sweeps of a 3x3 chamfer mask rather than an exact transform.
 pub fn chamfer_distance(seeded: &[bool], width: usize, height: usize) -> Vec<f32> {
-    let mut distance: Vec<f32> = seeded
-        .iter()
-        .map(|&seed| {
-            if seed {
-                0.0
-            } else {
-                UNREACHED
-            }
-        })
-        .collect();
+    let mut distance = vec![UNREACHED; seeded.len()];
+    for (at, &seed) in distance.iter_mut().zip(seeded) {
+        if seed {
+            *at = 0.0;
+        }
+    }
 
     for y in 0..height {
         for x in 0..width {
