@@ -492,7 +492,7 @@ pub struct PassRepeat {
 /// block the entry point declares (checked at register from naga's
 /// layout; a shorter window rejects). A pass whose entry point declares
 /// no uniform block passes a zero-length window.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProgramPass {
     pub stage: PassStage,
     pub entry_point: String,

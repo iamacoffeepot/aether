@@ -4,6 +4,10 @@
 //! dispatch path records against; failure produces the `Err { reason }`
 //! string, one distinguishable message per validation class.
 
+use naga::front::wgsl;
+use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
+use naga::{AddressSpace, Module, ShaderStage};
+
 use crate::{InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat};
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
@@ -88,9 +92,9 @@ pub fn resolve_extent(extent: SlotExtent, reference: (u32, u32)) -> (u32, u32) {
 /// Returns the plan, or the `Err { reason }` string for the first
 /// failing check.
 pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
-    let module = naga::front::wgsl::parse_str(&mail.wgsl)
-        .map_err(|error| format!("invalid wgsl: {}", error.emit_to_string(&mail.wgsl)))?;
-    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+    let module =
+        wgsl::parse_str(&mail.wgsl).map_err(|error| format!("invalid wgsl: {}", error.emit_to_string(&mail.wgsl)))?;
+    let info = Validator::new(ValidationFlags::all(), Capabilities::all())
         .validate(&module)
         .map_err(|error| format!("invalid wgsl: {}", error.emit_to_string(&mail.wgsl)))?;
 
@@ -110,14 +114,15 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     let mut written_bindings: Vec<u32> = Vec::new();
     for (index, pass) in mail.passes.iter().enumerate() {
         let plan = validate_pass(mail, &module, &info, &passes, &transients, index, pass)?;
+        let sequence = u32::try_from(index).expect("pass sequence index fits u32");
         if let ResolvedSlot::Transient(transient) = plan.output {
             let live = &mut transients[transient as usize];
-            live.first_write.get_or_insert(index as u32);
-            live.last_use = Some(index as u32);
+            live.first_write.get_or_insert(sequence);
+            live.last_use = Some(sequence);
         }
         for input in &plan.inputs {
             if let ResolvedSlot::Transient(transient) = input {
-                transients[*transient as usize].last_use = Some(index as u32);
+                transients[*transient as usize].last_use = Some(sequence);
             }
         }
         if let ResolvedSlot::Binding(binding) = plan.output
@@ -155,8 +160,8 @@ fn check_extent(extent: SlotExtent, slot: impl Fn() -> String) -> Result<(), Str
 #[allow(clippy::too_many_arguments)]
 fn validate_pass(
     mail: &ProgramRegister,
-    module: &naga::Module,
-    info: &naga::valid::ModuleInfo,
+    module: &Module,
+    info: &ModuleInfo,
     earlier: &[PassPlan],
     transients: &[TransientPlan],
     index: usize,
@@ -170,7 +175,7 @@ fn validate_pass(
     let entry_index = module
         .entry_points
         .iter()
-        .position(|entry| entry.stage == naga::ShaderStage::Fragment && entry.name == pass.entry_point)
+        .position(|entry| entry.stage == ShaderStage::Fragment && entry.name == pass.entry_point)
         .ok_or_else(|| format!("pass {index}: no fragment entry point named `{}` in the module", pass.entry_point))?;
 
     let mut inputs = Vec::with_capacity(pass.inputs.len());
@@ -274,13 +279,13 @@ fn check_transient_index(mail: &ProgramRegister, pass: usize, transient: u32) ->
 /// `@group(0) @binding(0)`, from naga's layout info. `None` when the
 /// entry point touches no such block — a uniform-less pass is fine with
 /// any window, including a zero-length one.
-fn uniform_block_bytes(module: &naga::Module, info: &naga::valid::ModuleInfo, entry_index: usize) -> Option<u32> {
+fn uniform_block_bytes(module: &Module, info: &ModuleInfo, entry_index: usize) -> Option<u32> {
     let entry_info = info.get_entry_point(entry_index);
     module
         .global_variables
         .iter()
         .find(|(handle, var)| {
-            matches!(var.space, naga::AddressSpace::Uniform)
+            matches!(var.space, AddressSpace::Uniform)
                 && var.binding.as_ref().is_some_and(|binding| binding.group == 0 && binding.binding == 0)
                 && !entry_info[*handle].is_empty()
         })

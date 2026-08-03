@@ -621,12 +621,12 @@ impl NativeActor for RenderCapability {
     ) -> ProgramRegisterResult {
         state.observe(<ProgramRegister as Kind>::ID);
         state.ensure_offscreen_gpu_booted();
-        match state.gpu.as_ref() {
-            Some(gpu) => state.programs.register(gpu, mail),
-            None => ProgramRegisterResult::Err {
+        let Some(gpu) = state.gpu.as_ref() else {
+            return ProgramRegisterResult::Err {
                 reason: "the render GPU is not booted; register programs after the first window attaches".to_owned(),
-            },
-        }
+            };
+        };
+        state.programs.register(gpu, mail)
     }
 
     /// `ProgramDispatch` (ADR-0170): queue one execution for the next

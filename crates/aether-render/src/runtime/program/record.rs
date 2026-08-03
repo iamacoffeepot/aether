@@ -62,6 +62,10 @@ pub(super) fn record_dispatch(
 /// Run every dispatch-time check, warn-dropping on the first mismatch.
 /// Returns the program's reference extent (the output binding texture's
 /// size) on success.
+// One check per warn-drop class in dispatch order; the line count is the
+// tracing fields naming program, pass, and binding, and splitting per
+// class would scatter the single rejection narrative.
+#[allow(clippy::too_many_lines)]
 fn check_dispatch(plan: &ProgramPlan, textures: &TextureRegistry, dispatch: &ProgramDispatch) -> Option<(u32, u32)> {
     let program_id = dispatch.program_id;
     if dispatch.bindings.len() != plan.bindings.len() {
@@ -180,6 +184,10 @@ fn check_dispatch(plan: &ProgramPlan, textures: &TextureRegistry, dispatch: &Pro
 /// staging arrangement (wgpu dynamic uniform offsets must be multiples
 /// of `min_uniform_buffer_offset_alignment`, and dispatch windows carry
 /// no alignment of their own), upload it once, and record the passes.
+// Staging, bind groups, and pass encoding share the per-pass borrow
+// structure; splitting them would re-thread the same six context
+// arguments — the same shape `record_overlay_batches` keeps.
+#[allow(clippy::too_many_lines)]
 fn encode_passes(
     gpu: &RenderGpu,
     encoder: &mut wgpu::CommandEncoder,
