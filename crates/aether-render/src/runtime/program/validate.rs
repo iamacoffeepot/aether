@@ -359,6 +359,14 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// Each register-time failure class replies its own distinguishable
     /// reason — collapsing them into one opaque string is the bug this
     /// pins, since callers triage a rejected program by its class.
+    /// The rejection reason for a register mail that must not validate.
+    fn rejection(mail: &ProgramRegister) -> String {
+        match validate(mail) {
+            Err(reason) => reason,
+            Ok(_) => panic!("register must reject"),
+        }
+    }
+
     #[test]
     fn validation_classes_have_distinguishable_reasons() {
         let valid_pass =
@@ -370,49 +378,43 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             passes: vec![valid_pass()],
         };
 
-        let bad_wgsl = validate(&ProgramRegister { wgsl: "not wgsl at all".to_owned(), ..base() }).unwrap_err();
+        let bad_wgsl = rejection(&ProgramRegister { wgsl: "not wgsl at all".to_owned(), ..base() });
         assert!(bad_wgsl.starts_with("invalid wgsl:"), "naga class: {bad_wgsl}");
 
-        let missing_entry = validate(&ProgramRegister {
+        let missing_entry = rejection(&ProgramRegister {
             passes: vec![ProgramPass { entry_point: "fs_missing".to_owned(), ..valid_pass() }],
             ..base()
-        })
-        .unwrap_err();
+        });
         assert!(missing_entry.contains("no fragment entry point"), "entry class: {missing_entry}");
 
-        let unwritten_read = validate(&ProgramRegister {
+        let unwritten_read = rejection(&ProgramRegister {
             transients: vec![full(TextureFormat::Rgba8)],
             passes: vec![ProgramPass { inputs: vec![InputSlot::Transient { index: 0 }], ..valid_pass() }],
             ..base()
-        })
-        .unwrap_err();
+        });
         assert!(unwritten_read.contains("before any earlier pass writes it"), "sequence class: {unwritten_read}");
 
         let short_window =
-            validate(&ProgramRegister { passes: vec![ProgramPass { uniform_length: 2, ..valid_pass() }], ..base() })
-                .unwrap_err();
+            rejection(&ProgramRegister { passes: vec![ProgramPass { uniform_length: 2, ..valid_pass() }], ..base() });
         assert!(short_window.contains("uniform window"), "window class: {short_window}");
 
-        let self_read = validate(&ProgramRegister {
+        let self_read = rejection(&ProgramRegister {
             passes: vec![ProgramPass { inputs: vec![InputSlot::Binding { index: 1 }], ..valid_pass() }],
             ..base()
-        })
-        .unwrap_err();
+        });
         assert!(self_read.contains("its own output"), "self-read class: {self_read}");
 
-        let transient_tail = validate(&ProgramRegister {
+        let transient_tail = rejection(&ProgramRegister {
             transients: vec![full(TextureFormat::Rgba8)],
             passes: vec![ProgramPass { output: OutputSlot::Transient { index: 0 }, ..valid_pass() }],
             ..base()
-        })
-        .unwrap_err();
+        });
         assert!(transient_tail.contains("final pass"), "final-output class: {transient_tail}");
 
-        let zero_repeat = validate(&ProgramRegister {
+        let zero_repeat = rejection(&ProgramRegister {
             passes: vec![ProgramPass { repeat: Some(PassRepeat { count: 0, uniform_stride: 0 }), ..valid_pass() }],
             ..base()
-        })
-        .unwrap_err();
+        });
         assert!(zero_repeat.contains("repeat count"), "repeat class: {zero_repeat}");
     }
 }
