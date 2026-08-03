@@ -403,11 +403,11 @@ fn rim_matches_cpu_pour_rim_block() {
     let (mut ceiling_bites, mut floor_bites) = (0u32, 0u32);
     let mut expected = Vec::with_capacity(alpha.len());
     for y in 0..PLANE_HEIGHT {
-        let noise_row = ((y + (window.1 * RIM_RESTRIDE.1) as usize) % PLANE_HEIGHT) * PLANE_WIDTH;
+        let noise_row = ((y + window.1 as usize * RIM_RESTRIDE.1) % PLANE_HEIGHT) * PLANE_WIDTH;
         for x in 0..PLANE_WIDTH {
             let rim = (alpha[y * PLANE_WIDTH + x] - interior[y * PLANE_WIDTH + x]).max(0.0);
             let raw =
-                RIM_VARY.0 + noise[noise_row + (x + (window.0 * RIM_RESTRIDE.0) as usize) % PLANE_WIDTH] * RIM_VARY.1;
+                RIM_VARY.0 + noise[noise_row + (x + window.0 as usize * RIM_RESTRIDE.0) % PLANE_WIDTH] * RIM_VARY.1;
             if rim > 0.05 && raw > RIM_VARY_CEILING {
                 ceiling_bites += 1;
             }

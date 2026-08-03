@@ -28,8 +28,13 @@ use core::f32::consts::{PI, TAU};
 use aether_math::Vec2;
 use aether_render::{InputSlot, OutputSlot, PassStage, ProgramPass, SlotExtent, SlotSpec, TextureFormat};
 
-use crate::easel::field::DropAccident;
+use crate::easel::field::{DropAccident, SAG_STEP, SMEAR_REACH};
 use crate::easel::image;
+
+/// Advection passes the smear runs — `field`'s own count, re-exported so
+/// callers size the [`smear_passes`] chain against the same constant the
+/// CPU call site iterates.
+pub use crate::easel::field::SMEAR_PASSES;
 
 /// The WGSL module carrying the four pigment entry points
 /// (`fs_granulate`, `fs_sag`, `fs_spatter`, `fs_smear`). Register it —
@@ -81,10 +86,6 @@ pub fn granulate_pass(density: InputSlot, tooth: InputSlot, output: OutputSlot, 
     }
 }
 
-/// The reference-sheet spacing of the two downhill drag samples —
-/// mirrors field.rs `SAG_STEP`, private to the oracle.
-const SAG_STEP_REFERENCE_PIXELS: f32 = 12.0;
-
 /// Uniform window for [`sag_pass`] — the WGSL `SagParams` block: one
 /// little-endian `u32`.
 pub struct SagUniforms {
@@ -98,10 +99,10 @@ impl SagUniforms {
     pub const BYTES: u32 = 4;
 
     /// The step the CPU oracle takes at this canvas height: field.rs
-    /// `SAG_STEP` through [`image::tuned`], rounded, floored at one
+    /// [`SAG_STEP`] through [`image::tuned`], rounded, floored at one
     /// texel — exactly `sagged`'s own derivation.
     pub fn for_canvas(height: usize) -> Self {
-        Self { step_texels: image::tuned(SAG_STEP_REFERENCE_PIXELS, height).round().max(1.0) as u32 }
+        Self { step_texels: image::tuned(SAG_STEP, height).round().max(1.0) as u32 }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -209,14 +210,6 @@ pub fn spatter_pass(density: InputSlot, output: OutputSlot, uniform_offset: u32)
     }
 }
 
-/// Advection passes the smear runs — mirrors field.rs `SMEAR_PASSES`,
-/// private to the oracle's `coats` call site.
-pub const SMEAR_PASSES: u32 = 2;
-
-/// The reference-sheet reach of one advection segment — mirrors
-/// field.rs `SMEAR_REACH`, private to the oracle's `coats` call site.
-const SMEAR_REACH_REFERENCE_PIXELS: f32 = 12.0;
-
 /// Uniform window for the [`smear_passes`] chain — the WGSL
 /// `SmearParams` block: one little-endian `i32`, shared by every pass in
 /// the chain.
@@ -231,10 +224,10 @@ impl SmearUniforms {
     pub const BYTES: u32 = 4;
 
     /// The reach the CPU call site uses at this canvas height: field.rs
-    /// `SMEAR_REACH` through [`image::tuned`], rounded — exactly
+    /// [`SMEAR_REACH`] through [`image::tuned`], rounded — exactly
     /// `Sheet::coats`' own derivation.
     pub fn for_canvas(height: usize) -> Self {
-        Self { reach: image::tuned(SMEAR_REACH_REFERENCE_PIXELS, height).round() as i32 }
+        Self { reach: image::tuned(SMEAR_REACH, height).round() as i32 }
     }
 
     pub fn encode(&self) -> Vec<u8> {

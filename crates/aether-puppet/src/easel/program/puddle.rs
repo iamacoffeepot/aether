@@ -45,40 +45,16 @@ pub const THRESHOLD_ENTRY: &str = "fs_threshold";
 /// Entry point of the tide-line rim ([`rim_pass`]).
 pub const RIM_ENTRY: &str = "fs_rim";
 
-/// How much narrower one box pass is than the Gaussian three of them
-/// stand in for. Mirrors the private constant in `easel::image` — the
-/// blur parity scenario pins the two against each other.
-pub const BOX_TO_GAUSSIAN: f32 = 1.7;
-
-/// Box iterations per blur, matching `easel::image`'s pass count: three
-/// is where the corners stop showing. Each iteration is two program
-/// passes (horizontal, then vertical), so [`box_blur_passes`] emits six.
-pub const BLUR_ITERATIONS: u32 = 3;
-
-/// Half-width of the band the puddle is thresholded across. Mirrors the
-/// private constant in `easel::field`; callers put it in
-/// [`ThresholdUniforms::band`] unless a wash deliberately widens it.
-pub const EDGE_BAND: f32 = 0.08;
-
-/// Middle strength of the tide line and how far the edge noise swings it
-/// either side. Mirrors `easel::field`'s private pair;
-/// [`RimUniforms::encode`] bakes it into the rim window.
-pub const RIM_VARY: (f32, f32) = (0.55, 1.5);
-
-/// Ceiling on the darkest the tide line may go. Mirrors `easel::field`.
-pub const RIM_VARY_CEILING: f32 = 1.3;
-
-/// How far the rim's window into the noise is displaced past the one
-/// that placed the edge, in multiples of the pour's own offset. Mirrors
-/// `easel::field`; [`RimUniforms::encode`] applies it, so the rim's
-/// strength varies along a different stretch of noise than the signal
-/// that decided where the tide line went.
-pub const RIM_RESTRIDE: (u32, u32) = (3, 7);
-
-/// How much stronger the rim reads than the body it edges. Mirrors
-/// `easel::field`; the sequencer folds it into [`RimUniforms::strength`]
-/// as `params.rim * params.load * RIM_GAIN`.
-pub const RIM_GAIN: f32 = 2.2;
+/// The one source of these is the CPU wash itself: [`ThresholdUniforms`]
+/// and [`RimUniforms`] window the same [`EDGE_BAND`] / [`RIM_VARY`] /
+/// [`RIM_RESTRIDE`] the oracle thresholds and rims with, the sequencer
+/// folds [`RIM_GAIN`] into [`RimUniforms::strength`] as
+/// `params.rim * params.load * RIM_GAIN`, and [`box_radius_texels`] and
+/// [`box_blur_passes`] round and iterate through the same
+/// [`BOX_TO_GAUSSIAN`] / [`BLUR_PASSES`] as `image::blur` — each blur is
+/// `2 * BLUR_PASSES` program passes, horizontal then vertical.
+pub use crate::easel::field::{EDGE_BAND, RIM_GAIN, RIM_RESTRIDE, RIM_VARY, RIM_VARY_CEILING};
+pub use crate::easel::image::{BLUR_PASSES, BOX_TO_GAUSSIAN};
 
 /// The data-plane slot every puddle op reads and writes: full-extent
 /// `R32Float`, nearest-bound (ADR-0170), so plane values survive a chain
@@ -128,7 +104,7 @@ impl BoxBlurUniforms {
     }
 }
 
-/// The full blur chain mirroring `image::blur`: [`BLUR_ITERATIONS`] box
+/// The full blur chain mirroring `image::blur`: [`BLUR_PASSES`] box
 /// iterations, each a horizontal sweep into the `scratch` transient and a
 /// vertical sweep out of it — the vertical result parking in `carry`
 /// between iterations and landing in `output` on the last. `scratch` and
@@ -143,11 +119,11 @@ pub fn box_blur_passes(
     output: OutputSlot,
     uniform_offset: u32,
 ) -> Vec<ProgramPass> {
-    let mut passes = Vec::with_capacity(2 * BLUR_ITERATIONS as usize);
+    let mut passes = Vec::with_capacity(2 * BLUR_PASSES as usize);
     let mut read = source;
 
-    for iteration in 0..BLUR_ITERATIONS {
-        let vertical_out = if iteration + 1 == BLUR_ITERATIONS {
+    for iteration in 0..BLUR_PASSES {
+        let vertical_out = if iteration + 1 == BLUR_PASSES {
             output
         } else {
             OutputSlot::Transient { index: carry }
@@ -268,8 +244,8 @@ impl RimUniforms {
     /// The window bytes in the blob layout the shader declares.
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         encode_words([
-            (self.window.0 * RIM_RESTRIDE.0).to_le_bytes(),
-            (self.window.1 * RIM_RESTRIDE.1).to_le_bytes(),
+            (self.window.0 * RIM_RESTRIDE.0 as u32).to_le_bytes(),
+            (self.window.1 * RIM_RESTRIDE.1 as u32).to_le_bytes(),
             RIM_VARY.0.to_le_bytes(),
             RIM_VARY.1.to_le_bytes(),
             RIM_VARY_CEILING.to_le_bytes(),

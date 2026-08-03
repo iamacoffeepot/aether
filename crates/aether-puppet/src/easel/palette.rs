@@ -56,8 +56,10 @@ const PIGMENT_FLOOR: f32 = 0.02;
 /// rather than run through a per-channel power.
 const MINIMUM_DEPOSIT: f32 = 0.002;
 
-/// Tone at which a material is fully lit, unless it names its own.
-const LIT: f32 = 0.92;
+/// Tone at which a material is fully lit, unless it names its own. The
+/// GPU shade pass takes the resolved value through its uniforms, so the
+/// dispatch encoder reads this too.
+pub(crate) const LIT: f32 = 0.92;
 
 /// Tone at which a material is fully in shadow.
 const SHADOWED: f32 = 0.3;

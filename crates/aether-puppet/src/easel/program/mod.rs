@@ -7,13 +7,16 @@
 //! is data authored here. Nothing rolls dice on the GPU, and the CPU
 //! develop stays the oracle its parity scenarios paint against.
 //!
-//! The op vocabulary lands in three file-disjoint slices, one module
-//! each, so their pull requests never contend on these declarations:
+//! The op vocabulary landed in three file-disjoint slices, one module
+//! each, so their pull requests never contended on these declarations:
 //! [`puddle`] (iamacoffeepot/aether#4366), [`pigment`]
 //! (iamacoffeepot/aether#4367) and [`sheet`] (iamacoffeepot/aether#4368).
-//! Each slice owns its own `.wgsl` and scenario files under this
-//! directory.
+//! [`wash`] (iamacoffeepot/aether#4369) is the coat sequencer that
+//! composes them into the one registered wash program and encodes its
+//! per-develop uniform blob. Each module owns its own `.wgsl` and
+//! scenario files under this directory.
 
 pub mod pigment;
 pub mod puddle;
 pub mod sheet;
+pub mod wash;
