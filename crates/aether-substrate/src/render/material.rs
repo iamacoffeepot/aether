@@ -224,6 +224,9 @@ pub fn material_params_offset(index: usize) -> Option<u32> {
     index.checked_mul(PARAMS_ALIGN).and_then(|offset| u32::try_from(offset).ok())
 }
 
+// `mul_add` would change float semantics for no gain the eye can see, and
+// the plain form keeps corner(u, v) readable as origin + basis extents.
+#[allow(clippy::suboptimal_flops)]
 pub fn push_material_rect_vertices(
     out: &mut Vec<u8>,
     origin: [f32; 3],
