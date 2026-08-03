@@ -29,9 +29,18 @@
 // Reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness knob,
 // not cap config.
 #![allow(clippy::disallowed_methods)]
-// The oracle mirrors restate field.rs geometry, and answer the numeric
-// cast lints the way the crate itself does.
-#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+// The oracle mirrors restate field.rs geometry literally — `mul_add`
+// would change float semantics against both the oracle and the shader
+// port — and the flow planes are genuine x/y siblings, so their
+// bindings differ by one letter. The numeric cast lints are answered
+// the way the crate itself answers them.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::suboptimal_flops,
+    clippy::similar_names
+)]
 
 use std::env;
 
@@ -267,8 +276,8 @@ fn canvas_index(x: usize, y: usize) -> usize {
 }
 
 /// Mirror of field.rs `Sheet::granulate` over explicit planes (the
-/// method is private to the wash). Constants restate GRANULATION_FLOOR /
-/// _AUTHORITY / _PIVOT; if field.rs moves them, the sequencer's
+/// method is private to the wash). Constants restate `GRANULATION_FLOOR`
+/// / `_AUTHORITY` / `_PIVOT`; if field.rs moves them, the sequencer's
 /// whole-wash parity scenario (iamacoffeepot/aether#4369) is the
 /// tripwire that catches the shader lagging.
 fn granulated_oracle(density: &[f32], tooth: &[f32], gran: f32) -> Vec<f32> {
@@ -309,7 +318,7 @@ fn sagged_oracle(soft: &[f32], step: usize) -> Vec<f32> {
 }
 
 /// Mirror of field.rs `Sheet::spatter` (the method is private to the
-/// wash), bounding boxes, clamps and all. 1.25 restates SPATTER_DROOP.
+/// wash), bounding boxes, clamps and all. 1.25 restates `SPATTER_DROOP`.
 fn spattered_oracle(density: &[f32], centre: Vec2, drops: &[DropAccident]) -> Vec<f32> {
     let mut out = density.to_vec();
 
