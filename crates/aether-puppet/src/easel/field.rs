@@ -33,12 +33,14 @@ use core::f32::consts::TAU;
 
 use aether_math::Vec2;
 
+use super::accent::Accents;
 use super::image::{self, Flow, Rng};
 use super::palette::{self, Atmosphere, Coat, Material};
-use crate::labels::{BROW, DRESS, EYE, HAIR, LIPS};
+use crate::labels::{BROW, DRESS, EYE, HAIR, LIPS, SKIN};
 
 /// The baked planes a sheet is painted from, all at `width * height` and
 /// row major.
+#[derive(Clone, Copy)]
 pub struct Planes<'a> {
     /// Which material each pixel belongs to — the region class plane.
     pub classes: &'a [u8],
@@ -379,13 +381,17 @@ impl<'a> Sheet<'a> {
     /// Pass a `flow` solved from the drawing's own coverage — see
     /// [`image::structure_tensor_flow`] — to have the hair brushed down
     /// its locks rather than poured over them; the wash is complete
-    /// without it.
-    pub fn coats(&self, flow: Option<&Flow>) -> Vec<Coat> {
+    /// without it. Pass the [`Accents`] a face was charted for and the
+    /// meta-materials paint too: a subject with no face simply has no
+    /// coverage for them, and every labelled wash develops unchanged.
+    pub fn coats(&self, flow: Option<&Flow>, accents: Option<&Accents>) -> Vec<Coat> {
         let mut rng = Rng::new(self.seed);
         let mut coats = Vec::new();
 
         for material in palette::MATERIALS {
-            let mask = palette::mask_of(self.planes.classes, material.class);
+            let Some(mask) = self.coverage(material, accents) else {
+                continue;
+            };
             let value = palette::shade_of(material, self.planes.tone);
             let mut density = self.material_wash(material, &mask, &value, &mut rng);
 
@@ -395,6 +401,17 @@ impl<'a> Sheet<'a> {
                 let reach = image::tuned(SMEAR_REACH, self.planes.height).round() as i32;
                 let (width, height) = (self.planes.width, self.planes.height);
                 density = image::smear_along_flow(&density, flow, width, height, SMEAR_PASSES, reach);
+            }
+
+            // The lid crossing the iris is weight rather than coverage, so
+            // it lands on the finished wash: folded into the mask instead
+            // it would move the puddle's own edge and take the rim with it.
+            if material.class == palette::IRIS
+                && let Some(accents) = accents
+            {
+                for (at, &lift) in density.iter_mut().zip(&accents.lift) {
+                    *at *= lift;
+                }
             }
 
             coats.push(Coat { class: material.class, pigment: material.pigment, cap: palette::DENSITY_CAP, density });
@@ -413,6 +430,18 @@ impl<'a> Sheet<'a> {
                 let density = self.atmosphere(&mask, policy, &mut air);
                 coats.push(Coat { class: material.class, pigment: policy.pigment, cap: policy.cap, density });
             }
+        }
+
+        // The flush belongs to the skin the way the glaze belongs to the
+        // hair: a second pigment over a region already washed, and one
+        // that arrives soft and edgeless rather than as a wash of its own.
+        if let Some(accents) = accents {
+            coats.push(Coat {
+                class: SKIN,
+                pigment: palette::BLUSH_PIGMENT,
+                cap: palette::BLUSH_CAP,
+                density: accents.blush.clone(),
+            });
         }
 
         coats
@@ -460,6 +489,20 @@ impl<'a> Sheet<'a> {
             .spattering(ATMOSPHERE_SPATTER);
 
         self.wash(&spill.iter().map(|&at| f32::from(at > ATMOSPHERE_LEVEL)).collect::<Vec<f32>>(), None, &params, rng)
+    }
+
+    /// Where a material's coverage comes from: the baked class plane for
+    /// one the field labels, the chart's own frame for a meta-material.
+    ///
+    /// `None` is a meta-material on a subject that charted no face — it
+    /// paints nothing rather than falling back to a class plane that has
+    /// never carried its id.
+    fn coverage(&self, material: &Material, accents: Option<&Accents>) -> Option<Vec<f32>> {
+        if material.class < palette::META {
+            return Some(palette::mask_of(self.planes.classes, material.class));
+        }
+
+        accents.and_then(|accents| accents.mask(material.class)).map(<[f32]>::to_vec)
     }
 
     /// One material's density, held as tightly as the care field says.
@@ -801,7 +844,7 @@ mod tests {
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
         let sheet = Sheet::new(planes, seed);
 
-        palette::composite(&sheet.coats(None), sheet.paper_shade())
+        palette::composite(&sheet.coats(None, None), sheet.paper_shade())
     }
 
     /// Tripwire: the sheet is a pure function of its seed.
@@ -834,7 +877,7 @@ mod tests {
         let (classes, tone, facing) = subject(width, height);
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
 
-        for coat in Sheet::new(planes, 0x5e_ed).coats(None) {
+        for coat in Sheet::new(planes, 0x5e_ed).coats(None, None) {
             assert!(coat.density.iter().all(|at| at.is_finite()), "class {} laid down a NaN", coat.class);
         }
     }

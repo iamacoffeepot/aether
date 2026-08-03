@@ -21,7 +21,7 @@
 //! light are the ones the ink drawing used, which is the point: the maps
 //! register with the drawing to the pixel.
 
-use aether_math::{Mat4, Vec3};
+use aether_math::{Mat4, Vec2, Vec3};
 use aether_render::DrawTriangle;
 
 use crate::extract::Settings;
@@ -79,6 +79,19 @@ fn project(view_proj: &Mat4, p: Vec3, half_width: f32, half_height: f32) -> Opti
     let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
 
     Some(Projected { page_x: (ndc.x + 1.0) * half_width, page_y: (1.0 - ndc.y) * half_height, depth: ndc.z })
+}
+
+/// Where a world point lands on the canvas, or `None` for anything the
+/// near plane has already eaten.
+///
+/// The accents project the chart's planted frames through this rather than
+/// carrying a projection of their own: the maps and the paint on them have
+/// to agree with the drawing to the pixel, and two copies of the mapping
+/// are two things to keep in step.
+pub fn on_canvas(view_proj: &Mat4, p: Vec3, width: usize, height: usize) -> Option<Vec2> {
+    let at = project(view_proj, p, width as f32 * 0.5, height as f32 * 0.5)?;
+
+    Some(Vec2::new(at.page_x, at.page_y))
 }
 
 /// Rasterize the three planes for one view of `mesh`.

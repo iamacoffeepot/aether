@@ -499,8 +499,20 @@ impl WasmActor for Puppet {
             field_of_view: FIELD_OF_VIEW,
         };
         if let Some(labels) = self.labels.as_ref() {
+            // The wash bakes off the coarse mesh and the accents plant on
+            // the fine one, which is the mesh the ink plants on: the paint
+            // has to come to rest on the ink's own fitted plane, and the
+            // wash only ever asks the surface what material it is.
             let painted_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
-            self.easel.develop(painted_mesh, labels, &self.settings, &self.drawn, &view, self.dragging);
+            let chart = self.anchors.as_ref().zip(self.settings.face).map(|(anchors, face)| easel::Chart {
+                mesh: subject,
+                anchors,
+                face,
+            });
+            let painted =
+                easel::Subject { mesh: painted_mesh, labels, settings: &self.settings, drawn: &self.drawn, chart };
+
+            self.easel.develop(&painted, &view, self.dragging);
         }
 
         if let Some(destroy) = self.easel.take_destroy() {
