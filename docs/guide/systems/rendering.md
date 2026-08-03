@@ -84,9 +84,11 @@ surface.
 The material pass records after the triangle pass and before the screen overlay,
 loading the main pass depth buffer with writes disabled. Components send typed
 material draw kinds rather than shader source. `aether.render.material.textured`
-draws sampled rects in the world plane with a tint. `aether.render.material.coverage`
+draws sampled rects with a tint. `aether.render.material.coverage`
 requires an R8 texture, thresholds at iso 127.5, and renders a body/rim band
-from the rect parameters. Both are immediate-mode: resend the batch every frame
+from the rect parameters. Each rect carries its own `right`/`up` basis: draped
+planar content passes the world axes, while content registered to a view — an
+underpainting standing behind its subject — orients the rect toward the eye. Both are immediate-mode: resend the batch every frame
 or it disappears on the next commit-current frame.
 
 `aether.kit.world` stores painted overlay surfaces as one scalar coverage byte

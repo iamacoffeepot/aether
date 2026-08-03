@@ -999,7 +999,15 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
         &DrawMaterialCoverage {
             texture_id,
             rects: vec![MaterialCoverageRect {
-                rect: MaterialRect { x: -0.8, y: -0.6, width: 1.6, height: 1.2, z: 0.5 },
+                rect: MaterialRect {
+                    x: -0.8,
+                    y: -0.6,
+                    width: 1.6,
+                    height: 1.2,
+                    z: 0.5,
+                    right: [1.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                },
                 body_color: Rgba::new(0.0, 0.9, 0.1, 1.0),
                 rim_color: Rgba::new(1.0, 0.9, 0.0, 1.0),
                 rim_width: 0.25,
@@ -1064,7 +1072,15 @@ fn textured_material_depth_tests_against_main_geometry() {
             &DrawMaterialTextured {
                 texture_id,
                 rects: vec![MaterialTexturedRect {
-                    rect: MaterialRect { x: -0.8, y: -0.6, width: 1.6, height: 1.2, z: 0.5 },
+                    rect: MaterialRect {
+                        x: -0.8,
+                        y: -0.6,
+                        width: 1.6,
+                        height: 1.2,
+                        z: 0.5,
+                        right: [1.0, 0.0, 0.0],
+                        up: [0.0, 1.0, 0.0],
+                    },
                     u0: 0.0,
                     v0: 0.0,
                     u1: 1.0,
@@ -1084,6 +1100,68 @@ fn textured_material_depth_tests_against_main_geometry() {
         "left sample should show red main-pass occluder, not blue material; got {left:?}",
     );
     assert!(right[2] > right[0].saturating_add(100), "right sample should show blue textured material; got {right:?}");
+}
+
+/// Oriented material rect (#4348): the rect's `right`/`up` basis, not
+/// the world axes, decides where it stands. Swinging the height along
+/// world X turns this tall narrow definition into a wide bar across the
+/// view's horizontal midline — a line the flat interpretation of the
+/// same fields never touches, so the midline sample fails if the basis
+/// is ignored.
+#[test]
+fn textured_material_rect_extends_along_its_basis() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+    let pixels = vec![255u8, 255, 255, 255];
+    let created = harness
+        .execute(vec![(
+            "create",
+            HarnessOp::send_and_await_reply(
+                "aether.render",
+                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels },
+            ),
+        )])
+        .expect("create oriented material texture");
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawMaterialTextured {
+            texture_id,
+            rects: vec![MaterialTexturedRect {
+                rect: MaterialRect {
+                    x: -0.8,
+                    y: 0.15,
+                    width: 0.3,
+                    height: 1.6,
+                    z: 0.5,
+                    right: [0.0, -1.0, 0.0],
+                    up: [1.0, 0.0, 0.0],
+                },
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: Rgba::new(0.0, 0.1, 1.0, 1.0),
+            }],
+        },
+    )];
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture oriented material");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode oriented material png");
+    let bar = rgba_at(&img, 32, 24);
+    let clear = rgba_at(&img, 56, 44);
+    let bg = background_top_left(&img);
+    assert!(bar[2] > bar[0].saturating_add(100), "midline sample should show the basis-swung blue bar; got {bar:?}");
+    assert!(
+        clear[0].abs_diff(bg[0]) <= 8 && clear[1].abs_diff(bg[1]) <= 8 && clear[2].abs_diff(bg[2]) <= 8,
+        "sample outside both interpretations should stay background; bg={bg:?} clear={clear:?}",
+    );
 }
 
 /// ADR-0140 coverage material rejects non-R8 textures at encode time:
@@ -1113,7 +1191,15 @@ fn coverage_material_warn_drops_non_r8_texture() {
         &DrawMaterialCoverage {
             texture_id,
             rects: vec![MaterialCoverageRect {
-                rect: MaterialRect { x: -0.8, y: -0.6, width: 1.6, height: 1.2, z: 0.5 },
+                rect: MaterialRect {
+                    x: -0.8,
+                    y: -0.6,
+                    width: 1.6,
+                    height: 1.2,
+                    z: 0.5,
+                    right: [1.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                },
                 body_color: Rgba::new(0.0, 1.0, 0.0, 1.0),
                 rim_color: Rgba::new(1.0, 1.0, 0.0, 1.0),
                 rim_width: 0.25,

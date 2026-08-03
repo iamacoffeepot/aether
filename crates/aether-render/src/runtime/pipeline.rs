@@ -240,7 +240,10 @@ pub(super) fn record_material_batches(
                     let first_vertex = (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
                     push_material_rect_vertices(
                         &mut vertex_bytes,
-                        [rect.rect.x, rect.rect.y, rect.rect.width, rect.rect.height, rect.rect.z],
+                        [rect.rect.x, rect.rect.y, rect.rect.z],
+                        rect.rect.right,
+                        rect.rect.up,
+                        [rect.rect.width, rect.rect.height],
                         [rect.u0, rect.v0, rect.u1, rect.v1],
                     );
                     draws.push(MaterialPassDraw::Textured(MaterialDraw {
@@ -285,7 +288,10 @@ pub(super) fn record_material_batches(
                     let first_vertex = (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
                     push_material_rect_vertices(
                         &mut vertex_bytes,
-                        [rect.rect.x, rect.rect.y, rect.rect.width, rect.rect.height, rect.rect.z],
+                        [rect.rect.x, rect.rect.y, rect.rect.z],
+                        rect.rect.right,
+                        rect.rect.up,
+                        [rect.rect.width, rect.rect.height],
                         [0.0, 0.0, 1.0, 1.0],
                     );
                     draws.push(MaterialPassDraw::Coverage(MaterialDraw {
