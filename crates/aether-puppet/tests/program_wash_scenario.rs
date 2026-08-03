@@ -191,7 +191,7 @@ fn camera() -> Mat4 {
 /// structure-tensor flow runs vertically with near-full coherence and
 /// the hair smear genuinely drags.
 fn striped_ink() -> Vec<f32> {
-    (0..CANVAS_WIDTH * CANVAS_HEIGHT).map(|i| f32::from((i % CANVAS_WIDTH) / 3 % 2 == 0)).collect()
+    (0..CANVAS_WIDTH * CANVAS_HEIGHT).map(|i| f32::from(((i % CANVAS_WIDTH) / 3).is_multiple_of(2))).collect()
 }
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
