@@ -256,8 +256,8 @@ pub struct RimUniforms {
     /// The pour's noise window — the same pair its threshold read; the
     /// restride displaces the rim's read past it.
     pub window: (u32, u32),
-    /// The folded rim multiplier:
-    /// `params.rim * params.load * `[`RIM_GAIN`].
+    /// The folded rim multiplier: the pour's `params.rim * params.load`
+    /// times [`RIM_GAIN`].
     pub strength: f32,
 }
 
