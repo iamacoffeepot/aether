@@ -1,4 +1,5 @@
 use super::super::capture::capture_envelope;
+use super::super::ids::parse_window_id;
 #[allow(clippy::wildcard_imports)]
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
@@ -46,11 +47,49 @@ fn decode_synthetic_png(png: &[u8]) -> DecodedSyntheticPng {
     DecodedSyntheticPng { dimensions, rgba }
 }
 
+/// Tripwire: a real window id survives the tool boundary.
+///
+/// A window id is an ADR-0099 lineage fold near 2^60, and `f64` spacing up
+/// there is 256 — so the `u64` this argument used to be could not be
+/// carried by a client that parses JSON numbers as doubles. The id an
+/// agent read from `aether.window.list` came back quantised and
+/// `capture_frame` rejected it as unknown, which made desktop capture
+/// unaddressable (iamacoffeepot/aether#4344).
+///
+/// The pinned value is computed rather than chosen — it is the encoding of
+/// the id, so it moves if the encoding does — and it is deliberately one
+/// that is *not* a multiple of 256, so a round trip through a double
+/// cannot come back equal.
+#[test]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the double round-trip is the assertion — the lints here are naming the exact loss the fixture has to exhibit"
+)]
+fn a_lineage_scale_window_id_survives_the_tool_boundary() {
+    let real = 1_473_705_000_037_674_430u64;
+    assert_ne!(real, real as f64 as u64, "the fixture must be a value a double cannot carry, or it proves nothing");
+
+    let tagged = tagged_id::encode(real).expect("a lineage fold carries valid tag bits");
+    let parsed = parse_window_id(&tagged).expect("the tagged form parses");
+
+    assert_eq!(parsed, WindowId(real), "every bit of the id reaches the engine");
+}
+
+/// The decimal form stays open for a synthetic or harness-scale id, and a
+/// token that is neither is a named error rather than a silent zero.
+#[test]
+fn a_window_id_is_a_tagged_string_or_a_decimal_and_nothing_else() {
+    assert_eq!(parse_window_id("73").expect("a decimal id parses"), WindowId(73));
+    assert!(parse_window_id("not-an-id").is_err(), "an unparseable token is refused");
+}
+
 #[test]
 fn capture_frame_window_id_reaches_the_engine_envelope() {
     let engine = EngineId(Uuid::from_u128(0x3990));
     for window_id in [0, 73] {
-        let envelope = capture_envelope(engine, window_id, Vec::new(), Vec::new(), Vec::new(), None);
+        let envelope = capture_envelope(engine, WindowId(window_id), Vec::new(), Vec::new(), Vec::new(), None);
         let request = CaptureFrame::decode_from_bytes(&envelope.payload).expect("capture request decodes");
 
         assert_eq!(envelope.to.engine, Some(engine));
@@ -67,7 +106,7 @@ async fn capture_frame_bad_bundle_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-            window_id: 1,
+            window_id: "1".to_owned(),
             mails: vec![EngineMailSpec {
                 recipient_name: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
@@ -95,7 +134,7 @@ async fn capture_frame_relative_save_path_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-            window_id: 1,
+            window_id: "1".to_owned(),
             mails: vec![],
             after_mails: vec![],
             checks: vec![],

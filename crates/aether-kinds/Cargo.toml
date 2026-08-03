@@ -25,5 +25,14 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = { workspace = true }
 
+[dev-dependencies]
+# iamacoffeepot/aether#4344: `tests/window_id_json.rs` asserts a window id
+# reaches JSON as an ADR-0064 tagged string rather than a number it cannot
+# survive as. The claim is about this crate's schema declaration, but only
+# the codec can render it, so the assertion runs through the real encoder.
+# Acyclic — `aether-codec` depends on `aether-data`, never on this crate.
+aether-codec = { path = "../aether-codec" }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
