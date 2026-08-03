@@ -105,6 +105,9 @@ frame record, before the material and overlay passes, so drawing a program's
 writable output texture in the same frame shows the freshly computed pixels;
 runtime binding mismatches warn-drop naming the program, pass, and binding.
 Headless replies `Err` to `register` and absorbs `dispatch` / `destroy`.
+The full contract — slots, extents, uniform windows, repeat semantics,
+validation classes, pooling, determinism conventions — is the subject of
+[Authored render programs](render-programs.md).
 
 Quads draw through a second alpha-blended pipeline in an overlay pass recorded
 after the world pass, so they always land on top. The accumulate-per-frame
