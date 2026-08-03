@@ -68,6 +68,8 @@ current source.
   tree slot, and swap it without treating it as a security gate.
 - **Drawing your first text** (drive/build) — load a font, draw with explicit
   origin/clip, and gather frame evidence.
+- **Authoring a render program** (drive-only) — register a WGSL pass graph,
+  dispatch it with a uniform blob, and draw its output texture.
 - **Serving HTTP from a component** (recompile) — the `aether.http.server`
   capability, the request/response handler, and claiming a route.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
