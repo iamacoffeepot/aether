@@ -212,7 +212,8 @@ fn encode_passes(
         }
         iteration_offsets.push(offsets);
     }
-    staging.resize(staging.len().next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize), 0);
+    let copy_alignment = usize::try_from(wgpu::COPY_BUFFER_ALIGNMENT).expect("copy alignment fits usize");
+    staging.resize(staging.len().next_multiple_of(copy_alignment), 0);
 
     let uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether program uniform staging"),

@@ -56,8 +56,8 @@ pub fn program_uniform_layout(device: &wgpu::Device, bound_bytes: u64) -> wgpu::
 #[must_use]
 pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu::BindGroupLayout {
     let mut entries = Vec::with_capacity(filterable.len() * 2);
-    for (index, &filterable) in filterable.iter().enumerate() {
-        let base = u32::try_from(index * 2).expect("program input binding index fits u32");
+    let mut base = 0u32;
+    for &filterable in filterable {
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -78,6 +78,7 @@ pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu
             }),
             count: None,
         });
+        base += 2;
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("aether program inputs bind group layout"),
@@ -91,6 +92,10 @@ pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu
 /// color formats (alpha over the target) and `None` for `R32Float`,
 /// which core WebGPU cannot blend — the pass replaces instead. No
 /// vertex buffers, no depth: program passes are pure image work.
+// Eight arguments mirror the same all-in-one shape `realize_texture` and
+// `record_quad_overlay_pass` use; bundling into a struct for the one
+// register call site adds no clarity.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn build_program_pipeline(
     device: &wgpu::Device,
