@@ -6,21 +6,28 @@
 
 use std::collections::HashMap;
 
-use aether_substrate::render::{RealizedTexture, TextureBindings, realize_texture, upload_texture_full};
+use aether_substrate::render::{
+    RealizedTexture, TextureBindings, realize_texture, realize_writable_texture, upload_texture_full,
+};
 
-use crate::TextureFormat;
 use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
+use crate::{TextureFormat, TextureSampling, TextureUsage};
 
 /// A texture registered via `create_texture`: the staged pixels (the CPU
 /// source of truth), plus the lazily-realized GPU texture + bind group.
 /// `create_texture` / `update_texture` only touch the staging side; the
 /// wgpu resources are realized at record time (the `RenderGpu` boots lazily
 /// on the first frame). `dirty` flags staging that the GPU copy hasn't
-/// caught up to yet — the next record re-uploads the whole texture.
+/// caught up to yet — the next record re-uploads the whole texture. A
+/// `Writable` texture (ADR-0170) has no CPU staging: `pixels` stays
+/// empty, `update` warn-drops, and realization clears the GPU render
+/// target instead of uploading.
 pub struct StagedTexture {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
+    pub sampling: TextureSampling,
+    pub usage: TextureUsage,
     pub pixels: Vec<u8>,
     pub realized: Option<RealizedTexture>,
     pub dirty: bool,
@@ -58,8 +65,11 @@ impl StagedTexture {
     /// Realize the GPU texture if it isn't yet, or re-upload the
     /// staged pixels if `update_texture` dirtied them since the last
     /// record. Runs at record time on the driver thread, where a
-    /// device + queue are available.
+    /// device + queue are available. A `Writable` texture realizes as a
+    /// cleared render target (ADR-0170) and has no staging to re-upload
+    /// (`update` rejects it, so `dirty` never sets).
     pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture_bindings: &TextureBindings) {
+        let nearest = self.sampling == TextureSampling::Nearest;
         if let Some(realized) = &self.realized {
             // Already on the GPU; re-upload only if `update_texture`
             // dirtied the staging buffer since the last record.
@@ -67,15 +77,27 @@ impl StagedTexture {
                 upload_texture_full(queue, realized, &self.pixels);
             }
         } else {
-            self.realized = Some(realize_texture(
-                device,
-                queue,
-                texture_bindings,
-                self.width,
-                self.height,
-                wgpu_texture_format(self.format),
-                &self.pixels,
-            ));
+            self.realized = Some(match self.usage {
+                TextureUsage::Sampled => realize_texture(
+                    device,
+                    queue,
+                    texture_bindings,
+                    self.width,
+                    self.height,
+                    wgpu_texture_format(self.format),
+                    nearest,
+                    &self.pixels,
+                ),
+                TextureUsage::Writable => realize_writable_texture(
+                    device,
+                    queue,
+                    texture_bindings,
+                    self.width,
+                    self.height,
+                    wgpu_texture_format(self.format),
+                    nearest,
+                ),
+            });
         }
         self.dirty = false;
     }
@@ -85,6 +107,7 @@ fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
     match format {
         TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
+        TextureFormat::R32Float => wgpu::TextureFormat::R32Float,
     }
 }
 
@@ -110,8 +133,8 @@ impl TextureRegistry {
         Self { next_id: 0, entries: HashMap::new() }
     }
 
-    /// Stage a new texture, validating that `pixels` matches the declared
-    /// dimensions and format before any id is consumed. A rejected create
+    /// Stage a new texture, validating the declared dimensions, format,
+    /// sampling, and `pixels` before any id is consumed. A rejected create
     /// leaves `next_id` untouched, so ids stay dense over accepted textures.
     pub fn create(&mut self, mail: CreateTexture) -> CreateTextureResult {
         let Some(expected) = expected_pixel_bytes(mail.width, mail.height, mail.format) else {
@@ -119,16 +142,32 @@ impl TextureRegistry {
                 error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
             };
         };
-        if mail.pixels.len() != expected {
+        if mail.sampling == TextureSampling::Linear && !mail.format.filterable() {
             return CreateTextureResult::Err {
-                error: format!(
-                    "pixels length {} does not match {}x{} {:?} = {expected}",
-                    mail.pixels.len(),
-                    mail.width,
-                    mail.height,
-                    mail.format
-                ),
+                error: format!("{:?} cannot be linear-filtered; create it with Nearest sampling", mail.format),
             };
+        }
+        match mail.usage {
+            TextureUsage::Sampled if mail.pixels.len() != expected => {
+                return CreateTextureResult::Err {
+                    error: format!(
+                        "pixels length {} does not match {}x{} {:?} = {expected}",
+                        mail.pixels.len(),
+                        mail.width,
+                        mail.height,
+                        mail.format
+                    ),
+                };
+            }
+            TextureUsage::Writable if !mail.pixels.is_empty() => {
+                return CreateTextureResult::Err {
+                    error: format!(
+                        "writable textures are created without staged pixels, but {} bytes were supplied",
+                        mail.pixels.len()
+                    ),
+                };
+            }
+            TextureUsage::Sampled | TextureUsage::Writable => {}
         }
         let texture_id = self.next_id;
         self.next_id += 1;
@@ -138,9 +177,11 @@ impl TextureRegistry {
                 width: mail.width,
                 height: mail.height,
                 format: mail.format,
+                sampling: mail.sampling,
+                usage: mail.usage,
                 pixels: mail.pixels,
                 realized: None,
-                dirty: true,
+                dirty: mail.usage == TextureUsage::Sampled,
             },
         );
         CreateTextureResult::Ok { texture_id }
@@ -166,6 +207,14 @@ impl TextureRegistry {
             );
             return;
         };
+        if entry.usage == TextureUsage::Writable {
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = mail.texture_id,
+                "update_texture for a writable texture, which has no CPU staging; dropping",
+            );
+            return;
+        }
         if !entry.apply_subrect(mail.x, mail.y, mail.width, mail.height, &mail.pixels) {
             tracing::warn!(
                 target: "aether_render",
@@ -205,6 +254,8 @@ impl TextureRegistry {
             width: 1,
             height: 1,
             format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
             pixels: vec![255, 255, 255, 255],
             realized: None,
             dirty: true,
@@ -235,6 +286,7 @@ mod tests {
     fn expected_pixel_bytes_validates_dimensions() {
         assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::Rgba8), Some(24));
         assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::R8), Some(6));
+        assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::R32Float), Some(24));
         assert_eq!(expected_pixel_bytes(0, 4, TextureFormat::Rgba8), None);
         assert_eq!(expected_pixel_bytes(4, 0, TextureFormat::R8), None);
         assert_eq!(expected_pixel_bytes(u32::MAX, u32::MAX, TextureFormat::Rgba8), None);
@@ -250,6 +302,8 @@ mod tests {
             width: 2,
             height: 2,
             format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
             pixels: vec![0u8; 16],
             realized: None,
             dirty: false,
@@ -277,6 +331,8 @@ mod tests {
             width: 4,
             height: 2,
             format: TextureFormat::R8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
             pixels: vec![0u8; 8],
             realized: None,
             dirty: false,
@@ -289,5 +345,91 @@ mod tests {
         texture.dirty = false;
         assert!(!texture.apply_subrect(0, 0, 2, 1, &[1, 2, 3]));
         assert!(!texture.dirty);
+    }
+
+    /// ADR-0170: a writable create must arrive without staged pixels —
+    /// letting bytes through would hand `ensure_realized` staging it can
+    /// never upload (the realized target has no `COPY_DST`) — and a
+    /// rejected create must not consume an id.
+    #[test]
+    fn create_writable_rejects_staged_pixels() {
+        let mut registry = TextureRegistry::new();
+        let rejected = registry.create(CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Writable,
+            pixels: vec![0u8; 16],
+        });
+        assert!(matches!(rejected, CreateTextureResult::Err { .. }), "staged pixels on a writable create must reject");
+        assert_eq!(registry.next_id, 0, "a rejected create must not consume an id");
+
+        let accepted = registry.create(CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Writable,
+            pixels: Vec::new(),
+        });
+        let CreateTextureResult::Ok { texture_id } = accepted else {
+            panic!("an empty-pixels writable create must be accepted");
+        };
+        let entry = registry.entries.get(&texture_id).expect("accepted create stages an entry");
+        assert!(!entry.dirty, "a writable texture has no staging for the record path to re-upload");
+    }
+
+    /// ADR-0170: core WebGPU cannot linear-filter `R32Float`, so a
+    /// `Linear` create over it must reject at mail time rather than die
+    /// as a wgpu validation error at realization.
+    #[test]
+    fn create_r32float_requires_nearest_sampling() {
+        let mut registry = TextureRegistry::new();
+        let rejected = registry.create(CreateTexture {
+            width: 2,
+            height: 1,
+            format: TextureFormat::R32Float,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels: vec![0u8; 8],
+        });
+        assert!(matches!(rejected, CreateTextureResult::Err { .. }), "linear sampling over R32Float must reject");
+
+        let accepted = registry.create(CreateTexture {
+            width: 2,
+            height: 1,
+            format: TextureFormat::R32Float,
+            sampling: TextureSampling::Nearest,
+            usage: TextureUsage::Sampled,
+            pixels: vec![0u8; 8],
+        });
+        assert!(matches!(accepted, CreateTextureResult::Ok { .. }), "nearest-sampled R32Float must be accepted");
+    }
+
+    /// ADR-0170: `update_texture` against a writable texture must drop
+    /// without dirtying — a set `dirty` would make the next record call
+    /// `upload_texture_full` with empty staging against a target that
+    /// has no `COPY_DST` usage.
+    #[test]
+    fn update_writable_texture_drops_without_dirtying() {
+        let mut registry = TextureRegistry::new();
+        let created = registry.create(CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Writable,
+            pixels: Vec::new(),
+        });
+        let CreateTextureResult::Ok { texture_id } = created else {
+            panic!("writable create accepted");
+        };
+
+        registry.update(UpdateTexture { texture_id, x: 0, y: 0, width: 1, height: 1, pixels: vec![1, 2, 3, 4] });
+
+        let entry = registry.entries.get(&texture_id).expect("entry survives the dropped update");
+        assert!(entry.pixels.is_empty(), "a writable texture must never gain staged pixels");
+        assert!(!entry.dirty, "a dropped update must not dirty a writable texture");
     }
 }

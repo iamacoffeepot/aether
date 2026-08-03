@@ -55,7 +55,7 @@ use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::Rgba;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, RenderCapability, TextureFormat,
-    TexturedQuad,
+    TextureSampling, TextureUsage, TexturedQuad,
 };
 
 /// The asset's fixed width, in pixels. A raw RGBA8 tile has no header, so
@@ -158,6 +158,8 @@ impl WasmActor for BundleComponent {
             width: TILE_WIDTH,
             height: TILE_HEIGHT,
             format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
             pixels,
         });
     }

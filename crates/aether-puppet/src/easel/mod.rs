@@ -26,7 +26,7 @@ pub mod regions;
 use aether_math::{Mat4, Vec3};
 use aether_render::{
     CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect, MaterialTexturedRect,
-    TextureFormat, UpdateTexture,
+    TextureFormat, TextureSampling, TextureUsage, UpdateTexture,
 };
 
 use crate::anchor::Anchors;
@@ -233,6 +233,8 @@ impl Easel {
             width: *width as u32,
             height: *height as u32,
             format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
             pixels: pixels.clone(),
         })
     }

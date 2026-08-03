@@ -17,6 +17,7 @@
 //! plus the group-1 bind group built against shared texture bindings.
 
 use super::targets::Targets;
+use std::iter;
 use std::slice;
 
 /// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
@@ -45,9 +46,21 @@ pub const QUAD_SHADER_WGSL: &str = include_str!("quad.wgsl");
 /// Shared GPU texture binding state for every pipeline that samples a
 /// registered render texture.
 pub struct TextureBindings {
-    /// Layout for texture view at binding 0 plus sampler at binding 1.
+    /// Filtering layout for texture view at binding 0 plus sampler at
+    /// binding 1 — the layout the color material / overlay pipelines
+    /// are built against. Filterable formats only.
     pub layout: wgpu::BindGroupLayout,
+    /// Non-filtering companion of `layout` — a `filterable: false`
+    /// texture entry plus a `NonFiltering` sampler entry — for
+    /// data-plane formats core WebGPU cannot linear-filter (`R32Float`,
+    /// ADR-0170). Bind groups built against it are not compatible with
+    /// pipelines built on `layout`.
+    pub data_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
+    /// Nearest-neighbor sampler for label planes whose texel values are
+    /// identities rather than colors (ADR-0170). Non-filtering, so it
+    /// binds under both layouts.
+    pub nearest_sampler: wgpu::Sampler,
 }
 
 /// Owned GPU state for the quad overlay pipeline: the render pipeline,
@@ -99,14 +112,31 @@ pub struct OverlayDraw<'a> {
 /// pipelines.
 #[must_use]
 pub fn build_texture_bindings(device: &wgpu::Device) -> TextureBindings {
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("shared texture bind group layout"),
+    let layout = sampled_texture_layout(device, "shared texture bind group layout", true);
+    let data_layout = sampled_texture_layout(device, "shared data texture bind group layout", false);
+    let sampler = build_sampler(device, "shared texture sampler", wgpu::FilterMode::Linear);
+    let nearest_sampler = build_sampler(device, "shared nearest texture sampler", wgpu::FilterMode::Nearest);
+    TextureBindings { layout, data_layout, sampler, nearest_sampler }
+}
+
+/// Texture-view + sampler bind group layout in the shared shape.
+/// `filterable` selects the filtering pair (`Float { filterable: true }`
+/// texture + `Filtering` sampler) or the non-filtering pair data-plane
+/// formats require.
+fn sampled_texture_layout(device: &wgpu::Device, label: &'static str, filterable: bool) -> wgpu::BindGroupLayout {
+    let sampler_type = if filterable {
+        wgpu::SamplerBindingType::Filtering
+    } else {
+        wgpu::SamplerBindingType::NonFiltering
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: wgpu::TextureSampleType::Float { filterable },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -115,22 +145,24 @@ pub fn build_texture_bindings(device: &wgpu::Device) -> TextureBindings {
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(sampler_type),
                 count: None,
             },
         ],
-    });
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("shared texture sampler"),
+    })
+}
+
+fn build_sampler(device: &wgpu::Device, label: &'static str, filter: wgpu::FilterMode) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some(label),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
+        mag_filter: filter,
+        min_filter: filter,
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
-    });
-    TextureBindings { layout, sampler }
+    })
 }
 
 /// Build the quad overlay pipeline. `color_format` matches the
@@ -235,9 +267,15 @@ pub fn build_quad_pipeline(
 /// Create a GPU texture from staged `pixels` and build its group-1 bind
 /// group against shared texture bindings. `pixels` must be exactly
 /// `width * height * bytes_per_pixel(format)` bytes (the render cap
-/// validates this at `create_texture` time). Pair with
+/// validates this at `create_texture` time). `nearest` selects the
+/// nearest sampler for label planes; a non-filterable `format` binds
+/// through the non-filtering data layout regardless. Pair with
 /// [`upload_texture_full`] to refresh the pixels later without rebuilding
 /// the bind group.
+// Eight arguments mirror the same all-in-one shape `record_quad_overlay_pass`
+// uses; bundling into a struct for the one render-cap call site adds no
+// clarity.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn realize_texture(
     device: &wgpu::Device,
@@ -246,30 +284,125 @@ pub fn realize_texture(
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+    nearest: bool,
     pixels: &[u8],
 ) -> RealizedTexture {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("aether quad texture"),
+    let texture = create_registry_texture(
+        device,
+        "aether quad texture",
+        width,
+        height,
+        format,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let bind_group = texture_bind_group(device, texture_bindings, &texture, format, nearest);
+    let realized = RealizedTexture { texture, bind_group, width, height, format };
+    upload_texture_full(queue, &realized, pixels);
+    realized
+}
+
+/// Create a writable registry texture (ADR-0170): a GPU render target
+/// draws paint into and the sampling passes read — wgpu
+/// `RENDER_ATTACHMENT | TEXTURE_BINDING`, no CPU staging. The initial
+/// content is defined by an explicit clear pass to transparent black
+/// recorded and submitted here, which also puts the render-attachment
+/// usage under wgpu validation at realization time.
+#[must_use]
+pub fn realize_writable_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture_bindings: &TextureBindings,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    nearest: bool,
+) -> RealizedTexture {
+    let texture = create_registry_texture(
+        device,
+        "aether writable texture",
+        width,
+        height,
+        format,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let bind_group = texture_bind_group(device, texture_bindings, &texture, format, nearest);
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("aether writable texture clear") });
+    // Beginning and immediately ending the pass performs the clear.
+    drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("aether writable texture clear pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    }));
+    queue.submit(iter::once(encoder.finish()));
+
+    RealizedTexture { texture, bind_group, width, height, format }
+}
+
+fn create_registry_texture(
+    device: &wgpu::Device,
+    label: &'static str,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
         size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage,
         view_formats: &[],
-    });
+    })
+}
+
+/// Group-1 bind group for a registry texture: a filterable `format`
+/// binds against the filtering layout with the linear or nearest
+/// sampler as `nearest` selects; a non-filterable one (`R32Float`)
+/// binds against the non-filtering data layout with the nearest
+/// sampler — core WebGPU refuses to linear-filter it, so the layout
+/// choice is forced, and the resulting bind group is incompatible with
+/// pipelines built on the filtering layout.
+fn texture_bind_group(
+    device: &wgpu::Device,
+    texture_bindings: &TextureBindings,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    nearest: bool,
+) -> wgpu::BindGroup {
+    let filterable = !matches!(format, wgpu::TextureFormat::R32Float);
+    let layout = if filterable {
+        &texture_bindings.layout
+    } else {
+        &texture_bindings.data_layout
+    };
+    let sampler = if nearest || !filterable {
+        &texture_bindings.nearest_sampler
+    } else {
+        &texture_bindings.sampler
+    };
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("aether texture bind group"),
-        layout: &texture_bindings.layout,
+        layout,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&texture_bindings.sampler) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
         ],
-    });
-    let realized = RealizedTexture { texture, bind_group, width, height, format };
-    upload_texture_full(queue, &realized, pixels);
-    realized
+    })
 }
 
 /// Re-upload the full staged `pixels` into an already-realized texture.
@@ -297,7 +430,7 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
 
 fn texture_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
-        wgpu::TextureFormat::Rgba8Unorm => 4,
+        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::R32Float => 4,
         wgpu::TextureFormat::R8Unorm => 1,
         _ => panic!("unsupported render texture format: {format:?}"),
     }

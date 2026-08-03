@@ -22,8 +22,8 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat,
-    TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat, TextureSampling,
+    TextureUsage, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
 
 const PANEL_X: f32 = 8.0;
@@ -51,7 +51,14 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, pixels: V
             label,
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels },
+                &CreateTexture {
+                    width: 2,
+                    height: 2,
+                    format: TextureFormat::Rgba8,
+                    sampling: TextureSampling::Linear,
+                    usage: TextureUsage::Sampled,
+                    pixels,
+                },
             ),
         )])
         .expect("create image texture");

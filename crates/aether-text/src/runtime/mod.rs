@@ -23,7 +23,8 @@ use aether_fs::FsMailboxExt;
 #[allow(unused_imports)]
 pub use aether_fs::{FsCapability, Read, ReadResult};
 pub use aether_render::{
-    CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad, UpdateTexture,
+    CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    UpdateTexture,
 };
 
 // ADR-0105 shelf-packed RGBA8 glyph atlas (`atlas`) and the pure layout /
@@ -184,6 +185,8 @@ impl TextCapabilityState {
             width: ATLAS_SIZE,
             height: ATLAS_SIZE,
             format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
             pixels: self.atlas.pixels().to_vec(),
         };
         // Address the render cap through the lineage-correct resolver
