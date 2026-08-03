@@ -59,6 +59,7 @@
 //! 4. Every `aether.lifecycle.render` stage publishes the camera and
 //!    re-emits the drawing.
 
+pub mod easel;
 pub mod extract;
 pub mod feature;
 mod kinds;
@@ -77,7 +78,7 @@ use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{Mat4, Vec2, Vec3};
-use aether_render::{DrawTriangle, RenderCapability, ViewProjection};
+use aether_render::{CreateTextureResult, DrawTriangle, RenderCapability, ViewProjection};
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +176,9 @@ pub struct Puppet {
     surface: Vec<Curve3>,
     settings: extract::Settings,
     look: Look,
+    /// The wash layer under the ink (#4349): a painted sheet standing
+    /// behind the subject, re-developed when the view settles.
+    easel: easel::Easel,
 }
 
 impl Puppet {
@@ -190,11 +194,15 @@ impl Puppet {
         Vec3::new(0.0, self.look.height, 0.0)
     }
 
-    fn view_projection(&self) -> ViewProjection {
+    fn view_matrix(&self) -> Mat4 {
         let view = Mat4::look_at_rh(self.eye(), self.target(), Vec3::new(0.0, 1.0, 0.0));
         let projection = Mat4::perspective_rh(FIELD_OF_VIEW, self.aspect, 0.05, 40.0);
 
-        ViewProjection { view_proj: (projection * view).to_cols_array() }
+        projection * view
+    }
+
+    fn view_projection(&self) -> ViewProjection {
+        ViewProjection { view_proj: self.view_matrix().to_cols_array() }
     }
 }
 
@@ -216,6 +224,7 @@ impl WasmActor for Puppet {
             owed: None,
             surface: Vec::new(),
             settings: extract::Settings::default(),
+            easel: easel::Easel::default(),
             // Facing her, slightly above, far enough back that her whole
             // height fits the frame at this field of view.
             look: Look { azimuth: 0.0, elevation: 3.0, distance: 5.4, height: 0.0 },
@@ -237,11 +246,13 @@ impl WasmActor for Puppet {
         window.subscribe::<WindowSize>(WindowSelector::All);
     }
 
-    /// The surface changed shape, so the projection has to follow it.
+    /// The surface changed shape, so the projection has to follow it —
+    /// and the easel's canvas with it.
     #[handler::single]
     fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
         if size.width > 0 && size.height > 0 {
             self.aspect = size.width as f32 / size.height as f32;
+            self.easel.resized(size.width, size.height);
         }
     }
 
@@ -360,6 +371,7 @@ impl WasmActor for Puppet {
         // solved once here rather than every frame.
         self.surface = extract::surface(subject, self.labels.as_ref(), &self.settings);
         self.drawn_from = None;
+        self.easel.subject_changed();
         tracing::info!(
             target: "aether_puppet",
             faces = subject.faces.len(),
@@ -378,7 +390,8 @@ impl WasmActor for Puppet {
     }
 
     /// One frame: publish the camera, add the view-dependent lines to the
-    /// cached ones, split them against the surface, and emit ribbons.
+    /// cached ones, split them against the surface, and emit ribbons over
+    /// the easel's sheet.
     #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _stage: Render) {
         let render = ctx.actor::<RenderCapability>();
@@ -389,39 +402,82 @@ impl WasmActor for Puppet {
         };
 
         let eye = self.eye();
-        if self.drawn_from == Some(eye) {
+        if self.drawn_from != Some(eye) {
+            // The silhouette is solved on the coarse mesh and the cached
+            // surface curves on the fine one, so each carries its own mesh's
+            // ray bias into the visibility split — a coarse point tested at
+            // the fine mesh's bias sits inside its own subject and the
+            // outline comes back dashed.
+            let silhouette_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
+            let mut triangles: Vec<DrawTriangle> = Vec::new();
+            let drawing = self.surface.iter().cloned().map(|curve| (curve, subject.surface_bias())).chain(
+                extract::silhouettes(silhouette_mesh, eye)
+                    .into_iter()
+                    .map(|curve| (curve, silhouette_mesh.surface_bias())),
+            );
+
+            for (curve, bias) in drawing {
+                // Tone gating already happened at load — it does not depend
+                // on the eye — so all that is left per frame is occlusion,
+                // and that is always asked of the fine mesh: what stands in
+                // front of a stroke is a question about the real surface.
+                for run in
+                    visibility::runs(subject, eye, &curve, &|_| true, visibility::Mode::Opaque, VISIBILITY_STRIDE, bias)
+                {
+                    ribbon::ribbon(&run, eye, 0, &mut triangles);
+                }
+            }
+
+            self.drawn = triangles;
+            self.drawn_from = Some(eye);
+        }
+        if !self.drawn.is_empty() {
             render.send_many(&self.drawn);
-            return;
         }
 
-        // The silhouette is solved on the coarse mesh and the cached
-        // surface curves on the fine one, so each carries its own mesh's
-        // ray bias into the visibility split — a coarse point tested at the
-        // fine mesh's bias sits inside its own subject and the outline
-        // comes back dashed.
-        let silhouette_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
-        let mut triangles: Vec<DrawTriangle> = Vec::new();
-        let drawing = self.surface.iter().cloned().map(|curve| (curve, subject.surface_bias())).chain(
-            extract::silhouettes(silhouette_mesh, eye).into_iter().map(|curve| (curve, silhouette_mesh.surface_bias())),
-        );
+        // The easel, under everything above: develop when the view has
+        // settled, then stand the sheet behind the subject. The develop is
+        // the slow path and its gate keeps it off the frame cadence; the
+        // presentation costs one textured rect.
+        let view = easel::View {
+            eye,
+            target: self.target(),
+            view_proj: self.view_matrix(),
+            aspect: self.aspect,
+            field_of_view: FIELD_OF_VIEW,
+        };
+        if let Some(labels) = self.labels.as_ref() {
+            let painted_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
+            self.easel.develop(painted_mesh, labels, &self.settings, &view, self.dragging);
+        }
 
-        for (curve, bias) in drawing {
-            // Tone gating already happened at load — it does not depend on
-            // the eye — so all that is left per frame is occlusion, and
-            // that is always asked of the fine mesh: what stands in front
-            // of a stroke is a question about the real surface.
-            for run in
-                visibility::runs(subject, eye, &curve, &|_| true, visibility::Mode::Opaque, VISIBILITY_STRIDE, bias)
-            {
-                ribbon::ribbon(&run, eye, 0, &mut triangles);
+        if let Some(destroy) = self.easel.take_destroy() {
+            render.send(&destroy);
+        }
+        if let Some(create) = self.easel.take_create() {
+            render.send(&create);
+        }
+        if let Some(update) = self.easel.take_update() {
+            render.send(&update);
+        }
+        let subject_radius = (subject.max - subject.min).length() * 0.5;
+        if let Some(sheet) = self.easel.draw(&view, subject_radius) {
+            render.send(&sheet);
+        }
+    }
+
+    /// The render cap answered the easel's create. `Err` is the headless
+    /// chassis' fail-fast reply, and it switches the easel off for the
+    /// session rather than letting it ask again every settle.
+    #[handler::single]
+    fn on_texture_created(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateTextureResult) {
+        match result {
+            CreateTextureResult::Ok { texture_id } => self.easel.created(Ok(texture_id)),
+            CreateTextureResult::Err { error } => {
+                tracing::info!(target: "aether_puppet", error = %error, "easel disabled: create_texture refused");
+                self.easel.created(Err(()));
             }
         }
-
-        if !triangles.is_empty() {
-            render.send_many(&triangles);
-        }
-        self.drawn = triangles;
-        self.drawn_from = Some(eye);
     }
 }
 
