@@ -72,7 +72,7 @@ pub mod weld;
 
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
@@ -118,9 +118,12 @@ const DOLLY_PER_NOTCH: f32 = 0.08;
 /// two thirds of the rays off the frame.
 const VISIBILITY_STRIDE: usize = 3;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.load_context")]
 struct LoadContext {
+    /// Only the mesh read carries one. The field read is a dependency of
+    /// the same request, not a request of its own, so it must not answer.
+    reply: Option<ReplyHandle>,
     namespace: String,
     path: String,
 }
@@ -154,6 +157,9 @@ pub struct Puppet {
     /// re-cast every occlusion ray to arrive at the identical answer.
     drawn: Vec<DrawTriangle>,
     drawn_from: Option<Vec3>,
+    /// Held until extraction runs, because the answer is not known until
+    /// both assets have landed.
+    owed: Option<ReplyHandle>,
     /// The view-independent drawing: hatch and crease, welded, kept from
     /// load. Rebuilt only when the subject changes.
     surface: Vec<Curve3>,
@@ -196,6 +202,7 @@ impl WasmActor for Puppet {
             aspect: ASPECT_UNTIL_MEASURED,
             drawn: Vec::new(),
             drawn_from: None,
+            owed: None,
             surface: Vec::new(),
             settings: extract::Settings::default(),
             // Facing her, slightly above, far enough back that her whole
@@ -262,25 +269,45 @@ impl WasmActor for Puppet {
 
     /// Point her at a subject. Asynchronous — the reply target is carried
     /// in the fs context so the eventual `LoadResult` reaches whoever asked.
-    #[handler::single]
-    fn on_load(&mut self, ctx: &mut WasmCtx<'_>, mail: Load) {
-        let fs = ctx.actor::<FsCapability>();
+    #[handler::manual]
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Load) {
+        self.owed = ctx.reply_target();
+
         if !mail.labels.is_empty() {
             self.awaiting_labels = Some(mail.labels.clone());
-            let context = LoadContext { namespace: mail.namespace.clone(), path: mail.labels.clone() };
-            fs.with_context(&context).read(&mail.namespace, &mail.labels);
+            let context = LoadContext { reply: None, namespace: mail.namespace.clone(), path: mail.labels.clone() };
+            ctx.actor::<FsCapability>().with_context(&context).read(&mail.namespace, &mail.labels);
         }
 
-        let context = LoadContext { namespace: mail.namespace, path: mail.path };
+        let context = LoadContext { reply: None, namespace: mail.namespace, path: mail.path };
         ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+    }
+
+    /// Answer the load, once, with whatever actually happened.
+    ///
+    /// A loader that cannot report failure is a bad surface and this one
+    /// proved it: a mesh that overran the mail bound reported `delivered`
+    /// to the caller and left the reason only in the actor log.
+    fn settle(&mut self, ctx: &mut WasmCtx<'_, Manual>, result: &LoadResult) {
+        if let Some(sender) = self.owed.take() {
+            ctx.reply_to(sender, result);
+        }
     }
 
     /// The bytes arrived. Parse, run the view-independent passes, and swap
     /// the cache in one go.
-    #[handler::single]
-    fn on_read(&mut self, _ctx: &mut WasmCtx<'_>, mail: ReadResult) {
-        let ReadResult::Ok { path, bytes, .. } = mail else {
-            tracing::warn!(target: "aether_puppet", "read failed; keeping the previous subject");
+    #[handler::manual]
+    fn on_read(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: ReadResult) {
+        let path = match mail {
+            ReadResult::Ok { ref path, .. } => path.clone(),
+            ReadResult::Err { ref path, ref error, .. } => {
+                tracing::warn!(target: "aether_puppet", path = %path, error = ?error, "read failed");
+                let reason = format!("read {path} failed: {error:?}");
+                self.settle(ctx, &LoadResult::Err { reason });
+                return;
+            }
+        };
+        let ReadResult::Ok { bytes, .. } = mail else {
             return;
         };
 
@@ -296,6 +323,7 @@ impl WasmActor for Puppet {
         } else {
             let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
                 tracing::warn!(target: "aether_puppet", "parse failed; keeping the previous subject");
+                self.settle(ctx, &LoadResult::Err { reason: format!("{path} is not a mesh this reader accepts") });
                 return;
             };
             self.subject = Some(subject);
@@ -322,6 +350,9 @@ impl WasmActor for Puppet {
             masked = self.labels.is_some(),
             "subject loaded",
         );
+
+        let settled = LoadResult::Ok { vertices: subject.positions.len() as u32, faces: subject.faces.len() as u32 };
+        self.settle(ctx, &settled);
     }
 
     #[handler::single]

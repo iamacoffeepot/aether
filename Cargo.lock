@@ -833,6 +833,7 @@ dependencies = [
  "aether-lifecycle",
  "aether-math",
  "aether-render",
+ "aether-window",
  "inventory",
  "serde",
  "tracing",

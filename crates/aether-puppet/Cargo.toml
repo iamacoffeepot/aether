@@ -20,12 +20,6 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[features]
-# An embedding cdylib enables this to strip the `export!` entry surface, so
-# a host that links this as an rlib does not collide with its own entries.
-# Same arrangement as aether-kit-commons.
-library = []
-
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 # Guest faces only — this is a wasm component and addresses every capability

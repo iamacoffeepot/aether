@@ -24,7 +24,6 @@ use aether_math::{Rgb, Vec3};
 use aether_render::{DrawTriangle, Vertex};
 
 use crate::feature::{Curve3, Pen};
-use crate::math3::hash_unit;
 use crate::style::{pressure, wander};
 
 /// Half-width of a stroke at unit distance, in radians. Multiplied by the
@@ -140,13 +139,4 @@ fn triangle(a: Vec3, b: Vec3, c: Vec3, colour: Rgb) -> DrawTriangle {
             Vertex { x: c.x, y: c.y, z: c.z, color: colour },
         ],
     }
-}
-
-/// Re-phase every stroke without moving any geometry.
-///
-/// The control for the stability test: a drawing that changes this much
-/// between adjacent frames is re-randomising itself rather than being
-/// redrawn, which is what crawling is.
-pub fn phase(seed: u64) -> u64 {
-    (hash_unit(seed) * f32::from(u16::MAX)) as u64
 }
