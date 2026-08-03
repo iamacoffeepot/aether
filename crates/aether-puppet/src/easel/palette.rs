@@ -95,13 +95,17 @@ pub const MATERIALS: &[Material] = &[
         shade_lit: Some(0.58),
         small: false,
     },
+    // The ear rose is an accent in the studies' sense — warm only at
+    // blood, placed by policy — so unlike a true material it keeps almost
+    // all of its flush in full light: value-carving it left a white hole
+    // in the bowl of the ear (#4354).
     Material {
         class: INNER_EAR,
         name: "inner ear",
         pigment: 0xd7_7f_a1,
         load: 0.5,
         gran: 0.2,
-        shade_floor: 0.45,
+        shade_floor: 0.9,
         shade_lit: None,
         small: true,
     },
@@ -111,7 +115,7 @@ pub const MATERIALS: &[Material] = &[
         pigment: 0xd7_a4_b4,
         load: 0.2,
         gran: 0.15,
-        shade_floor: 0.3,
+        shade_floor: 0.82,
         shade_lit: None,
         small: true,
     },

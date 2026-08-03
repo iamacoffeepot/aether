@@ -413,6 +413,7 @@ impl WasmActor for Puppet {
             let drawing = self.surface.iter().cloned().map(|curve| (curve, subject.surface_bias())).chain(
                 extract::silhouettes(silhouette_mesh, eye)
                     .into_iter()
+                    .filter(|curve| self.labels.as_ref().is_none_or(|labels| !extract::ear_noise(curve, labels)))
                     .map(|curve| (curve, silhouette_mesh.surface_bias())),
             );
 
