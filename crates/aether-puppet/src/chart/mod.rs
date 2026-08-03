@@ -164,6 +164,64 @@ pub fn marks(mesh: &Mesh, anchors: &Anchors, face: Face, settings: &Settings, ey
         .collect()
 }
 
+/// One eye's frame, planted: the chart geometry a painted accent reads
+/// instead of re-deriving anything from the label field.
+///
+/// Everything here rests on the same fitted plane at the same standoff the
+/// ink's own marks do, so paint and ink cannot skew apart wherever the
+/// surface curves — an iris centred on the label blob instead looks past
+/// the viewer the moment she turns.
+pub struct EyeFrame {
+    /// The iris centre, and the tips of its two radii. Projected, the pair
+    /// of tips becomes the axes paint measures in, so foreshortening rides
+    /// along with them rather than being modelled a second time.
+    pub centre: Vec3,
+    pub width_tip: Vec3,
+    pub height_tip: Vec3,
+    /// Pupil half-axes as fractions of the iris radius.
+    pub pupil: Vec2,
+    /// The aperture as a closed loop — the lid curves the ink draws, which
+    /// is the only clip a painted iris may use.
+    pub aperture: Vec<Vec3>,
+}
+
+/// How finely each lid is sampled around the aperture loop.
+///
+/// The loop is a clip rather than a stroke, so it is sampled for the
+/// polygon's own straightness: an eye spans a couple of hundred pixels of
+/// a developed sheet, and at this many rungs a chord departs from the lid
+/// by well under one of them.
+const APERTURE_SAMPLES: usize = 24;
+
+/// Every eye's paint frame on this subject.
+///
+/// Solved per repaint rather than cached with the anchors, because gaze
+/// moves the iris inside its own aperture — so a frame cached at load
+/// would leave the paint looking where she used to.
+pub fn eye_frames(mesh: &Mesh, anchors: &Anchors, face: Face, style: Style) -> Vec<EyeFrame> {
+    let front = anchors.front();
+
+    anchors
+        .eyes
+        .iter()
+        .filter_map(|&(side, at)| {
+            let iris = eye::iris_frame(&at, style, face.eye, face.gaze, side)?;
+
+            let mut chart = vec![iris.centre, iris.centre + Vec2::X * iris.radius, iris.centre + Vec2::Y * iris.radius];
+            chart.extend(eye::aperture_outline(&at, style, face.eye, face.gaze, side, APERTURE_SAMPLES));
+            let planted = plant::points(mesh, &chart, front, STANDOFF_EYE)?;
+
+            Some(EyeFrame {
+                centre: planted[0],
+                width_tip: planted[1],
+                height_tip: planted[2],
+                pupil: iris.pupil,
+                aperture: planted[3..].to_vec(),
+            })
+        })
+        .collect()
+}
+
 /// Rungs across the bridge the turn is measured at. A handful: the
 /// question is whether a sign change exists across the nose's own width,
 /// and the nose is one feature wide.

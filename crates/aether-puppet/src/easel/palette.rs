@@ -5,12 +5,38 @@
 //! present. Compositing is subtractive throughout — every coat multiplies
 //! the light coming back off the sheet, and the sheet's own white is the
 //! only white there is, because watercolour has no white paint.
+//!
+//! Which is why two of the face's regions have no entry here at all. The
+//! sclera and the pupil are **reserves**: paper, left bare, because the
+//! only way to paint them would be to paint white. The sclera reserves
+//! itself by carrying no material of its own; the pupil is cut out of the
+//! iris' mask, so the wash stops at the slit the ink drew instead of
+//! filling it.
 
 use crate::labels::{BROW, DRESS, HAIR, INNER_EAR, LIPS, SKIN, TUFT};
 
 /// The paper's own colour, in 8-bit channels. Everything painted is this
 /// multiplied down.
 pub const PAPER: [f32; 3] = [246.0, 242.0, 233.0];
+
+/// First class id belonging to a **meta-material** — a painted feature the
+/// [`chart`](crate::chart) owns rather than the label field.
+///
+/// Past the field's own range on purpose, so a meta-material and a labelled
+/// one can never collide in the class plane and a coat's class still names
+/// exactly one thing.
+pub const META: u8 = 100;
+
+/// The iris. Painted through the same pours, rim and granulation as any
+/// other material, over a mask the chart's own eye frame supplies.
+pub const IRIS: u8 = META;
+
+/// The blush, and how far it may build.
+///
+/// Skin's own flush rather than a pigment of its own — the same rose the
+/// inner ear takes, which is the other place blood sits near the surface.
+pub const BLUSH_PIGMENT: u32 = 0xd7_7f_a1;
+pub const BLUSH_CAP: f32 = 0.7;
 
 /// Ceiling on how much pigment one coat may deposit at a pixel.
 ///
@@ -159,6 +185,22 @@ pub const MATERIALS: &[Material] = &[
         load: 0.22,
         gran: 0.1,
         shade_floor: 0.6,
+        shade_lit: None,
+        small: true,
+        atmosphere: None,
+    },
+    // Last, and a meta-material: its coverage comes from the chart rather
+    // than from the field, and everything else about it is an entry in
+    // this box like any other. A high floor because an iris is coloured
+    // wherever the light finds it — the reserve inside it is the pupil,
+    // and that is cut out of the mask rather than lit out of it.
+    Material {
+        class: IRIS,
+        name: "iris (meta)",
+        pigment: 0x3f_7f_d0,
+        load: 0.75,
+        gran: 0.25,
+        shade_floor: 0.85,
         shade_lit: None,
         small: true,
         atmosphere: None,

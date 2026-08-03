@@ -16,6 +16,7 @@
 //! the orchestrator: when to develop, what to upload, and where the sheet
 //! stands.
 
+pub mod accent;
 pub mod field;
 pub mod image;
 pub mod palette;
@@ -27,6 +28,8 @@ use aether_render::{
     TextureFormat, UpdateTexture,
 };
 
+use crate::anchor::Anchors;
+use crate::chart::{self, Face};
 use crate::extract::Settings;
 use crate::labels::Labels;
 use crate::mesh::Mesh;
@@ -36,10 +39,17 @@ use crate::mesh::Mesh;
 /// subject skips the wait; there is nothing on the sheet to hold.
 const SETTLE_FRAMES: u32 = 120;
 
-/// Long-edge ceiling on the wash canvas, at half the window's own pixels
-/// below it. The wash carries only the low frequencies by construction;
-/// the ink above it holds the detail at full resolution.
-const CANVAS_LONG_EDGE: usize = 640;
+/// Long-edge ceiling on the wash canvas.
+///
+/// The wash carries only the low frequencies, so it used to develop at
+/// half the window's pixels and lose nothing the eye could find. The
+/// accents ended that: an iris is a couple of dozen pixels across at this
+/// framing and its slit a fraction of one, so at half resolution the eye
+/// shape goes and what is left is a blue smudge behind the ink. The sheet
+/// now develops at the window's own pixels up to this ceiling — which is
+/// the resolution every distance in the engine was tuned at — and the
+/// settle gate keeps the extra cost off the frame path.
+const CANVAS_LONG_EDGE: usize = 1280;
 
 /// The studio's one seed — `Sumire` in ASCII — so the same view develops
 /// the same painting, today and tomorrow.
@@ -61,6 +71,31 @@ pub struct View {
     /// cross-section exactly, so the wash registers with the ink pixel for
     /// pixel.
     pub field_of_view: f32,
+}
+
+/// The chart geometry the accents are painted on.
+///
+/// Borrowed rather than owned, and handed in per develop rather than kept:
+/// the easel consumes the chart, it does not hold a puppet. `mesh` is the
+/// subject the ink plants its own marks against — the fine one, whatever
+/// coarser stand-in the wash is rasterized from — because paint and ink
+/// have to come to rest on the same fitted plane.
+pub struct Chart<'a> {
+    pub mesh: &'a Mesh,
+    pub anchors: &'a Anchors,
+    pub face: Face,
+}
+
+/// Everything the easel reads of the subject for one development: the
+/// surface the wash bakes off, its material field, the drawing solved for
+/// this eye (the flow's source), and the chart when the subject has a
+/// face. Borrowed for the call — the easel keeps none of it.
+pub struct Subject<'a> {
+    pub mesh: &'a Mesh,
+    pub labels: &'a Labels,
+    pub settings: &'a Settings,
+    pub drawn: &'a [DrawTriangle],
+    pub chart: Option<Chart<'a>>,
 }
 
 /// The wash layer's state machine: a developed sheet waiting to upload, a
@@ -107,10 +142,10 @@ impl Easel {
         }
     }
 
-    /// Half the window, clamped to the long-edge ceiling.
+    /// The window's own pixels, clamped to the long-edge ceiling.
     fn canvas(&self) -> Option<(usize, usize)> {
         let (width, height) = self.window?;
-        let (width, height) = ((width as usize / 2).max(1), (height as usize / 2).max(1));
+        let (width, height) = ((width as usize).max(1), (height as usize).max(1));
 
         let long = width.max(height);
         if long <= CANVAS_LONG_EDGE {
@@ -124,20 +159,7 @@ impl Easel {
     /// This is the slow path — a few hundred milliseconds of blurs — and
     /// the gate is what keeps it off every frame: never mid-drag, never
     /// twice for one view, never before the eye has rested.
-    ///
-    /// `drawn` is the ink the sheet is developed under: the same triangles
-    /// the render cap is about to be handed, solved for the same eye. The
-    /// easel reads them and keeps nothing — the ink plane it bakes from
-    /// them is as short-lived as the rest of the develop.
-    pub fn develop(
-        &mut self,
-        mesh: &Mesh,
-        labels: &Labels,
-        settings: &Settings,
-        drawn: &[DrawTriangle],
-        view: &View,
-        dragging: bool,
-    ) {
+    pub fn develop(&mut self, subject: &Subject<'_>, view: &View, dragging: bool) {
         if self.disabled {
             return;
         }
@@ -154,12 +176,21 @@ impl Easel {
         let Some((width, height)) = self.canvas() else {
             return;
         };
+        let Subject { mesh, labels, settings, drawn, chart } = subject;
 
-        let planes = regions::rasterize(mesh, labels, settings, view.eye, &view.view_proj, width, height);
-        let sheet = field::Sheet::new(
-            field::Planes { classes: &planes.class, tone: &planes.tone, facing: &planes.facing, width, height },
-            SHEET_SEED,
-        );
+        let regions = regions::rasterize(mesh, labels, settings, view.eye, &view.view_proj, width, height);
+        let planes =
+            field::Planes { classes: &regions.class, tone: &regions.tone, facing: &regions.facing, width, height };
+
+        // Asked of the chart per repaint rather than cached with the
+        // anchors: gaze moves the iris inside its own aperture, so a frame
+        // solved once at load would leave the paint looking where she used
+        // to look.
+        let accents = chart.as_ref().map(|chart| {
+            let frames = chart::eye_frames(chart.mesh, chart.anchors, chart.face, settings.eye_style);
+
+            accent::paint(&frames, &view.view_proj, &planes)
+        });
 
         // Gesture follows form: the drawing already knows which way the
         // hair runs, so the wash asks it rather than guessing. Baked here
@@ -167,7 +198,9 @@ impl Easel {
         // view that moves invalidates it along with the sheet.
         let flow = image::structure_tensor_flow(&regions::ink(drawn, &view.view_proj, width, height), width, height);
 
-        self.pending = Some((width, height, palette::composite(&sheet.coats(Some(&flow)), sheet.paper_shade())));
+        let sheet = field::Sheet::new(planes, SHEET_SEED);
+        let coats = sheet.coats(Some(&flow), accents.as_ref());
+        self.pending = Some((width, height, palette::composite(&coats, sheet.paper_shade())));
         self.painted_from = Some(view.eye);
         self.frames_still = 0;
     }

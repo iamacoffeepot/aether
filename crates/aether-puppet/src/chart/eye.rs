@@ -347,6 +347,48 @@ impl Lids {
     }
 }
 
+/// Where the iris sits inside the aperture once the gaze has moved it.
+///
+/// One place rather than two, for the same reason the lid pair is one
+/// place:
+/// the ink draws its ring on this ellipse and a painted iris fills the same
+/// one, so a second copy of the reach formula would let the two drift apart
+/// the moment either changed.
+pub struct Iris {
+    pub centre: Vec2,
+    pub radius: f32,
+    /// Pupil half-axes as fractions of `radius`, width then height.
+    pub pupil: Vec2,
+}
+
+impl Lids {
+    /// The iris this aperture holds, or `None` for a design that draws
+    /// none — which also means that design cannot hold a gaze.
+    fn iris(&self) -> Option<Iris> {
+        if self.style.iris <= 0.0 {
+            return None;
+        }
+
+        let radius = self.half_height * self.style.iris;
+        let reach = Vec2::new((self.half_width - radius * 1.02).max(0.0) * 0.72, self.half_height * 0.52);
+
+        Some(Iris {
+            centre: Vec2::new(self.centre.x + self.gaze.x * reach.x, self.centre.y + self.gaze.y * reach.y),
+            radius,
+            pupil: self.style.pupil,
+        })
+    }
+}
+
+/// The iris the ink draws, for paint that has to land inside it.
+///
+/// `None` for a design with no iris and for an eye shut far enough that
+/// the ink has collapsed to the blink arc, where there is nothing left to
+/// paint inside.
+pub fn iris_frame(anchor: &Anchor, style: Style, shape: [f32; 3], gaze: Vec2, side: f32) -> Option<Iris> {
+    (shape[0] >= SHUT).then(|| Lids::new(anchor, style, shape, gaze, side).iris()).flatten()
+}
+
 /// The aperture the drawn lids enclose — the clip a painted iris needs.
 pub fn aperture_outline(
     anchor: &Anchor,
@@ -409,17 +451,13 @@ fn blink(anchor: &Anchor, lids: &Lids) -> Mark {
 /// the open crescent says the same thing with the pen already in use.
 /// Colour comes back later, over this, not instead of it.
 fn iris(lids: &Lids) -> Vec<Mark> {
-    if lids.style.iris <= 0.0 {
+    let Some(iris) = lids.iris() else {
         return Vec::new();
-    }
+    };
+    let pupil = iris.pupil * iris.radius;
 
-    let radius = lids.half_height * lids.style.iris;
-    let reach = Vec2::new((lids.half_width - radius * 1.02).max(0.0) * 0.72, lids.half_height * 0.52);
-    let centre = Vec2::new(lids.centre.x + lids.gaze.x * reach.x, lids.centre.y + lids.gaze.y * reach.y);
-    let pupil = Vec2::new(radius * lids.style.pupil.x, radius * lids.style.pupil.y);
-
-    let mut marks = ring(lids, centre, Vec2::splat(radius), lids.style.arc, lids.style.open, 1.0);
-    marks.extend(ring(lids, centre, pupil, (0.0, 1.0), 0.0, 0.85));
+    let mut marks = ring(lids, iris.centre, Vec2::splat(iris.radius), lids.style.arc, lids.style.open, 1.0);
+    marks.extend(ring(lids, iris.centre, pupil, (0.0, 1.0), 0.0, 0.85));
 
     marks
 }
