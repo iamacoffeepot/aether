@@ -103,7 +103,7 @@ impl StagedTexture {
     }
 }
 
-fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
+pub(super) fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
     match format {
         TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,

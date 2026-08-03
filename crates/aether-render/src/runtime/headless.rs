@@ -16,7 +16,8 @@ use aether_substrate::chassis::error::BootError;
 use crate::headless::HeadlessRenderCapability;
 use crate::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, UpdateTexture, ViewProjection,
+    DrawTexturedQuads, DrawTriangle, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
+    UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state, which is nothing at all — the
@@ -118,6 +119,30 @@ impl NativeActor for HeadlessRenderCapability {
     /// reason as `on_draw_textured_quads`.
     #[handler::single]
     fn on_draw_material_coverage(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialCoverage) {}
+
+    /// `ProgramRegister` replies `Err` so an agent registering an
+    /// authored render program against a headless chassis fails fast
+    /// instead of waiting on a reply that never comes (ADR-0170) —
+    /// mirrors `on_create_texture`.
+    #[handler::single]
+    fn on_program_register(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ProgramRegister,
+    ) -> ProgramRegisterResult {
+        ProgramRegisterResult::Err { reason: "unsupported on headless chassis — no GPU".to_owned() }
+    }
+
+    /// `ProgramDispatch` lands here as a no-op (ADR-0170) for the same
+    /// reason as `on_draw_textured_quads` — fire-and-forget kinds are
+    /// absorbed, not failed.
+    #[handler::single]
+    fn on_program_dispatch(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDispatch) {}
+
+    /// `ProgramDestroy` lands here as a no-op (ADR-0170) for the same
+    /// reason as `on_program_dispatch`.
+    #[handler::single]
+    fn on_program_destroy(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDestroy) {}
 }
 
 #[cfg(all(test, feature = "runtime"))]

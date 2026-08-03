@@ -19,6 +19,7 @@
 mod capture;
 mod material;
 mod pipeline;
+mod program;
 mod quad;
 mod targets;
 // ADR-0161 §Decision 4: the `FrameCheck` verdict + similarity scorer, rehomed
@@ -34,6 +35,11 @@ pub use material::{
     push_textured_params, record_material_pass,
 };
 pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
+pub use program::{
+    PROGRAM_FULLSCREEN_ENTRY, PROGRAM_FULLSCREEN_WGSL, ProgramPassDraw, build_fullscreen_vertex_module,
+    build_program_pipeline, create_program_transient, program_inputs_layout, program_uniform_layout,
+    record_program_pass,
+};
 pub use quad::{
     OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
     QuadPipeline, RealizedTexture, TextureBindings, build_quad_pipeline, build_texture_bindings,

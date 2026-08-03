@@ -13,7 +13,8 @@ use aether_kinds::CaptureFrame;
 
 use crate::kinds::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, UpdateTexture, ViewProjection,
+    DrawTexturedQuads, DrawTriangle, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
+    UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` **identity** (ADR-0122 identity/runtime

@@ -860,6 +860,7 @@ dependencies = [
  "clap",
  "confique",
  "inventory",
+ "naga",
  "pollster",
  "serde",
  "serde_json",

@@ -392,6 +392,219 @@ pub struct DrawMaterialCoverage {
     pub rects: Vec<MaterialCoverageRect>,
 }
 
+/// How a program texture slot's size derives from the program's
+/// reference extent — the size of the dispatch binding the final pass
+/// writes (ADR-0170).
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SlotExtent {
+    /// The reference extent itself.
+    Full,
+    /// The reference extent divided by `divisor` on both axes — floor
+    /// division, clamped to at least one texel — for pyramid and
+    /// reduced-resolution work. `divisor` must be at least 1; a zero
+    /// divisor rejects at register.
+    Divided { divisor: u32 },
+}
+
+/// The declared shape of one program texture slot — an entry in
+/// `ProgramRegister.bindings` (a registry texture supplied at dispatch)
+/// or `ProgramRegister.transients` (an executor-owned intermediate).
+/// `format` fixes the slot's pixel format at register time, which is
+/// what lets every pass pipeline build (and fail) inside the register
+/// reply rather than at first dispatch; a dispatch binding whose
+/// registry texture disagrees with the declared format or resolved
+/// extent warn-drops the dispatch.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SlotSpec {
+    pub format: TextureFormat,
+    pub extent: SlotExtent,
+}
+
+/// One input slot a program pass samples (ADR-0170). Every variant
+/// resolves to a texture the pass binds in its group-1 input pairs, in
+/// declaration order.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InputSlot {
+    /// The dispatch binding at `index` into `ProgramDispatch.bindings`,
+    /// declared at the same `index` in `ProgramRegister.bindings`.
+    Binding { index: u32 },
+    /// Whatever slot the pass at sequence index `pass` wrote its output
+    /// into — an alias resolved at register time, so a ping-pong chain
+    /// reads "the previous pass's result" without naming the transient
+    /// twice. `pass` must be earlier in the sequence.
+    PassOutput { pass: u32 },
+    /// The transient intermediate at `index` into
+    /// `ProgramRegister.transients`. Must be written by an earlier pass
+    /// before it is read — the register-time sequence-index check.
+    Transient { index: u32 },
+}
+
+/// The slot a program pass writes (ADR-0170): a dispatch binding (a
+/// writable registry texture) or a transient intermediate. Passes never
+/// write another pass's output alias, so that variant does not exist
+/// here.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum OutputSlot {
+    /// The dispatch binding at `index` into `ProgramDispatch.bindings`.
+    /// The bound registry texture must be `TextureUsage::Writable`;
+    /// a `Sampled` texture there warn-drops the dispatch.
+    Binding { index: u32 },
+    /// The transient intermediate at `index` into
+    /// `ProgramRegister.transients`.
+    Transient { index: u32 },
+}
+
+/// Which GPU stage a program pass runs (ADR-0170). One variant today:
+/// every named consumer's operations are gathers or pointwise math, so
+/// version one executes fragment passes only. A `Compute` arm arrives
+/// as an addition when a consumer needs shared-memory tiles, reductions,
+/// or scatter writes — the slot / extent / uniform-window vocabulary is
+/// stage-agnostic.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PassStage {
+    /// A fullscreen-triangle fragment pipeline over a render attachment.
+    Fragment,
+}
+
+/// Repetition of one program pass (ADR-0170): the pass records `count`
+/// times, iteration `i` binding its uniform window at
+/// `uniform_offset + i * uniform_stride`, so a chain of pours is one
+/// pass entry over a strided parameter table rather than many entries.
+/// The first iteration clears the output slot (if nothing wrote it
+/// earlier in the dispatch); later iterations load it, so iterations
+/// accumulate through the pass's blend. `count` must be at least 1 and
+/// at most 4096; `uniform_stride` may be 0 to rebind the same window
+/// every iteration.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PassRepeat {
+    pub count: u32,
+    pub uniform_stride: u32,
+}
+
+/// One pass in a program's declared graph (ADR-0170). The graph is a
+/// sequence: a pass may read only slots already written, which makes
+/// the DAG check a single index comparison at register time.
+/// `entry_point` names a fragment entry in the program's WGSL module;
+/// `inputs` bind in order as the pass's group-1 texture / sampler
+/// pairs; `output` is the render attachment. `uniform_offset` /
+/// `uniform_length` window the dispatch's uniform blob in bytes — the
+/// window binds at `@group(0) @binding(0)` and must cover the uniform
+/// block the entry point declares (checked at register from naga's
+/// layout; a shorter window rejects). A pass whose entry point declares
+/// no uniform block passes a zero-length window.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProgramPass {
+    pub stage: PassStage,
+    pub entry_point: String,
+    pub inputs: Vec<InputSlot>,
+    pub output: OutputSlot,
+    pub uniform_offset: u32,
+    pub uniform_length: u32,
+    pub repeat: Option<PassRepeat>,
+}
+
+/// `aether.render.program.register` — register an authored render
+/// program (ADR-0170): one WGSL module plus a declared pass graph the
+/// substrate compiles, validates, and executes without knowing what it
+/// paints. Validation happens here, once, each failure class with a
+/// distinguishable `Err` reason: the WGSL through naga (`invalid
+/// wgsl`), then the graph — every declared extent divisor is nonzero,
+/// every pass's entry point exists as a fragment entry, every slot is
+/// written before it is read (the sequence-index check), no pass reads
+/// its own output, every uniform window covers the uniform block its
+/// entry point declares, the final pass writes a dispatch binding
+/// declared `Full` extent (the program's result texture, whose size is
+/// the reference every other extent scales from) — and finally wgpu
+/// shader-module + pipeline creation under a validation error scope
+/// (`pipeline creation failed`), so a bad-but-parseable program replies
+/// `Err` instead of crashing the substrate. A rejected register
+/// consumes no id.
+///
+/// The shader contract: the substrate owns the vertex stage (a
+/// fullscreen triangle), so the module declares fragment entry points
+/// only. An entry point may take `@location(0) uv: vec2<f32>` — `(0, 0)`
+/// top-left to `(1, 1)` bottom-right, texture convention — and returns
+/// `@location(0) vec4<f32>`. Its uniform window binds at
+/// `@group(0) @binding(0) var<uniform>`; its input slots bind in
+/// declaration order at group 1 as texture / sampler pairs — input `n`
+/// is `@binding(2 * n)` (`texture_2d<f32>`) plus `@binding(2 * n + 1)`
+/// (`sampler`). Blendable-format outputs (`Rgba8`, `R8`) alpha-blend
+/// onto the target; `R32Float` outputs replace it (core WebGPU cannot
+/// blend 32-bit floats). The first write a dispatch makes to each
+/// output slot clears it to transparent black; later writes — a
+/// repeat's iterations, a second pass onto the same slot — load the
+/// existing content.
+///
+/// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
+/// assigned like texture and instrument ids. Desktop-only — the
+/// headless chassis replies `Err` (fail-fast, ADR-0105), and a register
+/// before the render GPU boots (desktop: before the first window
+/// attaches) replies `Err` rather than parking.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.program.register")]
+pub struct ProgramRegister {
+    pub wgsl: String,
+    pub bindings: Vec<SlotSpec>,
+    pub transients: Vec<SlotSpec>,
+    pub passes: Vec<ProgramPass>,
+}
+
+/// Reply to `ProgramRegister`. `Ok` carries the assigned `program_id`
+/// — thread it into `ProgramDispatch.program_id` and
+/// `ProgramDestroy.program_id`. `Err` carries a human-readable reason
+/// prefixed by its validation class: `invalid wgsl` (naga parse or
+/// validation), a graph-check message naming the offending pass and
+/// slot, or `pipeline creation failed` (a wgpu validation error caught
+/// by the register's error scope).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.program.register_result")]
+pub enum ProgramRegisterResult {
+    Ok { program_id: u32 },
+    Err { reason: String },
+}
+
+/// `aether.render.program.dispatch` — execute a registered program once
+/// at the next frame record (ADR-0170). Fire-and-forget, immediate-mode
+/// like every draw kind: register once, dispatch per repaint or per
+/// frame with fresh uniforms. The program's passes record into the
+/// frame's command encoder *before* the world / material / overlay
+/// passes, so those passes sample the program's freshly written outputs
+/// in the same frame. The written outputs persist in their writable
+/// registry textures between dispatches — a program is re-executed only
+/// when dispatched again.
+///
+/// `bindings` names one registry texture id per declared
+/// `ProgramRegister.bindings` slot, in order; `uniforms` is one byte
+/// blob the passes window into (each window is copied into an aligned
+/// staging arrangement, so windows need no alignment of their own —
+/// pack them tight). Runtime mismatches — an unknown `program_id`, a
+/// wrong binding count, an unknown texture id, a binding whose format,
+/// size, or writability disagrees with the declared graph, a uniform
+/// window past the blob's end, or a pass whose input and output resolve
+/// to the same texture — warn-drop the dispatch naming the program,
+/// pass, and binding in the render actor's log ring, the same
+/// convention as an unknown texture id in `draw_textured_quads`. The
+/// headless chassis absorbs it (no-op).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.program.dispatch")]
+pub struct ProgramDispatch {
+    pub program_id: u32,
+    pub bindings: Vec<u32>,
+    pub uniforms: Vec<u8>,
+}
+
+/// `aether.render.program.destroy` — release a registered program from
+/// the render cap's session-scoped program registry, mirroring
+/// `destroy_texture`. Fire-and-forget; an unknown `program_id` logs and
+/// drops. Dropping the entry releases the program's compiled pipelines;
+/// pooled transient textures stay in the shared pool for other
+/// programs. The headless chassis absorbs it (no-op).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.program.destroy")]
+pub struct ProgramDestroy {
+    pub program_id: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
