@@ -846,6 +846,7 @@ dependencies = [
  "aether-actor",
  "aether-component",
  "aether-data",
+ "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-kinds",

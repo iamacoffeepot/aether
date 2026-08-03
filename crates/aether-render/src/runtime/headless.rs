@@ -5,11 +5,6 @@
 //! [`crate::RenderCapability`], the headless companion never names wgpu, so
 //! this module compiles on a no-GPU headless `runtime` build.
 
-use std::io;
-use std::sync::Arc;
-
-use aether_substrate::mail::outbound::HubOutbound;
-
 use aether_actor::runtime;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
@@ -24,36 +19,28 @@ use crate::{
     DrawTexturedQuads, DrawTriangle, UpdateTexture, ViewProjection,
 };
 
-/// `HeadlessRenderCapability` runtime state. Holds only the [`HubOutbound`]
-/// captured at init — the headless cap replies `Err` to the GPU-bound
-/// kinds (`CaptureFrame` / `CreateTexture`) and no-ops the accumulator
-/// kinds, so it needs no handles. The addressing identity is the distinct
-/// ZST [`HeadlessRenderCapability`]. Living in this private module
-/// keeps it `pub`-enough to satisfy the `NativeActor::State` interface
-/// without exposing it as crate-public API.
-pub struct HeadlessRenderCapabilityState {
-    pub outbound: Arc<HubOutbound>,
-}
+/// `HeadlessRenderCapability` runtime state, which is nothing at all — the
+/// headless cap replies `Err` to the GPU-bound kinds (`CaptureFrame` /
+/// `CreateTexture`) and no-ops the accumulator kinds, and each of those
+/// answers through its own inbound rather than through a handle held here.
+/// The addressing identity is the distinct ZST
+/// [`HeadlessRenderCapability`]. Living in this private module keeps it
+/// `pub`-enough to satisfy the `NativeActor::State` interface without
+/// exposing it as crate-public API.
+pub struct HeadlessRenderCapabilityState;
 
 #[runtime]
 impl NativeActor for HeadlessRenderCapability {
-    /// The runtime state this identity boots into (ADR-0122 split): the
-    /// captured `HubOutbound` the `Err`/no-op handlers reply through.
+    /// The runtime state this identity boots into (ADR-0122 split) —
+    /// stateless, since every handler answers through its own inbound.
     type State = HeadlessRenderCapabilityState;
 
     type Config = ();
 
     const NAMESPACE: &'static str = "aether.render";
 
-    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessRenderCapabilityState, BootError> {
-        let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-            BootError::Other(Box::new(io::Error::other(
-                "HubOutbound must be wired on Mailer before \
-                     HeadlessRenderCapability::init (chassis main connects the hub before \
-                     the Builder chain)",
-            )))
-        })?;
-        Ok(HeadlessRenderCapabilityState { outbound })
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessRenderCapabilityState, BootError> {
+        Ok(HeadlessRenderCapabilityState)
     }
 
     /// `DrawTriangle` lands here as a no-op so headless boots of
@@ -72,12 +59,17 @@ impl NativeActor for HeadlessRenderCapability {
     /// fails fast on headless instead of hanging on a reply that
     /// never comes. Mirrors ADR-0035 §Consequences fail-fast shape
     /// for `set_window_mode`.
+    ///
+    /// Through the inbound guard rather than the hub outbound, which is
+    /// what made the fail-fast a hang in practice: an RPC `Call` names the
+    /// rpc server's own mailbox as its reply target, and
+    /// `HubOutbound::send_reply` answers only `Session` / `EngineMailbox`
+    /// senders — it drops a `Component` one and returns `false`
+    /// (iamacoffeepot/aether#4341).
     #[handler::manual]
-    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CaptureFrame) {
-        state.outbound.send_reply(
-            ctx.reply_target(),
-            &CaptureFrameResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() },
-        );
+    fn on_capture_frame(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CaptureFrame) {
+        ctx.take_inbound()
+            .reply(&CaptureFrameResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() });
     }
 
     /// `CreateTexture` replies `Err` so an agent that creates a texture
@@ -130,6 +122,8 @@ impl NativeActor for HeadlessRenderCapability {
 
 #[cfg(all(test, feature = "runtime"))]
 mod headless_tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::TextureFormat;
     use aether_data::MailboxId;
@@ -146,8 +140,7 @@ mod headless_tests {
     #[test]
     fn headless_create_texture_replies_err() {
         let (mailer, _rx) = test_mailer_and_rx();
-        let outbound = mailer.outbound().cloned().expect("test_mailer_and_rx wires a loopback outbound");
-        let mut state = HeadlessRenderCapabilityState { outbound };
+        let mut state = HeadlessRenderCapabilityState;
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
         let mut ctx =
             NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);

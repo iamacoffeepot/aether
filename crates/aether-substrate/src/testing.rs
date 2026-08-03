@@ -33,9 +33,10 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_actor::Root;
-use aether_data::{Kind, SessionToken, Source, SourceAddr, Uuid};
+use aether_actor::{Manual, Root};
+use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
+use aether_kinds::trace::Nanos;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -44,8 +45,10 @@ use crate::chassis::Chassis;
 use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use crate::chassis::error::BootError;
 use crate::config::ConfigMember;
+use crate::mail::MailRef;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
+use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{BootAuthority, Registry};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
@@ -188,7 +191,7 @@ where
     // ADR-0112: route through the macro dispatch seam, which carries the
     // `Manual` ctx. Issue 4158: that seam is also typed by the actor, so build
     // it via `new_for_actor` — `new_dispatching` names none.
-    let mut ctx = NativeCtx::new_for_actor(binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+    let mut ctx = NativeCtx::new_for_actor(binding, Source::NONE, MailId::NONE, MailId::NONE);
     A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }
@@ -264,6 +267,42 @@ pub fn session_sender_with(id: u128) -> Source {
 /// (e.g. an `aether.fs` read) carries back into a cap's result handler.
 pub fn fs_reply_source(correlation_id: u64) -> Source {
     Source::with_correlation(SourceAddr::None, correlation_id)
+}
+
+/// A [`Manual`] dispatch ctx whose inbound is *armed*, so a
+/// `#[handler::manual]` cap test can exercise the
+/// [`take_inbound`](NativeCtx::take_inbound) reply edge.
+///
+/// [`NativeCtx::new_dispatching`] carries no envelope, so a handler that
+/// retains its inbound panics under it — which leaves the guard edge
+/// reachable only through a real dispatcher. Since that edge is the one
+/// that answers a `SourceAddr::Component` sender (the hub outbound does
+/// not), a cap test without this fixture can only assert the session
+/// shape and passes while the wire shape is broken.
+pub fn manual_dispatch_ctx<'a, A>(
+    binding: &'a Arc<NativeBinding>,
+    sender: Source,
+    self_mailbox: MailboxId,
+) -> NativeCtx<'a, Manual, A> {
+    NativeCtx::with_inbound(
+        binding,
+        sender,
+        MailId::NONE,
+        MailId::NONE,
+        OwnedDispatch::disarmed(
+            KindId(0),
+            None,
+            sender,
+            MailRef::from(Vec::new()),
+            1,
+            MailId::NONE,
+            MailId::NONE,
+            None,
+            Nanos(0),
+            0,
+            self_mailbox,
+        ),
+    )
 }
 
 /// Decode the *next* egress as a `ToSession` reply of kind `K`. Strict
