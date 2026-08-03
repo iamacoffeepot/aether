@@ -28,6 +28,7 @@ pub enum ResolvedSlot {
 
 /// One validated pass: entry point, resolved slots, uniform window, and
 /// the flattened repeat (`repeat_count` is 1 for an unrepeated pass).
+#[derive(Debug)]
 pub struct PassPlan {
     pub entry_point: String,
     pub inputs: Vec<ResolvedSlot>,
@@ -43,6 +44,7 @@ pub struct PassPlan {
 /// it. The dispatch-time pool assignment reuses a physical texture
 /// whose previous holder's `last_use` lies strictly before the next
 /// holder's `first_write`.
+#[derive(Debug)]
 pub struct TransientPlan {
     pub spec: SlotSpec,
     pub first_write: Option<u32>,
@@ -51,6 +53,7 @@ pub struct TransientPlan {
 
 /// The validated program graph: everything the register path needs to
 /// build pipelines and the dispatch path needs to resolve and record.
+#[derive(Debug)]
 pub struct ProgramPlan {
     pub bindings: Vec<SlotSpec>,
     pub transients: Vec<TransientPlan>,
