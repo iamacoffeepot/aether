@@ -39,10 +39,18 @@ const ANGULAR_HALF_WIDTH: f32 = 0.00035;
 /// The same conversion applied to the offline silhouette wobble of 0.8 px.
 const ANGULAR_WOBBLE: f32 = 0.00057;
 
-/// Shortest stroke worth drawing, in radians of arc. Detail too small to
-/// read is dropped rather than inked as noise — a relief field on a
+/// Shortest *extracted* stroke worth drawing, in radians of arc. Detail too
+/// small to read is dropped rather than inked as noise — a relief field on a
 /// reconstruction throws off specks, and a speck at full weight reads as
 /// dirt on the paper.
+///
+/// It does not reach an authored mark, and that exemption is not a nicety.
+/// The floor is a noise rejector, and the chart draws no noise: a cupid's
+/// bow is a fifth of a mouth wide, a lip corner tick is smaller still, and
+/// the iris hook arrives as two short arcs because a lid crosses it. Every
+/// one of those is under the floor and every one of them was silently
+/// missing — the mouth came out as two bare lines and the eyes as blanks,
+/// with nothing having errored.
 const MIN_ANGULAR_LENGTH: f32 = 0.004;
 
 fn ink(pen: Pen) -> Rgb {
@@ -89,7 +97,7 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
         })
         .collect();
     let length = angular.last().copied().unwrap_or(0.0);
-    if length < MIN_ANGULAR_LENGTH {
+    if !curve.authored && length < MIN_ANGULAR_LENGTH {
         return;
     }
 

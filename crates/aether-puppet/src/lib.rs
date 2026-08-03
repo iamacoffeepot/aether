@@ -33,20 +33,30 @@
 //! extract  ->  visibility  ->  weld  ->  ribbon  ->  aether.render
 //! ```
 //!
-//! Everything drawn is a **level set of a per-vertex scalar**, which is why
-//! one piece of machinery produces every feature kind: the silhouette is
-//! the zero set of `view . normal`, hatching is the level sets of
-//! `position . axis`, and creases are the level sets of surface relief —
-//! a band-pass of the mesh against itself, projected on the normal.
+//! Nearly everything drawn is a **level set of a per-vertex scalar**, which
+//! is why one piece of machinery produces most feature kinds: the silhouette
+//! is the zero set of `view . normal`, hatching is the level sets of
+//! `position . axis`, and creases are the level sets of surface relief — a
+//! band-pass of the mesh against itself, projected on the normal.
+//!
+//! The face is the exception, and it has to be. Her eyes carry no relief at
+//! all, because a pupil is painted texture over a smooth ball, and her lips
+//! clear the crease threshold about a tenth of the time. So the eye, brow,
+//! mouth and nose are **authored**: `chart` says what each looks like,
+//! `anchor` says where it goes — measured off the material field, never
+//! guessed — and `plant` drops the marks onto a plane fitted through the
+//! surface beneath them.
 //!
 //! # What is cached and what is not
 //!
 //! Hatch and crease are properties of the surface, not of the viewer, so
-//! they are extracted once at load and kept. Only the silhouette and the
-//! visibility split are per-frame, because only those two depend on where
-//! the eye is. The offline renderer recomputes everything every frame
-//! because it has no reason not to; here that difference is most of the
-//! frame budget.
+//! they are extracted once at load and kept, and so are the anchors the
+//! chart draws around. Per frame there is the silhouette, the charted face
+//! (its nose bar retires once she turns far enough for the profile to draw
+//! her nose itself), the suggestive contours, and the visibility split —
+//! everything that depends on where the eye is, and nothing else. The
+//! offline renderer recomputes all of it every frame because it has no
+//! reason not to; here that difference is most of the frame budget.
 //!
 //! # Lifecycle
 //!
@@ -59,6 +69,8 @@
 //! 4. Every `aether.lifecycle.render` stage publishes the camera and
 //!    re-emits the drawing.
 
+pub mod anchor;
+pub mod chart;
 pub mod easel;
 pub mod extract;
 pub mod feature;
@@ -66,6 +78,7 @@ mod kinds;
 pub mod labels;
 pub mod math3;
 pub mod mesh;
+pub mod plant;
 pub mod ribbon;
 pub mod style;
 pub mod visibility;
@@ -147,6 +160,10 @@ pub struct Puppet {
     /// twice.
     labels: Option<labels::Labels>,
     awaiting_labels: Option<String>,
+    /// Where the charted face goes on this subject, measured off the field
+    /// when the subject changes. Neither the mesh nor the field moves, so
+    /// neither does the answer, and the eye scan walks every vertex.
+    anchors: Option<anchor::Anchors>,
     /// Where the cursor was on the last move, and whether a button is
     /// down. Only the delta between two moves means anything for an orbit,
     /// and the substrate reports absolute window positions, so the previous
@@ -204,6 +221,17 @@ impl Puppet {
     fn view_projection(&self) -> ViewProjection {
         ViewProjection { view_proj: self.view_matrix().to_cols_array() }
     }
+
+    /// The charted face, planted on `subject`. Empty without a material
+    /// field, since every anchor is measured from one — a face drawn on a
+    /// guess is worse than no face.
+    fn face(&self, subject: &Mesh, eye: Vec3) -> Vec<Curve3> {
+        let (Some(anchors), Some(face)) = (self.anchors.as_ref(), self.settings.face) else {
+            return Vec::new();
+        };
+
+        chart::marks(subject, anchors, face, &self.settings, eye)
+    }
 }
 
 #[actor]
@@ -216,6 +244,7 @@ impl WasmActor for Puppet {
             silhouette_subject: None,
             labels: None,
             awaiting_labels: None,
+            anchors: None,
             dragging: false,
             cursor: Vec2::new(0.0, 0.0),
             aspect: ASPECT_UNTIL_MEASURED,
@@ -367,9 +396,13 @@ impl WasmActor for Puppet {
             return;
         }
 
+        // Where her features are, measured off the field before anything is
+        // drawn on them. Placement is derived; only the shape is authored.
+        self.anchors = self.labels.as_ref().and_then(|labels| anchor::Anchors::measure(subject, labels));
+
         // Hatch and crease describe the surface, not the view, so they are
         // solved once here rather than every frame.
-        self.surface = extract::surface(subject, self.labels.as_ref(), &self.settings);
+        self.surface = extract::surface(subject, self.labels.as_ref(), self.anchors.as_ref(), &self.settings);
         self.drawn_from = None;
         self.easel.subject_changed();
         tracing::info!(
@@ -377,6 +410,7 @@ impl WasmActor for Puppet {
             faces = subject.faces.len(),
             curves = self.surface.len(),
             masked = self.labels.is_some(),
+            eyes = self.anchors.as_ref().map_or(0, |at| at.eyes.len()),
             "subject loaded",
         );
 
@@ -410,11 +444,25 @@ impl WasmActor for Puppet {
             // outline comes back dashed.
             let silhouette_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
             let mut triangles: Vec<DrawTriangle> = Vec::new();
-            let drawing = self.surface.iter().cloned().map(|curve| (curve, subject.surface_bias())).chain(
-                extract::silhouettes(silhouette_mesh, eye)
-                    .into_iter()
-                    .map(|curve| (curve, silhouette_mesh.surface_bias())),
-            );
+
+            // The face rides the per-eye path rather than the cached
+            // surface, because the nose bar retires once her face turns
+            // over its own bridge and that is a question about where the
+            // eye is. Suggestive contours are there for the same reason —
+            // they are the silhouette one derivative out. Both cost a ray
+            // per point against a mesh already indexed for occlusion.
+            let drawing = self
+                .surface
+                .iter()
+                .cloned()
+                .chain(self.face(subject, eye))
+                .chain(extract::suggestive(subject, self.labels.as_ref(), eye, &self.settings))
+                .map(|curve| (curve, subject.surface_bias()))
+                .chain(
+                    extract::silhouettes(silhouette_mesh, eye)
+                        .into_iter()
+                        .map(|curve| (curve, silhouette_mesh.surface_bias())),
+                );
 
             for (curve, bias) in drawing {
                 // Tone gating already happened at load — it does not depend

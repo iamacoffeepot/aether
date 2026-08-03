@@ -13,6 +13,8 @@
 
 use aether_math::Vec3;
 
+use crate::anchor::{Anchor, Anchors};
+use crate::chart;
 use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
 use crate::labels::{self, Labels};
 use crate::math3::noise;
@@ -90,17 +92,28 @@ pub struct Settings {
     pub crease_steepness: f32,
     /// Which side of each carved feature gets a line.
     pub crease_sides: CreaseSides,
-    /// The mouth shape to draw, as spike 145's `(openness, width, corner,
-    /// teeth)`. `None` leaves her mouth to the geometry alone.
+    /// What her face is doing. `None` hands the eyes, brows and lips back
+    /// to the sculpt, which is honest but nearly blank — the eye carries no
+    /// relief at all and the lips clear the crease threshold 12% of the
+    /// time.
+    ///
+    /// The state a control surface addresses (iamacoffeepot/aether#4338);
+    /// until then every subject wears the rest pose.
+    pub face: Option<chart::Face>,
+    /// Which eye archetype the chart draws. Shape only — expression and
+    /// gaze ride on top of whichever one is chosen.
+    pub eye_style: chart::Style,
     /// Which mark, if any, stands in for the nose. `None` leaves the nose
     /// to the sculpt, which can draw its own given a threshold it can
     /// actually reach.
+    pub nose: chart::Nose,
     /// Relief threshold for `skin`, applied only inside the nose window.
     ///
     /// One global threshold cannot serve both an eyelid and a nose: a lid
     /// is carved three times as deep, so a number set for lids buries the
     /// nose, and a number set for the nose brings every swell on her cheeks
     /// with it. Zero switches the pass off.
+    pub nose_relief: f32,
     /// Curvature a suggestive contour must reach to be drawn. Zero is off.
     pub suggestive: f32,
     /// How near the turn a suggestive contour has to be, as `n . v`.
@@ -143,10 +156,14 @@ impl Default for Settings {
             relief_threshold: 0.36,
             crease_steepness: 0.10,
             crease_sides: CreaseSides::Valley,
+            face: Some(chart::Face::REST),
+            eye_style: chart::Style::default(),
+            nose: chart::Nose::Tick,
             // Both off. Either can find her nose, and both draw it as a
             // contour — which is the right answer to a different question.
             // A single bar says nose without claiming to describe one, and
             // it gets out of the way as soon as the profile can.
+            nose_relief: 0.0,
             suggestive: 0.0,
             suggestive_gate: 0.60,
             // Straight. The curve made it a nose and then kept going —
@@ -251,11 +268,19 @@ pub fn hatching(mesh: &Mesh, settings: &Settings) -> Vec<Curve3> {
 /// inker does: a fold reads as one line where it turns over, not as a
 /// filled band.
 pub fn creases(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec<Curve3> {
-    // Every class the drawing wants inked. When the charted face lands
-    // it will take the eye, brow and lip classes off this list — a charted
-    // lid over a sculpted one is two lids a few pixels apart — but until
-    // then the sculpt draws all of them.
-    let classes = settings.crease_classes.clone();
+    // Whichever of the two is drawing a feature has to draw all of it: a
+    // charted lid over a sculpted one is two lids a few pixels apart, which
+    // is the blob the crease-sides setting was added to stop. So the
+    // classes the chart takes over swap out rather than stack — at rest as
+    // much as in speech, because her lips are the shallowest feature on her
+    // face and the sculpt cannot supply a mouth worth drawing at any shape.
+    let charted = settings.face.is_some();
+    let classes: Vec<u8> = settings
+        .crease_classes
+        .iter()
+        .copied()
+        .filter(|&class| !(charted && matches!(class, labels::LIPS | labels::BROW | labels::EYE)))
+        .collect();
 
     let relief = mesh.relief(settings.relief_fine, settings.relief_coarse);
     let steepness = mesh.gradient(&relief);
@@ -297,9 +322,22 @@ pub fn creases(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec
         .collect()
 }
 
-/// Where the mouth is, measured from the `lips` class the same way spike
-/// 145's `mouth_anchor` does — from the field, saying nothing about how it
-/// looks.
+/// Suggestive contours, masked to the classes that have a form worth
+/// implying.
+///
+/// The silhouette extractor one derivative further out: the set where
+/// `n . v` bottoms out along the view direction without reaching zero. That
+/// is what makes it worth having rather than a placed mark — it joins the
+/// profile exactly, so run the eye around and a suggestive contour walks to
+/// the profile edge and becomes it.
+///
+/// View-dependent for the same reason, which is why it belongs on the
+/// per-eye path rather than with the cached surface.
+///
+/// Unmasked this fires on every strand seam in her hair, which is honest
+/// and unreadable — a hair seam really is about to turn away, there are
+/// just hundreds of them. Skin is where the criterion earns its place: the
+/// nose, the brow ridge, the turn of a cheek.
 pub fn suggestive(mesh: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Settings) -> Vec<Curve3> {
     if settings.suggestive <= 0.0 {
         return Vec::new();
@@ -323,27 +361,57 @@ pub fn suggestive(mesh: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Se
     weld::curves(to_points(segments), &template)
 }
 
-/// Whether the profile already runs over the nose.
+/// How far past the measured window the relief nose pass reaches.
 ///
-/// A box around the measured tip, not a screen-space test: the silhouette
-/// only passes through here once the head has turned far enough for the
-/// bridge to break the outline, which is exactly when the stand-in stops
-/// being wanted. The box stays tight to the front and to the midline or a
-/// cheek edge trips it while she is still face-on.
+/// The window is bounded by the eye and lip *bands*, and a nose runs past
+/// both of them — the bridge climbs between the eyes and the nostrils sit
+/// below the top of the lip band. The tip is found inside the window; the
+/// drawing is allowed out of it.
+const NOSE_REACH: (f32, f32) = (1.45, 1.85);
+
+/// The nose, drawn from the sculpt's own relief rather than charted.
 ///
-/// Skin only, and that is not a detail. Her fringe hangs down the midline
-/// and throws a silhouette straight through the box at every angle
-/// including dead ahead, so an unmasked test suppresses the tick always
-/// and the nose simply never appears. The question is whether her *face*
+/// It was never missing. At the global threshold it contributes two specks;
+/// drop to a threshold a nose can actually reach and the bridge, both wings
+/// and the nostril curls all come out — the model's own, no authoring
+/// involved. What it needs is its own number and its own window, because
+/// the same threshold cannot serve a feature carved this shallow and a lid
+/// carved three times deeper, and because `skin` is kept out of the crease
+/// classes for the good reason that its swells blotch everywhere else on
+/// her face.
+///
+/// View-independent, so it rides with the rest of the cached surface rather
+/// than being re-solved per frame the way the charted bar is — it is the
+/// carving, and the carving does not move when the eye does.
+fn nose_creases(mesh: &Mesh, labels: &Labels, window: &Anchor, settings: &Settings) -> Vec<Curve3> {
+    let (reach_x, reach_y) = (window.half.x * NOSE_REACH.0, window.half.y * NOSE_REACH.1);
+    let inside = |p: Vec3| (p.x - window.centre.x).abs() <= reach_x && (p.y - window.centre.y).abs() <= reach_y;
+
+    let relief = mesh.relief(settings.relief_fine, settings.relief_coarse);
+    let steepness = mesh.gradient(&relief);
+    let template =
+        Curve3 { points: Vec::new(), class: FeatureClass::Decal, pen: Pen::Ink, seed: 0x0503_0000, authored: false };
+
+    let segments: Vec<_> = mesh
+        .level_set(&relief, &steepness, settings.nose_relief)
+        .into_iter()
+        .filter(|[a, b]| inside(a.pos) && inside(b.pos))
+        .filter(|[a, b]| labels.is(a.pos, &[labels::SKIN]) || labels.is(b.pos, &[labels::SKIN]))
+        .collect();
+
+    weld::curves(to_points(segments), &template)
+}
+
 /// The view-independent drawing: everything that describes the surface
 /// rather than the viewer.
 ///
 /// Hatch planes are world-space and creases are a property of the carving,
 /// so neither moves when the eye does — which means both are solved once at
-/// load and kept. Only the silhouette and the visibility split are per
-/// frame. The offline renderer recomputes all of it every frame because it
+/// load and kept. What stays per frame is what depends on the eye: the
+/// silhouette, the charted face, the suggestive contours and the visibility
+/// split. The offline renderer recomputes all of it every frame because it
 /// has no reason not to; here that difference is most of the budget.
-pub fn surface(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec<Curve3> {
+pub fn surface(mesh: &Mesh, labels: Option<&Labels>, anchors: Option<&Anchors>, settings: &Settings) -> Vec<Curve3> {
     // Tone-gate the hatching here, once, rather than every frame.
     //
     // View-independent, not pose-independent: it reads each point's normal,
@@ -370,6 +438,15 @@ pub fn surface(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec
         .collect();
 
     out.extend(creases(mesh, labels, settings));
+
+    // The relief nose only exists when it has been given a threshold it can
+    // reach, a field to be masked against, and a window to be found in.
+    if settings.nose_relief > 0.0
+        && let (Some(labels), Some(window)) = (labels, anchors.and_then(|at| at.nose.as_ref()))
+    {
+        out.extend(nose_creases(mesh, labels, window, settings));
+    }
+
     out
 }
 
