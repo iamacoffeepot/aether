@@ -424,6 +424,8 @@ fn lit_runs(curve: &Curve3, keep: impl Fn(&SurfacePoint) -> bool) -> Vec<Curve3>
 
 #[cfg(test)]
 mod tests {
+    use aether_math::TAU;
+
     use super::*;
 
     /// A field whose every cell is one class, over the unit cube. Ten
@@ -439,7 +441,7 @@ mod tests {
     fn loop_of(radius: f32) -> Curve3 {
         let points = (0..8)
             .map(|step| {
-                let angle = step as f32 / 8.0 * core::f32::consts::TAU;
+                let angle = step as f32 / 8.0 * TAU;
                 SurfacePoint::on_surface(
                     Vec3::new(radius * angle.cos(), radius * angle.sin(), 0.0),
                     Vec3::new(0.0, 0.0, 1.0),
