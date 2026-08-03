@@ -991,13 +991,20 @@ mod tests {
         let windows: Vec<(usize, usize)> = accidents.pours.iter().map(|pour| pour.window).collect();
         assert_eq!(
             jitters,
-            [Vec2::new(-8.694343, -7.0365443), Vec2::new(-6.760276, -17.585537), Vec2::new(-13.240774, -7.993333)]
+            [
+                Vec2::new(-8.694_343, -7.036_544_3),
+                Vec2::new(-6.760_276, -17.585_537),
+                Vec2::new(-13.240_774, -7.993_333)
+            ]
         );
         assert_eq!(windows, [(396, 53), (65, 982), (355, 155)]);
 
         let drops: Vec<(f32, f32, f32, f32)> =
             accidents.drops.iter().map(|drop| (drop.bearing, drop.throw, drop.radius, drop.strength)).collect();
-        assert_eq!(drops, [(1.1086539, 242.24065, 4.904192, 0.45045543), (1.7642559, 256.17038, 3.5548816, 1.0268316)]);
+        assert_eq!(
+            drops,
+            [(1.108_653_9, 242.240_65, 4.904_192, 0.450_455_43), (1.764_255_9, 256.170_38, 3.554_881_6, 1.026_831_6)]
+        );
     }
 
     /// Tripwire: an empty region paints nothing rather than dividing by a
