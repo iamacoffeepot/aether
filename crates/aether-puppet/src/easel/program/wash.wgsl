@@ -160,9 +160,9 @@ fn fs_atmosphere_spill(@builtin(position) position: vec4<f32>) -> @location(0) v
     let at = vec2<i32>(position.xy);
     let extent = vec2<i32>(textureDimensions(spill_halo));
     let drift = vec2<f32>(spill_params.drift_x, spill_params.drift_y);
-    let from = vec2<i32>(clamp(vec2<f32>(at) - drift, vec2<f32>(0.0, 0.0), vec2<f32>(extent - vec2<i32>(1, 1))));
+    let came = vec2<i32>(clamp(vec2<f32>(at) - drift, vec2<f32>(0.0, 0.0), vec2<f32>(extent - vec2<i32>(1, 1))));
 
-    let spill = hermite(ATMOSPHERE_REACH_NEAR, ATMOSPHERE_REACH_FULL, textureLoad(spill_halo, from, 0).r)
+    let spill = hermite(ATMOSPHERE_REACH_NEAR, ATMOSPHERE_REACH_FULL, textureLoad(spill_halo, came, 0).r)
         * (1.0 - textureLoad(spill_standing, at, 0).r * ATMOSPHERE_RESIST);
     return vec4<f32>(f32(spill > ATMOSPHERE_LEVEL), 0.0, 0.0, 1.0);
 }
