@@ -20,6 +20,7 @@ pub mod accent;
 pub mod field;
 pub mod image;
 pub mod palette;
+pub mod program;
 pub mod regions;
 
 use aether_math::{Mat4, Vec3};

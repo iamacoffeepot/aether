@@ -185,6 +185,71 @@ impl WashParams {
     }
 }
 
+/// The chance one pour consumed, rolled before any paint goes down.
+pub struct PourAccident {
+    /// Where the touch wandered off the region's centre, in this sheet's
+    /// pixels. Displacing each pour differently is what keeps the pours
+    /// siblings rather than rings.
+    pub jitter: Vec2,
+    /// Which window of the shared tide-line noise decides this pour's
+    /// edge, so no pour repeats the last pour's tide line.
+    pub window: (usize, usize),
+}
+
+/// One drop thrown off the brush, short of the centre it is thrown about.
+pub struct DropAccident {
+    /// Direction the drop leaves in, in radians.
+    pub bearing: f32,
+    /// How far it flies, in this sheet's pixels.
+    pub throw: f32,
+    /// Size of the drop where it lands, in this sheet's pixels.
+    pub radius: f32,
+    /// How much pigment it carries.
+    pub strength: f32,
+}
+
+/// Every accident one wash will consume, enumerated before a single pixel
+/// is painted.
+///
+/// The paint path reads this list instead of rolling dice inline, so the
+/// list alone carries the wash's chance — the plain data a GPU dispatch
+/// later serializes into its uniform blob while the CPU develop stays the
+/// oracle (ADR-0170).
+pub struct WashAccidents {
+    pub pours: Vec<PourAccident>,
+    pub drops: Vec<DropAccident>,
+}
+
+impl WashAccidents {
+    /// Roll the wash's whole ration of chance, in exactly the order the
+    /// paint path once drew it inline: per pour the jitter pair then the
+    /// window pair, then per drop the bearing, throw, radius and strength.
+    pub fn roll(params: &WashParams, width: usize, height: usize, rng: &mut Rng) -> Self {
+        let wander = image::tuned(params.wander, height);
+        let pours = params
+            .pours
+            .iter()
+            .map(|_| PourAccident {
+                jitter: Vec2::new((rng.next_unit() - 0.5) * wander, (rng.next_unit() - 0.5) * wander),
+                window: ((rng.next_unit() * width as f32) as usize, (rng.next_unit() * height as f32) as usize),
+            })
+            .collect();
+
+        // The radius draw is squared so most drops are fine and the
+        // occasional one is a blot, which is what comes off a loaded brush.
+        let drops = (0..params.spatter)
+            .map(|_| DropAccident {
+                bearing: rng.next_unit() * TAU,
+                throw: image::tuned(SPATTER_THROW.0 + rng.next_unit() * SPATTER_THROW.1, height),
+                radius: image::tuned(SPATTER_RADIUS.0 + rng.next_unit() * rng.next_unit() * SPATTER_RADIUS.1, height),
+                strength: SPATTER_STRENGTH.0 + rng.next_unit() * SPATTER_STRENGTH.1,
+            })
+            .collect();
+
+        Self { pours, drops }
+    }
+}
+
 /// Half-width of the band the puddle is thresholded across.
 const EDGE_BAND: f32 = 0.08;
 
@@ -315,16 +380,27 @@ const ATMOSPHERE_SEED: u64 = 0xa7_a7;
 pub struct Sheet<'a> {
     planes: Planes<'a>,
     seed: u64,
-    /// The paper's tooth: fine, high frequency, and the thing granulating
-    /// pigment settles into.
-    tooth: Vec<f32>,
-    /// Coarse noise the wash's edges are dithered along, so no stretch of
-    /// tide line reads like its neighbour.
-    edge_noise: Vec<f32>,
+    noise: NoisePlanes,
     /// The sheet's own colour variation, as a multiplier about one.
     shade: Vec<f32>,
     /// How closely the hand is held, in `[0, 1]`.
     care: Vec<f32>,
+}
+
+/// The paper's shared noise, as plain planes at the sheet's own size —
+/// the data a GPU wash uploads once per canvas as textures (ADR-0170),
+/// where the CPU paint path reads them in place.
+pub struct NoisePlanes {
+    /// The paper's tooth: fine, high frequency, and the thing granulating
+    /// pigment settles into.
+    pub tooth: Vec<f32>,
+    /// The sizing's broad blotches, folded into both the tide-line noise
+    /// and the paper's own colour.
+    pub mottle: Vec<f32>,
+    /// The tide-line field the wash's edges are dithered along — coarse
+    /// noise with the mottle mixed in — so no stretch of tide line reads
+    /// like its neighbour.
+    pub edge: Vec<f32>,
 }
 
 /// Domain constants for the three noise fields, so the same sheet seed
@@ -354,7 +430,7 @@ impl<'a> Sheet<'a> {
         let mottle = image::Noise::new(seed ^ MOTTLE_SEED, MOTTLE_NOISE.0, MOTTLE_NOISE.1).plane(width, height);
         let coarse = image::Noise::new(seed ^ EDGE_SEED, EDGE_NOISE.0, EDGE_NOISE.1).plane(width, height);
 
-        let edge_noise = coarse
+        let edge = coarse
             .iter()
             .zip(&mottle)
             .map(|(&at, &blotch)| (at - 0.5) * EDGE_MIX.0 + (blotch - 0.5) * EDGE_MIX.1)
@@ -366,12 +442,17 @@ impl<'a> Sheet<'a> {
             .collect();
         let care = care_field(planes.classes, width, height);
 
-        Self { planes, seed, tooth, edge_noise, shade, care }
+        Self { planes, seed, noise: NoisePlanes { tooth, mottle, edge }, shade, care }
     }
 
     /// The paper's own colour variation, for [`palette::composite`].
     pub fn paper_shade(&self) -> &[f32] {
         &self.shade
+    }
+
+    /// The paper's shared noise, for upload as textures by a GPU wash.
+    pub fn noise(&self) -> &NoisePlanes {
+        &self.noise
     }
 
     /// How closely the hand is held at each pixel: one at the face, zero
@@ -557,7 +638,10 @@ impl<'a> Sheet<'a> {
     /// `value` is the material's own coverage from [`palette::shade_of`],
     /// or `None` for a wash that carries pigment uniformly. The result is
     /// pigment density, uncapped — [`palette::composite`] decides how much
-    /// of it the sheet can hold.
+    /// of it the sheet can hold. The wash's whole ration of chance is
+    /// rolled into a [`WashAccidents`] before any paint goes down; the
+    /// paint below is a pure function of the mask, the params and that
+    /// list.
     pub fn wash(&self, mask: &[f32], value: Option<&[f32]>, params: &WashParams, rng: &mut Rng) -> Vec<f32> {
         let (width, height) = (self.planes.width, self.planes.height);
         let mut density = vec![0.0; mask.len()];
@@ -565,6 +649,7 @@ impl<'a> Sheet<'a> {
             return density;
         };
 
+        let accidents = WashAccidents::roll(params, width, height, rng);
         let margin = image::tuned(params.water + SUPPORT_MARGIN, height);
         let support = Support {
             centre,
@@ -572,33 +657,31 @@ impl<'a> Sheet<'a> {
             reference: image::blur(mask, width, height, margin),
         };
 
-        for pour in params.pours {
-            self.pour(&mut density, mask, params, pour, &support, rng);
+        for (pour, accident) in params.pours.iter().zip(&accidents.pours) {
+            self.pour(&mut density, mask, params, pour, accident, &support);
         }
 
         if params.gran > 0.0 {
             self.granulate(&mut density, params.gran);
         }
-        if params.spatter > 0 {
-            self.spatter(&mut density, centre, params.spatter, rng);
-        }
+        self.spatter(&mut density, centre, &accidents.drops);
 
         density
     }
 
-    /// One touch of the brush, accumulated into `density`.
+    /// One touch of the brush, accumulated into `density`, its chance
+    /// already rolled into `accident`.
     fn pour(
         &self,
         density: &mut [f32],
         mask: &[f32],
         params: &WashParams,
         pour: &Pour,
+        accident: &PourAccident,
         support: &Support,
-        rng: &mut Rng,
     ) {
         let (width, height) = (self.planes.width, self.planes.height);
-        let wander = image::tuned(params.wander, height);
-        let jitter = Vec2::new((rng.next_unit() - 0.5) * wander, (rng.next_unit() - 0.5) * wander);
+        let PourAccident { jitter, window } = *accident;
 
         // A pour that is neither shrunk nor displaced would resample the
         // mask onto itself, so the whole step is skipped rather than
@@ -614,10 +697,6 @@ impl<'a> Sheet<'a> {
             soft = sagged(&soft, width, height);
         }
 
-        // The tide-line noise is one field for the whole sheet, so each
-        // pour reads a different window of it rather than repeating the
-        // last pour's edge.
-        let window = ((rng.next_unit() * width as f32) as usize, (rng.next_unit() * height as f32) as usize);
         let alpha = self.threshold(&soft, params, support.centre, window);
         let interior =
             image::blur(&alpha, width, height, image::tuned(params.water * RIM_SPREAD + SUPPORT_MARGIN, height));
@@ -630,7 +709,7 @@ impl<'a> Sheet<'a> {
             for x in 0..width {
                 let i = y * width + x;
                 let rim = (alpha[i] - interior[i]).max(0.0);
-                let noise = self.edge_noise[noise_row + (x + window.0 * RIM_RESTRIDE.0) % width];
+                let noise = self.noise.edge[noise_row + (x + window.0 * RIM_RESTRIDE.0) % width];
                 let vary = (RIM_VARY.0 + noise * RIM_VARY.1).clamp(0.0, RIM_VARY_CEILING);
                 let carried = support
                     .value
@@ -658,7 +737,7 @@ impl<'a> Sheet<'a> {
             let noise_row = ((y + offset.1) % height) * width;
             for x in 0..width {
                 let i = y * width + x;
-                let shift = self.edge_noise[noise_row + (x + offset.0) % width] * params.wobble;
+                let shift = self.noise.edge[noise_row + (x + offset.0) % width] * params.wobble;
                 let hard =
                     image::smoothstep(params.level - EDGE_BAND + shift, params.level + EDGE_BAND + shift, soft[i]);
 
@@ -684,26 +763,21 @@ impl<'a> Sheet<'a> {
 
     /// Settle the pigment into the paper's tooth.
     fn granulate(&self, density: &mut [f32], gran: f32) {
-        for (at, &grain) in density.iter_mut().zip(&self.tooth) {
+        for (at, &grain) in density.iter_mut().zip(&self.noise.tooth) {
             if *at > GRANULATION_FLOOR {
                 *at *= 1.0 - gran * GRANULATION_AUTHORITY * (grain - GRANULATION_PIVOT);
             }
         }
     }
 
-    /// Throw drops off the brush, around and mostly below the region.
-    fn spatter(&self, density: &mut [f32], centre: Vec2, drops: u32, rng: &mut Rng) {
+    /// Throw the pre-rolled drops off the brush, around and mostly below
+    /// the region.
+    fn spatter(&self, density: &mut [f32], centre: Vec2, drops: &[DropAccident]) {
         let (width, height) = (self.planes.width, self.planes.height);
 
-        for _ in 0..drops {
-            let bearing = rng.next_unit() * TAU;
-            let throw = image::tuned(SPATTER_THROW.0 + rng.next_unit() * SPATTER_THROW.1, height);
+        for drop in drops {
+            let DropAccident { bearing, throw, radius, strength } = *drop;
             let at = Vec2::new(centre.x + bearing.cos() * throw, centre.y + bearing.sin() * throw * SPATTER_DROOP);
-
-            // Squared so most drops are fine and the occasional one is a
-            // blot, which is what comes off a loaded brush.
-            let radius = image::tuned(SPATTER_RADIUS.0 + rng.next_unit() * rng.next_unit() * SPATTER_RADIUS.1, height);
-            let strength = SPATTER_STRENGTH.0 + rng.next_unit() * SPATTER_STRENGTH.1;
 
             let x0 = (at.x - radius - 1.0).max(0.0) as usize;
             let x1 = ((at.x + radius + 1.0) as usize).min(width.saturating_sub(1));
@@ -893,6 +967,44 @@ mod tests {
         for coat in Sheet::new(planes, 0x5e_ed).coats(None, None) {
             assert!(coat.density.iter().all(|at| at.is_finite()), "class {} laid down a NaN", coat.class);
         }
+    }
+
+    /// Tripwire: the enumerated accident list reproduces the inline
+    /// stream.
+    ///
+    /// [`WashAccidents::roll`] must consume the shared stream in exactly
+    /// the order the paint path once drew inline — per pour the jitter
+    /// pair then the window pair, then per drop the bearing, throw,
+    /// radius and strength — because this list is the contract a GPU
+    /// dispatch will serialize into its uniform blob while the CPU
+    /// develop stays the oracle (ADR-0170). A reordered draw, or a scale
+    /// applied at the wrong site, repaints every image while still
+    /// looking entirely plausible. These constants are the splitmix
+    /// stream itself, pinned at the reference height so [`image::tuned`]
+    /// is the identity; any drift in the roll trips here first.
+    #[test]
+    fn enumerated_accidents_pin_the_splitmix_stream() {
+        let params = WashParams::loose().spattering(2);
+        let accidents = WashAccidents::roll(&params, 900, 1150, &mut Rng::new(0x5e_ed));
+
+        let jitters: Vec<Vec2> = accidents.pours.iter().map(|pour| pour.jitter).collect();
+        let windows: Vec<(usize, usize)> = accidents.pours.iter().map(|pour| pour.window).collect();
+        assert_eq!(
+            jitters,
+            [
+                Vec2::new(-8.694_343, -7.036_544_3),
+                Vec2::new(-6.760_276, -17.585_537),
+                Vec2::new(-13.240_774, -7.993_333)
+            ]
+        );
+        assert_eq!(windows, [(396, 53), (65, 982), (355, 155)]);
+
+        let drops: Vec<(f32, f32, f32, f32)> =
+            accidents.drops.iter().map(|drop| (drop.bearing, drop.throw, drop.radius, drop.strength)).collect();
+        assert_eq!(
+            drops,
+            [(1.108_653_9, 242.240_65, 4.904_192, 0.450_455_43), (1.764_255_9, 256.170_38, 3.554_881_6, 1.026_831_6)]
+        );
     }
 
     /// Tripwire: an empty region paints nothing rather than dividing by a
