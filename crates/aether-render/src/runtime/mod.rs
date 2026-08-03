@@ -848,7 +848,7 @@ impl NativeActor for RenderCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SolidQuad, TextureFormat};
+    use super::super::{SolidQuad, TextureFormat, TextureSampling, TextureUsage};
     use super::texture::StagedTexture;
     use super::*;
     use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
@@ -865,7 +865,16 @@ mod tests {
     use std::sync::mpsc;
 
     fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
-        StagedTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels, realized: None, dirty: true }
+        StagedTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels,
+            realized: None,
+            dirty: true,
+        }
     }
 
     /// Build a `PendingCapture` whose retained guard replies to a Session

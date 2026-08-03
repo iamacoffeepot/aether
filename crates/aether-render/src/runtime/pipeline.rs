@@ -101,6 +101,18 @@ pub(super) fn record_overlay_batches(
         let Some(entry) = registry.entries.get(&batch.texture_id) else {
             continue;
         };
+        if !entry.format.filterable() {
+            // A non-filterable data plane binds through the non-filtering
+            // layout, which the overlay pipeline was not built against
+            // (ADR-0170) — drawing it would fail wgpu validation.
+            tracing::warn!(
+                target: "aether_render",
+                texture_id = batch.texture_id,
+                format = ?entry.format,
+                "draw_textured_quads over a non-filterable data-plane texture; dropping the batch",
+            );
+            continue;
+        }
         let Some(realized) = entry.realized.as_ref() else {
             continue;
         };
@@ -167,7 +179,10 @@ pub(super) fn record_overlay_batches(
         if vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES {
             for batch in batches {
                 let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
-                let is_recorded = registry.entries.get(&batch.texture_id).is_some_and(|entry| entry.realized.is_some())
+                let is_recorded = registry
+                    .entries
+                    .get(&batch.texture_id)
+                    .is_some_and(|entry| entry.realized.is_some() && entry.format.filterable())
                     && !batch.quads.is_empty()
                     && overlay_clip_is_visible(clip, targets.width(), targets.height());
                 if is_recorded {
@@ -224,6 +239,18 @@ pub(super) fn record_material_batches(
                 let Some(entry) = registry.entries.get(texture_id) else {
                     continue;
                 };
+                if !entry.format.filterable() {
+                    // Same layout incompatibility as the overlay pass: the
+                    // textured material pipeline is built against the
+                    // filtering layout (ADR-0170).
+                    tracing::warn!(
+                        target: "aether_render",
+                        texture_id,
+                        format = ?entry.format,
+                        "textured material over a non-filterable data-plane texture; dropping the batch",
+                    );
+                    continue;
+                }
                 let Some(realized) = entry.realized.as_ref() else {
                     continue;
                 };

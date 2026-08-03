@@ -46,7 +46,8 @@ use aether_kit_widget::{
 };
 use aether_math::Rgba;
 use aether_render::{
-    CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, TextureFormat, TextureSampling, TextureUsage,
+    TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
@@ -122,6 +123,8 @@ fn create_four_color_texture(harness: &mut SubstrateHarness) -> u32 {
                     width: size,
                     height: size,
                     format: TextureFormat::Rgba8,
+                    sampling: TextureSampling::Linear,
+                    usage: TextureUsage::Sampled,
                     pixels: four_color_texture_pixels(size),
                 },
             ),

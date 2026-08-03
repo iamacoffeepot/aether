@@ -49,7 +49,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 |---|---|---|
 | `aether.draw_triangle` | `{ verts: [Vertex; 3] }`, cast-shaped | per-tick geometry; accumulates into the frame |
 | `aether.view_projection` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
-| `aether.render.create_texture` | `{ width, height, format, pixels }` → `create_texture_result` | register an `Rgba8` or `R8` texture; reply carries the `texture_id` |
+| `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, or `R32Float` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
@@ -70,6 +70,19 @@ and an RGBA tint. `R8` samples contribute their scalar value in the red channel
 sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
 texture when the producer knows it is no longer used; headless absorbs it as a
 no-op.
+
+The create carries two role knobs (ADR-0170). `sampling` selects `Linear`
+filtering for color content or `Nearest` for label planes whose texel values
+are identities — interpolating between region labels would manufacture values
+no texel holds. `usage` selects `Sampled` (CPU-staged pixels, the default role
+above) or `Writable` — a GPU render target created without staged pixels and
+cleared to transparent black at realization, the output surface authored
+render programs draw into; `update_texture` against a writable texture
+warn-drops, since it has no CPU staging. The `R32Float` format stores one
+`f32` per texel for data planes; core WebGPU cannot linear-filter it, so it
+requires `Nearest` sampling and binds through a non-filtering layout — the
+color material and overlay passes warn-drop batches over it, and its consumers
+are the authored-program passes.
 Quads draw through a second alpha-blended pipeline in an overlay pass recorded
 after the world pass, so they always land on top. The accumulate-per-frame
 contract matches `draw_triangle`: resend the batch every frame it should appear.

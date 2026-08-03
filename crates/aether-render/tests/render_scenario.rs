@@ -60,7 +60,7 @@ use aether_math::{Rgb, Rgba};
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
     DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
-    TextureFormat, TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
+    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, UpdateTexture, Vertex, WHITE_TEXTURE_ID,
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
@@ -168,6 +168,12 @@ fn require_wgpu_only() -> bool {
     assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
     eprintln!("skipping: no wgpu adapter available");
     false
+}
+
+/// A `Sampled` + `Linear` create — the default role every scenario
+/// that stages ordinary color pixels uses.
+fn sampled_linear(width: u32, height: u32, format: TextureFormat, pixels: Vec<u8>) -> CreateTexture {
+    CreateTexture { width, height, format, sampling: TextureSampling::Linear, usage: TextureUsage::Sampled, pixels }
 }
 
 /// `capture_frame` round-trip with non-empty mail bundles. The
@@ -380,7 +386,7 @@ fn textured_quad_draws_screen_space_rect() {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
+                &sampled_linear(texture_width, texture_height, TextureFormat::Rgba8, pixels),
             ),
         )])
         .expect("create_texture sequence");
@@ -463,7 +469,7 @@ fn create_observation_texture(harness: &mut SubstrateHarness) -> u32 {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
+                &sampled_linear(1, 1, TextureFormat::Rgba8, vec![255, 255, 255, 255]),
             ),
         )])
         .expect("create observation texture");
@@ -732,7 +738,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: texture_size, height: texture_size, format: TextureFormat::Rgba8, pixels },
+                &sampled_linear(texture_size, texture_size, TextureFormat::Rgba8, pixels),
             ),
         )])
         .expect("create_texture sequence");
@@ -814,7 +820,7 @@ fn destroyed_texture_draw_drops_from_frame() {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
+                &sampled_linear(texture_width, texture_height, TextureFormat::Rgba8, pixels),
             ),
         )])
         .expect("create_texture sequence");
@@ -895,12 +901,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture {
-                    width: texture_width,
-                    height: texture_height,
-                    format: TextureFormat::R8,
-                    pixels: pixels.clone(),
-                },
+                &sampled_linear(texture_width, texture_height, TextureFormat::R8, pixels.clone()),
             ),
         )])
         .expect("create r8 texture");
@@ -983,10 +984,7 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await_reply(
-                "aether.render",
-                &CreateTexture { width: 8, height: 4, format: TextureFormat::R8, pixels },
-            ),
+            HarnessOp::send_and_await_reply("aether.render", &sampled_linear(8, 4, TextureFormat::R8, pixels)),
         )])
         .expect("create coverage texture");
     let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
@@ -1047,10 +1045,7 @@ fn textured_material_depth_tests_against_main_geometry() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await_reply(
-                "aether.render",
-                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels },
-            ),
+            HarnessOp::send_and_await_reply("aether.render", &sampled_linear(1, 1, TextureFormat::Rgba8, pixels)),
         )])
         .expect("create textured material texture");
     let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
@@ -1118,10 +1113,7 @@ fn textured_material_rect_extends_along_its_basis() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await_reply(
-                "aether.render",
-                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels },
-            ),
+            HarnessOp::send_and_await_reply("aether.render", &sampled_linear(1, 1, TextureFormat::Rgba8, pixels)),
         )])
         .expect("create oriented material texture");
     let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
@@ -1178,7 +1170,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![255u8; 16] },
+                &sampled_linear(2, 2, TextureFormat::Rgba8, vec![255u8; 16]),
             ),
         )])
         .expect("create rgba texture");
@@ -1341,7 +1333,7 @@ fn textured_quad_clip_bounds_pixels() {
             "create",
             HarnessOp::send_and_await_reply(
                 "aether.render",
-                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
+                &sampled_linear(1, 1, TextureFormat::Rgba8, vec![255, 255, 255, 255]),
             ),
         )])
         .expect("create white texture");
@@ -1887,4 +1879,338 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     let _ = fs::remove_dir_all(&panic_dir);
     let _ = fs::remove_dir_all(&reference_dir);
     let _ = fs::remove_dir_all(&passing_dir);
+}
+
+/// ADR-0170 writable registry textures: a `Writable` create (no staged
+/// pixels) is accepted, realizes under wgpu validation as a
+/// `RENDER_ATTACHMENT | TEXTURE_BINDING` target whose realization
+/// records an explicit clear pass, and samples through both
+/// `aether.render.material.textured` and the overlay pass as the
+/// defined transparent-black initial content — the covered regions stay
+/// at clear color while a solid control quad proves the frame drew.
+/// The named bugs: a realize path that uploads the (empty) staging into
+/// a target without `COPY_DST`, missing render-attachment usage (the
+/// clear pass fails wgpu validation and panics the record), an
+/// undefined or non-transparent initial content (the probes diverge
+/// from background), and a sampling path that warn-drops writable
+/// textures (the committed overlay snapshot loses the batch).
+#[test]
+// One linear story: create → sample through both passes → probe; splitting
+// it would scatter the single writable-texture narrative.
+#[allow(clippy::too_many_lines)]
+fn writable_texture_realizes_cleared_and_samples_transparent() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let created = harness
+        .execute(vec![(
+            "create",
+            HarnessOp::send_and_await_reply(
+                "aether.render",
+                &CreateTexture {
+                    width: 8,
+                    height: 8,
+                    format: TextureFormat::Rgba8,
+                    sampling: TextureSampling::Linear,
+                    usage: TextureUsage::Writable,
+                    pixels: Vec::new(),
+                },
+            ),
+        )])
+        .expect("create writable texture");
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture (writable) failed: {error}"),
+    };
+
+    // Sample the writable texture through the depth-tested material pass
+    // (a large world rect) and the overlay pass (a screen rect), with a
+    // solid control quad outside both regions proving the passes ran.
+    let pre = vec![
+        envelope(
+            "aether.render",
+            &DrawMaterialTextured {
+                texture_id,
+                rects: vec![MaterialTexturedRect {
+                    rect: MaterialRect {
+                        x: -0.8,
+                        y: -0.6,
+                        width: 1.6,
+                        height: 1.2,
+                        z: 0.5,
+                        right: [1.0, 0.0, 0.0],
+                        up: [0.0, 1.0, 0.0],
+                    },
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                }],
+            },
+        ),
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                space: QuadSpace::Screen,
+                clip: None,
+                quads: vec![TexturedQuad {
+                    x: 16.0,
+                    y: 12.0,
+                    width: 24.0,
+                    height: 18.0,
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                }],
+            },
+        ),
+        envelope(
+            "aether.render",
+            &DrawSolidQuads {
+                space: QuadSpace::Screen,
+                clip: None,
+                quads: vec![SolidQuad {
+                    x: 2.0,
+                    y: 2.0,
+                    width: 5.0,
+                    height: 5.0,
+                    color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                }],
+            },
+        ),
+    ];
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture writable sampling");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode writable capture png");
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    assert!(pixel_is_lit(&img, 4, 4, bg, tolerance), "the solid control quad must draw — the frame's passes ran");
+    for (x, y, region) in [(32u32, 24u32, "material rect + overlay rect"), (20, 35, "material rect only")] {
+        let probe = rgba_at(&img, x, y);
+        assert!(
+            probe[0].abs_diff(bg[0]) <= tolerance
+                && probe[1].abs_diff(bg[1]) <= tolerance
+                && probe[2].abs_diff(bg[2]) <= tolerance,
+            "the writable texture's cleared content is transparent black, so the {region} probe at \
+             ({x}, {y}) must stay background; bg={bg:?} probe={probe:?}",
+        );
+    }
+    assert!(
+        harness.committed_overlay_snapshot().iter().any(|batch| batch.texture_id == texture_id),
+        "the writable batch must survive record — sampled as cleared content, not warn-dropped",
+    );
+}
+
+/// ADR-0170 data-plane format: `R32Float` textures — a `Sampled` one
+/// staged from little-endian `f32` bytes and a `Writable` program
+/// target — are creatable and realize under wgpu validation through the
+/// non-filtering binding, while the color material / overlay passes
+/// warn-drop batches over them instead of binding an incompatible
+/// layout. The named bugs: a bind group built against the filtering
+/// layout (wgpu rejects the non-filterable sample type at realization
+/// and panics), a wrong `R32Float` byte stride in the staging upload
+/// (`write_texture` validation fails), a clear pass that mishandles a
+/// float render attachment, and a missing record-time guard (binding
+/// the data layout to a filtering-layout pipeline fails validation —
+/// and the committed observation must mirror the drop).
+#[test]
+// One linear story: create both float roles → reference from both passes →
+// assert the drop; splitting it would scatter the narrative.
+#[allow(clippy::too_many_lines)]
+fn r32float_textures_realize_and_drop_from_color_passes() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let data: Vec<u8> = [0.0f32, 0.25, 0.5, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
+    let created = harness
+        .execute(vec![
+            (
+                "create_sampled",
+                HarnessOp::send_and_await_reply(
+                    "aether.render",
+                    &CreateTexture {
+                        width: 2,
+                        height: 2,
+                        format: TextureFormat::R32Float,
+                        sampling: TextureSampling::Nearest,
+                        usage: TextureUsage::Sampled,
+                        pixels: data,
+                    },
+                ),
+            ),
+            (
+                "create_writable",
+                HarnessOp::send_and_await_reply(
+                    "aether.render",
+                    &CreateTexture {
+                        width: 4,
+                        height: 4,
+                        format: TextureFormat::R32Float,
+                        sampling: TextureSampling::Nearest,
+                        usage: TextureUsage::Writable,
+                        pixels: Vec::new(),
+                    },
+                ),
+            ),
+        ])
+        .expect("create r32float textures");
+    let sampled_id = match created.reply::<CreateTextureResult>("create_sampled").expect("decode CreateTextureResult") {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture (sampled r32float) failed: {error}"),
+    };
+    let writable_id = match created.reply::<CreateTextureResult>("create_writable").expect("decode CreateTextureResult")
+    {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture (writable r32float) failed: {error}"),
+    };
+
+    // Reference both float textures from the color passes: the record's
+    // realize pass realizes them (the acceptance surface), the draw pass
+    // must drop them, and the frame must survive both.
+    let pre = vec![
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id: sampled_id,
+                space: QuadSpace::Screen,
+                clip: None,
+                quads: vec![TexturedQuad {
+                    x: 16.0,
+                    y: 8.0,
+                    width: 24.0,
+                    height: 10.0,
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                }],
+            },
+        ),
+        envelope(
+            "aether.render",
+            &DrawMaterialTextured {
+                texture_id: writable_id,
+                rects: vec![MaterialTexturedRect {
+                    rect: MaterialRect {
+                        x: -0.8,
+                        y: -0.6,
+                        width: 1.6,
+                        height: 1.2,
+                        z: 0.5,
+                        right: [1.0, 0.0, 0.0],
+                        up: [0.0, 1.0, 0.0],
+                    },
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                }],
+            },
+        ),
+    ];
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture r32float frame");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode r32float capture png");
+    let dropped = coverage(&img, background_top_left(&img), 5);
+
+    assert!(
+        dropped < 0.01,
+        "color passes must drop data-plane batches, leaving the frame at clear color; coverage was {dropped}",
+    );
+    assert!(
+        harness.committed_overlay_snapshot().is_empty(),
+        "the typed observation must mirror the record-time drop of the data-plane batch",
+    );
+}
+
+/// ADR-0170 label planes: `Nearest` sampling holds texel identities
+/// where `Linear` manufactures in-between values. Two 2x1 R8 textures
+/// with texels [0, 255] draw as 32-pixel-wide screen quads; just left
+/// of center the nearest quad must still read the 0 texel while the
+/// linear quad reads a blended midtone. The named bug: the `sampling`
+/// field not reaching the realized bind group (both quads would show
+/// the same gradient, or the same hard step).
+#[test]
+fn nearest_sampling_preserves_label_texel_identity() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let create = |sampling: TextureSampling| CreateTexture {
+        width: 2,
+        height: 1,
+        format: TextureFormat::R8,
+        sampling,
+        usage: TextureUsage::Sampled,
+        pixels: vec![0, 255],
+    };
+    let created = harness
+        .execute(vec![
+            ("create_nearest", HarnessOp::send_and_await_reply("aether.render", &create(TextureSampling::Nearest))),
+            ("create_linear", HarnessOp::send_and_await_reply("aether.render", &create(TextureSampling::Linear))),
+        ])
+        .expect("create label textures");
+    let texture_id_for = |label: &str, reply: CreateTextureResult| match reply {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture ({label}) failed: {error}"),
+    };
+    let nearest_id =
+        texture_id_for("nearest", created.reply::<CreateTextureResult>("create_nearest").expect("decode reply"));
+    let linear_id =
+        texture_id_for("linear", created.reply::<CreateTextureResult>("create_linear").expect("decode reply"));
+
+    // Both quads map u 0..1 across columns 16..48, so texel centers land
+    // at x=24 and x=40 and the linear interpolation ramp spans between
+    // them; x=30 sits at interpolation fraction ~0.4.
+    let quad = |texture_id: u32, y: f32| DrawTexturedQuads {
+        texture_id,
+        space: QuadSpace::Screen,
+        clip: None,
+        quads: vec![TexturedQuad {
+            x: 16.0,
+            y,
+            width: 32.0,
+            height: 8.0,
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+            tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        }],
+    };
+    let pre =
+        vec![envelope("aether.render", &quad(nearest_id, 8.0)), envelope("aether.render", &quad(linear_id, 28.0))];
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture label sampling");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode label sampling png");
+
+    let nearest_left = rgba_at(&img, 30, 12)[0];
+    let nearest_right = rgba_at(&img, 34, 12)[0];
+    let linear_left = rgba_at(&img, 30, 32)[0];
+
+    assert!(
+        nearest_left <= 30,
+        "left of center the nearest quad must still read the 0 texel identity; got red {nearest_left}",
+    );
+    assert!(
+        nearest_right >= 220,
+        "right of center the nearest quad must read the 255 texel identity; got red {nearest_right}",
+    );
+    assert!(
+        (60..=230).contains(&linear_left),
+        "left of center the linear quad must read a blended midtone, not a texel identity; \
+         got red {linear_left}",
+    );
 }

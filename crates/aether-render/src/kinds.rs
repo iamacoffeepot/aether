@@ -121,42 +121,97 @@ pub enum TextureFormat {
     /// One unsigned normalized byte per pixel. Sampling in WGSL yields
     /// `vec4(r, 0.0, 0.0, 1.0)`.
     R8,
+    /// Four bytes per pixel, one little-endian `f32` — the data-plane
+    /// format (ADR-0170) whose texel values are quantities or labels
+    /// rather than colors. Core WebGPU cannot linear-filter 32-bit
+    /// floats, so a create with `TextureSampling::Linear` is rejected
+    /// and the realized texture binds through a non-filtering nearest
+    /// binding. The color material / overlay passes sample through the
+    /// filtering binding only, so they warn-drop batches over this
+    /// format; its consumers are the authored render programs.
+    R32Float,
 }
 
 impl TextureFormat {
     #[must_use]
     pub const fn bytes_per_pixel(self) -> usize {
         match self {
-            Self::Rgba8 => 4,
+            Self::Rgba8 | Self::R32Float => 4,
             Self::R8 => 1,
+        }
+    }
+
+    /// Whether core WebGPU can linear-filter this format — equivalently,
+    /// whether its realized texture binds through the shared filtering
+    /// layout the color material / overlay pipelines are built against.
+    #[must_use]
+    pub const fn filterable(self) -> bool {
+        match self {
+            Self::Rgba8 | Self::R8 => true,
+            Self::R32Float => false,
         }
     }
 }
 
+/// How a registered texture's texels are filtered when sampled.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TextureSampling {
+    /// Bilinear filtering — texels are colors, and blending adjacent
+    /// texels produces an in-between color. The right choice for
+    /// images, glyph atlases, and coverage fields.
+    Linear,
+    /// Nearest texel — texel values are identities (region labels,
+    /// cell states), and interpolating between neighbors would
+    /// manufacture values no texel holds (ADR-0170). Required for
+    /// `TextureFormat::R32Float`.
+    Nearest,
+}
+
+/// Which GPU role a registered texture is realized for.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TextureUsage {
+    /// CPU-staged pixels sampled by draws — wgpu
+    /// `TEXTURE_BINDING | COPY_DST`. `CreateTexture.pixels` stages the
+    /// initial content and `UpdateTexture` overwrites sub-rects.
+    Sampled,
+    /// A GPU render target sampled by draws — wgpu
+    /// `RENDER_ATTACHMENT | TEXTURE_BINDING` (ADR-0170). Created
+    /// without staged pixels (`CreateTexture.pixels` must be empty) and
+    /// cleared to transparent black at realization; authored render
+    /// programs draw into it, so there is no CPU staging and
+    /// `UpdateTexture` warn-drops.
+    Writable,
+}
+
 /// `aether.render.create_texture` — register a texture in the render
-/// cap's session-scoped texture registry. `pixels` is exactly
-/// `width * height * format.bytes_per_pixel()` bytes, row-major and
-/// top-down. The cap validates the dimensions, assigns the next
-/// `texture_id` past any previously created texture (the same
-/// id-assignment shape ADR-0103 uses for instrument ids), stages the
-/// pixels CPU-side, and replies as soon as the id is assigned — the
-/// wgpu texture is realized lazily at the next frame record. Reply:
-/// `CreateTextureResult`. Desktop-only — the headless chassis replies
-/// `Err` (fail-fast, ADR-0105).
+/// cap's session-scoped texture registry. For a `Sampled` texture,
+/// `pixels` is exactly `width * height * format.bytes_per_pixel()`
+/// bytes, row-major and top-down; for a `Writable` texture, `pixels`
+/// must be empty — the texture is a GPU render target cleared to
+/// transparent black at realization (ADR-0170). The cap validates the
+/// dimensions, assigns the next `texture_id` past any previously
+/// created texture (the same id-assignment shape ADR-0103 uses for
+/// instrument ids), stages any pixels CPU-side, and replies as soon as
+/// the id is assigned — the wgpu texture is realized lazily at the
+/// next frame record. Reply: `CreateTextureResult`. Desktop-only — the
+/// headless chassis replies `Err` (fail-fast, ADR-0105).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.create_texture")]
 pub struct CreateTexture {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
+    pub sampling: TextureSampling,
+    pub usage: TextureUsage,
     pub pixels: Vec<u8>,
 }
 
 /// Reply to `CreateTexture`. `Ok` carries the assigned `texture_id` —
 /// thread it into `DrawTexturedQuads.texture_id` and
 /// `UpdateTexture.texture_id`. `Err` carries a human-readable reason —
-/// a zero dimension, or a `pixels` length that doesn't match the
-/// texture format's byte count.
+/// a zero dimension, a `pixels` length that doesn't match the texture
+/// format's byte count (or isn't empty for a `Writable` texture), or
+/// `Linear` sampling on the non-filterable `R32Float` format.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.create_texture_result")]
 pub enum CreateTextureResult {
@@ -169,7 +224,8 @@ pub enum CreateTextureResult {
 /// cap rasterizing a new glyph into its atlas). `pixels` is exactly
 /// `width * height * texture_format.bytes_per_pixel()` bytes covering
 /// the `(x, y, width, height)` sub-rect. Fire-and-forget; a bad
-/// `texture_id` or an out-of-bounds rect logs and drops. The staged
+/// `texture_id`, an out-of-bounds rect, or a `Writable` texture (a GPU
+/// render target with no CPU staging) logs and drops. The staged
 /// pixels update immediately; the GPU texture re-uploads at the next
 /// frame record.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]

@@ -125,7 +125,7 @@ mod headless_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::TextureFormat;
+    use crate::{TextureFormat, TextureSampling, TextureUsage};
     use aether_data::MailboxId;
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -147,7 +147,14 @@ mod headless_tests {
         let result = HeadlessRenderCapability::on_create_texture(
             &mut state,
             &mut ctx,
-            CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![0u8; 16] },
+            CreateTexture {
+                width: 2,
+                height: 2,
+                format: TextureFormat::Rgba8,
+                sampling: TextureSampling::Linear,
+                usage: TextureUsage::Sampled,
+                pixels: vec![0u8; 16],
+            },
         );
         match result {
             CreateTextureResult::Err { error } => {
