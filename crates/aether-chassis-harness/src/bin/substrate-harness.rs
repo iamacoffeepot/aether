@@ -109,7 +109,10 @@ fn main() -> anyhow::Result<()> {
     // feature-unified build that enables aether-render/desktop — the
     // desktop-only `window: None`, so this literal is robust to unification.
     let (mut render_slot, render_wake_slot) = passive.boot_pumped_actor::<RenderCapability>(
-        RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES },
+        RenderTuningConfig {
+            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+            clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
+        },
         RenderParams {
             observed_kinds: None,
             assets_dir: Some(assets_dir),

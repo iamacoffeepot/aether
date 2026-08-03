@@ -33,6 +33,7 @@
 //!   [`aether_substrate::render::visual`], so the ready-branch readback scores
 //!   the verdict and similarity directly.
 
+use crate::runtime::config::parse_clear_color;
 use std::collections::BTreeSet;
 use std::io;
 use std::iter;
@@ -68,6 +69,7 @@ use winit::window::Window;
 // and `config` (the `RenderTuningConfig` knobs + `RenderParams`).
 mod capture;
 mod config;
+pub use config::DEFAULT_CLEAR_COLOR;
 // The `HeadlessRenderCapability` companion's runtime half (identity in the
 // crate-root `headless` module) — a nested child so the same `mod runtime;`
 // gate covers it.
@@ -133,6 +135,7 @@ pub struct RenderCapabilityState {
     material_last_submitted: Vec<MaterialBatch>,
     textures: TextureRegistry,
     vertex_buffer_bytes: usize,
+    clear_color: wgpu::Color,
 
     /// Attached desktop surfaces keyed by the canonical engine window id.
     #[cfg(feature = "desktop")]
@@ -368,6 +371,7 @@ impl RenderCapabilityState {
                 &self.last_submitted,
                 &self.camera_state,
                 extras,
+                self.clear_color,
             )?;
         }
         // Material pass (depth-tested world-space rects), then the screen /
@@ -516,6 +520,10 @@ impl NativeActor for RenderCapability {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
+            clear_color: {
+                let [r, g, b] = parse_clear_color(&config.clear_color);
+                wgpu::Color { r, g, b, a: 1.0 }
+            },
             #[cfg(feature = "desktop")]
             targets: WindowTargets::default(),
             #[cfg(feature = "desktop")]
@@ -925,6 +933,7 @@ mod tests {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             vertex_buffer_bytes: 1024,
+            clear_color: wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 },
             #[cfg(feature = "desktop")]
             targets: WindowTargets::default(),
             #[cfg(feature = "desktop")]

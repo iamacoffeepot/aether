@@ -67,8 +67,8 @@ use aether_kinds::CaptureFrame;
 // `kinds` module (re-exported above).
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    RenderCapabilityState, RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
-    WHITE_TEXTURE_ID,
+    DEFAULT_CLEAR_COLOR, RenderCapabilityState, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
+    RenderTuningOverlay, WHITE_TEXTURE_ID,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123

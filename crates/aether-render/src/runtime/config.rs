@@ -3,6 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use aether_data::KindId;
 
+/// The historical dark field, kept as the default so nothing but a line
+/// drawing has to opt out of it.
+pub const DEFAULT_CLEAR_COLOR: &str = "0d1220";
+
 /// Boot knobs for `RenderCapability` (ADR-0090). The
 /// `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `RenderTuningConfigLayer`, the clap-shaped `RenderTuningOverlay`,
@@ -23,6 +27,29 @@ pub struct RenderTuningConfig {
     /// (64 MiB, ~932k triangles at 72 bytes each).
     #[config(default = 67_108_864)]
     pub vertex_buffer_bytes: usize,
+    /// Background the colour pass clears to, as `rrggbb` hex.
+    ///
+    /// A knob rather than a constant because what the background should be
+    /// is a property of what is being drawn, not of the renderer: a lit 3D
+    /// scene wants the dark default it has always had, and a line drawing
+    /// wants paper — on a dark field, ink is invisible and pale hatching
+    /// reads as highlight, which inverts the whole tonal reading.
+    #[config(default = "0d1220")]
+    pub clear_color: String,
+}
+
+/// `rrggbb` to linear-ish RGB, falling back to the historical dark field
+/// when the string is not six hex digits.
+#[must_use]
+pub fn parse_clear_color(hex: &str) -> [f64; 3] {
+    let channel = |at: usize| u8::from_str_radix(hex.get(at..at + 2).unwrap_or("!!"), 16).ok();
+
+    match (channel(0), channel(2), channel(4)) {
+        (Some(r), Some(g), Some(b)) if hex.len() == 6 => {
+            [f64::from(r) / 255.0, f64::from(g) / 255.0, f64::from(b) / 255.0]
+        }
+        _ => [0.05, 0.07, 0.12],
+    }
 }
 
 /// Composer-supplied construction params for `RenderCapability`
