@@ -100,5 +100,82 @@ pub fn runs(
         segments.push(current);
     }
 
-    segments.into_iter().filter(|s| s.len() >= 2).map(|points| Curve3 { points, ..curve.clone() }).collect()
+    let survivors: Vec<Curve3> =
+        segments.into_iter().filter(|s| s.len() >= 2).map(|points| Curve3 { points, ..curve.clone() }).collect();
+
+    whole_or_nothing(curve, survivors)
+}
+
+/// How much of an authored mark has to survive for any of it to be drawn.
+const CHART_COVERAGE: f32 = 0.35;
+
+/// An authored mark goes whole or not at all.
+///
+/// Shortened is fine — a lid running behind a fringe should end where the
+/// hair starts — but shattered is not: past forty degrees the far eye
+/// survives only as fragments between hair strands, and four disconnected
+/// crumbs where an eye should be read as dirt on the paper rather than as a
+/// feature partly hidden.
+///
+/// Applied inside `runs` rather than left to the caller, because the rule
+/// needs the original curve's length and that is the one thing a caller
+/// holding only the survivors has lost.
+fn whole_or_nothing(curve: &Curve3, survivors: Vec<Curve3>) -> Vec<Curve3> {
+    if !curve.authored {
+        return survivors;
+    }
+
+    let kept: usize = survivors.iter().map(|run| run.points.len()).sum();
+    if (kept as f32) < curve.points.len() as f32 * CHART_COVERAGE {
+        return Vec::new();
+    }
+
+    survivors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::feature::Pen;
+
+    fn curve(points: usize, authored: bool) -> Curve3 {
+        Curve3 {
+            points: vec![SurfacePoint::on_surface(Vec3::splat(0.0), Vec3::new(0.0, 0.0, 1.0)); points],
+            class: FeatureClass::Decal,
+            pen: Pen::Ink,
+            seed: 0,
+            authored,
+        }
+    }
+
+    /// `curve` cut into `runs` pieces of `each` points — what the split
+    /// hands back when a mark crosses something that hides parts of it.
+    fn split(of: &Curve3, runs: usize, each: usize) -> Vec<Curve3> {
+        (0..runs).map(|_| Curve3 { points: of.points[..each].to_vec(), ..of.clone() }).collect()
+    }
+
+    /// Tripwire: an authored mark is allowed to be shortened and not to be
+    /// shattered, and an extracted one is allowed both.
+    ///
+    /// Three cases because the rule has three edges and dropping any one of
+    /// them is silent. Shattered-and-dropped is the failure it exists for —
+    /// past forty degrees the far eye survives only as crumbs between hair
+    /// strands, and four disconnected specks read as dirt on the paper.
+    /// Shortened-and-kept rules out a floor so eager that a lid running
+    /// behind a fringe vanishes whole, which looks exactly like the eye
+    /// never being drawn. And a hatch line crossing behind an ear *should*
+    /// arrive as two runs, so the rule must not reach it.
+    #[test]
+    fn an_authored_mark_survives_shortening_but_not_shattering() {
+        let mark = curve(100, true);
+        let shattered = split(&mark, 3, 8);
+        let shortened = split(&mark, 1, 60);
+
+        assert!(whole_or_nothing(&mark, shattered.clone()).is_empty(), "24 of 100 points is dirt, not an eye");
+        assert_eq!(whole_or_nothing(&mark, shortened).len(), 1, "60 of 100 points is a mark ending at the hair");
+
+        let hatch = curve(100, false);
+        assert_eq!(whole_or_nothing(&hatch, shattered).len(), 3, "an extracted curve is happy to be cut up");
+    }
 }
