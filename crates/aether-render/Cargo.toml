@@ -55,6 +55,7 @@ runtime = [
     "dep:aether-substrate",
     "aether-substrate/render",
     "dep:wgpu",
+    "dep:naga",
     "dep:pollster",
     "dep:tracing",
     "dep:clap",
@@ -84,6 +85,10 @@ bytemuck = { workspace = true, features = ["derive"] }
 # substrate runtime and the wgpu GPU stack.
 aether-substrate = { path = "../aether-substrate", optional = true }
 wgpu = { workspace = true, optional = true }
+# ADR-0170: register-time WGSL validation + uniform-block layout for the
+# authored-program surface — parse (`wgsl-in`) and validate before any
+# device work, so a bad module is an `Err` reply, not a GPU error.
+naga = { workspace = true, optional = true, features = ["wgsl-in"] }
 # `boot_surface` blocks on `request_adapter` / `request_device` during the
 # desktop chassis + pumped-runtime GPU boot; native-only, gated with the
 # rest of the runtime half.

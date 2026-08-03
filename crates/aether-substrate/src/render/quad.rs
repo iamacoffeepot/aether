@@ -95,6 +95,17 @@ impl RealizedTexture {
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
     }
+
+    /// The realized wgpu texture. The authored-program executor
+    /// (ADR-0170) views it directly — as a render attachment for a
+    /// writable output binding, and as a sampled entry in a pass's
+    /// combined input bind group (which pairs each input with the
+    /// sampler its format and sampling mode select, so the cached
+    /// per-texture `bind_group` shape doesn't fit).
+    #[must_use]
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
 }
 
 /// One draw inside the overlay pass: the group-1 bind group for the

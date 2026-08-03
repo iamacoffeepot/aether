@@ -139,6 +139,11 @@ syn = { version = "2", features = ["full"] }
 tracing = { version = "0.1", default-features = false }
 wasmtime = "44"
 wgpu = "29.0.1"
+# ADR-0170 authored render programs: the render cap validates authored
+# WGSL and reads its uniform-block layout at register time through naga
+# directly — the same naga version wgpu 29 compiles shaders with, pinned
+# in lockstep so validation and compilation agree.
+naga = "29.0.1"
 
 # Optimize the cranelift compiler even in dev/test builds. Every wasm
 # component load runs a full cranelift compile of the module, and

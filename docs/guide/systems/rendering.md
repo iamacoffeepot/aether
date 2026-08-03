@@ -56,6 +56,9 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.material.textured` | `{ texture_id, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
+| `aether.render.program.register` | `{ wgsl, bindings, transients, passes }` → `program.register_result` | register an authored render program (ADR-0170); reply carries the `program_id` |
+| `aether.render.program.dispatch` | `{ program_id, bindings, uniforms }` | execute a registered program once at the next frame record; fire-and-forget |
+| `aether.render.program.destroy` | `{ program_id }` | release a registered program; fire-and-forget |
 
 A `Vertex` is `{ x, y, z, r, g, b }` — a world-space position plus a per-vertex
 color. One `DrawTriangle` is three of them; a component batches many per envelope
@@ -83,6 +86,26 @@ warn-drops, since it has no CPU staging. The `R32Float` format stores one
 requires `Nearest` sampling and binds through a non-filtering layout — the
 color material and overlay passes warn-drop batches over it, and its consumers
 are the authored-program passes.
+
+**Authored render programs** ([ADR-0170](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0170-authored-render-programs.md))
+put actor-owned per-pixel work on the GPU without a substrate change.
+`program.register` carries one WGSL module (fragment entry points only — the
+substrate owns a fullscreen-triangle vertex stage) plus a declared graph:
+`bindings` are the registry textures a dispatch supplies, `transients` are
+executor-pooled intermediates (each an extent — full reference size or an
+integer divisor — plus a format), and each pass names its fragment entry
+point, input slots, output slot, byte-window into the dispatch's uniform blob,
+and an optional repeat with per-iteration uniform stride. Validation happens
+at register, once — naga over the WGSL, then the graph (entry points exist,
+slots written before read, windows cover the shader's uniform block), then
+wgpu pipeline creation under an error scope — so every failure class is a
+distinguishable `register_result` `Err { reason }` and a bad program never
+crashes the substrate. `program.dispatch` executes the passes once at the next
+frame record, before the material and overlay passes, so drawing a program's
+writable output texture in the same frame shows the freshly computed pixels;
+runtime binding mismatches warn-drop naming the program, pass, and binding.
+Headless replies `Err` to `register` and absorbs `dispatch` / `destroy`.
+
 Quads draw through a second alpha-blended pipeline in an overlay pass recorded
 after the world pass, so they always land on top. The accumulate-per-frame
 contract matches `draw_triangle`: resend the batch every frame it should appear.

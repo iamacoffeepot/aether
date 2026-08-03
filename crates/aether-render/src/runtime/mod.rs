@@ -74,6 +74,10 @@ pub use config::DEFAULT_CLEAR_COLOR;
 mod headless;
 mod material;
 mod pipeline;
+// The ADR-0170 authored-render-program registry + executor: register-time
+// validation and pipeline construction, dispatch-time resolution and pass
+// recording into the frame encoder ahead of the sampling passes.
+mod program;
 mod quad;
 // Shared desktop-surface GPU helpers (ADR-0161): the wireframe overlay
 // pipeline builder, swapchain acquisition, and the surface / offscreen
@@ -102,13 +106,14 @@ use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTarget
 use self::capture::PendingCapture;
 pub use self::capture::resolve_reference;
 pub use self::material::MaterialBatch;
+use self::program::ProgramRegistry;
 pub use self::quad::QuadBatch;
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
-    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled,
-    RenderCapability, UpdateTexture, ViewProjection,
+    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, RenderCapability, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -132,6 +137,13 @@ pub struct RenderCapabilityState {
     material_frame: Vec<MaterialBatch>,
     material_last_submitted: Vec<MaterialBatch>,
     textures: TextureRegistry,
+    /// ADR-0170 authored render programs: the session-scoped registry.
+    programs: ProgramRegistry,
+    /// Dispatches queued since the last frame record. Unlike the draw
+    /// accumulators these are one-shot — a program executes once per
+    /// dispatch and its output persists in its writable registry
+    /// texture — so the record drains this rather than commit/replay.
+    pending_program_dispatches: Vec<ProgramDispatch>,
     vertex_buffer_bytes: usize,
     clear_color: wgpu::Color,
 
@@ -345,6 +357,11 @@ impl RenderCapabilityState {
     /// again.
     fn record_passes(&mut self, encoder: &mut wgpu::CommandEncoder) -> Result<(), RenderError> {
         let gpu = self.gpu.as_ref().expect("record_passes requires a booted GPU");
+        // Authored program passes first (ADR-0170): their outputs are
+        // registry textures the material and overlay passes below sample,
+        // so a dispatch and a draw over its output land in one frame.
+        let dispatches = mem::take(&mut self.pending_program_dispatches);
+        self.programs.record(gpu, encoder, &mut self.textures, &dispatches);
         let extras_storage: [&wgpu::RenderPipeline; 1];
         let extras: &[&wgpu::RenderPipeline] = match self.wire_pipeline.as_ref() {
             Some(pipeline) => {
@@ -507,6 +524,8 @@ impl NativeActor for RenderCapability {
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
+            programs: ProgramRegistry::new(),
+            pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
             clear_color: {
                 let [r, g, b] = parse_clear_color(&config.clear_color);
@@ -585,6 +604,47 @@ impl NativeActor for RenderCapability {
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         state.observe(<DestroyTexture as Kind>::ID);
         state.textures.destroy(mail);
+    }
+
+    /// `ProgramRegister` (ADR-0170): validate the WGSL and pass graph,
+    /// build every pass pipeline under a wgpu validation error scope, and
+    /// reply the assigned session-scoped `program_id` — or the failing
+    /// check's distinguishable `Err` reason. Pipeline construction needs a
+    /// live device, so the offscreen GPU boots here if configured; on
+    /// desktop a register before the first window attaches replies `Err`
+    /// rather than parking.
+    #[handler::single]
+    fn on_program_register(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ProgramRegister,
+    ) -> ProgramRegisterResult {
+        state.observe(<ProgramRegister as Kind>::ID);
+        state.ensure_offscreen_gpu_booted();
+        let Some(gpu) = state.gpu.as_ref() else {
+            return ProgramRegisterResult::Err {
+                reason: "the render GPU is not booted; register programs after the first window attaches".to_owned(),
+            };
+        };
+        state.programs.register(gpu, mail)
+    }
+
+    /// `ProgramDispatch` (ADR-0170): queue one execution for the next
+    /// frame record. One-shot — the program's output persists in its
+    /// writable registry texture, so nothing replays. Runtime mismatches
+    /// warn-drop at record time, naming program, pass, and binding.
+    #[handler::single]
+    fn on_program_dispatch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDispatch) {
+        state.observe(<ProgramDispatch as Kind>::ID);
+        state.pending_program_dispatches.push(mail);
+    }
+
+    /// `ProgramDestroy` (ADR-0170), on the owned program registry —
+    /// mirrors `destroy_texture`.
+    #[handler::single]
+    fn on_program_destroy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDestroy) {
+        state.observe(<ProgramDestroy as Kind>::ID);
+        state.programs.destroy(&mail);
     }
 
     /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `quad_frame`.
@@ -931,6 +991,8 @@ mod tests {
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
+            programs: ProgramRegistry::new(),
+            pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: 1024,
             clear_color: wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 },
             #[cfg(feature = "desktop")]
