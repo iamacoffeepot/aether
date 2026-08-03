@@ -23,8 +23,8 @@ pub mod regions;
 
 use aether_math::{Mat4, Vec3};
 use aether_render::{
-    CreateTexture, DestroyTexture, DrawMaterialTextured, MaterialRect, MaterialTexturedRect, TextureFormat,
-    UpdateTexture,
+    CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect, MaterialTexturedRect,
+    TextureFormat, UpdateTexture,
 };
 
 use crate::extract::Settings;
@@ -124,7 +124,20 @@ impl Easel {
     /// This is the slow path — a few hundred milliseconds of blurs — and
     /// the gate is what keeps it off every frame: never mid-drag, never
     /// twice for one view, never before the eye has rested.
-    pub fn develop(&mut self, mesh: &Mesh, labels: &Labels, settings: &Settings, view: &View, dragging: bool) {
+    ///
+    /// `drawn` is the ink the sheet is developed under: the same triangles
+    /// the render cap is about to be handed, solved for the same eye. The
+    /// easel reads them and keeps nothing — the ink plane it bakes from
+    /// them is as short-lived as the rest of the develop.
+    pub fn develop(
+        &mut self,
+        mesh: &Mesh,
+        labels: &Labels,
+        settings: &Settings,
+        drawn: &[DrawTriangle],
+        view: &View,
+        dragging: bool,
+    ) {
         if self.disabled {
             return;
         }
@@ -147,7 +160,14 @@ impl Easel {
             field::Planes { classes: &planes.class, tone: &planes.tone, facing: &planes.facing, width, height },
             SHEET_SEED,
         );
-        self.pending = Some((width, height, palette::composite(&sheet.coats(None), sheet.paper_shade())));
+
+        // Gesture follows form: the drawing already knows which way the
+        // hair runs, so the wash asks it rather than guessing. Baked here
+        // and dropped here — it describes this view of this drawing, and a
+        // view that moves invalidates it along with the sheet.
+        let flow = image::structure_tensor_flow(&regions::ink(drawn, &view.view_proj, width, height), width, height);
+
+        self.pending = Some((width, height, palette::composite(&sheet.coats(Some(&flow)), sheet.paper_shade())));
         self.painted_from = Some(view.eye);
         self.frames_still = 0;
     }
