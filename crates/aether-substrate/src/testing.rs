@@ -279,11 +279,11 @@ pub fn fs_reply_source(correlation_id: u64) -> Source {
 /// that answers a `SourceAddr::Component` sender (the hub outbound does
 /// not), a cap test without this fixture can only assert the session
 /// shape and passes while the wire shape is broken.
-pub fn manual_dispatch_ctx<'a, A>(
-    binding: &'a Arc<NativeBinding>,
+pub fn manual_dispatch_ctx<A>(
+    binding: &Arc<NativeBinding>,
     sender: Source,
     self_mailbox: MailboxId,
-) -> NativeCtx<'a, Manual, A> {
+) -> NativeCtx<'_, Manual, A> {
     NativeCtx::with_inbound(
         binding,
         sender,
