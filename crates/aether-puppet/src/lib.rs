@@ -59,6 +59,7 @@
 //! 4. Every `aether.lifecycle.render` stage publishes the camera and
 //!    re-emits the drawing.
 
+pub mod easel;
 pub mod extract;
 pub mod feature;
 mod kinds;
