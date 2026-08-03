@@ -265,6 +265,10 @@ const LOST_RUN: (f32, f32) = (-0.4, -0.8);
 /// with enough water to throw any.
 const HAIR_SPATTER: u32 = 20;
 
+/// The dress's loose-wash water, against [`WashParams::loose`]'s 12 for
+/// the hair. In the pixels of the reference sheet.
+const DRESS_WATER: f32 = 6.5;
+
 /// The violet dropped into the wet hair, and how far it may build.
 const GLAZE_PIGMENT: u32 = 0x8d_84_b8;
 const GLAZE_CAP: f32 = 0.8;
@@ -527,6 +531,15 @@ impl<'a> Sheet<'a> {
             .charged(material.gran, material.load)
             .losing(lost_angle(material.class))
             .spattering(drops);
+        // The dress wears less water than the hair: at the board's framing
+        // the full flood overshot her silhouette into a slab past the arm.
+        // A garment's edge is a cut line, not a fall of hair — the lost
+        // side stays, the water that carried it a hand-width out does not.
+        let freed = if material.class == DRESS {
+            freed.wetted(DRESS_WATER)
+        } else {
+            freed
+        };
 
         let tight = self.wash(mask, Some(value), &held, rng);
         let loose = self.wash(mask, Some(value), &freed, rng);
