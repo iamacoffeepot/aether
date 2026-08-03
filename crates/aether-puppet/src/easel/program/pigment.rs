@@ -23,6 +23,8 @@
 //! no alignment demands of their own (the dispatch path re-stages them
 //! aligned), so a sequencer may pack op windows tight in one blob.
 
+use core::f32::consts::{PI, TAU};
+
 use aether_math::Vec2;
 use aether_render::{InputSlot, OutputSlot, PassStage, ProgramPass, SlotExtent, SlotSpec, TextureFormat};
 
@@ -149,6 +151,11 @@ impl SpatterUniforms<'_> {
     /// window must too.
     pub const BYTES: u32 = 16 + MAX_SPATTER_DROPS as u32 * 16;
 
+    /// # Panics
+    ///
+    /// When more than [`MAX_SPATTER_DROPS`] drops are handed in — the
+    /// fixed uniform array cannot carry them, and silently truncating
+    /// the list would drop authored accidents.
     pub fn encode(&self) -> Vec<u8> {
         assert!(
             self.drops.len() <= MAX_SPATTER_DROPS,
@@ -168,9 +175,9 @@ impl SpatterUniforms<'_> {
             // bearings live in [0, tau). Cosine and sine are periodic,
             // so the wrap moves the landing by under a millionth of a
             // texel per texel of throw.
-            let bearing = drop.bearing.rem_euclid(core::f32::consts::TAU);
-            let bearing = if bearing > core::f32::consts::PI {
-                bearing - core::f32::consts::TAU
+            let bearing = drop.bearing.rem_euclid(TAU);
+            let bearing = if bearing > PI {
+                bearing - TAU
             } else {
                 bearing
             };
