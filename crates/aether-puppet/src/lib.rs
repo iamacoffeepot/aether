@@ -74,10 +74,11 @@ pub use kinds::*;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
-use aether_kinds::Render;
+use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
-use aether_math::{Mat4, Vec3};
+use aether_math::{Mat4, Vec2, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, ViewProjection};
+use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 
 use feature::Curve3;
@@ -88,8 +89,34 @@ use mesh::Mesh;
 /// subject bigger is one too many.
 const FIELD_OF_VIEW: f32 = 0.454;
 
-/// Assumed aspect until a window size arrives. Portrait, because she is.
-const ASPECT: f32 = 0.78;
+/// Aspect assumed only until the first `WindowSize` arrives.
+///
+/// It cannot stay a constant: the projection's horizontal scale divides by
+/// it, so a guess that disagrees with the surface stretches the drawing on
+/// one axis and keeps stretching it as the window is resized.
+const ASPECT_UNTIL_MEASURED: f32 = 4.0 / 3.0;
+
+/// Padding the material field was baked with, as a fraction of the mesh's
+/// longest axis. The lattice is reconstructed from the mesh bounds by the
+/// same rule, so no transform rides alongside the volume.
+const LABEL_PAD: f32 = 0.12;
+
+/// Drag sensitivity. A full sweep of a 900-pixel window turns her a bit
+/// more than half a revolution, which is about where a drag stops feeling
+/// like shoving and starts feeling like turning.
+const ORBIT_DEGREES_PER_PIXEL: f32 = 0.25;
+
+/// Fraction of the current distance one wheel notch covers.
+const DOLLY_PER_NOTCH: f32 = 0.08;
+
+/// Cast an occlusion ray every Nth point rather than at all of them.
+///
+/// A curve's points sit a triangle apart, far finer than the scale at which
+/// occlusion actually changes — an edge a stroke disappears behind is many
+/// points wide. Sampling every third and holding the verdict between
+/// samples costs a point or two of precision at an occluding edge and takes
+/// two thirds of the rays off the frame.
+const VISIBILITY_STRIDE: usize = 3;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.load_context")]
@@ -100,6 +127,33 @@ struct LoadContext {
 
 pub struct Puppet {
     subject: Option<Mesh>,
+    /// The material field, and the path still owed for it. Both assets
+    /// arrive as separate mail, in whichever order the reads settle, so
+    /// extraction waits until nothing is outstanding rather than running
+    /// twice.
+    labels: Option<labels::Labels>,
+    awaiting_labels: Option<String>,
+    /// Where the cursor was on the last move, and whether a button is
+    /// down. Only the delta between two moves means anything for an orbit,
+    /// and the substrate reports absolute window positions, so the previous
+    /// one has to be kept here.
+    dragging: bool,
+    cursor: Vec2,
+    aspect: f32,
+    /// Last frame's triangles, and the eye they were solved for.
+    ///
+    /// Keyed on the eye alone, which is sound only while the mesh is
+    /// static: once a pose exists the eye can be unchanged while the
+    /// drawing is not, and this would serve a stale frame. The key has to
+    /// carry the pose too — iamacoffeepot/aether#4336.
+    ///
+    /// Silhouette and visibility are the only view-dependent work, so a
+    /// frame drawn from an eye we have already solved is the same frame.
+    /// The window redraws continuously whether or not anything moved, and
+    /// without this every one of those redraws re-marched 868k faces and
+    /// re-cast every occlusion ray to arrive at the identical answer.
+    drawn: Vec<DrawTriangle>,
+    drawn_from: Option<Vec3>,
     /// The view-independent drawing: hatch and crease, welded, kept from
     /// load. Rebuilt only when the subject changes.
     surface: Vec<Curve3>,
@@ -122,7 +176,7 @@ impl Puppet {
 
     fn view_projection(&self) -> ViewProjection {
         let view = Mat4::look_at_rh(self.eye(), self.target(), Vec3::new(0.0, 1.0, 0.0));
-        let projection = Mat4::perspective_rh(FIELD_OF_VIEW, ASPECT, 0.05, 40.0);
+        let projection = Mat4::perspective_rh(FIELD_OF_VIEW, self.aspect, 0.05, 40.0);
 
         ViewProjection { view_proj: (projection * view).to_cols_array() }
     }
@@ -135,22 +189,88 @@ impl WasmActor for Puppet {
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self {
             subject: None,
+            labels: None,
+            awaiting_labels: None,
+            dragging: false,
+            cursor: Vec2::new(0.0, 0.0),
+            aspect: ASPECT_UNTIL_MEASURED,
+            drawn: Vec::new(),
+            drawn_from: None,
             surface: Vec::new(),
             settings: extract::Settings::default(),
             // Facing her, slightly above, far enough back that her whole
             // height fits the frame at this field of view.
-            look: Look { azimuth: 0.0, elevation: 3.0, distance: 3.2, height: 0.0 },
+            look: Look { azimuth: 0.0, elevation: 3.0, distance: 5.4, height: 0.0 },
         })
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         ctx.actor::<LifecycleCapability>().subscribe::<Render>();
+
+        // Window-originated input is addressed through the window identity
+        // (ADR-0164), not the lifecycle stream — subscribing to these on
+        // lifecycle compiles and silently delivers nothing, which is how
+        // the first attempt at a drag camera did exactly nothing.
+        let window = ctx.actor::<WindowCapability>();
+        window.subscribe::<MouseButton>(WindowSelector::All);
+        window.subscribe::<MouseButtonRelease>(WindowSelector::All);
+        window.subscribe::<MouseMove>(WindowSelector::All);
+        window.subscribe::<MouseWheel>(WindowSelector::All);
+        window.subscribe::<WindowSize>(WindowSelector::All);
+    }
+
+    /// The surface changed shape, so the projection has to follow it.
+    #[handler::single]
+    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
+        if size.width > 0 && size.height > 0 {
+            self.aspect = size.width as f32 / size.height as f32;
+        }
+    }
+
+    #[handler::single]
+    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
+        self.dragging = true;
+        self.cursor = Vec2::new(press.x, press.y);
+    }
+
+    #[handler::single]
+    fn on_mouse_release(&mut self, _ctx: &mut WasmCtx<'_>, _release: MouseButtonRelease) {
+        self.dragging = false;
+    }
+
+    /// Drag to orbit. Horizontal sweeps her around, vertical raises and
+    /// lowers the eye — clamped short of the poles, where an orbit camera's
+    /// up vector degenerates and the view rolls.
+    #[handler::single]
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        let at = Vec2::new(moved.x, moved.y);
+        let delta = at - self.cursor;
+        self.cursor = at;
+
+        if self.dragging {
+            self.look.azimuth -= delta.x * ORBIT_DEGREES_PER_PIXEL;
+            self.look.elevation = (self.look.elevation + delta.y * ORBIT_DEGREES_PER_PIXEL).clamp(-85.0, 85.0);
+        }
+    }
+
+    /// Wheel to dolly. Proportional rather than additive, so a step feels
+    /// the same close up as far out.
+    #[handler::single]
+    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
+        self.look.distance = (self.look.distance * (1.0 - wheel.delta_y * DOLLY_PER_NOTCH)).clamp(0.6, 40.0);
     }
 
     /// Point her at a subject. Asynchronous — the reply target is carried
     /// in the fs context so the eventual `LoadResult` reaches whoever asked.
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, mail: Load) {
+        let fs = ctx.actor::<FsCapability>();
+        if !mail.labels.is_empty() {
+            self.awaiting_labels = Some(mail.labels.clone());
+            let context = LoadContext { namespace: mail.namespace.clone(), path: mail.labels.clone() };
+            fs.with_context(&context).read(&mail.namespace, &mail.labels);
+        }
+
         let context = LoadContext { namespace: mail.namespace, path: mail.path };
         ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
     }
@@ -159,26 +279,49 @@ impl WasmActor for Puppet {
     /// the cache in one go.
     #[handler::single]
     fn on_read(&mut self, _ctx: &mut WasmCtx<'_>, mail: ReadResult) {
-        let ReadResult::Ok { bytes, .. } = mail else {
+        let ReadResult::Ok { path, bytes, .. } = mail else {
             tracing::warn!(target: "aether_puppet", "read failed; keeping the previous subject");
             return;
         };
 
-        let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
-            tracing::warn!(target: "aether_puppet", "parse failed; keeping the previous subject");
+        // Which asset this is, decided by the path the reply echoes rather
+        // than by arrival order — the two reads settle independently.
+        if self.awaiting_labels.as_deref() == Some(path.as_str()) {
+            self.awaiting_labels = None;
+            let bounds = self.subject.as_ref().map_or((Vec3::splat(-1.0), Vec3::splat(1.0)), |m| (m.min, m.max));
+            self.labels = labels::Labels::parse(&bytes, bounds.0, bounds.1, LABEL_PAD);
+            if self.labels.is_none() {
+                tracing::warn!(target: "aether_puppet", "material field is not a cube; creases stay unmasked");
+            }
+        } else {
+            let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
+                tracing::warn!(target: "aether_puppet", "parse failed; keeping the previous subject");
+                return;
+            };
+            self.subject = Some(subject);
+        }
+
+        // Extraction needs the mesh, and the field if one was asked for —
+        // the lattice is placed against the mesh's own bounds, so a field
+        // that lands first has to be re-placed once the mesh arrives.
+        let Some(subject) = self.subject.as_ref() else {
             return;
         };
+        if self.awaiting_labels.is_some() {
+            return;
+        }
 
         // Hatch and crease describe the surface, not the view, so they are
         // solved once here rather than every frame.
-        self.surface = extract::surface(&subject, None, &self.settings);
+        self.surface = extract::surface(subject, self.labels.as_ref(), &self.settings);
+        self.drawn_from = None;
         tracing::info!(
             target: "aether_puppet",
             faces = subject.faces.len(),
             curves = self.surface.len(),
+            masked = self.labels.is_some(),
             "subject loaded",
         );
-        self.subject = Some(subject);
     }
 
     #[handler::single]
@@ -198,11 +341,18 @@ impl WasmActor for Puppet {
         };
 
         let eye = self.eye();
+        if self.drawn_from == Some(eye) {
+            render.send_many(&self.drawn);
+            return;
+        }
+
         let mut triangles: Vec<DrawTriangle> = Vec::new();
         let drawing = self.surface.iter().cloned().chain(extract::silhouettes(subject, eye));
 
         for curve in drawing {
-            for run in visibility::runs(subject, eye, &curve, &|_| true, visibility::Mode::Opaque) {
+            // Tone gating already happened at load — it does not depend on
+            // the eye — so all that is left per frame is occlusion.
+            for run in visibility::runs(subject, eye, &curve, &|_| true, visibility::Mode::Opaque, VISIBILITY_STRIDE) {
                 ribbon::ribbon(&run, eye, 0, &mut triangles);
             }
         }
@@ -210,6 +360,8 @@ impl WasmActor for Puppet {
         if !triangles.is_empty() {
             render.send_many(&triangles);
         }
+        self.drawn = triangles;
+        self.drawn_from = Some(eye);
     }
 }
 

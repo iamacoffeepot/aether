@@ -30,10 +30,15 @@ use crate::style::{pressure, wander};
 /// Half-width of a stroke at unit distance, in radians. Multiplied by the
 /// distance to the eye it becomes a world half-width that projects to the
 /// same size wherever the subject sits.
-const ANGULAR_HALF_WIDTH: f32 = 0.0016;
+/// Derived, not guessed: the offline renderer draws a silhouette 2 px wide
+/// on a 900 px page at this field of view, which is ~1410 px per radian.
+/// Half of 2 px, divided by that scale, divided again by the silhouette's
+/// own `base_width` of 2.0 — since this is multiplied by the class weight.
+const ANGULAR_HALF_WIDTH: f32 = 0.00035;
 
 /// How far the hand wanders, in the same angular units.
-const ANGULAR_WOBBLE: f32 = 0.0022;
+/// The same conversion applied to the offline silhouette wobble of 0.8 px.
+const ANGULAR_WOBBLE: f32 = 0.00057;
 
 /// Shortest stroke worth drawing, in radians of arc. Detail too small to
 /// read is dropped rather than inked as noise — a relief field on a

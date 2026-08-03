@@ -11,6 +11,15 @@ use serde::{Deserialize, Serialize};
 pub struct Load {
     pub namespace: String,
     pub path: String,
+    /// Optional path to the material field, a `uint8` cubic `.npy` baked
+    /// over the same sculpt.
+    ///
+    /// Without it every crease is inked, and the sculpt carves a hair-strand
+    /// seam exactly as deeply as it carves an eyelid — there are five times
+    /// as many of them, so they bury the face. Depth cannot tell them apart;
+    /// the field already knows which is which, so the drawing asks it rather
+    /// than inventing a geometric proxy. Empty loads the mesh alone.
+    pub labels: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]

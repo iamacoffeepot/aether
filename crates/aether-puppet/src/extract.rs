@@ -15,8 +15,11 @@ use aether_math::Vec3;
 
 use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
 use crate::labels::{self, Labels};
+use crate::math3::noise;
 use crate::mesh::{Crossing, Mesh};
 use crate::weld;
+
+use core::mem;
 
 /// Which side of a carved feature gets a line.
 ///
@@ -326,7 +329,56 @@ pub fn suggestive(mesh: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Se
 /// frame. The offline renderer recomputes all of it every frame because it
 /// has no reason not to; here that difference is most of the budget.
 pub fn surface(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec<Curve3> {
-    let mut out = hatching(mesh, settings);
+    // Tone-gate the hatching here, once, rather than every frame.
+    //
+    // View-independent, not pose-independent: it reads each point's normal,
+    // and skinning changes normals. Once she can be posed this has to come
+    // back onto a per-frame path over the curve points —
+    // iamacoffeepot/aether#4336.
+    //
+    // Which hatch families survive at a point is decided by the light and
+    // the point's own normal and position — not by where the eye is. So the
+    // gate belongs with the other view-independent work, and leaving it on
+    // the per-frame path made every redraw recompute a lambert term, a
+    // face-lift falloff and a noise sample for every point of every hatch
+    // curve, to reach the same verdict as the frame before.
+    let mut out: Vec<Curve3> = hatching(mesh, settings)
+        .into_iter()
+        .flat_map(|curve| {
+            let limit = match curve.class {
+                FeatureClass::Hatch { level } => settings.hatch_thresholds[usize::from(level)],
+                FeatureClass::Silhouette | FeatureClass::Decal => return vec![curve],
+            };
+
+            lit_runs(&curve, |point| settings.tone(point) < limit + noise(point.pos) * DITHER)
+        })
+        .collect();
+
     out.extend(creases(mesh, labels, settings));
     out
+}
+
+/// Threshold dither, so a family's boundary breaks up instead of slabbing
+/// into a hard edge across a flat region.
+const DITHER: f32 = 0.055;
+
+/// Split a curve into the runs whose points pass `keep`, preserving order.
+fn lit_runs(curve: &Curve3, keep: impl Fn(&SurfacePoint) -> bool) -> Vec<Curve3> {
+    let mut runs = Vec::new();
+    let mut current: Vec<SurfacePoint> = Vec::new();
+
+    for point in &curve.points {
+        if keep(point) {
+            current.push(*point);
+        } else if current.len() >= 2 {
+            runs.push(Curve3 { points: mem::take(&mut current), ..curve.clone() });
+        } else {
+            current.clear();
+        }
+    }
+    if current.len() >= 2 {
+        runs.push(Curve3 { points: current, ..curve.clone() });
+    }
+
+    runs
 }

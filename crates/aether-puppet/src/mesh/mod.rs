@@ -32,6 +32,9 @@ pub struct Mesh {
     pub min: Vec3,
     pub max: Vec3,
     bvh: Bvh,
+    /// Cached, because the occlusion bias reads it once per ray sample and
+    /// the honest computation walks every face.
+    mean_edge: f32,
 }
 
 /// A point where a level set crosses an edge.
@@ -82,7 +85,8 @@ impl Mesh {
         tracing::debug!(target: "aether_puppet", agreement, "normal orientation");
 
         let bvh = Bvh::build(&raw.positions, &raw.faces);
-        Self { positions: raw.positions, faces: raw.faces, normals, min, max, bvh }
+        let mean_edge = mean_edge_length(&raw.positions, &raw.faces);
+        Self { positions: raw.positions, faces: raw.faces, normals, min, max, bvh, mean_edge }
     }
 
     pub fn centre(&self) -> Vec3 {
@@ -209,7 +213,13 @@ impl Mesh {
         self.positions
             .iter()
             .zip(&self.normals)
-            .map(|(&p, &n)| (p - eye).normalize_or(Vec3::new(0.0, 0.0, 1.0)).dot(n))
+            // Unnormalised. The silhouette is this field's *zero* set, and
+            // scaling each vertex's value by its own positive distance to
+            // the eye cannot move a sign — it only reweights where between
+            // two vertices the crossing interpolates to, by well under a
+            // pixel. The normalize it replaces was a square root per vertex,
+            // 434k of them, every frame.
+            .map(|(&p, &n)| (p - eye).dot(n))
             .collect()
     }
 
@@ -384,22 +394,37 @@ impl Mesh {
     }
 
     pub fn mean_edge_length(&self) -> f32 {
-        let total: f32 = self
-            .faces
-            .iter()
-            .map(|f| {
-                let [a, b, c] = f.map(|i| self.positions[i as usize]);
-                ((b - a).length() + (c - b).length() + (a - c).length()) / 3.0
-            })
-            .sum();
+        self.mean_edge
+    }
 
-        (total / self.faces.len() as f32).max(1e-9)
+    /// How far to lift a ray off the surface before asking what occludes it.
+    ///
+    /// A fraction of an edge, not a constant. A level-set point sits *on* a
+    /// triangle, and the smooth vertex normal it carries is not the flat
+    /// face's, so a fixed epsilon that clears one mesh's triangles sinks
+    /// under a coarser mesh's — the point then occludes itself, and every
+    /// long curve comes back chopped into dashes. Scaling with the mesh
+    /// means the same number works for a reconstruction and a decimation.
+    pub fn surface_bias(&self) -> f32 {
+        self.mean_edge * 0.9
     }
 
     /// `p . axis` per vertex. Its level sets are parallel plane cuts.
     pub fn projected(&self, axis: Vec3) -> Vec<f32> {
         self.positions.iter().map(|p| p.dot(axis)).collect()
     }
+}
+
+fn mean_edge_length(positions: &[Vec3], faces: &[[u32; 3]]) -> f32 {
+    let total: f32 = faces
+        .iter()
+        .map(|f| {
+            let [a, b, c] = f.map(|i| positions[i as usize]);
+            ((b - a).length() + (c - b).length() + (a - c).length()) / 3.0
+        })
+        .sum();
+
+    (total / faces.len().max(1) as f32).max(1e-9)
 }
 
 /// `iterations` umbrella passes over a vertex field.

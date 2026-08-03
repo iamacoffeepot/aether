@@ -28,7 +28,7 @@ pub fn hidden(mesh: &Mesh, eye: Vec3, point: &SurfacePoint) -> bool {
     let to_eye = eye - point.probe;
     let distance = to_eye.length();
 
-    mesh.occluded(point.probe + point.normal * 2e-4, to_eye / distance, distance)
+    mesh.occluded(point.probe + point.normal * mesh.surface_bias(), to_eye / distance, distance)
 }
 
 fn is_drawn(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, class: FeatureClass, mode: Mode) -> bool {
@@ -43,8 +43,30 @@ fn is_drawn(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, class: FeatureClass, m
 }
 
 /// Split `curve` into the runs that survive, preserving order.
-pub fn runs(mesh: &Mesh, eye: Vec3, curve: &Curve3, keep: &dyn Fn(&SurfacePoint) -> bool, mode: Mode) -> Vec<Curve3> {
-    let flags: Vec<bool> = curve.points.iter().map(|p| keep(p) && is_drawn(mesh, eye, p, curve.class, mode)).collect();
+pub fn runs(
+    mesh: &Mesh,
+    eye: Vec3,
+    curve: &Curve3,
+    keep: &dyn Fn(&SurfacePoint) -> bool,
+    mode: Mode,
+    stride: usize,
+) -> Vec<Curve3> {
+    // The occlusion verdict is sampled every `stride` points and held in
+    // between. `keep` is not — it is a per-point tone test with no ray
+    // behind it, so sampling it would band the hatch thresholds.
+    let stride = stride.max(1);
+    let mut sampled = true;
+    let flags: Vec<bool> = curve
+        .points
+        .iter()
+        .enumerate()
+        .map(|(index, p)| {
+            if index % stride == 0 {
+                sampled = is_drawn(mesh, eye, p, curve.class, mode);
+            }
+            keep(p) && sampled
+        })
+        .collect();
 
     if flags.iter().all(|&f| f) {
         return vec![curve.clone()];

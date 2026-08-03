@@ -32,6 +32,9 @@ aether-actor = { path = "../aether-actor" }
 # by mail, so each cap comes in marker-only with its runtime feature off.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 aether-render = { path = "../aether-render", default-features = false }
+# ADR-0164: window-originated input is addressed through the neutral window
+# identity, so a drag camera takes the window cap's marker-only guest face.
+aether-window = { path = "../aether-window", default-features = false }
 aether-fs = { path = "../aether-fs", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }

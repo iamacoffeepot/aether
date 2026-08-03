@@ -39,7 +39,7 @@ pub fn wander(seed: u64, at: Vec3) -> f32 {
 /// the whole drawing would read as dots.
 pub fn pressure(travelled: f32, total: f32) -> f32 {
     /// In radians of arc, matching the units `ribbon` measures length in.
-    const RAMP: f32 = 0.010;
+    const RAMP: f32 = 0.0064;
 
     let ramp = RAMP.min(total * 0.45);
     if ramp <= 1e-6 {
