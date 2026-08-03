@@ -130,6 +130,16 @@ struct LoadContext {
 
 pub struct Puppet {
     subject: Option<Mesh>,
+    /// The subject again at a tenth of the faces, and the only thing the
+    /// silhouette is solved against.
+    ///
+    /// Marching 868k faces every time the eye moves is the whole of the
+    /// per-frame geometry cost once hatch and crease are cached at load,
+    /// and a silhouette does not need them: it is where the surface turns
+    /// away from the viewer, which is a property of the form rather than of
+    /// the carving. Creases and occlusion keep the fine mesh, where the
+    /// detail is what is being asked about.
+    silhouette_subject: Option<Mesh>,
     /// The material field, and the path still owed for it. Both assets
     /// arrive as separate mail, in whichever order the reads settle, so
     /// extraction waits until nothing is outstanding rather than running
@@ -195,6 +205,7 @@ impl WasmActor for Puppet {
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self {
             subject: None,
+            silhouette_subject: None,
             labels: None,
             awaiting_labels: None,
             dragging: false,
@@ -326,6 +337,12 @@ impl WasmActor for Puppet {
                 self.settle(ctx, &LoadResult::Err { reason: format!("{path} is not a mesh this reader accepts") });
                 return;
             };
+            // A lattice too coarse for the subject's own feature scale
+            // leaves nothing to draw on, so the fine mesh stands in rather
+            // than the outline disappearing.
+            self.silhouette_subject = (self.settings.silhouette_cells > 0)
+                .then(|| subject.coarsened(self.settings.silhouette_cells, self.settings.relaxation))
+                .flatten();
             self.subject = Some(subject);
         }
 
@@ -377,13 +394,25 @@ impl WasmActor for Puppet {
             return;
         }
 
+        // The silhouette is solved on the coarse mesh and the cached
+        // surface curves on the fine one, so each carries its own mesh's
+        // ray bias into the visibility split — a coarse point tested at the
+        // fine mesh's bias sits inside its own subject and the outline
+        // comes back dashed.
+        let silhouette_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
         let mut triangles: Vec<DrawTriangle> = Vec::new();
-        let drawing = self.surface.iter().cloned().chain(extract::silhouettes(subject, eye));
+        let drawing = self.surface.iter().cloned().map(|curve| (curve, subject.surface_bias())).chain(
+            extract::silhouettes(silhouette_mesh, eye).into_iter().map(|curve| (curve, silhouette_mesh.surface_bias())),
+        );
 
-        for curve in drawing {
+        for (curve, bias) in drawing {
             // Tone gating already happened at load — it does not depend on
-            // the eye — so all that is left per frame is occlusion.
-            for run in visibility::runs(subject, eye, &curve, &|_| true, visibility::Mode::Opaque, VISIBILITY_STRIDE) {
+            // the eye — so all that is left per frame is occlusion, and
+            // that is always asked of the fine mesh: what stands in front
+            // of a stroke is a question about the real surface.
+            for run in
+                visibility::runs(subject, eye, &curve, &|_| true, visibility::Mode::Opaque, VISIBILITY_STRIDE, bias)
+            {
                 ribbon::ribbon(&run, eye, 0, &mut triangles);
             }
         }

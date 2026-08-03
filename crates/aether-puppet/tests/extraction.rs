@@ -10,6 +10,8 @@
 //! truth behind it. What is tested is the two places where this port added
 //! a decision, and where getting it wrong is silent.
 
+use core::f32::consts::{PI, TAU};
+use core::fmt::Write as _;
 use core::iter;
 
 use aether_math::Vec3;
@@ -78,4 +80,72 @@ fn a_material_field_that_is_not_a_cube_is_refused() {
     assert!(Labels::parse(&header(4 * 4 * 4), lo, hi, 0.12).is_some(), "a cube is accepted");
     assert!(Labels::parse(&header(4 * 4 * 4 + 1), lo, hi, 0.12).is_none(), "a non-cube is refused");
     assert!(Labels::parse(b"\x93NU", lo, hi, 0.12).is_none(), "a truncated buffer is refused, not indexed");
+}
+
+/// A closed, consistently outward-wound sphere as OBJ text, dense enough
+/// that clustering has something to remove. A cube cannot serve — eight
+/// vertices survive any lattice, so the decimation is a no-op and the test
+/// asserts nothing.
+fn sphere(rings: usize, segments: usize) -> String {
+    let mut text = String::new();
+    for ring in 0..=rings {
+        let phi = PI * ring as f32 / rings as f32;
+        for segment in 0..segments {
+            let theta = TAU * segment as f32 / segments as f32;
+            let (x, y, z) = (phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
+            let _ = writeln!(text, "v {x} {y} {z}");
+        }
+    }
+    // Outward winding, matching the cube fixture's convention.
+    for ring in 0..rings {
+        for segment in 0..segments {
+            let next = (segment + 1) % segments;
+            let (a, b) = (ring * segments + segment + 1, ring * segments + next + 1);
+            let (c, d) = ((ring + 1) * segments + segment + 1, (ring + 1) * segments + next + 1);
+            let _ = writeln!(text, "f {a} {b} {c}\nf {b} {d} {c}");
+        }
+    }
+    text
+}
+
+/// Orientation agreement: the mean of `normalize(p - centre) . n`. Near
+/// `+1` outward, near `-1` inward, near `0` inconsistent.
+fn agreement(mesh: &Mesh) -> f32 {
+    let centre = (mesh.min + mesh.max) * 0.5;
+
+    mesh.positions.iter().zip(&mesh.normals).map(|(&p, &n)| (p - centre).normalize_or(n).dot(n)).sum::<f32>()
+        / mesh.positions.len() as f32
+}
+
+/// Tripwire: clustering removes faces and keeps the winding.
+///
+/// The silhouette is the zero set of `view . normal`, so a decimation that
+/// scrambles the normal sign leaves it with no coherent zero set and the
+/// outline simply vanishes — with nothing having errored, which is what
+/// makes it worth a tripwire rather than a comment. The failure has a name:
+/// deduplicating faces on a *sorted* index triple maps a face and its
+/// mirror onto one key, so whichever arrived first survives and the sign
+/// becomes input order. Agreement is the quantity that sees it, because
+/// inconsistency drives it to zero rather than to `-1`.
+///
+/// Both halves matter. Reduction alone passes for a decimation that
+/// destroyed the surface; agreement alone passes for one that removed
+/// nothing.
+#[test]
+fn clustering_reduces_the_face_count_without_losing_the_winding() {
+    let fine = Mesh::from_obj_bytes(sphere(48, 96).as_bytes(), 0).expect("a sphere is a mesh");
+    let coarse = fine.coarsened(16, 0).expect("a lattice this coarse still leaves a surface");
+
+    assert!(
+        coarse.faces.len() * 4 < fine.faces.len(),
+        "clustering should remove most of the faces: {} of {}",
+        coarse.faces.len(),
+        fine.faces.len(),
+    );
+    assert!(
+        agreement(&coarse) > 0.5,
+        "the coarse mesh keeps its outward winding; got {:+.3} against the source's {:+.3}",
+        agreement(&coarse),
+        agreement(&fine),
+    );
 }
