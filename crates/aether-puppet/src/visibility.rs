@@ -24,14 +24,23 @@ pub enum Mode {
     Ghost,
 }
 
-pub fn hidden(mesh: &Mesh, eye: Vec3, point: &SurfacePoint) -> bool {
+/// How far a ray is lifted off the surface before the occlusion question is
+/// asked.
+///
+/// It belongs to whichever mesh the *point* came from, not to the one being
+/// cast against. A silhouette solved on the coarse mesh sits up to a coarse
+/// cell away from the fine surface it is then tested against, so the fine
+/// mesh's own bias leaves it inside its own subject: every outline comes
+/// back chopped into dashes by self-occlusion, which reads as a rendering
+/// bug rather than a decimation one.
+pub fn hidden(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, bias: f32) -> bool {
     let to_eye = eye - point.probe;
     let distance = to_eye.length();
 
-    mesh.occluded(point.probe + point.normal * mesh.surface_bias(), to_eye / distance, distance)
+    mesh.occluded(point.probe + point.normal * bias, to_eye / distance, distance)
 }
 
-fn is_drawn(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, class: FeatureClass, mode: Mode) -> bool {
+fn is_drawn(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, class: FeatureClass, mode: Mode, bias: f32) -> bool {
     if !matches!(class, FeatureClass::Silhouette | FeatureClass::Decal) {
         let to_eye = (eye - point.probe).normalize();
         if point.normal.dot(to_eye) < 0.02 {
@@ -39,10 +48,15 @@ fn is_drawn(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, class: FeatureClass, m
         }
     }
 
-    mode == Mode::Ghost || !hidden(mesh, eye, point)
+    mode == Mode::Ghost || !hidden(mesh, eye, point, bias)
 }
 
 /// Split `curve` into the runs that survive, preserving order.
+///
+/// `bias` lifts each occlusion ray off the surface and is the caller's to
+/// supply, because it belongs to the mesh the curve was extracted from
+/// rather than to `mesh`, the one being cast against. The two are the same
+/// for hatch and crease and differ for a silhouette solved coarse.
 pub fn runs(
     mesh: &Mesh,
     eye: Vec3,
@@ -50,6 +64,7 @@ pub fn runs(
     keep: &dyn Fn(&SurfacePoint) -> bool,
     mode: Mode,
     stride: usize,
+    bias: f32,
 ) -> Vec<Curve3> {
     // The occlusion verdict is sampled every `stride` points and held in
     // between. `keep` is not — it is a per-point tone test with no ray
@@ -62,7 +77,7 @@ pub fn runs(
         .enumerate()
         .map(|(index, p)| {
             if index % stride == 0 {
-                sampled = is_drawn(mesh, eye, p, curve.class, mode);
+                sampled = is_drawn(mesh, eye, p, curve.class, mode, bias);
             }
             keep(p) && sampled
         })

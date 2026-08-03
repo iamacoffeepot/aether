@@ -107,6 +107,15 @@ pub struct Settings {
     pub suggestive_gate: f32,
     /// How far the tick's lower end kicks away from the midline.
     pub nose_bend: f32,
+    /// Lattice resolution the silhouette mesh is clustered to, along the
+    /// subject's longest axis. Zero solves the silhouette on the fine mesh.
+    ///
+    /// The silhouette is the only per-frame geometry pass, so this is the
+    /// number that decides whether the drawing holds a frame rate — and it
+    /// is a large-scale feature by definition, being where the surface
+    /// turns away from the eye, so it does not need the faces the carving
+    /// does. Creases and occlusion stay fine.
+    pub silhouette_cells: u32,
     /// Which material classes get their creases inked.
     ///
     /// Everything except `hair`, `skin` and `dress`. Hair is the class that
@@ -144,6 +153,12 @@ impl Default for Settings {
             // past about 0.4 it reads as a contour and starts competing
             // with the profile for the same job.
             nose_bend: 0.0,
+            // Measured on the sculpt rather than picked. At 128 the
+            // drawing is indistinguishable from the fine solve at normal
+            // framing, on an eighth of the faces, and the whole per-frame
+            // path drops from 23.8ms to 3.7ms. 256 is the next rung and
+            // costs 8.1ms for no visible gain.
+            silhouette_cells: 128,
             crease_classes: vec![labels::EYE, labels::BROW, labels::LIPS, labels::INNER_EAR, labels::TUFT],
         }
     }
