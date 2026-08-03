@@ -129,6 +129,10 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # the edge `cargo xtask affected` derives `wasm_needed` from so the
 # `cargo xtask dist` pre-build runs before these tests in CI.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
+# iamacoffeepot/aether#4341: `tests/fleetharness_capture_reply.rs` asserts a
+# rejected `capture_frame` answers over the hub's RPC boundary — the sender
+# shape that only exists on the wire, and the one the cap used to drop.
+aether-harness-fleet = { path = "../aether-harness-fleet" }
 # The artifact-guard scenario decodes the persisted `measurements.json`.
 serde_json = { workspace = true }
 

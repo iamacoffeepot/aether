@@ -35,7 +35,6 @@
 
 use crate::runtime::config::parse_clear_color;
 use std::collections::BTreeSet;
-use std::io;
 use std::iter;
 use std::mem;
 use std::path::PathBuf;
@@ -52,7 +51,6 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::mailer::Mailer;
-use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
@@ -171,11 +169,6 @@ pub struct RenderCapabilityState {
 
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
-    /// Reply edge for `on_capture_frame`'s inline-failure paths (occluded,
-    /// already-pending, bundle / reference resolution error) — those reply
-    /// synchronously and let the dispatcher settle the inbound, so they
-    /// never take the deferred guard.
-    outbound: Arc<HubOutbound>,
     assets_dir: Option<PathBuf>,
     observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
 }
@@ -504,11 +497,6 @@ impl NativeActor for RenderCapability {
     ) -> Result<RenderCapabilityState, BootError> {
         let mailer = ctx.mailer();
         let registry = Arc::clone(mailer.registry());
-        let outbound = mailer.outbound().cloned().ok_or_else(|| {
-            BootError::Other(Box::new(io::Error::other(
-                "HubOutbound must be wired on Mailer before RenderCapability::init",
-            )))
-        })?;
         Ok(RenderCapabilityState {
             frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
             last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
@@ -537,7 +525,6 @@ impl NativeActor for RenderCapability {
             pending_capture: None,
             registry,
             mailer,
-            outbound,
             assets_dir: params.assets_dir,
             observed_kinds: params.observed_kinds,
         })
@@ -768,43 +755,48 @@ impl NativeActor for RenderCapability {
     /// A render handler must **never** block on a pre-mail settlement (the
     /// ADR Context deadlock: pre-chains terminate back at this mailbox), so
     /// the settlement bridge only mails — it never waits.
+    ///
+    /// Every exit answers through the inbound guard, the same edge the
+    /// deferred readback replies through. The failure paths used to answer
+    /// through the hub outbound instead, which routes only `Session` /
+    /// `EngineMailbox` senders and drops a `Component` one — and an RPC
+    /// `Call` names the rpc server's own mailbox as its reply target, so
+    /// every rejected capture over the wire returned no image, no error and
+    /// no timeout (iamacoffeepot/aether#4341).
     #[handler::manual]
     fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
         state.observe(<CaptureFrame as Kind>::ID);
-        let sender = ctx.reply_target();
+        let reply = ctx.take_inbound();
 
         if let Err(error) = state.validate_capture_target(mail.window) {
-            state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+            reply.reply(&CaptureFrameResult::Err { error });
             return;
         }
         if state.pending_capture.is_some() {
-            state.outbound.send_reply(
-                sender,
-                &CaptureFrameResult::Err {
-                    error: "capture already pending; try again once the in-flight request completes".to_owned(),
-                },
-            );
+            reply.reply(&CaptureFrameResult::Err {
+                error: "capture already pending; try again once the in-flight request completes".to_owned(),
+            });
             return;
         }
 
         let pre = match resolve_bundle(&state.registry, &mail.mails, "capture bundle") {
             Ok(bundle) => bundle,
             Err(error) => {
-                state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                reply.reply(&CaptureFrameResult::Err { error });
                 return;
             }
         };
         let after = match resolve_bundle(&state.registry, &mail.after_mails, "capture after bundle") {
             Ok(bundle) => bundle,
             Err(error) => {
-                state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                reply.reply(&CaptureFrameResult::Err { error });
                 return;
             }
         };
         let reference = match resolve_reference(state.assets_dir.as_deref(), mail.similarity.as_ref()) {
             Ok(reference) => reference,
             Err(error) => {
-                state.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                reply.reply(&CaptureFrameResult::Err { error });
                 return;
             }
         };
@@ -831,7 +823,6 @@ impl NativeActor for RenderCapability {
             }
         }
 
-        let reply = ctx.take_inbound();
         state.pending_capture = Some(PendingCapture {
             window: mail.window,
             reply,
@@ -870,7 +861,7 @@ mod tests {
     use aether_substrate::chassis::inbox::SettlingInbox;
     use aether_substrate::mail::registry::OwnedDispatch;
     use aether_substrate::mail::{EgressEvent, MailRef};
-    use aether_substrate::testing::{decode_reply, test_mailer_and_rx};
+    use aether_substrate::testing::{decode_reply, manual_dispatch_ctx, session_sender, test_mailer_and_rx};
     use std::sync::mpsc;
 
     fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
@@ -921,7 +912,6 @@ mod tests {
     /// window, no GPU (`gpu` stays `None`, so the ready branch fails fast
     /// rather than touching an absent adapter).
     fn headless_state(mailer: &Arc<Mailer>) -> RenderCapabilityState {
-        let outbound = mailer.outbound().cloned().expect("test_mailer_and_rx wires a loopback outbound");
         RenderCapabilityState {
             frame_vertices: Vec::new(),
             last_submitted: Vec::new(),
@@ -947,7 +937,6 @@ mod tests {
             pending_capture: None,
             registry: Arc::clone(mailer.registry()),
             mailer: Arc::clone(mailer),
-            outbound,
             assets_dir: None,
             observed_kinds: None,
         }
@@ -1052,12 +1041,7 @@ mod tests {
         state.offscreen_size = Some((64, 48));
         state.pending_capture = Some(parked_capture(&mailer, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new_dispatching(
-            &binding,
-            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
-            MailId::NONE,
-            MailId::NONE,
-        );
+        let mut ctx = manual_dispatch_ctx(&binding, session_sender(), MailboxId(0));
 
         RenderCapability::on_capture_frame(
             &mut state,
