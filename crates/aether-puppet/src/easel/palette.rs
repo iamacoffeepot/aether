@@ -36,6 +36,27 @@ const LIT: f32 = 0.92;
 /// Tone at which a material is fully in shadow.
 const SHADOWED: f32 = 0.3;
 
+/// The stain a material throws past its own silhouette.
+///
+/// A region's gesture does not stop at the line the drawing set, and a
+/// wash that does reads as filled in rather than painted. Only a material
+/// carrying enough water to throw a stain names a policy; the rest paint
+/// to their own edges and the air around them stays bare paper.
+pub struct Atmosphere {
+    /// How far the region's own coverage is spread before it is carried
+    /// off the figure, in the pixels of the reference sheet. Far wider
+    /// than any wash's water, because what is carried is the region's
+    /// presence rather than its shape.
+    pub halo: f32,
+    /// Where that presence is carried, across the sheet and down it.
+    pub drift: (f32, f32),
+    /// The pigment the stain is left in, and how far it may build.
+    /// Greyer than the pigment it echoes: this is the region seen through
+    /// air rather than the region.
+    pub pigment: u32,
+    pub cap: f32,
+}
+
 /// One entry in the painter's box.
 pub struct Material {
     /// Which region class of the baked plane this material paints.
@@ -57,6 +78,9 @@ pub struct Material {
     /// A region too small to loosen. The hand stays tight over a feature
     /// however far it sits from the face.
     pub small: bool,
+    /// What this material leaves in the air past its own edge, if
+    /// anything.
+    pub atmosphere: Option<Atmosphere>,
 }
 
 /// The painter's box, in the order it was mixed.
@@ -74,6 +98,11 @@ pub const MATERIALS: &[Material] = &[
         shade_floor: 0.4,
         shade_lit: None,
         small: false,
+        // The one region wet enough to throw a stain, and it throws it
+        // down and to the left, the way the hair itself falls. The grey
+        // is the dress's own pigment rather than the hair's indigo: this
+        // far off the figure the colour has gone out of it.
+        atmosphere: Some(Atmosphere { halo: 48.0, drift: (-68.0, 92.0), pigment: 0x4a_56_61, cap: 1.0 }),
     },
     Material {
         class: DRESS,
@@ -84,6 +113,7 @@ pub const MATERIALS: &[Material] = &[
         shade_floor: 0.3,
         shade_lit: None,
         small: false,
+        atmosphere: None,
     },
     Material {
         class: SKIN,
@@ -94,6 +124,7 @@ pub const MATERIALS: &[Material] = &[
         shade_floor: 0.0,
         shade_lit: Some(0.58),
         small: false,
+        atmosphere: None,
     },
     // The ear rose is an accent in the studies' sense — warm only at
     // blood, placed by policy — so unlike a true material it keeps almost
@@ -108,6 +139,7 @@ pub const MATERIALS: &[Material] = &[
         shade_floor: 0.9,
         shade_lit: None,
         small: true,
+        atmosphere: None,
     },
     Material {
         class: TUFT,
@@ -118,6 +150,7 @@ pub const MATERIALS: &[Material] = &[
         shade_floor: 0.82,
         shade_lit: None,
         small: true,
+        atmosphere: None,
     },
     Material {
         class: BROW,
@@ -128,6 +161,7 @@ pub const MATERIALS: &[Material] = &[
         shade_floor: 0.6,
         shade_lit: None,
         small: true,
+        atmosphere: None,
     },
 ];
 

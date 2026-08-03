@@ -24,13 +24,17 @@
 //! How tightly those are held is [`Sheet::care`]: near the face the
 //! painter cuts to the line, and past the fall of the hair the hand
 //! relaxes.
+//!
+//! Past the drawing entirely is the atmosphere, where a material that
+//! names the policy throws a thinned echo of itself into the air off the
+//! figure — the one mark on the sheet with no line under it.
 
 use core::f32::consts::TAU;
 
 use aether_math::Vec2;
 
 use super::image::{self, Flow, Rng};
-use super::palette::{self, Coat, Material};
+use super::palette::{self, Atmosphere, Coat, Material};
 use crate::labels::{BROW, DRESS, EYE, HAIR, LIPS};
 
 /// The baked planes a sheet is painted from, all at `width * height` and
@@ -171,6 +175,12 @@ impl WashParams {
         self.spatter = drops;
         self
     }
+
+    /// How wet the paper is under this wash.
+    pub const fn wetted(mut self, water: f32) -> Self {
+        self.water = water;
+        self
+    }
 }
 
 /// Half-width of the band the puddle is thresholded across.
@@ -260,6 +270,35 @@ const GLAZE_CAP: f32 = 0.8;
 /// Passes and reach of the smear that rides the hair along its own locks.
 const SMEAR_PASSES: u32 = 2;
 const SMEAR_REACH: f32 = 12.0;
+
+/// How far the figure's own coverage is softened before it pushes the
+/// stain off itself, and how much of the stain it takes back where it
+/// stands. Short of all of it: the air in front of a shoulder is still air.
+const ATMOSPHERE_FIGURE: f32 = 6.0;
+const ATMOSPHERE_RESIST: f32 = 0.85;
+
+/// Where in the displaced halo the stain reaches full strength, and the
+/// level its own mask is cut at. The ramp fades the far tail out; the cut
+/// is also what keeps the stain off the figure, whose surviving fifteen
+/// hundredths of spill falls under it.
+const ATMOSPHERE_REACH: (f32, f32) = (0.1, 0.4);
+const ATMOSPHERE_LEVEL: f32 = 0.45;
+
+/// The wash the stain is painted as, against the loose one it echoes: a
+/// smaller puddle, a thinner load, granulating far harder, and a dozen
+/// drops thrown after it.
+const ATMOSPHERE_WATER: f32 = 7.0;
+const ATMOSPHERE_LOAD: f32 = 0.42;
+const ATMOSPHERE_GRAN: f32 = 0.6;
+const ATMOSPHERE_SPATTER: u32 = 12;
+
+/// Which way the stain gives up its edge, as a rise over a run — steeper
+/// and squarer than the figure's own, there being no form under it to turn
+/// away.
+const ATMOSPHERE_LOST: (f32, f32) = (1.0, -0.5);
+
+/// Domain constant for the stain's own stream of chance.
+const ATMOSPHERE_SEED: u64 = 0xa7_a7;
 
 /// One sheet of paper with the drawing's planes registered on it.
 ///
@@ -364,9 +403,63 @@ impl<'a> Sheet<'a> {
                 let glaze = self.wash(&mask, None, &WashParams::glaze().losing(lost_angle(HAIR)), &mut rng);
                 coats.push(Coat { class: HAIR, pigment: GLAZE_PIGMENT, cap: GLAZE_CAP, density: glaze });
             }
+
+            if let Some(policy) = material.atmosphere.as_ref() {
+                // A stream of its own, keyed by the material. The stain's
+                // accidents belong to the stain: hanging one on a material
+                // then moves nothing already on the sheet, and two
+                // materials that both throw one do not throw it alike.
+                let mut air = Rng::new(self.seed ^ ATMOSPHERE_SEED ^ u64::from(material.class));
+                let density = self.atmosphere(&mask, policy, &mut air);
+                coats.push(Coat { class: material.class, pigment: policy.pigment, cap: policy.cap, density });
+            }
         }
 
         coats
+    }
+
+    /// The stain one material leaves in the air past its own silhouette.
+    ///
+    /// The region's presence — its coverage spread far wider than any wash
+    /// reaches — is carried off the figure along the material's own drift
+    /// and cut back wherever the figure stands in the way. What that
+    /// leaves is then painted as a wash in its own right rather than
+    /// composited as the blur it started as, so the stain arrives with
+    /// pours, a tide line, a lost edge and a few thrown drops like
+    /// everything else on the sheet.
+    ///
+    /// The reference board records its own weak spot here: displacing a
+    /// blur is not the same as pouring deliberately, and a painter would
+    /// place this mark rather than derive it. The parameters are the
+    /// board's so its look ports intact, and deciding where the air ought
+    /// to go is a taste pass rather than a port.
+    fn atmosphere(&self, mask: &[f32], policy: &Atmosphere, rng: &mut Rng) -> Vec<f32> {
+        let (width, height) = (self.planes.width, self.planes.height);
+        let figure: Vec<f32> = self.planes.classes.iter().map(|&at| f32::from(at != 0)).collect();
+
+        let halo = image::blur(mask, width, height, image::tuned(policy.halo, height));
+        let standing = image::blur(&figure, width, height, image::tuned(ATMOSPHERE_FIGURE, height));
+        let drift = (image::tuned(policy.drift.0, height), image::tuned(policy.drift.1, height));
+
+        let mut spill = vec![0.0; mask.len()];
+        for y in 0..height {
+            let from_y = (y as f32 - drift.1).clamp(0.0, (height - 1) as f32) as usize * width;
+            for x in 0..width {
+                let from_x = (x as f32 - drift.0).clamp(0.0, (width - 1) as f32) as usize;
+                let i = y * width + x;
+
+                spill[i] = image::smoothstep(ATMOSPHERE_REACH.0, ATMOSPHERE_REACH.1, halo[from_y + from_x])
+                    * (1.0 - standing[i] * ATMOSPHERE_RESIST);
+            }
+        }
+
+        let params = WashParams::loose()
+            .wetted(ATMOSPHERE_WATER)
+            .charged(ATMOSPHERE_GRAN, ATMOSPHERE_LOAD)
+            .losing(ATMOSPHERE_LOST.0.atan2(ATMOSPHERE_LOST.1))
+            .spattering(ATMOSPHERE_SPATTER);
+
+        self.wash(&spill.iter().map(|&at| f32::from(at > ATMOSPHERE_LEVEL)).collect::<Vec<f32>>(), None, &params, rng)
     }
 
     /// One material's density, held as tightly as the care field says.
@@ -766,5 +859,55 @@ mod tests {
 
         let density = sheet.wash(&vec![0.0; width * height], None, &WashParams::loose(), &mut Rng::new(1));
         assert!(density.iter().all(|&at| at == 0.0), "an uncovered region must lay down no pigment");
+    }
+
+    /// Where a density field's pigment sits, weighted by how much of it is
+    /// there — the region's own [`centroid`] counts pixels instead, and a
+    /// stain has no threshold at which it starts counting.
+    fn mass_centre(density: &[f32], width: usize) -> Vec2 {
+        let mut sum = Vec2::new(0.0, 0.0);
+        let mut total = 0.0;
+
+        for (i, &at) in density.iter().enumerate() {
+            sum += Vec2::new((i % width) as f32, (i / width) as f32) * at;
+            total += at;
+        }
+
+        Vec2::new(sum.x / total, sum.y / total)
+    }
+
+    /// Tripwire: the stain drifts off the region it echoes, the way the
+    /// region falls.
+    ///
+    /// Everything else in the atmosphere is a composition of primitives
+    /// held elsewhere — the blur, the ramp, the wash. The displacement is
+    /// the step this file owns, and it is read backwards from the plane it
+    /// samples: the halo is fetched from where the stain came, not where
+    /// it is going. Taken the wrong way round the stain is still soft,
+    /// still spattered, still entirely plausible, and hanging off the
+    /// opposite side of the head.
+    #[test]
+    fn the_atmosphere_stain_drifts_off_the_region_it_echoes() {
+        let (width, height) = (240, 300);
+        let mut classes = vec![0u8; width * height];
+        for y in 60..140 {
+            classes[y * width + 80..y * width + 160].fill(HAIR);
+        }
+
+        let tone = vec![0.5; width * height];
+        let sheet = Sheet::new(Planes { classes: &classes, tone: &tone, facing: &tone, width, height }, 0x5e_ed);
+        let mask = palette::mask_of(&classes, HAIR);
+        let policy = palette::MATERIALS
+            .iter()
+            .find(|material| material.class == HAIR)
+            .and_then(|material| material.atmosphere.as_ref())
+            .expect("the hair carries an atmosphere policy");
+
+        let stain = sheet.atmosphere(&mask, policy, &mut Rng::new(1));
+        assert!(stain.iter().any(|&at| at > 0.0), "a region present on the sheet must leave something in the air");
+
+        let (from, to) = (centroid(&mask, width).expect("the fixture region"), mass_centre(&stain, width));
+        assert!(to.x < from.x, "the hair's stain drifts left across the sheet: {from:?} to {to:?}");
+        assert!(to.y > from.y, "and down it: {from:?} to {to:?}");
     }
 }
