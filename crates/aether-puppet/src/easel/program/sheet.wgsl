@@ -53,8 +53,10 @@ struct SheetParams {
 
 // image::smoothstep restated: a Hermite ramp whose edges may run either
 // way (a > b descends). WGSL's own smoothstep leaves a descending edge
-// pair undefined, and the lost arc ramps downward.
-fn hermite(a: f32, b: f32, x: f32) -> f32 {
+// pair undefined, and the lost arc ramps downward. Named apart from
+// puddle.wgsl's identical `hermite` so the wash sequencer can register
+// the op modules concatenated as one module.
+fn sheet_ramp(a: f32, b: f32, x: f32) -> f32 {
     let t = clamp((x - a) / (b - a), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
@@ -88,7 +90,7 @@ fn fs_lost_edge(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
     let offset = position.xy - vec2<f32>(0.5, 0.5) - sheet_params.centre;
     let bearing = atan2(offset.y, offset.x);
     let away = abs(bearing - sheet_params.lost_angle);
-    let lostness = hermite(LOST_ARC_FAR, LOST_ARC_NEAR, min(away, TAU - away));
+    let lostness = sheet_ramp(LOST_ARC_FAR, LOST_ARC_NEAR, min(away, TAU - away));
     let stain = pow(max(soft, 0.0), LOST_FALLOFF);
     return vec4<f32>(hard * (1.0 - lostness) + stain * LOST_STAIN * lostness, 0.0, 0.0, 1.0);
 }

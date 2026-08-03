@@ -125,12 +125,14 @@ impl Noise {
 }
 
 /// How much narrower one box pass is than the Gaussian three of them
-/// stand in for.
-const BOX_TO_GAUSSIAN: f32 = 1.7;
+/// stand in for. The GPU blur chain ([`super::program::puddle`]) maps
+/// radii through the same constant so both sides round identically.
+pub const BOX_TO_GAUSSIAN: f32 = 1.7;
 
 /// Passes that turn a box average into something that reads as a
-/// Gaussian. Three is where the corners stop showing.
-const BLUR_PASSES: u32 = 3;
+/// Gaussian. Three is where the corners stop showing. The GPU blur chain
+/// iterates the same count.
+pub const BLUR_PASSES: u32 = 3;
 
 /// A soft copy of `field`, the only blur the engine uses.
 pub fn blur(field: &[f32], width: usize, height: usize, radius: f32) -> Vec<f32> {

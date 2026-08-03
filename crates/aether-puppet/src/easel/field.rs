@@ -250,34 +250,40 @@ impl WashAccidents {
     }
 }
 
-/// Half-width of the band the puddle is thresholded across.
-const EDGE_BAND: f32 = 0.08;
+/// Half-width of the band the puddle is thresholded across. The GPU
+/// threshold pass ([`super::program::puddle`]) reads the same constant.
+pub const EDGE_BAND: f32 = 0.08;
 
 /// How far past the wash's own water the rim's reference blur reaches.
-const RIM_SPREAD: f32 = 1.6;
+pub(crate) const RIM_SPREAD: f32 = 1.6;
 
 /// Radius added to a wash's water before the value and support are
 /// softened, so neither reads as sharper than the wash carrying it.
-const SUPPORT_MARGIN: f32 = 2.0;
+pub(crate) const SUPPORT_MARGIN: f32 = 2.0;
 
-/// How much stronger the rim reads than the body it edges.
-const RIM_GAIN: f32 = 2.2;
+/// How much stronger the rim reads than the body it edges. The GPU rim
+/// pass folds it into its strength uniform.
+pub const RIM_GAIN: f32 = 2.2;
 
 /// Middle strength of the tide line and how far the paper's own noise
 /// swings it either side, with a ceiling on the darkest it may go.
-const RIM_VARY: (f32, f32) = (0.55, 1.5);
-const RIM_VARY_CEILING: f32 = 1.3;
+/// Shared with the GPU rim pass, which bakes the pair into its window.
+pub const RIM_VARY: (f32, f32) = (0.55, 1.5);
+pub const RIM_VARY_CEILING: f32 = 1.3;
 
 /// How far the rim's window into the noise is displaced past the one that
-/// placed the edge, in multiples of the pour's own offset.
-const RIM_RESTRIDE: (usize, usize) = (3, 7);
+/// placed the edge, in multiples of the pour's own offset. Shared with
+/// the GPU rim pass.
+pub const RIM_RESTRIDE: (usize, usize) = (3, 7);
 
 /// Floor under the region's own support, so a thin sliver of coverage does
 /// not divide the value it carries up to something enormous.
-const SUPPORT_FLOOR: f32 = 0.05;
+pub(crate) const SUPPORT_FLOOR: f32 = 0.05;
 
-/// Spacing of the two downhill samples a sagging wash drags behind it.
-const SAG_STEP: f32 = 12.0;
+/// Spacing of the two downhill samples a sagging wash drags behind it, in
+/// the pixels of the reference sheet. The GPU sag pass derives its texel
+/// step from the same constant.
+pub const SAG_STEP: f32 = 12.0;
 
 /// How much of the wash each downhill sample carries.
 const SAG_FALLOFF: [f32; 2] = [0.8, 0.55];
@@ -319,7 +325,7 @@ const CARE_FAR: f32 = 600.0;
 /// The tight wash sits under the loose one across the whole care ramp, so
 /// letting it granulate at full strength would double the tooth wherever
 /// the two overlap.
-const TIGHT_GRANULATION: f32 = 0.4;
+pub(crate) const TIGHT_GRANULATION: f32 = 0.4;
 
 /// Which way each material gives up its far edge, as a run over rise about
 /// the region's centroid. The dress turns away sooner than the hair does.
@@ -328,24 +334,29 @@ const LOST_RUN: (f32, f32) = (-0.4, -0.8);
 
 /// Drops thrown off the brush loading the hair, the one region painted
 /// with enough water to throw any.
-const HAIR_SPATTER: u32 = 20;
+pub(crate) const HAIR_SPATTER: u32 = 20;
 
 /// The dress's loose-wash water, against [`WashParams::loose`]'s 12 for
 /// the hair. In the pixels of the reference sheet.
-const DRESS_WATER: f32 = 6.5;
+pub(crate) const DRESS_WATER: f32 = 6.5;
 
 /// The violet dropped into the wet hair, and how far it may build.
-const GLAZE_PIGMENT: u32 = 0x8d_84_b8;
-const GLAZE_CAP: f32 = 0.8;
+pub(crate) const GLAZE_PIGMENT: u32 = 0x8d_84_b8;
+pub(crate) const GLAZE_CAP: f32 = 0.8;
 
-/// Passes and reach of the smear that rides the hair along its own locks.
-const SMEAR_PASSES: u32 = 2;
-const SMEAR_REACH: f32 = 12.0;
+/// Passes of the smear that rides the hair along its own locks. The GPU
+/// smear chain emits the same number of advection passes.
+pub const SMEAR_PASSES: u32 = 2;
+
+/// Reach of one smear advection segment, in the pixels of the reference
+/// sheet. The GPU smear pass derives its texel reach from the same
+/// constant.
+pub const SMEAR_REACH: f32 = 12.0;
 
 /// How far the figure's own coverage is softened before it pushes the
 /// stain off itself, and how much of the stain it takes back where it
 /// stands. Short of all of it: the air in front of a shoulder is still air.
-const ATMOSPHERE_FIGURE: f32 = 6.0;
+pub(crate) const ATMOSPHERE_FIGURE: f32 = 6.0;
 const ATMOSPHERE_RESIST: f32 = 0.85;
 
 /// Where in the displaced halo the stain reaches full strength, and the
@@ -369,7 +380,7 @@ const ATMOSPHERE_SPATTER: u32 = 12;
 const ATMOSPHERE_LOST: (f32, f32) = (1.0, -0.5);
 
 /// Domain constant for the stain's own stream of chance.
-const ATMOSPHERE_SEED: u64 = 0xa7_a7;
+pub(crate) const ATMOSPHERE_SEED: u64 = 0xa7_a7;
 
 /// One sheet of paper with the drawing's planes registered on it.
 ///
@@ -450,6 +461,17 @@ impl<'a> Sheet<'a> {
         &self.shade
     }
 
+    /// The seed this sheet was pulped from, for the GPU dispatch encoder
+    /// ([`super::program::wash`]) to replay the same accident stream.
+    pub(crate) fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// The planes this sheet paints from, for the same encoder.
+    pub(crate) fn planes(&self) -> Planes<'a> {
+        self.planes
+    }
+
     /// The paper's shared noise, for upload as textures by a GPU wash.
     pub fn noise(&self) -> &NoisePlanes {
         &self.noise
@@ -502,7 +524,7 @@ impl<'a> Sheet<'a> {
             coats.push(Coat { class: material.class, pigment: material.pigment, cap: palette::DENSITY_CAP, density });
 
             if material.class == HAIR {
-                let glaze = self.wash(&mask, None, &WashParams::glaze().losing(lost_angle(HAIR)), &mut rng);
+                let glaze = self.wash(&mask, None, &glaze_wash_params(), &mut rng);
                 coats.push(Coat { class: HAIR, pigment: GLAZE_PIGMENT, cap: GLAZE_CAP, density: glaze });
             }
 
@@ -548,6 +570,16 @@ impl<'a> Sheet<'a> {
     /// board's so its look ports intact, and deciding where the air ought
     /// to go is a taste pass rather than a port.
     fn atmosphere(&self, mask: &[f32], policy: &Atmosphere, rng: &mut Rng) -> Vec<f32> {
+        self.wash(&self.atmosphere_spill(mask, policy), None, &atmosphere_wash_params(), rng)
+    }
+
+    /// The stain's own coverage: the region's halo carried off the figure
+    /// along the material's drift, cut back where the figure stands, and
+    /// hardened at the atmosphere level into the mask the stain's wash
+    /// develops from. Split from [`Self::atmosphere`] so the GPU dispatch
+    /// encoder ([`super::program::wash`]) derives the stain's centroid
+    /// from the same pixels the spill pass writes.
+    pub(crate) fn atmosphere_spill(&self, mask: &[f32], policy: &Atmosphere) -> Vec<f32> {
         let (width, height) = (self.planes.width, self.planes.height);
         let figure: Vec<f32> = self.planes.classes.iter().map(|&at| f32::from(at != 0)).collect();
 
@@ -562,18 +594,15 @@ impl<'a> Sheet<'a> {
                 let from_x = (x as f32 - drift.0).clamp(0.0, (width - 1) as f32) as usize;
                 let i = y * width + x;
 
-                spill[i] = image::smoothstep(ATMOSPHERE_REACH.0, ATMOSPHERE_REACH.1, halo[from_y + from_x])
-                    * (1.0 - standing[i] * ATMOSPHERE_RESIST);
+                spill[i] = f32::from(
+                    image::smoothstep(ATMOSPHERE_REACH.0, ATMOSPHERE_REACH.1, halo[from_y + from_x])
+                        * (1.0 - standing[i] * ATMOSPHERE_RESIST)
+                        > ATMOSPHERE_LEVEL,
+                );
             }
         }
 
-        let params = WashParams::loose()
-            .wetted(ATMOSPHERE_WATER)
-            .charged(ATMOSPHERE_GRAN, ATMOSPHERE_LOAD)
-            .losing(ATMOSPHERE_LOST.0.atan2(ATMOSPHERE_LOST.1))
-            .spattering(ATMOSPHERE_SPATTER);
-
-        self.wash(&spill.iter().map(|&at| f32::from(at > ATMOSPHERE_LEVEL)).collect::<Vec<f32>>(), None, &params, rng)
+        spill
     }
 
     /// Where a material's coverage comes from: the baked class plane for
@@ -597,32 +626,10 @@ impl<'a> Sheet<'a> {
     /// painted twice — once gongbi, once xieyi — and the care ramp decides
     /// which of the two the eye is looking at.
     fn material_wash(&self, material: &Material, mask: &[f32], value: &[f32], rng: &mut Rng) -> Vec<f32> {
-        if material.small {
-            let held = WashParams::tight().charged(material.gran, material.load);
-            return self.wash(mask, Some(value), &held, rng);
-        }
-
-        let drops = if material.class == HAIR {
-            HAIR_SPATTER
-        } else {
-            0
+        let tight = self.wash(mask, Some(value), &held_params(material), rng);
+        let Some(freed) = freed_params(material) else {
+            return tight;
         };
-        let held = WashParams::tight().charged(material.gran * TIGHT_GRANULATION, material.load);
-        let freed = WashParams::loose()
-            .charged(material.gran, material.load)
-            .losing(lost_angle(material.class))
-            .spattering(drops);
-        // The dress wears less water than the hair: at the board's framing
-        // the full flood overshot her silhouette into a slab past the arm.
-        // A garment's edge is a cut line, not a fall of hair — the lost
-        // side stays, the water that carried it a hand-width out does not.
-        let freed = if material.class == DRESS {
-            freed.wetted(DRESS_WATER)
-        } else {
-            freed
-        };
-
-        let tight = self.wash(mask, Some(value), &held, rng);
         let loose = self.wash(mask, Some(value), &freed, rng);
 
         tight
@@ -808,7 +815,7 @@ struct Support {
 }
 
 /// Where the region sits, or `None` when nothing is covered at all.
-fn centroid(mask: &[f32], width: usize) -> Option<Vec2> {
+pub(crate) fn centroid(mask: &[f32], width: usize) -> Option<Vec2> {
     let mut sum = Vec2::new(0.0, 0.0);
     let mut count = 0.0;
 
@@ -870,6 +877,65 @@ fn lost_angle(class: u8) -> f32 {
     } else {
         LOST_RUN.1
     })
+}
+
+/// The tight wash a material is held to: full granulation for a feature
+/// too small to loosen, [`TIGHT_GRANULATION`] of it under a care ramp.
+///
+/// These four constructors are the single statement of which wash each
+/// coat runs — [`Sheet::coats`] paints through them and the GPU sequencer
+/// ([`super::program::wash`]) lays its pass graph and encodes its uniform
+/// blob from the same values, so the two develops cannot drift apart on a
+/// parameter.
+pub(crate) fn held_params(material: &Material) -> WashParams {
+    if material.small {
+        WashParams::tight().charged(material.gran, material.load)
+    } else {
+        WashParams::tight().charged(material.gran * TIGHT_GRANULATION, material.load)
+    }
+}
+
+/// The loose wash a material relaxes into past the care ramp, or `None`
+/// for a feature the hand never loosens over.
+pub(crate) fn freed_params(material: &Material) -> Option<WashParams> {
+    if material.small {
+        return None;
+    }
+
+    let drops = if material.class == HAIR {
+        HAIR_SPATTER
+    } else {
+        0
+    };
+    let freed =
+        WashParams::loose().charged(material.gran, material.load).losing(lost_angle(material.class)).spattering(drops);
+
+    // The dress wears less water than the hair: at the board's framing
+    // the full flood overshot her silhouette into a slab past the arm.
+    // A garment's edge is a cut line, not a fall of hair — the lost
+    // side stays, the water that carried it a hand-width out does not.
+    Some(if material.class == DRESS {
+        freed.wetted(DRESS_WATER)
+    } else {
+        freed
+    })
+}
+
+/// The glaze dropped into the wet hair, losing its edge the way the hair
+/// does.
+pub(crate) fn glaze_wash_params() -> WashParams {
+    WashParams::glaze().losing(lost_angle(HAIR))
+}
+
+/// The wash an atmosphere stain is painted as, against the loose one it
+/// echoes: a smaller puddle, a thinner load, granulating far harder, and
+/// a dozen drops thrown after it.
+pub(crate) fn atmosphere_wash_params() -> WashParams {
+    WashParams::loose()
+        .wetted(ATMOSPHERE_WATER)
+        .charged(ATMOSPHERE_GRAN, ATMOSPHERE_LOAD)
+        .losing(ATMOSPHERE_LOST.0.atan2(ATMOSPHERE_LOST.1))
+        .spattering(ATMOSPHERE_SPATTER)
 }
 
 /// How closely the hand is held, everywhere on the sheet.
