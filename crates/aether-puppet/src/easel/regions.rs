@@ -1,23 +1,28 @@
-//! The painter's two input maps, baked through the drawing's own camera.
+//! The painter's input maps, baked through the drawing's own camera.
 //!
 //! Before a brush touches paper a painter has answered two questions per
-//! patch of the subject: what is this, and how lit is it. This pass bakes
-//! both answers per pixel — `class` carries the material at the nearest
-//! surface (`0` background, then the [`labels`](crate::labels) ids), `tone`
-//! carries the key light there — so a wash engine downstream places pigment
-//! by material and reserves paper by light instead of guessing from the
-//! strokes.
+//! patch of the subject: what is this, and how lit is it. [`rasterize`]
+//! bakes both answers per pixel — `class` carries the material at the
+//! nearest surface (`0` background, then the [`labels`](crate::labels)
+//! ids), `tone` carries the key light there — so a wash engine downstream
+//! places pigment by material and reserves paper by light instead of
+//! guessing from the strokes.
 //!
 //! `facing` carries the normal turned toward the eye, which is how much the
 //! surface confronts the viewer, so surface-anchored paint policy — a blush
 //! — can fade as a cheek turns away instead of stamping a sliver at full
 //! frontal strength.
 //!
+//! [`ink`] bakes a fourth map from the drawing rather than from the
+//! surface: where the strokes themselves landed. It is what the wash reads
+//! to find which way the hair runs.
+//!
 //! One z-buffered barycentric pass over the triangles. The camera, mesh and
 //! light are the ones the ink drawing used, which is the point: the maps
 //! register with the drawing to the pixel.
 
 use aether_math::{Mat4, Vec3};
+use aether_render::DrawTriangle;
 
 use crate::extract::Settings;
 use crate::feature::SurfacePoint;
@@ -38,6 +43,10 @@ pub struct RegionPlanes {
     /// surface has turned away.
     pub facing: Vec<f32>,
 }
+
+/// Doubled triangle area below which the projection has collapsed the
+/// corners onto a line and there is no interior to walk.
+const AREA_FLOOR: f32 = 1e-6;
 
 /// A vertex after the camera: where it lands on the page, and the depth the
 /// buffer compares.
@@ -108,7 +117,7 @@ pub fn rasterize(
         // negates the area and every weight with it, and the interior test
         // below reads the ratios.
         let area = (b.page_x - a.page_x) * (c.page_y - a.page_y) - (b.page_y - a.page_y) * (c.page_x - a.page_x);
-        if area.abs() < 1e-6 {
+        if area.abs() < AREA_FLOOR {
             continue;
         }
 
@@ -151,15 +160,86 @@ pub fn rasterize(
     planes
 }
 
+/// How far past its own edges a triangle still claims a pixel, in pixels.
+///
+/// A ribbon is drawn about two pixels wide on the window and the wash
+/// canvas is half of that or less, so most of the drawing is narrower than
+/// one canvas pixel. Under a bare pixel-centre test whole strokes fall
+/// between the samples and the flow reads a dashed drawing — half a pixel
+/// of slack is what keeps a hair lock a continuous line at the resolution
+/// the wash is painted at.
+const COVERAGE_SLACK: f32 = 0.5;
+
+/// Where the drawing itself landed, as coverage in `[0, 1]`.
+///
+/// This is the ink's own alpha, not its colour — what the structure tensor
+/// downstream asks is where a stroke is and which way it runs, and a pale
+/// stroke runs the same way a dark one does. There is no depth buffer for
+/// the same reason: a ribbon hidden behind another still says which way the
+/// lock it belongs to falls.
+///
+/// `view_proj` must be the matrix the ribbons were solved for, so the
+/// coverage registers with the sheet the flow is applied to.
+pub fn ink(triangles: &[DrawTriangle], view_proj: &Mat4, width: usize, height: usize) -> Vec<f32> {
+    let mut plane = vec![0.0; width * height];
+    if plane.is_empty() {
+        return plane;
+    }
+
+    let (half_width, half_height) = (width as f32 * 0.5, height as f32 * 0.5);
+
+    for triangle in triangles {
+        let corners = triangle.verts.map(|v| Vec3::new(v.x, v.y, v.z));
+        let [Some(a), Some(b), Some(c)] = corners.map(|p| project(view_proj, p, half_width, half_height)) else {
+            continue;
+        };
+
+        let area = (b.page_x - a.page_x) * (c.page_y - a.page_y) - (b.page_y - a.page_y) * (c.page_x - a.page_x);
+        if area.abs() < AREA_FLOOR {
+            continue;
+        }
+
+        // An edge function divided by its own edge's length is the signed
+        // perpendicular distance from the pixel to that edge, so the slack
+        // is compared in the function's units by multiplying it back
+        // through. Winding carries the sign: a back-facing ribbon negates
+        // every edge function at once.
+        let winding = area.signum();
+        let opposite = [(b, c), (c, a), (a, b)];
+        let slack = opposite.map(|(p, q)| (q.page_x - p.page_x).hypot(q.page_y - p.page_y) * COVERAGE_SLACK);
+
+        let reach = COVERAGE_SLACK + 1.0;
+        let min_x = (a.page_x.min(b.page_x).min(c.page_x) - reach).max(0.0) as usize;
+        let max_x = ((a.page_x.max(b.page_x).max(c.page_x) + reach) as usize).min(width - 1);
+        let min_y = (a.page_y.min(b.page_y).min(c.page_y) - reach).max(0.0) as usize;
+        let max_y = ((a.page_y.max(b.page_y).max(c.page_y) + reach) as usize).min(height - 1);
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let edges =
+                    opposite.map(|(p, q)| (p.page_x - px) * (q.page_y - py) - (p.page_y - py) * (q.page_x - px));
+
+                if edges.iter().zip(slack).all(|(&edge, slack)| edge * winding >= -slack) {
+                    plane[y * width + x] = 1.0;
+                }
+            }
+        }
+    }
+
+    plane
+}
+
 #[cfg(test)]
 mod tests {
     use core::fmt::Write as _;
 
-    use super::{RegionPlanes, rasterize};
+    use super::{RegionPlanes, ink, rasterize};
     use crate::extract::Settings;
     use crate::labels::{self, Labels};
     use crate::mesh::Mesh;
-    use aether_math::{Mat4, Vec3};
+    use aether_math::{Mat4, Rgb, Vec3};
+    use aether_render::{DrawTriangle, Vertex};
 
     /// Page size every fixture rasterizes at. Even, so no pixel centre
     /// lands on the world origin and a test can name the half a pixel
@@ -306,6 +386,67 @@ mod tests {
         let away = rasterize_fixture(&mesh(&corners, &[[2, 1, 0]]), &orthographic());
         assert!((away.tone[y * SIDE + x] - 0.25).abs() < 1e-5, "a facet turned from the light keeps the ambient floor");
         assert_eq!(away.facing[y * SIDE + x], 0.0, "a facet turned from the eye confronts it not at all");
+    }
+
+    /// One drawn triangle from three world points. Colour carries no
+    /// meaning here — [`ink`] reads coverage, not pigment.
+    fn drawn(corners: [Vec3; 3]) -> DrawTriangle {
+        DrawTriangle { verts: corners.map(|p| Vertex { x: p.x, y: p.y, z: p.z, color: Rgb::new(0.0, 0.0, 0.0) }) }
+    }
+
+    /// A ribbon a third of a page pixel wide, laid along the boundary
+    /// between two rows so that no pixel centre falls inside it, as the two
+    /// triangles the ribbon builder emits per segment. World `y = 0` is
+    /// that boundary under [`orthographic`], the page being an even number
+    /// of pixels tall.
+    fn hairline() -> Vec<DrawTriangle> {
+        let (from, to) = (Vec3::new(-0.8, 0.0, 0.0), Vec3::new(0.8, 0.0, 0.0));
+        let across = Vec3::new(0.0, 0.02, 0.0);
+
+        vec![drawn([from - across, from + across, to + across]), drawn([from - across, to + across, to - across])]
+    }
+
+    fn lit(plane: &[f32]) -> Vec<(usize, usize)> {
+        (0..plane.len()).filter(|&i| plane[i] > 0.0).map(|i| (i % SIDE, i / SIDE)).collect()
+    }
+
+    /// Tripwire: a stroke narrower than a page pixel still lands as a line.
+    ///
+    /// The wash canvas is half the window or less, so most of the drawing
+    /// is thinner than one of its pixels. Under a bare pixel-centre test
+    /// such a stroke lands as a scatter of unconnected specks — and the
+    /// structure tensor over a dashed lock still returns a confident
+    /// orientation, just the wrong one, so nothing downstream reports the
+    /// loss. Only the coverage does.
+    #[test]
+    fn a_stroke_thinner_than_a_pixel_still_covers_a_continuous_line() {
+        let covered = lit(&ink(&hairline(), &orthographic(), SIDE, SIDE));
+
+        for column in 2..SIDE - 2 {
+            assert!(covered.iter().any(|&(x, _)| x == column), "column {column} has no ink; got {covered:?}");
+        }
+        assert!(
+            covered.len() < SIDE * SIDE / 4,
+            "a hairline must stay a line — {} of {} pixels inked",
+            covered.len(),
+            SIDE * SIDE,
+        );
+    }
+
+    /// Tripwire: a ribbon registers whichever way it is wound.
+    ///
+    /// A ribbon faces the eye rather than the surface, so both windings
+    /// reach this pass. The interior test compares the edge functions
+    /// against a sign taken from the triangle's own area, and dropping
+    /// that sign silently halves the drawing the flow is solved from.
+    #[test]
+    fn a_ribbon_inks_the_same_pixels_wound_either_way() {
+        let corners = [Vec3::new(-0.6, -0.5, 0.0), Vec3::new(0.7, -0.5, 0.0), Vec3::new(0.0, 0.6, 0.0)];
+        let forward = ink(&[drawn(corners)], &orthographic(), SIDE, SIDE);
+        let reversed = ink(&[drawn([corners[2], corners[1], corners[0]])], &orthographic(), SIDE, SIDE);
+
+        assert!(!lit(&forward).is_empty(), "the fixture triangle is in frame");
+        assert_eq!(lit(&forward), lit(&reversed), "winding must not decide whether a ribbon is drawn");
     }
 
     /// Tripwire: geometry behind the near plane is dropped rather than

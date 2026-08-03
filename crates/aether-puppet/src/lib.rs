@@ -439,7 +439,10 @@ impl WasmActor for Puppet {
         // The easel, under everything above: develop when the view has
         // settled, then stand the sheet behind the subject. The develop is
         // the slow path and its gate keeps it off the frame cadence; the
-        // presentation costs one textured rect.
+        // presentation costs one textured rect. It runs after the ribbons
+        // rather than before because it reads them — the wash smears along
+        // the drawing's own strokes, and the drawing has to be solved for
+        // this eye first.
         let view = easel::View {
             eye,
             target: self.target(),
@@ -449,7 +452,7 @@ impl WasmActor for Puppet {
         };
         if let Some(labels) = self.labels.as_ref() {
             let painted_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
-            self.easel.develop(painted_mesh, labels, &self.settings, &view, self.dragging);
+            self.easel.develop(painted_mesh, labels, &self.settings, &self.drawn, &view, self.dragging);
         }
 
         if let Some(destroy) = self.easel.take_destroy() {
