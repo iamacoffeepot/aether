@@ -1,3 +1,7 @@
+// A test binary is its own compilation unit, so the crate-level allows do
+// not reach it. The vertex-count cast is bounded by a twelve-face cube.
+#![allow(clippy::cast_precision_loss)]
+
 //! Tests for the two pieces of judgement this crate owns.
 //!
 //! Not the level sets, the welding or the relief band-pass: those came
@@ -5,6 +9,8 @@
 //! and asserting a curve count here would pin a number with no independent
 //! truth behind it. What is tested is the two places where this port added
 //! a decision, and where getting it wrong is silent.
+
+use core::iter;
 
 use aether_math::Vec3;
 use aether_puppet::labels::Labels;
@@ -64,7 +70,7 @@ fn a_material_field_that_is_not_a_cube_is_refused() {
     // `\x93NUMPY`, version, then a two-byte header length.
     let header = |cells: usize| {
         let mut bytes = b"\x93NUMPY\x01\x00\x00\x00".to_vec();
-        bytes.extend(std::iter::repeat_n(0u8, cells));
+        bytes.extend(iter::repeat_n(0u8, cells));
         bytes
     };
     let (lo, hi) = (Vec3::splat(-1.0), Vec3::splat(1.0));
