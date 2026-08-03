@@ -17,6 +17,7 @@
 //! plus the group-1 bind group built against shared texture bindings.
 
 use super::targets::Targets;
+use std::iter;
 use std::slice;
 
 /// Bytes per expanded quad vertex: `anchor vec3<f32>` (12) +
@@ -49,10 +50,11 @@ pub struct TextureBindings {
     /// binding 1 — the layout the color material / overlay pipelines
     /// are built against. Filterable formats only.
     pub layout: wgpu::BindGroupLayout,
-    /// Non-filtering companion of `layout` (`filterable: false` texture
-    /// + `NonFiltering` sampler) for data-plane formats core WebGPU
-    /// cannot linear-filter (`R32Float`, ADR-0170). Bind groups built
-    /// against it are not compatible with pipelines built on `layout`.
+    /// Non-filtering companion of `layout` — a `filterable: false`
+    /// texture entry plus a `NonFiltering` sampler entry — for
+    /// data-plane formats core WebGPU cannot linear-filter (`R32Float`,
+    /// ADR-0170). Bind groups built against it are not compatible with
+    /// pipelines built on `layout`.
     pub data_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
     /// Nearest-neighbor sampler for label planes whose texel values are
@@ -270,6 +272,10 @@ pub fn build_quad_pipeline(
 /// through the non-filtering data layout regardless. Pair with
 /// [`upload_texture_full`] to refresh the pixels later without rebuilding
 /// the bind group.
+// Eight arguments mirror the same all-in-one shape `record_quad_overlay_pass`
+// uses; bundling into a struct for the one render-cap call site adds no
+// clarity.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn realize_texture(
     device: &wgpu::Device,
@@ -338,7 +344,7 @@ pub fn realize_writable_texture(
         occlusion_query_set: None,
         multiview_mask: None,
     }));
-    queue.submit(std::iter::once(encoder.finish()));
+    queue.submit(iter::once(encoder.finish()));
 
     RealizedTexture { texture, bind_group, width, height, format }
 }
