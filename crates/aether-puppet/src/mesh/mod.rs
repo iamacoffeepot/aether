@@ -79,7 +79,7 @@ impl Mesh {
         let agreement: f32 =
             raw.positions.iter().zip(&normals).map(|(&p, &n)| (p - centre).normalize_or(n).dot(n)).sum::<f32>()
                 / raw.positions.len() as f32;
-        eprintln!("normal orientation: {agreement:+.3}");
+        tracing::debug!(target: "aether_puppet", agreement, "normal orientation");
 
         let bvh = Bvh::build(&raw.positions, &raw.faces);
         Self { positions: raw.positions, faces: raw.faces, normals, min, max, bvh }
@@ -155,12 +155,10 @@ impl Mesh {
 
         // Exactly one corner is on its own; the crossings are on the two
         // edges that touch it.
-        let odd = if above[0] == above[1] {
-            2
-        } else if above[0] == above[2] {
-            1
-        } else {
-            0
+        let odd = match above {
+            [x, y, _] if x == y => 2,
+            [x, _, z] if x == z => 1,
+            _ => 0,
         };
         let (a, b) = (corners[(odd + 1) % 3], corners[(odd + 2) % 3]);
 

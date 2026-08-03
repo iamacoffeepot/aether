@@ -9,6 +9,8 @@
 //! - **Occluded.** The point is real and front-facing, but something else
 //!   stands between it and the eye.
 
+use core::mem;
+
 use aether_math::Vec3;
 
 use crate::feature::{Curve3, FeatureClass, SurfacePoint};
@@ -54,7 +56,7 @@ pub fn runs(mesh: &Mesh, eye: Vec3, curve: &Curve3, keep: &dyn Fn(&SurfacePoint)
         if on {
             current.push(*point);
         } else if !current.is_empty() {
-            segments.push(std::mem::take(&mut current));
+            segments.push(mem::take(&mut current));
         }
     }
     if !current.is_empty() {

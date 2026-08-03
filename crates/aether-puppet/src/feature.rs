@@ -48,7 +48,7 @@ impl Pen {
 }
 
 /// What a curve is, which sets its weight and how heavily it wanders.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureClass {
     /// The outline of the form against what lies behind it.
     Silhouette,

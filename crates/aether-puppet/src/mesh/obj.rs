@@ -7,6 +7,8 @@
 //! `aether.fs`. Normals in the file are
 //! per-face and get recomputed anyway; texture coordinates are unused.
 
+use core::str;
+
 use aether_math::Vec3;
 
 pub struct Raw {
@@ -20,7 +22,7 @@ fn take_f32(bytes: &[u8]) -> Option<(f32, &[u8])> {
     let rest = &bytes[start..];
     let end = rest.iter().position(u8::is_ascii_whitespace).unwrap_or(rest.len());
 
-    let value = std::str::from_utf8(&rest[..end]).ok()?.parse().ok()?;
+    let value = str::from_utf8(&rest[..end]).ok()?.parse().ok()?;
     Some((value, &rest[end..]))
 }
 
@@ -33,7 +35,7 @@ fn take_index(bytes: &[u8], vertex_count: usize) -> Option<(u32, &[u8])> {
 
     let token = &rest[..end];
     let position_end = token.iter().position(|&b| b == b'/').unwrap_or(token.len());
-    let raw: i64 = std::str::from_utf8(&token[..position_end]).ok()?.parse().ok()?;
+    let raw: i64 = str::from_utf8(&token[..position_end]).ok()?.parse().ok()?;
 
     // Negative indices count back from the end of the vertex list so far.
     let index = if raw < 0 {

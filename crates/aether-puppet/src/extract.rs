@@ -213,7 +213,7 @@ pub fn hatching(mesh: &Mesh, settings: &Settings) -> Vec<Curve3> {
                 points: Vec::new(),
                 class: FeatureClass::Hatch { level: family as u8 },
                 pen: Pen::Pale,
-                seed: (family as u64) << 32 | plane.unsigned_abs() as u64,
+                seed: u64::from(family as u32) << 32 | u64::from(plane.unsigned_abs()),
                 authored: false,
             };
 
@@ -271,10 +271,7 @@ pub fn creases(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec
                 // cannot tell them apart — but the material field already
                 // knows which is which, so ask it rather than inventing a
                 // geometric proxy for the same question.
-                .filter(|[a, b]| match labels {
-                    Some(field) => field.is(a.pos, &classes) || field.is(b.pos, &classes),
-                    None => true,
-                })
+                .filter(|[a, b]| labels.is_none_or(|field| field.is(a.pos, &classes) || field.is(b.pos, &classes)))
                 .collect();
 
             weld::curves(to_points(segments), &template)
@@ -300,9 +297,8 @@ pub fn suggestive(mesh: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Se
     let segments: Vec<_> = mesh
         .suggestive(eye, settings.suggestive, settings.suggestive_gate)
         .into_iter()
-        .filter(|[a, b]| match labels {
-            Some(field) => field.is(a.pos, &[labels::SKIN]) && field.is(b.pos, &[labels::SKIN]),
-            None => true,
+        .filter(|[a, b]| {
+            labels.is_none_or(|field| field.is(a.pos, &[labels::SKIN]) && field.is(b.pos, &[labels::SKIN]))
         })
         .collect();
 

@@ -12,8 +12,6 @@
 //! field was baked with — a cube over the longest axis plus 12% padding
 //! either side — so no transform has to be carried alongside the volume.
 
-use std::path::Path;
-
 use aether_math::Vec3;
 
 /// Class indices as the source spike writes them: `0` unlabelled, then
@@ -51,15 +49,20 @@ pub struct Labels {
 impl Labels {
     /// Read a `uint8` C-order cubic `.npy` and place it against `min`/`max`,
     /// the bounds of the mesh it was baked from.
-    pub fn load(path: &Path, min: Vec3, max: Vec3, pad: f32) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
+    ///
+    /// Bytes rather than a path: a guest has no filesystem, so the field
+    /// arrives by mail from `aether.fs` like the mesh does. `None` when the
+    /// buffer is too short to carry a header or holds something that is not
+    /// a cube — the lattice is reconstructed from the cell count, so a
+    /// non-cube would silently place every sample in the wrong place.
+    pub fn parse(bytes: &[u8], min: Vec3, max: Vec3, pad: f32) -> Option<Self> {
         // `\x93NUMPY`, major, minor, then a little-endian header length.
-        let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-        let cells = bytes[10 + header_len..].to_vec();
+        let header_len = usize::from(u16::from_le_bytes([*bytes.get(8)?, *bytes.get(9)?]));
+        let cells = bytes.get(10 + header_len..)?.to_vec();
 
         let n = (cells.len() as f64).cbrt().round() as usize;
-        if n * n * n != cells.len() {
-            return Err(std::io::Error::other(format!("{} cells is not a cube", cells.len())));
+        if n < 2 || n * n * n != cells.len() {
+            return None;
         }
 
         let centre = (min + max) * 0.5;
@@ -67,7 +70,7 @@ impl Labels {
         let origin = centre - Vec3::splat(span * (0.5 + pad));
         let spacing = span * (1.0 + 2.0 * pad) / (n - 1) as f32;
 
-        Ok(Self { cells, n, origin, spacing })
+        Some(Self { cells, n, origin, spacing })
     }
 
     fn at(&self, ix: i32, iy: i32, iz: i32) -> u8 {

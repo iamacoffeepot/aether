@@ -1,5 +1,24 @@
-// Camera and stroke maths: bounded counts cast to f32 are domain-correct.
-#![allow(clippy::cast_precision_loss)]
+// Geometry throughout, and the numeric lints are answered the way
+// `aether-math` and `aether-mesh` answer them. Counts and indices cast to
+// and from `f32` are bounded by the mesh; `mul_add` changes float
+// semantics for no gain the eye can see; and `a`/`b`/`c` for the corners
+// of a triangle is the clearest name those have.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::suboptimal_flops,
+    clippy::many_single_char_names
+)]
+// The renderer is a pipeline of pure transforms, so very nearly every
+// function returns something. Marking each one adds noise without
+// catching anything a caller could plausibly get wrong.
+#![allow(clippy::must_use_candidate, clippy::return_self_not_must_use)]
+// Handlers take `&mut self` because the ADR-0033 dispatch ABI says so, not
+// because each one needs it: a handler that only forwards to a capability
+// touches no state at all.
+#![allow(clippy::unused_self)]
 // `#[handler]` methods take the decoded mail by value per the ADR-0033
 // dispatch ABI; the trampoline owns the payload and hands it off.
 #![allow(clippy::needless_pass_by_value)]
