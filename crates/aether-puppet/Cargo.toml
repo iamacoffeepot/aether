@@ -1,0 +1,51 @@
+[package]
+name = "aether-puppet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The mascot, drawn as pen-plotter line art on a live substrate.
+#
+# It never asks what colour a pixel is. It asks which lines an illustrator
+# would draw on the surface, solves them against the real geometry, decides
+# which survive, and emits them as stroke ribbons through
+# `aether.draw_triangle`. The renderer is ported from the `plot` tool in the
+# tessera research tree; what is new here is the actor around it and the
+# ribbon builder that replaces the SVG emitter.
+#
+# One crate rather than a module in the kit family: the renderer, the
+# charted face, the control surface and the rig are one subsystem, and
+# scattering them across sibling crates would hide that.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# Guest faces only — this is a wasm component and addresses every capability
+# by mail, so each cap comes in marker-only with its runtime feature off.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+aether-render = { path = "../aether-render", default-features = false }
+# ADR-0164: window-originated input is addressed through the neutral window
+# identity, so a drag camera takes the window cap's marker-only guest face.
+aether-window = { path = "../aether-window", default-features = false }
+aether-fs = { path = "../aether-fs", default-features = false }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native
+# builds so the `aether.kinds` descriptor list picks up its types. Wasm
+# guests skip the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-render = { path = "../aether-render" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+
+[lints]
+workspace = true

@@ -152,6 +152,10 @@ pub fn build_main_pipeline(
 /// pass is skipped, no encoder writes happen, the caller decides
 /// whether to log and continue (skipping submit) or short-circuit.
 /// Empty `vertices` is fine: the clear still runs, no draw is issued.
+// A pass recording call names the GPU resources it binds, and there are
+// eight of them. Grouping them into a struct would only move the same list
+// behind a name that adds nothing.
+#[allow(clippy::too_many_arguments)]
 pub fn record_main_pass(
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -160,6 +164,7 @@ pub fn record_main_pass(
     vertices: &[u8],
     view_proj: &[f32; 16],
     extra_pipelines: &[&wgpu::RenderPipeline],
+    clear: wgpu::Color,
 ) -> Result<(), RenderError> {
     let vertex_bytes = vertices.len();
     // Clamp against the buffer's created size, so the check tracks
@@ -193,10 +198,7 @@ pub fn record_main_pass(
             view: targets.color_view(),
             resolve_target: None,
             depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 }),
-                store: wgpu::StoreOp::Store,
-            },
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
         })],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &targets.depth.view,

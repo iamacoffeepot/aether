@@ -116,7 +116,10 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
             };
             let (slot, _wake_slot) = passive
                 .boot_pumped_actor::<RenderCapability>(
-                    RenderTuningConfig { vertex_buffer_bytes: VERTEX_BUFFER_BYTES },
+                    RenderTuningConfig {
+                        vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+                        clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
+                    },
                     params,
                 )
                 .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
