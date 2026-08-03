@@ -266,10 +266,15 @@ pub struct DrawSolidQuads {
     pub quads: Vec<SolidQuad>,
 }
 
-/// Shared world-plane rect for material draws. `(x, y, width, height)`
-/// are world units and `z` is the depth-tested layer the material quad
-/// sits on. Not a kind on its own — embedded in the typed material
-/// draw payloads below.
+/// Shared world rect for material draws. `(x, y, z)` is the rect's
+/// origin corner and `right` / `up` are the world directions its
+/// `width` and `height` extend along: a corner at fractional `(u, v)`
+/// sits at `origin + right * width * u + up * height * v`. A draped
+/// planar caller passes the world axes (`right = [1, 0, 0]`,
+/// `up = [0, 1, 0]`); an oriented caller — a camera-facing
+/// underpainting standing behind its subject — hands the basis it
+/// already knows. Depth-tests like any world geometry. Not a kind on
+/// its own — embedded in the typed material draw payloads below.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MaterialRect {
     pub x: f32,
@@ -277,6 +282,8 @@ pub struct MaterialRect {
     pub width: f32,
     pub height: f32,
     pub z: f32,
+    pub right: [f32; 3],
+    pub up: [f32; 3],
 }
 
 /// One textured material rect. The rect expands to a world-space quad;

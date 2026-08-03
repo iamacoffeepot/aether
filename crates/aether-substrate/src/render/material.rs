@@ -224,23 +224,35 @@ pub fn material_params_offset(index: usize) -> Option<u32> {
     index.checked_mul(PARAMS_ALIGN).and_then(|offset| u32::try_from(offset).ok())
 }
 
-pub fn push_material_rect_vertices(out: &mut Vec<u8>, rect: [f32; 5], uv: [f32; 4]) {
-    let [x, y, width, height, z] = rect;
+// `mul_add` would change float semantics for no gain the eye can see, and
+// the plain form keeps corner(u, v) readable as origin + basis extents.
+#[allow(clippy::suboptimal_flops)]
+pub fn push_material_rect_vertices(
+    out: &mut Vec<u8>,
+    origin: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    size: [f32; 2],
+    uv: [f32; 4],
+) {
     let [u0, v0, u1, v1] = uv;
-    let x0 = x;
-    let y0 = y;
-    let x1 = x + width;
-    let y1 = y + height;
+    let corner = |u: f32, v: f32| {
+        [
+            origin[0] + right[0] * size[0] * u + up[0] * size[1] * v,
+            origin[1] + right[1] * size[0] * u + up[1] * size[1] * v,
+            origin[2] + right[2] * size[0] * u + up[2] * size[1] * v,
+        ]
+    };
     let corners = [
-        (x0, y0, z, u0, v0),
-        (x0, y1, z, u0, v1),
-        (x1, y1, z, u1, v1),
-        (x0, y0, z, u0, v0),
-        (x1, y1, z, u1, v1),
-        (x1, y0, z, u1, v0),
+        (corner(0.0, 0.0), u0, v0),
+        (corner(0.0, 1.0), u0, v1),
+        (corner(1.0, 1.0), u1, v1),
+        (corner(0.0, 0.0), u0, v0),
+        (corner(1.0, 1.0), u1, v1),
+        (corner(1.0, 0.0), u1, v0),
     ];
-    for (px, py, pz, u, v) in corners {
-        let floats: [f32; 5] = (px, py, pz, u, v).into();
+    for (position, u, v) in corners {
+        let floats: [f32; 5] = [position[0], position[1], position[2], u, v];
         out.extend_from_slice(bytemuck::cast_slice(&floats));
     }
 }
@@ -366,8 +378,17 @@ mod tests {
 
     #[test]
     fn material_rect_vertices_have_expected_stride_and_corners() {
+        // Tripwire: the world-axis basis must reproduce the flat XY-plane
+        // expansion byte for byte — every draped caller depends on it.
         let mut bytes = Vec::new();
-        push_material_rect_vertices(&mut bytes, [1.0, 2.0, 3.0, 4.0, 0.5], [0.1, 0.2, 0.8, 0.9]);
+        push_material_rect_vertices(
+            &mut bytes,
+            [1.0, 2.0, 0.5],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [3.0, 4.0],
+            [0.1, 0.2, 0.8, 0.9],
+        );
         let vertex_stride = usize::try_from(MATERIAL_VERTEX_STRIDE).expect("material vertex stride fits usize");
         assert_eq!(bytes.len(), MATERIAL_VERTICES_PER_RECT * vertex_stride);
         let floats: &[f32] = bytemuck::cast_slice(&bytes);
@@ -375,6 +396,24 @@ mod tests {
         assert_eq!(&floats[5..10], &[1.0, 6.0, 0.5, 0.1, 0.9]);
         assert_eq!(&floats[10..15], &[4.0, 6.0, 0.5, 0.8, 0.9]);
         assert_eq!(&floats[25..30], &[4.0, 2.0, 0.5, 0.8, 0.2]);
+    }
+
+    #[test]
+    fn material_rect_vertices_extend_along_the_given_basis() {
+        let mut bytes = Vec::new();
+        push_material_rect_vertices(
+            &mut bytes,
+            [1.0, 2.0, 0.5],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [3.0, 4.0],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        let floats: &[f32] = bytemuck::cast_slice(&bytes);
+        assert_eq!(&floats[0..3], &[1.0, 2.0, 0.5]);
+        assert_eq!(&floats[5..8], &[1.0, 6.0, 0.5]);
+        assert_eq!(&floats[10..13], &[1.0, 6.0, 3.5]);
+        assert_eq!(&floats[25..28], &[1.0, 2.0, 3.5]);
     }
 
     #[test]
