@@ -7,6 +7,8 @@
 
 use alloc::string::String;
 
+use aether_data::schema::{LabelNode, SchemaType};
+use aether_data::{MailboxId, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
@@ -16,23 +18,31 @@ use serde::{Deserialize, Serialize};
 /// `winit::window::WindowId`: it is portable across native and guest code and
 /// remains meaningful in traces and replay data.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Pod,
-    Zeroable,
-    aether_data::Schema,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Pod, Zeroable, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
+
+/// A window id *is* a [`MailboxId`] — ADR-0164 addresses window-originated
+/// input through the window's own actor identity, and the desktop window
+/// manager mints this from that actor's ADR-0099 lineage fold. Declaring it
+/// as one is what gives it the ADR-0064 tagged-string form
+/// (`mbx-q3lr-bv2x-mtdr`) at the JSON boundary.
+///
+/// Which is not cosmetic. A lineage fold occupies the top of the `u64`
+/// range — around 2^60 — and the derived `Scalar(U64)` schema this replaces
+/// rendered it as a bare JSON number, where a consumer parsing numbers as
+/// doubles quantises it to the nearest multiple of 256. So the id an agent
+/// read back from `aether.window.list` could not be handed to
+/// `capture_frame`: `1473705000037674430` returned as `...674500`, and
+/// desktop capture was unaddressable (iamacoffeepot/aether#4344).
+///
+/// The wire encoding is unchanged — `TypeId` is a fixed 8-byte
+/// little-endian field exactly as `Scalar(U64)` was, and the codec still
+/// accepts a plain number on the way in.
+impl Schema for WindowId {
+    const SCHEMA: SchemaType = SchemaType::TypeId(MailboxId::TYPE_ID);
+    const LABEL: Option<&'static str> = Some(MailboxId::TYPE_NAME);
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
 
 /// A single keyboard keypress, identified by the stable codes in
 /// `keycode`. Dispatched on press only (no repeat). Released keys

@@ -614,11 +614,13 @@ dependencies = [
 name = "aether-kinds"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-codec",
  "aether-data",
  "aether-math",
  "bytemuck",
  "inventory",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

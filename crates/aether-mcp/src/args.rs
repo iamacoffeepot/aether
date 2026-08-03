@@ -1255,9 +1255,16 @@ pub struct CaptureSimilaritySpec {
 pub struct CaptureFrameArgs {
     /// Engine UUID to capture (from `list_engines`).
     pub engine_id: String,
-    /// Engine window id to capture. Desktop capture never guesses a primary,
-    /// focused, or current window.
-    pub window_id: u64,
+    /// Engine window id to capture, as the tagged `mbx-…` string
+    /// `aether.window.list` reports. Desktop capture never guesses a
+    /// primary, focused, or current window.
+    ///
+    /// A string rather than a number because a real window id is an
+    /// ADR-0099 lineage fold near 2^60, which a JSON number cannot carry
+    /// to a consumer that parses it as a double (iamacoffeepot/aether#4344).
+    /// A decimal `u64` is still accepted for a synthetic or harness-scale
+    /// id small enough to be exact.
+    pub window_id: String,
     /// Mail dispatched *before* the frame is read back — state changes
     /// whose effects should appear in the image. Resolved atomically:
     /// any bad entry aborts the whole capture.
