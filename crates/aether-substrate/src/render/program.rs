@@ -281,6 +281,37 @@ pub fn create_program_transient(
     })
 }
 
+/// Where one recorded pass writes its GPU timestamps
+/// (iamacoffeepot/aether#4423). Both indices name queries in the same
+/// set, so the pass's span is one subtraction after the caller resolves
+/// it; the caller owns the set, the resolve, and the readback.
+///
+/// A repeated pass brackets the whole repeat rather than each iteration:
+/// the first iteration carries `beginning` alone, the last carries `end`
+/// alone, and the iterations between carry no timestamps at all — which
+/// is why each index is optional. wgpu rejects a `Some` timestamp write
+/// with both indices `None`, so a pass with neither passes no
+/// `timestamps` at all.
+#[derive(Copy, Clone)]
+pub struct PassTimestamps<'a> {
+    pub query_set: &'a wgpu::QuerySet,
+    pub beginning: Option<u32>,
+    pub end: Option<u32>,
+}
+
+impl<'a> PassTimestamps<'a> {
+    /// Lower into the render-pass descriptor's field. A method rather
+    /// than a free mapper so both recorders spell it once.
+    #[must_use]
+    pub fn writes(self) -> wgpu::RenderPassTimestampWrites<'a> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: self.query_set,
+            beginning_of_pass_write_index: self.beginning,
+            end_of_pass_write_index: self.end,
+        }
+    }
+}
+
 /// One recorded program pass iteration: the pass's pipeline, the slot
 /// view it renders into, whether this is the dispatch's first write to
 /// that slot (clear to transparent black) or a later one (load), and
@@ -294,6 +325,9 @@ pub struct ProgramPassDraw<'a> {
     pub uniform_bind_group: &'a wgpu::BindGroup,
     pub uniform_offset: u32,
     pub inputs_bind_group: &'a wgpu::BindGroup,
+    /// GPU timestamps to bracket this iteration with, or `None` when the
+    /// per-pass timing instrument is not running.
+    pub timestamps: Option<PassTimestamps<'a>>,
 }
 
 /// Record one program pass iteration into `encoder`: a fullscreen
@@ -313,7 +347,7 @@ pub fn record_program_pass(encoder: &mut wgpu::CommandEncoder, draw: &ProgramPas
             ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
         })],
         depth_stencil_attachment: None,
-        timestamp_writes: None,
+        timestamp_writes: draw.timestamps.map(PassTimestamps::writes),
         occlusion_query_set: None,
         multiview_mask: None,
     });
@@ -347,6 +381,9 @@ pub struct ProgramDrawPass<'a> {
     pub vertex_buffer: &'a wgpu::Buffer,
     pub index_buffer: &'a wgpu::Buffer,
     pub index_count: u32,
+    /// GPU timestamps to bracket this iteration with, or `None` when the
+    /// per-pass timing instrument is not running.
+    pub timestamps: Option<PassTimestamps<'a>>,
 }
 
 /// Record one draw pass iteration into `encoder`: an indexed
@@ -381,7 +418,7 @@ pub fn record_program_draw_pass(encoder: &mut wgpu::CommandEncoder, draw: &Progr
             ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
         })],
         depth_stencil_attachment: depth_attachment,
-        timestamp_writes: None,
+        timestamp_writes: draw.timestamps.map(PassTimestamps::writes),
         occlusion_query_set: None,
         multiview_mask: None,
     });

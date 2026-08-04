@@ -36,6 +36,19 @@ pub struct RenderTuningConfig {
     /// reads as highlight, which inverts the whole tonal reading.
     #[config(default = "0d1220")]
     pub clear_color: String,
+    /// Measure per-pass GPU durations for authored programs.
+    ///
+    /// Brackets every recorded program pass with a wgpu timestamp query
+    /// pair and folds the resolved spans into the per-pass EWMAs
+    /// `aether.render.program.timings` reports
+    /// (iamacoffeepot/aether#4423). Off by default: placing a timestamp
+    /// at a pass boundary is not free on a tile-based GPU, and a
+    /// measurement that changes the frame it measures should be asked
+    /// for rather than assumed. Turning it on where the adapter has no
+    /// `TIMESTAMP_QUERY` changes nothing — the reply stays
+    /// absent-with-reason.
+    #[config(default = false)]
+    pub pass_timings: bool,
 }
 
 /// `rrggbb` to linear-ish RGB, falling back to the historical dark field

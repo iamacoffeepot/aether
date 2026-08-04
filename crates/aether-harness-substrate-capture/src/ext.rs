@@ -94,43 +94,62 @@ impl FrameHook for GpuFrameHook {
 pub trait RenderHarnessBuilderExt {
     #[must_use]
     fn with_render(self) -> Self;
+
+    /// Render support with the per-pass GPU timing instrument on
+    /// (iamacoffeepot/aether#4423). An explicit builder call rather than
+    /// the cap's `AETHER_RENDER_PASS_TIMINGS` env knob, because a test
+    /// binary runs its scenarios in parallel threads and a process-wide
+    /// environment mutation would decide the instrument's state for
+    /// whichever scenario happened to boot next.
+    ///
+    /// Timestamp queries can perturb the frame they measure, so the
+    /// instrument stays off for every other scenario.
+    #[must_use]
+    fn with_render_pass_timings(self) -> Self;
 }
 
 impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
     fn with_render(self) -> Self {
-        self.render_hook(Box::new(|passive, wiring, width, height| {
-            let RenderHookWiring { mailer, observed_kinds, assets_dir } = wiring;
-            // The `FrameCheck` / similarity scorer lives in
-            // `aether_substrate::render::visual` (below aether-render), so the
-            // pumped runtime scores capture verdicts + similarity directly in
-            // its ready-readback branch — no scorer injection.
-            // `..Default::default()` fills `wireframe: None` and — under a
-            // feature-unified build that enables aether-render/desktop — the
-            // desktop-only `window: None`, so this literal is robust to feature
-            // unification.
-            let params = RenderParams {
-                observed_kinds,
-                assets_dir,
-                offscreen_size: Some((width, height)),
-                ..Default::default()
-            };
-            let (slot, _wake_slot) = passive
-                .boot_pumped_actor::<RenderCapability>(
-                    RenderTuningConfig {
-                        vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-                        clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
-                    },
-                    params,
-                )
-                .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
-            // The pumped slot registered its inbox under the actor's NAMESPACE,
-            // so its id is the name hash — the same id
-            // `send_and_await_reply("aether.render", CaptureFrame)` resolves.
-            #[allow(clippy::disallowed_methods)] // ctx-less harness setup; no sibling resolver in scope
-            let render_mailbox = aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE);
-            Ok(Box::new(GpuFrameHook { slot, mailer, render_mailbox }) as Box<dyn FrameHook>)
-        }))
+        render_hook(self, false)
     }
+
+    fn with_render_pass_timings(self) -> Self {
+        render_hook(self, true)
+    }
+}
+
+/// The shared render hook both builder entry points register, differing
+/// only in whether the booted cap measures per-pass GPU durations.
+fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool) -> SubstrateHarnessBuilder {
+    builder.render_hook(Box::new(move |passive, wiring, width, height| {
+        let RenderHookWiring { mailer, observed_kinds, assets_dir } = wiring;
+        // The `FrameCheck` / similarity scorer lives in
+        // `aether_substrate::render::visual` (below aether-render), so the
+        // pumped runtime scores capture verdicts + similarity directly in
+        // its ready-readback branch — no scorer injection.
+        // `..Default::default()` fills `wireframe: None` and — under a
+        // feature-unified build that enables aether-render/desktop — the
+        // desktop-only `window: None`, so this literal is robust to feature
+        // unification.
+        let params =
+            RenderParams { observed_kinds, assets_dir, offscreen_size: Some((width, height)), ..Default::default() };
+        let (slot, _wake_slot) = passive
+            .boot_pumped_actor::<RenderCapability>(
+                RenderTuningConfig {
+                    vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+                    clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
+                    pass_timings,
+                },
+                params,
+            )
+            .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
+        // The pumped slot registered its inbox under the actor's NAMESPACE,
+        // so its id is the name hash — the same id
+        // `send_and_await_reply("aether.render", CaptureFrame)` resolves.
+        #[allow(clippy::disallowed_methods)] // ctx-less harness setup; no sibling resolver in scope
+        let render_mailbox = aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE);
+        Ok(Box::new(GpuFrameHook { slot, mailer, render_mailbox }) as Box<dyn FrameHook>)
+    }))
 }
 
 /// Harness extension restoring the render-typed overlay accessor the core no
