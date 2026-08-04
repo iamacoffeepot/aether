@@ -21,6 +21,11 @@
 //! any facing-gated coverage reduces to the bare class mask — the
 //! placement the reference board applies.
 
+// Skip diagnostics go to stderr so `cargo test -- --ignored --nocapture`
+// surfaces them next to the test name.
+#![allow(clippy::print_stderr)]
+
+use std::env;
 use std::fs;
 use std::path::Path;
 
@@ -47,7 +52,7 @@ fn crossfeed_the_wash_with_external_planes() {
     // Instrument input, not cap config: the test is opt-in and the
     // directory only exists on the workstation driving it.
     #[allow(clippy::disallowed_methods)]
-    let Ok(dir) = std::env::var("AETHER_CROSSFEED_DIR") else {
+    let Ok(dir) = env::var("AETHER_CROSSFEED_DIR") else {
         eprintln!("AETHER_CROSSFEED_DIR unset; nothing to cross-feed");
         return;
     };

@@ -148,7 +148,7 @@ struct LoadContext {
 /// `facing.bin` (little-endian f32 per pixel) — under `prefix` in
 /// `namespace`, for offline diff against the reference board's baked map
 /// and for cross-feeding the CPU wash oracle.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.dump_planes")]
 pub struct DumpPlanes {
     /// Writable `aether.fs` namespace to dump into, e.g. `save`.
