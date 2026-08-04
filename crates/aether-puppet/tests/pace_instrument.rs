@@ -52,7 +52,7 @@ use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{Load, LoadResult as PuppetLoadResult, Look, Pose, anchor, chart};
+use aether_puppet::{Load, LoadResult as PuppetLoadResult, Look, Pose, anchor, chart, deform};
 use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
 /// The address a loaded component registers at (ADR-0099).
@@ -591,6 +591,58 @@ fn the_render_handler_divides_by_phase() {
     );
     time_the_develop(&at, &view, canvas);
     time_the_eye_moved_half(&at, drawing, &view);
+    if let Some(skin) = at.skin.as_ref() {
+        time_the_pose_moved_half(&at, skin, &view);
+    }
+}
+
+/// Yaw a pose phase is measured at — off rest, so nothing short-circuits,
+/// and inside the arc a bust rig is meant to turn through.
+const PHASE_YAW: f32 = 18.0;
+
+/// The half only a pose pays, and what the coarse-mesh question turns on.
+///
+/// Four terms, and they scale with two different things. The surface skin
+/// and the prepass pack scale with the *mesh* — a coarse subject cuts them
+/// directly. The curve skin, the gate and the strokes pack scale with the
+/// *drawing*, and the drawing's point count is the level set's arc length
+/// over the triangle size, so a coarse mesh thins it rather than cutting
+/// it in proportion.
+///
+/// The pack is timed over the whole drawing rather than the volatile half
+/// because that is what a posed frame ships: every curve moved, so the
+/// resident buffer #4435 leaves on the GPU across an orbit is exactly what
+/// a pose invalidates. Read it against the same pack in
+/// `time_the_eye_moved_half`, which is the same work over the 12% an orbit
+/// re-ships.
+fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
+    let pose = Pose { yaw: PHASE_YAW, ..Pose::default() };
+    let transforms = skin.transforms(&pose);
+    let mut posed = at.mesh.deformable();
+
+    phase("pose — the surface skin, per vertex", PHASE_REPEATS, || {
+        skin.pose_surface(&transforms, &at.mesh, &mut posed.positions, &mut posed.normals);
+    });
+    posed.rebound();
+
+    let carried = phase("pose — the curve skin and the tone gate, per curve point", PHASE_REPEATS, || {
+        deform::posed_surface(skin, &transforms, &posed, &at.ungated, &at.settings)
+    });
+    phase("pose — silhouette off the posed surface", PHASE_REPEATS, || extract::silhouettes(&posed, view.eye));
+    phase("pose — the prepass subject pack, per vertex", PHASE_REPEATS, || sight::subject_vertices(&posed));
+
+    let volatile: Vec<Curve3> = carried.into_iter().chain(at.volatile_at(view.eye)).collect();
+    let drawing = Drawing { resident: &[], volatile: &volatile };
+    phase("pose — strokes pack, the WHOLE drawing volatile", PHASE_REPEATS, || {
+        let layout = sight::layout(drawing, (WIDTH, HEIGHT)).expect("the drawing fits");
+        (
+            sight::point_vertices(drawing, layout.volatile()),
+            sight::point_indices(layout.volatile()),
+            sight::curve_vertices(drawing, &layout, view.eye),
+            stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
+        )
+    });
+    eprintln!("phase: posed, the drawing is {} curves, all of them volatile", volatile.len());
 }
 
 /// The phases `Easel::develop` runs, in the order it runs them — the ones
@@ -670,7 +722,16 @@ struct Subject {
     settings: Settings,
     anchors: anchor::Anchors,
     scores: Vec<[f32; CLASSES]>,
+    /// The surface curves the component holds at rest: extracted once and
+    /// tone-gated once, since nothing turns their normals.
     resident: Vec<Curve3>,
+    /// The same curves ungated, which is what a rigged subject holds — the
+    /// gate reads each point's normal, so it runs after every skinning
+    /// pass rather than at load.
+    ungated: Vec<Curve3>,
+    /// The rig, when the crossfeed directory carries one. The pose phases
+    /// are skipped without it, as the pose sweep is.
+    skin: Option<deform::Skin>,
 }
 
 impl Subject {
@@ -683,9 +744,14 @@ impl Subject {
         let settings = Settings::default();
         let anchors = anchor::Anchors::measure(&mesh, &labels).expect("the subject carries a charted face");
         let scores = labels.vertex_scores(&mesh.positions);
-        let resident = extract::tone_gate(extract::surface(&mesh, Some(&labels), Some(&anchors), &settings), &settings);
+        let ungated = extract::surface(&mesh, Some(&labels), Some(&anchors), &settings);
+        let resident = extract::tone_gate(ungated.clone(), &settings);
+        let skin = fs::read(dir.join("rig/weights.npy"))
+            .ok()
+            .zip(fs::read_to_string(dir.join("rig/rig.txt")).ok())
+            .and_then(|(weights, descriptor)| deform::Skin::parse(&weights, &descriptor, mesh.positions.len()));
 
-        Self { mesh, labels, settings, anchors, scores, resident }
+        Self { mesh, labels, settings, anchors, scores, resident, ungated, skin }
     }
 
     fn chart_face(&self) -> chart::Face {

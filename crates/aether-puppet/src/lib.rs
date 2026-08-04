@@ -372,12 +372,22 @@ impl Puppet {
         else {
             return;
         };
+        self.posed_at = Some(self.pose);
+
+        // Back at rest the sculpt itself is the surface again, so the
+        // prepass buffer goes back to it and the resident half is refilled
+        // — the return trip has to ship as much as the outbound one did,
+        // or she stands still in the pose she was last driven to.
+        if self.pose.is_rest() {
+            self.posed_surface.clear();
+            self.strokes.subject_posed(subject);
+            return;
+        }
 
         self.transforms = skin.transforms(&self.pose);
         skin.pose_surface(&self.transforms, subject, &mut posed.positions, &mut posed.normals);
         posed.rebound();
         self.posed_surface = deform::posed_surface(skin, &self.transforms, posed, &self.surface, &self.settings);
-        self.posed_at = Some(self.pose);
 
         // The prepass reads the surface the ink is drawn on, so it has to
         // be the posed one — a depth buffer left at the rest pose culls
@@ -681,7 +691,10 @@ impl WasmActor for Puppet {
             self.surface = extract::tone_gate(mem::take(&mut self.surface), &self.settings);
         }
         self.posed = self.skin.as_ref().map(|_| subject.deformable());
-        self.posed_at = None;
+        // A fresh subject stands at rest, and `subject_changed` below has
+        // already staged it, so the first frame owes no skinning at all.
+        self.posed_at = Some(Pose::default());
+        self.pose = Pose::default();
         self.drawn_from = None;
         self.easel.subject_changed();
         self.strokes.subject_changed(subject);
