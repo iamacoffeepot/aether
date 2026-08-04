@@ -115,6 +115,60 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     return plane_out(sum / (2.0 * half_width));
 }
 
+// The whole chain's softening as one kernel (iamacoffeepot/aether#4441).
+// Convolution is associative, so the three box sweeps one axis carries are
+// a single piecewise-quadratic kernel, and the axes commute — six sweeps
+// collapse to two. The weights are the CPU's own: the three tap arrays
+// above convolved exactly and normalized (see `composite_taps`), which is
+// why one sweep here lands what three of `fs_box_blur` landed rather than
+// approximating them.
+//
+// The kernel is symmetric, so the uniform carries it from the centre out —
+// `weights[0].x` is the centre tap and the rest run outwards, four to a
+// vector because the uniform address space strides arrays by sixteen
+// bytes. The loop pays one load per side and one add, as the box sweep
+// does, over a window three times its reach.
+//
+// Exact at the border too, which is what the plane's mirrored edge buys
+// (iamacoffeepot/aether#4444): a symmetric extension survives a symmetric
+// kernel, so re-extending between three sweeps lands where extending once
+// does. Under a replicated edge the two would part within three reaches
+// of every edge.
+const FUSED_BLUR_VECTORS: u32 = 12u;
+
+struct FusedBlurParams {
+    // Tap pairs past the centre — the kernel spans `2 * pairs + 1` taps.
+    pairs: i32,
+    weights: array<vec4<f32>, FUSED_BLUR_VECTORS>,
+}
+
+@group(0) @binding(0) var<uniform> fused_blur: FusedBlurParams;
+@group(1) @binding(0) var fused_blur_source: texture_2d<f32>;
+
+fn fused_weight(tap: i32) -> f32 {
+    return fused_blur.weights[tap / 4][tap % 4];
+}
+
+fn fused_sweep(at: vec2<i32>, axis: vec2<i32>) -> vec4<f32> {
+    var sum = fused_weight(0) * load_reflected(fused_blur_source, at);
+    for (var tap = 1; tap <= fused_blur.pairs; tap++) {
+        let reach = axis * tap;
+        sum += fused_weight(tap)
+            * (load_reflected(fused_blur_source, at - reach) + load_reflected(fused_blur_source, at + reach));
+    }
+    return plane_out(sum);
+}
+
+@fragment
+fn fs_fused_blur_x(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return fused_sweep(vec2<i32>(position.xy), vec2<i32>(1, 0));
+}
+
+@fragment
+fn fs_fused_blur_y(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return fused_sweep(vec2<i32>(position.xy), vec2<i32>(0, 1));
+}
+
 // The two ends of a reduced-extent blur chain (iamacoffeepot/aether#4437).
 // Blur discards high frequencies by construction, so the sweeps between
 // these two need no more texels than the softening leaves standing: the

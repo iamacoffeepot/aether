@@ -365,8 +365,10 @@ impl Graph {
     /// softening by `radius_pixels` of the reference sheet. The chain
     /// sweeps at whatever extent that radius affords on this canvas
     /// (iamacoffeepot/aether#4437): the wider the softening, the fewer
-    /// texels it needs to carry it. Returns the blurred plane and the
-    /// plan its window is written from.
+    /// texels it needs to carry it. Its three iterations ride one
+    /// composite kernel per axis (iamacoffeepot/aether#4441), so the
+    /// chain is two passes rather than six. Returns the blurred plane and
+    /// the plan its window is written from.
     fn blur(&mut self, source: InputSlot, radius_pixels: f32) -> (InputSlot, BlurPlan) {
         let tuned = image::tuned(radius_pixels, self.canvas_height);
         let divisor = puddle::blur_divisor(tuned);
@@ -376,8 +378,12 @@ impl Graph {
             divisor,
         };
 
-        let chain =
-            puddle::BoxBlurChain { scratch: self.reduced_plane(divisor), carry: self.reduced_plane(divisor), divisor };
+        let chain = puddle::BoxBlurChain {
+            scratch: self.reduced_plane(divisor),
+            carry: self.reduced_plane(divisor),
+            divisor,
+            half_width_texels: plan.half_width_texels,
+        };
         let out = self.plane();
         self.passes.extend(puddle::box_blur_passes(source, &chain, OutputSlot::Transient { index: out }, plan.window));
 

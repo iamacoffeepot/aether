@@ -38,6 +38,11 @@ pub const PUDDLE_WGSL: &str = include_str!("puddle.wgsl");
 /// Entry point of one separable box-average sweep ([`box_blur_passes`]).
 pub const BOX_BLUR_ENTRY: &str = "fs_box_blur";
 
+/// Entry points of one fused sweep per axis — the chain's whole softening
+/// as a single kernel ([`composite_taps`]).
+pub const FUSED_BLUR_X_ENTRY: &str = "fs_fused_blur_x";
+pub const FUSED_BLUR_Y_ENTRY: &str = "fs_fused_blur_y";
+
 /// Entry points of a reduced-extent chain's two ends: the block average
 /// into the reduced plane and the bilinear carry back out of it.
 pub const BOX_DOWNSAMPLE_ENTRY: &str = "fs_box_downsample";
@@ -123,6 +128,83 @@ pub fn blur_divisor(radius_pixels: f32) -> u32 {
         .unwrap_or(1)
 }
 
+/// Weight vectors the fused sweep's uniform block declares, matching the
+/// WGSL `array<vec4<f32>, FUSED_BLUR_VECTORS>` this side fills.
+const FUSED_WEIGHT_VECTORS: usize = 12;
+
+/// Weights one fused kernel carries, from the centre out. Three sweeps of
+/// reach `r` convolve to a kernel of reach `3r`, so this covers every
+/// chain whose sweeps reach fifteen texels — the whole palette on any
+/// canvas up to around two and a half thousand pixels tall. A chain past
+/// it sweeps its [`BLUR_PASSES`] iterations instead ([`fuses`]).
+pub const MAX_FUSED_WEIGHTS: usize = 4 * FUSED_WEIGHT_VECTORS;
+
+/// The chain's [`BLUR_PASSES`] box sweeps convolved into one kernel, from
+/// the centre out: `[0]` weights the centre tap and `[i]` the pair at
+/// `±i`, normalized so the whole symmetric kernel sums to one.
+///
+/// Convolution is associative and the two axes commute, so this one
+/// kernel per axis is the six sweeps exactly — not a fit to them. The
+/// taps it convolves are the sweep's own coverage weights, fractional
+/// half-widths included, so a reduced-extent chain fuses on the same
+/// terms a full-extent one does.
+///
+/// Exactly at the plane's border too, which is what its mirrored edge
+/// buys (iamacoffeepot/aether#4444): a symmetric extension survives a
+/// symmetric kernel, so re-extending the plane between three sweeps lands
+/// where extending it once does. Under a replicated edge the two would
+/// part within [`BLUR_PASSES`] reaches of every edge, and the wash's
+/// threshold would cut the difference into a displaced tide line.
+pub fn composite_taps(half_width_texels: f32) -> Vec<f32> {
+    let sweep = sweep_taps(half_width_texels);
+    let mut kernel = vec![1.0f32];
+    for _ in 0..BLUR_PASSES {
+        kernel = convolved(&kernel, &sweep);
+    }
+
+    let total: f32 = kernel.iter().sum();
+    kernel[kernel.len() / 2..].iter().map(|weight| weight / total).collect()
+}
+
+/// Whether a sweep of `half_width_texels` fuses, or is wide enough that
+/// its composite outruns [`MAX_FUSED_WEIGHTS`] and the chain keeps its
+/// iterations.
+pub fn fuses(half_width_texels: f32) -> bool {
+    BLUR_PASSES as usize * sweep_reach(half_width_texels) < MAX_FUSED_WEIGHTS
+}
+
+/// One sweep's taps: how much of its own texel the window covers, which
+/// is what the sweep loop pays — one for every tap inside, the straddle
+/// for the pair at each end.
+fn sweep_taps(half_width_texels: f32) -> Vec<f32> {
+    let reach = sweep_reach(half_width_texels);
+    if reach == 0 {
+        return vec![2.0 * half_width_texels];
+    }
+
+    let mut taps = vec![1.0; 2 * reach + 1];
+    let straddle = half_width_texels - reach as f32 + 0.5;
+    taps[0] = straddle;
+    taps[2 * reach] = straddle;
+    taps
+}
+
+/// Taps one sweep of `half_width_texels` reaches either side of centre —
+/// the shader's own `ceil(half_width - 0.5)`.
+fn sweep_reach(half_width_texels: f32) -> usize {
+    (half_width_texels - 0.5).ceil().max(0.0) as usize
+}
+
+fn convolved(left: &[f32], right: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0; left.len() + right.len() - 1];
+    for (at, value) in left.iter().enumerate() {
+        for (offset, weight) in right.iter().enumerate() {
+            out[at + offset] += value * weight;
+        }
+    }
+    out
+}
+
 /// The box radius one `image::blur` call uses for a softening of
 /// `radius_pixels` (already converted to this sheet's pixels): the same
 /// `(radius / BOX_TO_GAUSSIAN).round()` mapping as the CPU, computed in
@@ -133,9 +215,9 @@ pub fn box_radius_texels(radius_pixels: f32) -> u32 {
     (radius_pixels / BOX_TO_GAUSSIAN).round().max(0.0) as u32
 }
 
-/// Uniforms for one blur chain: both sweep windows of
-/// [`box_blur_passes`], horizontal then vertical, each a `BoxBlurParams`
-/// block (`axis_x`, `axis_y`, `half_width_texels`), then the
+/// Uniforms for one blur chain: the `FusedBlurParams` block both fused
+/// sweeps share, then the two `BoxBlurParams` windows an unfused chain's
+/// iterations read (`axis_x`, `axis_y`, `half_width_texels`), then the
 /// `ScaleParams` window the reduced chain's two ends read.
 pub struct BoxBlurUniforms {
     /// Window half-width in texels of the plane the sweeps run on, from
@@ -146,6 +228,11 @@ pub struct BoxBlurUniforms {
     pub divisor: u32,
 }
 
+/// Bytes of the `FusedBlurParams` window: the pair count, the padding
+/// the uniform address space's sixteen-byte array stride forces, then the
+/// packed weights.
+const FUSED_BLUR_WINDOW_BYTES: u32 = 16 + 16 * FUSED_WEIGHT_VECTORS as u32;
+
 /// Bytes of one `BoxBlurParams` uniform window.
 const BOX_BLUR_WINDOW_BYTES: u32 = 12;
 
@@ -154,16 +241,24 @@ const BOX_SCALE_WINDOW_BYTES: u32 = 4;
 
 impl BoxBlurUniforms {
     /// Total bytes [`Self::encode`] appends at the chain's
-    /// `uniform_offset`: the horizontal window, the vertical one, then the
-    /// scale window. A full-extent chain lays no pass over the last one
-    /// and encodes it all the same, so the layout is the same shape
-    /// whatever extent the chain settles on.
-    pub const BYTES: u32 = 2 * BOX_BLUR_WINDOW_BYTES + BOX_SCALE_WINDOW_BYTES;
+    /// `uniform_offset`: the fused window, the two sweep windows, then the
+    /// scale window. A chain lays passes over some of these and encodes
+    /// them all the same, so the layout is the same shape whatever extent
+    /// and whatever kernel the chain settles on.
+    pub const BYTES: u32 = FUSED_BLUR_WINDOW_BYTES + 2 * BOX_BLUR_WINDOW_BYTES + BOX_SCALE_WINDOW_BYTES;
 
-    /// The three windows, packed tight in the blob layout the shader
-    /// declares.
+    /// The four windows, in the blob layout the shader declares.
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
-        encode_words([
+        let mut bytes = [0u8; Self::BYTES as usize];
+        let taps = composite_taps(self.half_width_texels);
+        if taps.len() <= MAX_FUSED_WEIGHTS {
+            bytes[0..4].copy_from_slice(&((taps.len() - 1) as u32).to_le_bytes());
+            for (slot, weight) in bytes[16..].chunks_exact_mut(4).zip(&taps) {
+                slot.copy_from_slice(&weight.to_le_bytes());
+            }
+        }
+
+        bytes[FUSED_BLUR_WINDOW_BYTES as usize..].copy_from_slice(&encode_words::<7, 28>([
             1u32.to_le_bytes(),
             0u32.to_le_bytes(),
             self.half_width_texels.to_le_bytes(),
@@ -171,31 +266,40 @@ impl BoxBlurUniforms {
             1u32.to_le_bytes(),
             self.half_width_texels.to_le_bytes(),
             self.divisor.to_le_bytes(),
-        ])
+        ]));
+        bytes
     }
 }
 
-/// Where one blur chain sweeps: the two transients its iterations
-/// ping-pong between, and the extent they run at. Both transients are
+/// Where one blur chain sweeps: the transients it hops through, the
+/// extent they run at, and the window they carry. Both transients are
 /// [`reduced_plane_slot`]s of the same `divisor` the caller declares
 /// (distinct from each other, and from `output` when that is a
-/// transient).
+/// transient); a full-extent fused chain hops through `scratch` alone and
+/// leaves `carry` unwritten.
 pub struct BoxBlurChain {
     pub scratch: u32,
     pub carry: u32,
     /// One for a chain that sweeps the canvas itself, otherwise the
     /// reduction [`blur_divisor`] chose.
     pub divisor: u32,
+    /// The sweep window on that plane, from [`box_half_width`] — what
+    /// decides whether the chain fuses ([`fuses`]).
+    pub half_width_texels: f32,
 }
 
-/// The full blur chain mirroring `image::blur`: [`BLUR_PASSES`] box
-/// iterations, each a horizontal sweep into the `scratch` transient and a
-/// vertical sweep out of it — the vertical result parking in `carry`
-/// between iterations. At `divisor` one the last vertical sweep lands
-/// straight in `output`; past it the chain opens with a block-average
-/// downsample into `carry`, sweeps the reduced plane, and closes with a
-/// bilinear upsample out of `carry` into `output`. The chain's
-/// [`BoxBlurUniforms`] encode at `uniform_offset`, shared by every pass.
+/// The full blur chain mirroring `image::blur`: one fused sweep per axis,
+/// horizontal into the `scratch` transient and vertical out of it, both
+/// reading the one composite kernel [`composite_taps`] convolved from the
+/// chain's [`BLUR_PASSES`] iterations. A chain too wide to fuse
+/// ([`fuses`]) sweeps those iterations instead, the vertical result
+/// parking in `carry` between them.
+///
+/// At `divisor` one the vertical sweep lands straight in `output`; past
+/// it the chain opens with a block-average downsample into `carry`,
+/// sweeps the reduced plane, and closes with a bilinear upsample out of
+/// `carry` into `output`. The chain's [`BoxBlurUniforms`] encode at
+/// `uniform_offset`, shared by every pass.
 pub fn box_blur_passes(
     source: InputSlot,
     chain: &BoxBlurChain,
@@ -203,9 +307,11 @@ pub fn box_blur_passes(
     uniform_offset: u32,
 ) -> Vec<ProgramPass> {
     let reduced = chain.divisor > 1;
-    let scale_offset = uniform_offset + 2 * BOX_BLUR_WINDOW_BYTES;
+    let sweep_offset = uniform_offset + FUSED_BLUR_WINDOW_BYTES;
+    let scale_offset = sweep_offset + 2 * BOX_BLUR_WINDOW_BYTES;
     let mut passes = Vec::with_capacity(2 * BLUR_PASSES as usize + 2);
-    let mut read = if reduced {
+
+    let source = if reduced {
         passes.push(pass(
             BOX_DOWNSAMPLE_ENTRY,
             vec![source],
@@ -217,29 +323,51 @@ pub fn box_blur_passes(
     } else {
         source
     };
+    let softened = if reduced {
+        OutputSlot::Transient { index: chain.carry }
+    } else {
+        output
+    };
 
-    for iteration in 0..BLUR_PASSES {
-        let last = iteration + 1 == BLUR_PASSES;
-        let vertical_out = if last && !reduced {
-            output
-        } else {
-            OutputSlot::Transient { index: chain.carry }
-        };
+    if fuses(chain.half_width_texels) {
         passes.push(pass(
-            BOX_BLUR_ENTRY,
-            vec![read],
+            FUSED_BLUR_X_ENTRY,
+            vec![source],
             OutputSlot::Transient { index: chain.scratch },
             uniform_offset,
-            BOX_BLUR_WINDOW_BYTES,
+            FUSED_BLUR_WINDOW_BYTES,
         ));
         passes.push(pass(
-            BOX_BLUR_ENTRY,
+            FUSED_BLUR_Y_ENTRY,
             vec![InputSlot::Transient { index: chain.scratch }],
-            vertical_out,
-            uniform_offset + BOX_BLUR_WINDOW_BYTES,
-            BOX_BLUR_WINDOW_BYTES,
+            softened,
+            uniform_offset,
+            FUSED_BLUR_WINDOW_BYTES,
         ));
-        read = InputSlot::Transient { index: chain.carry };
+    } else {
+        let mut read = source;
+        for iteration in 0..BLUR_PASSES {
+            let last = iteration + 1 == BLUR_PASSES;
+            passes.push(pass(
+                BOX_BLUR_ENTRY,
+                vec![read],
+                OutputSlot::Transient { index: chain.scratch },
+                sweep_offset,
+                BOX_BLUR_WINDOW_BYTES,
+            ));
+            passes.push(pass(
+                BOX_BLUR_ENTRY,
+                vec![InputSlot::Transient { index: chain.scratch }],
+                if last {
+                    softened
+                } else {
+                    OutputSlot::Transient { index: chain.carry }
+                },
+                sweep_offset + BOX_BLUR_WINDOW_BYTES,
+                BOX_BLUR_WINDOW_BYTES,
+            ));
+            read = InputSlot::Transient { index: chain.carry };
+        }
     }
 
     if reduced {
@@ -403,5 +531,102 @@ fn pass(
         uniform_offset,
         uniform_length,
         repeat: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BLUR_PASSES, MAX_FUSED_WEIGHTS, composite_taps, fuses, sweep_reach};
+    use crate::easel::image;
+    use crate::math3::hash_unit;
+
+    /// A plane one texel tall, so `image::blur`'s vertical sweep reads the
+    /// one row it has and the call is exactly [`BLUR_PASSES`] horizontal
+    /// box passes over `field` — the iterated chain this kernel replaces.
+    fn iterated(field: &[f32], radius_pixels: f32) -> Vec<f32> {
+        image::blur(field, field.len(), 1, radius_pixels)
+    }
+
+    /// The composite kernel swept once, the edge mirrored as the sweeps
+    /// mirror theirs (`image::reflected`, transcribed).
+    fn fused(field: &[f32], half_width_texels: f32) -> Vec<f32> {
+        let taps = composite_taps(half_width_texels);
+        let last = field.len() as isize - 1;
+        (0..field.len())
+            .map(|at| {
+                let read = |offset: isize| {
+                    let index = at as isize + offset;
+                    let under = if index < 0 {
+                        -1 - index
+                    } else {
+                        index
+                    };
+                    let over = if under > last {
+                        2 * last + 1 - under
+                    } else {
+                        under
+                    };
+                    field[over.clamp(0, last) as usize]
+                };
+                taps.iter()
+                    .zip(0isize..)
+                    .map(|(weight, tap)| match tap {
+                        0 => weight * read(0),
+                        _ => weight * (read(-tap) + read(tap)),
+                    })
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// The whole claim the fusion rests on: one composite sweep is the
+    /// three box sweeps, not a fit to them — over the whole field, border
+    /// rows included, because the plane's edge is a mirror
+    /// (iamacoffeepot/aether#4444) and a symmetric extension survives a
+    /// symmetric kernel. Under a replicated edge this would hold only
+    /// away from the border, and the border is where the wash's threshold
+    /// turns a fraction of a step into a displaced tide line.
+    ///
+    /// The named bugs, each of which moves whole percentages of the
+    /// signal: a kernel convolved twice or four times rather than
+    /// [`BLUR_PASSES`], a straddling tap taken as a whole one (the window
+    /// widens by up to a texel per sweep), a kernel normalized against
+    /// its one-sided sum rather than the whole symmetric one (everything
+    /// darkens by nearly half), and a reach short by one (the outermost
+    /// pair silently dropped).
+    ///
+    /// Tripwire: a composite sweep is the iterated chain, to a hair over
+    /// float rounding.
+    #[test]
+    fn one_composite_sweep_is_the_three_box_sweeps() {
+        let field: Vec<f32> = (0..96u64).map(hash_unit).collect();
+
+        for radius_pixels in [1.7, 3.4, 5.1, 8.5, 13.6] {
+            let half_width = super::box_radius_texels(radius_pixels) as f32 + 0.5;
+            let (want, got) = (iterated(&field, radius_pixels), fused(&field, half_width));
+
+            let worst = want.iter().zip(&got).map(|(want, got)| (want - got).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 1e-5, "radius {radius_pixels}: the composite sweep drifts {worst} from three box sweeps");
+        }
+    }
+
+    /// A kernel wide enough to outrun the uniform's weight table keeps its
+    /// iterations, and every kernel the fused sweep accepts fits in it —
+    /// so the pass builder's two shapes and the block it fills agree on
+    /// where the line is.
+    ///
+    /// Tripwire: the widest accepted kernel exactly fills the table.
+    #[test]
+    fn the_fused_kernel_fits_the_weights_the_block_declares() {
+        for half_width in [0.5f32, 1.5, 2.5, 3.375, 7.375, 15.5, 16.5, 40.0] {
+            let taps = composite_taps(half_width);
+            assert_eq!(
+                fuses(half_width),
+                taps.len() <= MAX_FUSED_WEIGHTS,
+                "half-width {half_width} ({} weights) disagrees with the block's room",
+                taps.len(),
+            );
+            assert_eq!(taps.len(), BLUR_PASSES as usize * sweep_reach(half_width) + 1, "reach {half_width}");
+        }
     }
 }
