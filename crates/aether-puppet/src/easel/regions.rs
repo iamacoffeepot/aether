@@ -134,11 +134,6 @@ pub fn rasterize(
             continue;
         }
 
-        // One sample per face, at the centroid. The field is a coarse
-        // lattice around the surface and a triangle is far smaller than a
-        // cell, so per-pixel sampling would cost three interpolations to
-        // arrive at the same answer.
-        let class = labels.sample((world[0] + world[1] + world[2]) / 3.0);
         let lit = corners.map(|i| settings.tone(&SurfacePoint::on_surface(mesh.positions[i], mesh.normals[i])));
         let confront =
             corners.map(|i| (eye - mesh.positions[i]).normalize_or(mesh.normals[i]).dot(mesh.normals[i]).max(0.0));
@@ -162,7 +157,11 @@ pub fn rasterize(
                 let at = y * width + x;
                 if z < depth[at] {
                     depth[at] = z;
-                    planes.class[at] = class;
+                    // Per pixel, not per face: the wash bakes off the
+                    // coarsened mesh, whose ear faces span many field cells
+                    // — one centroid class per face painted the whole rim
+                    // with the concha's flush (issue 4393).
+                    planes.class[at] = labels.sample(world[0] * wa + world[1] * wb + world[2] * wc);
                     planes.tone[at] = wa * lit[0] + wb * lit[1] + wc * lit[2];
                     planes.facing[at] = wa * confront[0] + wb * confront[1] + wc * confront[2];
                 }
@@ -288,6 +287,17 @@ mod tests {
         Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
     }
 
+    /// A 2x2x2 field over the unit cube split along depth instead —
+    /// `HAIR` where `z < 0` and `SKIN` where `z > 0` (z is the
+    /// fastest-varying cell axis, so the classes alternate).
+    fn depth_split_field() -> Labels {
+        let mut bytes = vec![0u8; 10];
+        bytes.extend([labels::HAIR, labels::SKIN, labels::HAIR, labels::SKIN]);
+        bytes.extend([labels::HAIR, labels::SKIN, labels::HAIR, labels::SKIN]);
+
+        Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
+    }
+
     /// Key light straight down the view axis, so a facet square to the eye
     /// tones to exactly one and a facet turned away tones to the ambient
     /// floor.
@@ -344,31 +354,31 @@ mod tests {
         );
     }
 
-    /// Tripwire: the class plane is a per-face answer sampled at the
-    /// centroid, not a per-pixel one. The face below straddles the field's
-    /// split, so a pixel on its far side carries the centroid's class and
-    /// not its own.
+    /// Tripwire: the class plane is a per-pixel answer, never one value
+    /// per face. The face below straddles the field's split; each side's
+    /// pixels must carry their own class — a per-face regression paints
+    /// the whole face with the centroid's side, which is the coarse-mesh
+    /// ear-flush bug (issue 4393).
     #[test]
-    fn class_is_the_centroid_sample_across_the_whole_face() {
+    fn class_is_the_pixel_sample_across_a_straddling_face() {
         let subject =
             mesh(&[Vec3::new(-0.9, -0.5, 0.0), Vec3::new(0.5, -0.5, 0.0), Vec3::new(-0.9, 0.5, 0.0)], &[[0, 1, 2]]);
         let planes = rasterize_fixture(&subject, &orthographic());
 
-        let (x, y) = (9, 11);
-        let (world_x, world_y) = world_at(x, y);
-        assert!(world_x > 0.0, "the probe pixel is on the field's SKIN side");
-        assert_eq!(
-            split_field().sample(Vec3::new(world_x, world_y, 0.0)),
-            labels::SKIN,
-            "the probe pixel samples SKIN on its own",
-        );
+        let (skin_x, skin_y) = (9, 11);
+        assert!(world_at(skin_x, skin_y).0 > 0.0, "the first probe pixel is on the field's SKIN side");
+        assert_eq!(planes.class[skin_y * SIDE + skin_x], labels::SKIN, "a SKIN-side pixel keeps its own class");
 
-        assert_eq!(planes.class[y * SIDE + x], labels::HAIR, "the face's centroid is on the HAIR side");
+        let (hair_x, hair_y) = (2, 8);
+        assert!(world_at(hair_x, hair_y).0 < 0.0, "the second probe pixel is on the field's HAIR side");
+        assert_eq!(planes.class[hair_y * SIDE + hair_x], labels::HAIR, "a HAIR-side pixel keeps its own class");
     }
 
     /// Tripwire: the depth test, and its independence from submission
     /// order. Both faces cover the probe pixel; the nearer one owns it
-    /// whichever is rasterized second.
+    /// whichever is rasterized second. The field splits along depth here
+    /// so the per-pixel class sample reads the winning face's own z band
+    /// — a broken depth test surfaces as the far band's class.
     #[test]
     fn the_nearer_face_owns_the_pixel_in_either_order() {
         let near = [Vec3::new(-0.9, -0.9, 0.5), Vec3::new(0.3, -0.9, 0.5), Vec3::new(-0.9, 0.9, 0.5)];
@@ -377,9 +387,10 @@ mod tests {
 
         let (x, y) = (8, 13);
         for faces in [[[0, 1, 2], [3, 4, 5]], [[3, 4, 5], [0, 1, 2]]] {
-            let planes = rasterize_fixture(&mesh(&vertices, &faces), &orthographic());
+            let subject = mesh(&vertices, &faces);
+            let planes = rasterize(&subject, &depth_split_field(), &settings(), EYE, &orthographic(), SIDE, SIDE);
 
-            assert_eq!(planes.class[y * SIDE + x], labels::HAIR, "the near face is the HAIR one, order {faces:?}");
+            assert_eq!(planes.class[y * SIDE + x], labels::SKIN, "the near z band is the SKIN one, order {faces:?}");
         }
     }
 
