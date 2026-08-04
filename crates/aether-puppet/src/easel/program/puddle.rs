@@ -100,7 +100,7 @@ const REDUCED_DIVISORS: [u32; 2] = [4, 2];
 /// spread. It also decides where a reduction stops being worth having:
 /// the sweeps that fall under it are the narrow ones, which are cheap at
 /// full extent for the same reason they cannot be reduced.
-const MIN_REDUCED_HALF_WIDTH: f32 = 2.5;
+pub const MIN_REDUCED_HALF_WIDTH: f32 = 2.5;
 
 /// Half-width of the sweep window that softens by `radius_pixels`
 /// (already this sheet's pixels) on a plane reduced by `divisor`: the
