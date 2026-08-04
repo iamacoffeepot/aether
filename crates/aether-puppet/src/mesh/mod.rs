@@ -15,7 +15,6 @@
 //! answered by the BVH.
 
 pub mod bvh;
-pub mod coarse;
 pub mod obj;
 
 use aether_math::Vec3;
@@ -59,18 +58,6 @@ impl Mesh {
 
     pub fn posed(&self, positions: Vec<Vec3>, normal_relaxation: usize) -> Self {
         Self::build(positions, self.faces.clone(), normal_relaxation)
-    }
-
-    /// The same subject at a lattice resolution of `cells` along its
-    /// longest axis — the mesh the silhouette is solved on.
-    ///
-    /// `None` when the decimation leaves nothing to draw on, which a
-    /// resolution below the subject's own feature scale will do. The caller
-    /// keeps the fine mesh in that case rather than losing the outline.
-    pub fn coarsened(&self, cells: u32, normal_relaxation: usize) -> Option<Self> {
-        let (positions, faces) = coarse::cluster(&self.positions, &self.faces, self.min, self.max, cells);
-
-        (!faces.is_empty()).then(|| Self::build(positions, faces, normal_relaxation))
     }
 
     fn build(positions: Vec<Vec3>, faces: Vec<[u32; 3]>, normal_relaxation: usize) -> Self {
