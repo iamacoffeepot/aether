@@ -91,7 +91,9 @@ use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{Mat4, Vec2, Vec3};
-use aether_render::{CreateTextureResult, DrawTriangle, ProgramRegisterResult, RenderCapability, ViewProjection};
+use aether_render::{
+    CreateGeometryResult, CreateTextureResult, DrawTriangle, ProgramRegisterResult, RenderCapability, ViewProjection,
+};
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 
@@ -576,8 +578,9 @@ impl WasmActor for Puppet {
         // The easel's mail for this frame, in dependency order: the
         // program register (once per session), the destroys a resize
         // owes, the creates carrying a first develop at this size, then
-        // the updates and the dispatch that reads them — all to the same
-        // mailbox, so the render cap sees them in exactly this order.
+        // the updates, the ribbon geometry the ink pass rasterizes, and
+        // the dispatch that reads them all — to the same mailbox, so the
+        // render cap sees them in exactly this order.
         if let Some(register) = self.easel.take_register() {
             render.send(register);
         }
@@ -588,6 +591,12 @@ impl WasmActor for Puppet {
             render.send(&create);
         }
         for update in self.easel.take_updates() {
+            render.send(&update);
+        }
+        if let Some(create) = self.easel.take_ink_create() {
+            render.send(&create);
+        }
+        if let Some(update) = self.easel.take_ink_update() {
             render.send(&update);
         }
         if let Some(dispatch) = self.easel.take_dispatch() {
@@ -624,6 +633,21 @@ impl WasmActor for Puppet {
             CreateTextureResult::Err { error } => {
                 tracing::info!(target: "aether_puppet", error = %error, "easel disabled: create_texture refused");
                 self.easel.created(Err(()));
+            }
+        }
+    }
+
+    /// The render cap answered the easel's ribbon-geometry create. `Err`
+    /// switches the easel off for the session, as a refused plane create
+    /// does — the ink pass is declared in the graph, so a develop without
+    /// its geometry has nothing to dispatch.
+    #[handler::single]
+    fn on_geometry_created(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateGeometryResult) {
+        match result {
+            CreateGeometryResult::Ok { geometry_id } => self.easel.ink_created(Ok(geometry_id)),
+            CreateGeometryResult::Err { reason } => {
+                tracing::info!(target: "aether_puppet", reason = %reason, "easel disabled: create_geometry refused");
+                self.easel.ink_created(Err(()));
             }
         }
     }

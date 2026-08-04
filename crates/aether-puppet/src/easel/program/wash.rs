@@ -23,7 +23,7 @@
 //! wash remains the oracle; `tests/program_wash_scenario.rs` holds the
 //! two whole-sheet develops together.
 
-use aether_math::Vec2;
+use aether_math::{Mat4, Vec2};
 use aether_render::{InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotSpec};
 
 use crate::easel::accent::Accents;
@@ -46,8 +46,19 @@ pub const WASH_WGSL: &str = include_str!("wash.wgsl");
 /// The wash program's one WGSL module: every op module plus the
 /// sequencer's glue, concatenated in dependency order.
 pub fn module() -> String {
-    format!("{}\n{}\n{}\n{}", puddle::PUDDLE_WGSL, pigment::PIGMENT_WGSL, super::sheet::SHEET_WGSL, WASH_WGSL)
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        puddle::PUDDLE_WGSL,
+        pigment::PIGMENT_WGSL,
+        super::sheet::SHEET_WGSL,
+        super::ink::INK_WGSL,
+        WASH_WGSL
+    )
 }
+
+/// The one geometry slot the program declares: the ribbon triangles the
+/// ink pass rasterizes, filled by id per dispatch (ADR-0171).
+const INK_GEOMETRY: u32 = 0;
 
 /// Dispatch-binding indices, in the order [`program`] declares them and
 /// [`WashBindings::to_vec`] lists them.
@@ -279,6 +290,10 @@ pub struct WashProgram {
     register: ProgramRegister,
     materials: Vec<MaterialPlan>,
     blush_coat: u32,
+    /// The transient the ink pass bakes the coverage plane into, and the
+    /// window its vertex stage reads the camera from.
+    ink_plane: u32,
+    ink_window: u32,
     uniform_bytes: u32,
 }
 
@@ -468,6 +483,16 @@ impl Graph {
 /// so it is the same graph for every develop at every canvas size.
 pub fn program() -> WashProgram {
     let mut graph = Graph::default();
+
+    // The ink coverage plane, rasterized from resident ribbon geometry
+    // (iamacoffeepot/aether#4410). It is laid first so it is written
+    // before anything could read it; nothing samples it yet, and
+    // iamacoffeepot/aether#4412 is what moves the flow field off the CPU
+    // rasterize onto this plane.
+    let ink_window = graph.window(super::ink::InkUniforms::BYTES);
+    let ink_plane = graph.plane();
+    graph.passes.push(super::ink::coverage_pass(INK_GEOMETRY, OutputSlot::Transient { index: ink_plane }, ink_window));
+
     let mut light = {
         let out = graph.light_hop();
         graph.passes.push(light_prime_pass(OutputSlot::Transient { index: out }));
@@ -557,12 +582,12 @@ pub fn program() -> WashProgram {
         wgsl: module(),
         bindings,
         transients: graph.transients,
-        geometries: Vec::new(),
+        geometries: vec![super::ink::geometry_slot()],
         depth_transients: Vec::new(),
         passes: graph.passes,
     };
 
-    WashProgram { register, materials, blush_coat, uniform_bytes: graph.uniform_bytes }
+    WashProgram { register, materials, blush_coat, ink_plane, ink_window, uniform_bytes: graph.uniform_bytes }
 }
 
 /// The uniform blob under construction: windows written at the offsets
@@ -594,17 +619,35 @@ impl WashProgram {
         &self.register
     }
 
+    /// The transient the ink pass bakes its coverage plane into — where a
+    /// pass that wants the drawing's own alpha reads it from.
+    #[must_use]
+    pub fn ink_plane(&self) -> u32 {
+        self.ink_plane
+    }
+
     /// The uniform blob for one develop of `sheet` — the dispatch-side
     /// half of [`Sheet::coats`]: the same seed rolls the same accidents
     /// in the same order, every tuned radius is resolved at the sheet's
     /// own height, and the palette's pigments and caps ride the coat
     /// windows. `flow` gates the hair smear exactly as it gates the CPU
-    /// one; `accents` gate the iris lift and the blush cap.
-    pub fn uniforms(&self, sheet: &Sheet<'_>, flow: Option<&Flow>, accents: Option<&Accents>) -> Vec<u8> {
+    /// one; `accents` gate the iris lift and the blush cap. `view_proj`
+    /// is the matrix the ribbons were solved for, which the ink pass'
+    /// vertex stage projects them through.
+    pub fn uniforms(
+        &self,
+        sheet: &Sheet<'_>,
+        flow: Option<&Flow>,
+        accents: Option<&Accents>,
+        view_proj: Mat4,
+    ) -> Vec<u8> {
         let planes = sheet.planes();
         let (width, height) = (planes.width, planes.height);
         let mut blob = Blob(vec![0u8; self.uniform_bytes as usize]);
         let mut rng = Rng::new(sheet.seed());
+
+        let half_size = Vec2::new(width as f32 * 0.5, height as f32 * 0.5);
+        blob.window(self.ink_window, &super::ink::InkUniforms { view_proj, half_size }.encode());
 
         for (material, plan) in palette::MATERIALS.iter().zip(&self.materials) {
             if let Some(window) = plan.mask {

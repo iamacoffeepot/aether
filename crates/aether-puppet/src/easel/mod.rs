@@ -32,8 +32,9 @@ pub mod regions;
 
 use aether_math::{Mat4, Vec3};
 use aether_render::{
-    CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect, MaterialTexturedRect,
-    ProgramDispatch, ProgramRegister, TextureFormat, TextureSampling, TextureUsage, UpdateTexture,
+    CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect,
+    MaterialTexturedRect, ProgramDispatch, ProgramRegister, TextureFormat, TextureSampling, TextureUsage,
+    UpdateGeometry, UpdateTexture,
 };
 
 use program::wash::{self, WashBindings, WashProgram};
@@ -124,6 +125,25 @@ struct Develop {
     uniforms: Vec<u8>,
 }
 
+/// The ribbon geometry for one develop, packed for the ink pass' vertex
+/// layout and waiting for the mail that carries it.
+struct InkGeometry {
+    vertices: Vec<u8>,
+    indices: Vec<u8>,
+}
+
+/// Where the resident ribbon geometry stands: nothing sent yet, a create
+/// in flight whose id has not come back, or the id the render cap
+/// assigned. Only the last can be dispatched against, and only the first
+/// may send a create — the same hold the plane creates keep.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Resident {
+    #[default]
+    Absent,
+    Creating,
+    Live(u32),
+}
+
 /// The creates for one canvas size are in flight; the render cap
 /// answers them in send order, so the collected ids land in binding
 /// order. The uniforms wait here for the dispatch that follows.
@@ -160,6 +180,11 @@ pub struct Easel {
     /// A develop's uniforms whose planes are already staged, waiting for
     /// the dispatch mail.
     dispatch_uniforms: Option<Vec<u8>>,
+    /// This develop's ribbon geometry, waiting for the create or update
+    /// that ships it.
+    ink: Option<InkGeometry>,
+    /// Where that geometry stands with the render cap.
+    resident_ink: Resident,
     /// At least one dispatch has been sent, so the sheet holds paint
     /// rather than the writable texture's transparent clear.
     developed: bool,
@@ -240,6 +265,44 @@ impl Easel {
         self.dispatch_uniforms = Some(uniforms);
     }
 
+    /// The reply to the one requested geometry create. `Err` disables the
+    /// easel for the session, as a refused plane create does — the ink
+    /// pass is part of the graph, so a program without it develops
+    /// nothing worth showing.
+    pub fn ink_created(&mut self, result: Result<u32, ()>) {
+        let Ok(geometry_id) = result else {
+            self.resident_ink = Resident::Absent;
+            self.disabled = true;
+            return;
+        };
+        self.resident_ink = Resident::Live(geometry_id);
+    }
+
+    /// The first develop's ribbon geometry: created once to earn an id,
+    /// then re-shipped by [`Easel::take_ink_update`] for the life of the
+    /// session.
+    pub fn take_ink_create(&mut self) -> Option<CreateGeometry> {
+        if self.disabled || self.resident_ink != Resident::Absent {
+            return None;
+        }
+        let InkGeometry { vertices, indices } = self.ink.take()?;
+
+        self.resident_ink = Resident::Creating;
+        Some(CreateGeometry { layout: program::ink::geometry_slot().layout, vertices, indices })
+    }
+
+    /// Every later develop's ribbon geometry, replacing the resident
+    /// bytes in place. The layout is fixed at create, so only the
+    /// contents travel.
+    pub fn take_ink_update(&mut self) -> Option<UpdateGeometry> {
+        let Resident::Live(geometry_id) = self.resident_ink else {
+            return None;
+        };
+        let InkGeometry { vertices, indices } = self.ink.take()?;
+
+        Some(UpdateGeometry { geometry_id, vertices, indices })
+    }
+
     /// The window's own pixels, clamped to the long-edge ceiling.
     fn canvas(&self) -> Option<(usize, usize)> {
         let (width, height) = self.window?;
@@ -318,7 +381,13 @@ impl Easel {
 
         let sheet = field::Sheet::new(planes, SHEET_SEED);
         let program = self.program.get_or_insert_with(wash::program);
-        let uniforms = program.uniforms(&sheet, Some(&flow), accents.as_ref());
+        let uniforms = program.uniforms(&sheet, Some(&flow), accents.as_ref(), view.view_proj);
+
+        // The same triangles the CPU rasterize above just walked, staged
+        // for the ink pass to rasterize on the GPU. Re-shipped every
+        // develop rather than registered once: the drawing is solved
+        // fresh for each eye, and a posed mesh will solve it per frame.
+        self.ink = Some(InkGeometry { vertices: program::ink::vertices(drawn), indices: program::ink::indices(drawn) });
 
         // The plane pixel buffers, in binding order. An absent chart
         // uploads zero planes for the accent inputs — the uniforms
@@ -463,10 +532,16 @@ impl Easel {
     pub fn take_dispatch(&mut self) -> Option<ProgramDispatch> {
         let program_id = self.program_id?;
         let (bindings, _) = self.textures.as_ref()?;
+        // Checked before the uniforms are taken, so a develop whose
+        // geometry create is still in flight keeps them for the frame
+        // that can use them rather than dispatching without its ink.
+        let Resident::Live(geometry_id) = self.resident_ink else {
+            return None;
+        };
         let uniforms = self.dispatch_uniforms.take()?;
 
         self.developed = true;
-        Some(ProgramDispatch { program_id, bindings: bindings.to_vec(), geometries: Vec::new(), uniforms })
+        Some(ProgramDispatch { program_id, bindings: bindings.to_vec(), geometries: vec![geometry_id], uniforms })
     }
 
     /// The sheet, standing behind the subject and facing the eye.
