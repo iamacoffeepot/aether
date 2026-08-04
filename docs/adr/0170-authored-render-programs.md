@@ -1,6 +1,6 @@
 # ADR-0170: Authored Render Programs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-03
 
 ## Context
