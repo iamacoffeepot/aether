@@ -266,6 +266,34 @@ pub fn points_slot() -> GeometrySlotSpec {
 /// this order.
 pub const POINT_VERTEX_BYTES: usize = 2 * (12 + 12 + 4 + 4) + 4 + 8 + 8 + 4;
 
+/// The same points with no binding: where the point already *is*, rather
+/// than the address a vertex stage would pose it from.
+///
+/// The volatile half is re-solved on the CPU every frame it changes, at
+/// whatever pose is running, so it arrives posed and an anchorage would
+/// be two corners of a face it no longer sits on. Carrying one anyway
+/// costs it the binding's bytes — and the volatile half is the buffer
+/// that travels, so those bytes are per frame rather than per subject.
+/// Hence two slots and two vertex entry points over one fragment stage:
+/// [`RESIDENT`] is anchored on the sculpt, [`VOLATILE`] stands for
+/// itself.
+#[must_use]
+pub fn posed_points_slot() -> GeometrySlotSpec {
+    GeometrySlotSpec {
+        layout: vec![
+            VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, format: VertexFormat::Float32 },
+            VertexAttribute { location: 3, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 4, format: VertexFormat::Float32x2 },
+        ],
+    }
+}
+
+/// Bytes one already-posed point vertex occupies: probe, normal, slot,
+/// ends and stroke.
+pub const POSED_POINT_VERTEX_BYTES: usize = 12 + 12 + 4 + 8 + 8;
+
 /// Uniform window for every pass — the WGSL `SightParams` block.
 ///
 /// One block is laid down per scan doubling, each carrying its own
@@ -637,13 +665,20 @@ pub fn subject_indices(mesh: &Mesh) -> Vec<u8> {
 /// [`Span`] names its own by the index
 /// [`Drawing::curves`](crate::feature::Drawing::curves) gives it.
 ///
-/// `bound` is the sculpt and the rig, and it is what divides the two
-/// regions now. The resident half is the *rest* surface curves, packed
-/// against their anchorages so the vertex stage poses them from the
-/// uniform blob — which is what lets them stay resident through a pose
-/// as they already stayed resident through an orbit. The volatile half
-/// is re-solved on the CPU every frame against whatever pose is running,
-/// so it packs with no binding and stands for itself.
+/// This is the [`RESIDENT`] region's layout, and it is the region rather
+/// than the rig that chooses it: a geometry slot is declared once when
+/// the program registers and cannot ask whether *this* subject carries a
+/// rig. So `bound` decides only whether the corners are real. Without a
+/// rig the point stands for itself, in an anchorage whose share row is
+/// empty — which the vertex stage reads as "this position is already the
+/// answer" and poses no further.
+///
+/// The resident half is the *rest* surface curves, so packing them
+/// against their anchorages is what lets the vertex stage pose them from
+/// the uniform blob — and what lets them stay resident through a pose as
+/// they already stayed resident through an orbit.
+/// [`posed_point_vertices`] is the volatile half's, which is re-solved
+/// on the CPU every frame against whatever pose is running.
 ///
 /// A region that laid out to nothing still packs one stand-in point, for
 /// the reason [`super::stroke::ribbon_geometry`] packs one stand-in
@@ -657,12 +692,27 @@ pub fn subject_indices(mesh: &Mesh) -> Vec<u8> {
 /// would answer for a barrier that has to read as hidden.
 #[must_use]
 pub fn point_vertices(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<'_>>) -> Vec<u8> {
-    // Assembled once per point on the stack and written three times with
-    // only the corner bits of `slot` patched between them, which is the
-    // only thing three vertices of one point disagree about. Both the
-    // intermediate vector and the per-vertex allocation the readable
-    // spelling wants are megabytes of churn at this density.
-    let mut packed: Vec<u8> = Vec::with_capacity(points_of(spans).max(1) * 3 * POINT_VERTEX_BYTES);
+    points(drawing, spans, bound, true)
+}
+
+/// The [`VOLATILE`] region's own layout: where each point already is.
+///
+/// See [`posed_points_slot`] for why the two regions divide.
+#[must_use]
+pub fn posed_point_vertices(drawing: Drawing<'_>, spans: &[Span]) -> Vec<u8> {
+    points(drawing, spans, None, false)
+}
+
+fn points(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<'_>>, anchored_layout: bool) -> Vec<u8> {
+    // Written straight into the buffer three times over, differing only
+    // in the corner bits of `slot`. The per-vertex allocation the
+    // readable spelling wants is megabytes of churn at this density.
+    let stride = if anchored_layout {
+        POINT_VERTEX_BYTES
+    } else {
+        POSED_POINT_VERTEX_BYTES
+    };
+    let mut packed: Vec<u8> = Vec::with_capacity(points_of(spans).max(1) * 3 * stride);
     let mut written = false;
     for span in spans {
         let Some(curve) = drawing.curve(span.curve as usize) else {
@@ -683,67 +733,62 @@ pub fn point_vertices(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<
             // weight gradient across one triangle edge — and the arc
             // this feeds is a taper's ramp, not a position.
             let step = curve.points.get(at + 1).map_or(0.0, |next| (next.pos - point.pos).length());
-            let anchored = bound
-                .zip(point.anchorage)
-                .map_or_else(|| Anchored::posed(point.probe, point.normal), |(bound, at)| bound.anchored(at));
+            let anchored = anchored_layout.then(|| {
+                bound
+                    .zip(point.anchorage)
+                    .map_or_else(|| Anchored::posed(point.probe, point.normal), |(bound, at)| bound.anchored(at))
+            });
+            let tail = [at as f32, (last - at) as f32, step, class];
 
-            let tail = [at as f32, (last - at) as f32, step, class, anchored.between];
-            let vertex = pack_point(&anchored, span.start + at as u32, tail);
+            let slot = (span.start + at as u32) * 4;
             for corner in 0..3u32 {
-                write_corner(&mut packed, &vertex, corner);
+                write_point(&mut packed, anchored.as_ref(), point.probe, point.normal, slot + corner);
+                packed.extend(tail.into_iter().flat_map(f32::to_le_bytes));
+                if let Some(anchored) = anchored.as_ref() {
+                    packed.extend(anchored.between.to_le_bytes());
+                }
             }
             written = true;
         }
     }
     if !written {
-        let inert = pack_point(&Anchored::posed(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)), 0, [0.0; 5]);
+        // Three copies of one corner — a triangle of zero area, which
+        // rasterizes nothing wherever it lands. It has to carry the
+        // region's own layout, since which of the two the slot was
+        // declared with is what the vertex fetch reads it as.
+        let inert = anchored_layout.then(|| Anchored::posed(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)));
         for _ in 0..3 {
-            write_corner(&mut packed, &inert, 0);
+            write_point(&mut packed, inert.as_ref(), Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 0);
+            packed.extend([0.0f32; 4].into_iter().flat_map(f32::to_le_bytes));
+            if let Some(inert) = inert.as_ref() {
+                packed.extend(inert.between.to_le_bytes());
+            }
         }
     }
 
     packed
 }
 
-/// Where `slot` sits inside a packed point vertex — after the two corner
-/// bindings and before the ends.
-const POINT_SLOT: usize = 2 * (12 + 12 + 4 + 4);
-
-/// One point vertex with `slot` holding the bare texel index, ready for
-/// the corner bits.
+/// One vertex's leading lanes: the anchorage where the region carries
+/// one, the point's own position and normal where it does not, then the
+/// packed slot.
 ///
-/// `tail` is the four `ends`/`stroke` lanes in declaration order, then
-/// the share between the corners.
-fn pack_point(anchored: &Anchored, texel: u32, tail: [f32; 5]) -> [u8; POINT_VERTEX_BYTES] {
-    let mut vertex = [0u8; POINT_VERTEX_BYTES];
-    let mut at = 0usize;
-    let mut lay = |bytes: &[u8]| {
-        vertex[at..at + bytes.len()].copy_from_slice(bytes);
-        at += bytes.len();
-    };
-    for corner in 0..2usize {
-        for value in anchored.positions[corner].to_array().into_iter().chain(anchored.normals[corner].to_array()) {
-            lay(&value.to_le_bytes());
+/// `slot` arrives with the corner index already folded in — it is the
+/// texel index shifted up two bits plus the corner, which is what
+/// `texel_clip` unpacks.
+fn write_point(packed: &mut Vec<u8>, anchored: Option<&Anchored>, probe: Vec3, normal: Vec3, slot: u32) {
+    match anchored {
+        Some(anchored) => {
+            for corner in 0..2usize {
+                let both = anchored.positions[corner].to_array().into_iter().chain(anchored.normals[corner].to_array());
+                packed.extend(both.flat_map(f32::to_le_bytes));
+                packed.extend(anchored.joints[corner]);
+                packed.extend(anchored.shares[corner].map(unorm));
+            }
         }
-        lay(&anchored.joints[corner]);
-        lay(&anchored.shares[corner].map(unorm));
+        None => packed.extend(probe.to_array().into_iter().chain(normal.to_array()).flat_map(f32::to_le_bytes)),
     }
-    lay(&((texel * 4) as f32).to_le_bytes());
-    for value in tail {
-        lay(&value.to_le_bytes());
-    }
-
-    vertex
-}
-
-/// One of a point's three vertices: the same bytes with the corner index
-/// added into the low bits of `slot`.
-fn write_corner(packed: &mut Vec<u8>, vertex: &[u8; POINT_VERTEX_BYTES], corner: u32) {
-    let slot = f32::from_le_bytes(vertex[POINT_SLOT..POINT_SLOT + 4].try_into().expect("the slot lane is four bytes"))
-        + corner as f32;
-    packed.extend_from_slice(&vertex[..POINT_SLOT]);
-    packed.extend_from_slice(&slot.to_le_bytes());
-    packed.extend_from_slice(&vertex[POINT_SLOT + 4..]);
+    packed.extend((slot as f32).to_le_bytes());
 }
 
 /// One region's index buffer: sequential little-endian `u32`
@@ -857,7 +902,7 @@ fn draw(
 fn over_points(entry_point: &str, inputs: Vec<InputSlot>, output: OutputSlot) -> [ProgramPass; 2] {
     [
         draw("vs_point", entry_point, RESIDENT, None, inputs.clone(), output, PassLoad::Clear),
-        draw("vs_point", entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
+        draw("vs_point_posed", entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
     ]
 }
 
@@ -963,7 +1008,7 @@ pub fn program() -> ProgramRegister {
         wgsl: format!("{SIGHT_WGSL}\n{SKIN_WGSL}\n{TONE_WGSL}"),
         bindings: vec![plane_slot(); PLANE_COUNT],
         transients: vec![plane_slot(); TRANSIENT_COUNT],
-        geometries: vec![subject_slot(), points_slot(), points_slot(), curves_slot()],
+        geometries: vec![subject_slot(), points_slot(), posed_points_slot(), curves_slot()],
         depth_transients: vec![SlotExtent::Full],
         passes,
     }
@@ -972,7 +1017,7 @@ pub fn program() -> ProgramRegister {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deform::bone_uniform;
+    use crate::deform::{bone_uniform, npy};
     use crate::feature::{Pen, SurfacePoint};
     use aether_render::vertex_stride_bytes;
 
@@ -994,6 +1039,37 @@ mod tests {
         }
     }
 
+    /// A strip and a rig binding its four corners — the smallest thing
+    /// the bound packer will take.
+    fn bound_fixture() -> (Mesh, Skin) {
+        const OBJ: &[u8] = b"v -1 0 0\nv 1 0 0\nv -1 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n";
+        let mesh = Mesh::from_obj_bytes(OBJ, 0).expect("a strip is a mesh");
+        let weights = npy(&[1.0, 0.0, 0.7, 0.3, 0.4, 0.6, 0.0, 1.0]);
+        let skin = Skin::parse(&weights, "bones chest head\npivot head 0.0 0.0 0.0\n", 4).expect("a four-vertex rig");
+
+        (mesh, skin)
+    }
+
+    /// A level set across that strip, so every point carries the
+    /// anchorage the bound packer reads.
+    fn anchored_curves(mesh: &Mesh) -> Vec<Curve3> {
+        let heights: Vec<f32> = mesh.positions.iter().map(|at| at.y).collect();
+        let template = Curve3 {
+            points: Vec::new(),
+            class: FeatureClass::Hatch { level: 0 },
+            pen: Pen::Pale,
+            seed: 0,
+            authored: false,
+        };
+        let crossings = mesh
+            .level_set(&heights, &[], 0.5)
+            .into_iter()
+            .map(|[a, b]| [SurfacePoint::anchored(&a), SurfacePoint::anchored(&b)])
+            .collect();
+
+        weld::curves(crossings, &template)
+    }
+
     /// Tripwire: the packers and the declared layouts must agree on
     /// their strides. They are two independent statements of one byte
     /// arrangement — the layout builds the vertex buffer layout, the
@@ -1004,16 +1080,29 @@ mod tests {
     fn the_packed_vertices_match_the_declared_strides() {
         assert_eq!(vertex_stride_bytes(&subject_slot().layout), SUBJECT_VERTEX_BYTES, "subject stride");
         assert_eq!(vertex_stride_bytes(&points_slot().layout), POINT_VERTEX_BYTES, "point stride");
+        assert_eq!(vertex_stride_bytes(&posed_points_slot().layout), POSED_POINT_VERTEX_BYTES, "posed point stride");
         assert_eq!(vertex_stride_bytes(&curves_slot().layout), CURVE_VERTEX_BYTES, "curve stride");
 
         let curves = [curve(1, 0.0, 4), curve(2, 1.0, 7)];
         let placed = layout(whole(&curves), (64, 64)).expect("fits");
         assert_eq!(
-            point_vertices(whole(&curves), placed.spans(), None).len(),
-            11 * 3 * POINT_VERTEX_BYTES,
+            posed_point_vertices(whole(&curves), placed.spans()).len(),
+            11 * 3 * POSED_POINT_VERTEX_BYTES,
             "packed length"
         );
         assert_eq!(point_indices(placed.spans()).len(), 11 * 3 * 4, "index length");
+
+        // And the bound region's, which is a second byte arrangement
+        // over the same points: a region packed at one stride into a
+        // slot declared at the other reads every lane one place along.
+        let (mesh, skin) = bound_fixture();
+        let anchored = anchored_curves(&mesh);
+        let bound = layout(whole(&anchored), (64, 64)).expect("fits");
+        assert_eq!(
+            point_vertices(whole(&anchored), bound.spans(), Some(Bound { rest: &mesh, skin: &skin })).len(),
+            bound.points() * 3 * POINT_VERTEX_BYTES,
+            "bound packed length",
+        );
 
         let eye = Vec3::new(0.0, 0.0, 4.0);
         assert_eq!(curve_vertices(whole(&curves), &placed, eye).len(), 2 * 3 * CURVE_VERTEX_BYTES, "curve length");
@@ -1067,11 +1156,11 @@ mod tests {
     #[test]
     fn an_empty_region_packs_one_point_that_draws_nothing() {
         let placed = layout(whole(&[]), (64, 64)).expect("fits");
-        let packed = point_vertices(whole(&[]), placed.spans(), None);
+        let packed = posed_point_vertices(whole(&[]), placed.spans());
 
-        assert_eq!(packed.len(), 3 * POINT_VERTEX_BYTES);
+        assert_eq!(packed.len(), 3 * POSED_POINT_VERTEX_BYTES);
         assert_eq!(point_indices(placed.spans()).len(), 3 * 4);
-        let (first, rest) = packed.split_at(POINT_VERTEX_BYTES);
+        let (first, rest) = packed.split_at(POSED_POINT_VERTEX_BYTES);
         assert_eq!(rest, [first, first].concat(), "the stand-in's three vertices are one corner");
     }
 

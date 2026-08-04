@@ -603,8 +603,13 @@ fn the_drawing_divides_by_volatility() {
         let drawing = Drawing { resident: &resident, volatile: &volatile };
         let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
         let both = |packed: (Vec<u8>, Vec<u8>)| packed.0.len() + packed.1.len();
-        let points =
-            |spans: &[sight::Span]| both((sight::point_vertices(drawing, spans, None), sight::point_indices(spans)));
+        // Each half through its own packer, as the layer ships it: the
+        // resident one carries the anchorage its vertex stage poses from,
+        // the volatile one is posed already and carries none.
+        let resting =
+            both((sight::point_vertices(drawing, layout.resident(), None), sight::point_indices(layout.resident())));
+        let moving =
+            both((sight::posed_point_vertices(drawing, layout.volatile()), sight::point_indices(layout.volatile())));
         let ribbons = |half| both(stroke::ribbon_geometry(drawing, &layout, half, None));
         let curves = both((sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)));
 
@@ -612,8 +617,8 @@ fn the_drawing_divides_by_volatility() {
         // ribbons, and the per-curve references that belong to neither
         // — a reference depth is the eye's for a resident curve as
         // much as for a volatile one (#4440).
-        let staying = points(layout.resident()) + ribbons(Half::Resident);
-        let travelling = points(layout.volatile()) + ribbons(Half::Volatile) + curves;
+        let staying = resting + ribbons(Half::Resident);
+        let travelling = moving + ribbons(Half::Volatile) + curves;
         let megabytes = |bytes: usize| bytes as f64 / 1.0e6;
 
         eprintln!(
@@ -623,7 +628,7 @@ fn the_drawing_divides_by_volatility() {
             volatile.len(),
             megabytes(staying),
             megabytes(travelling),
-            megabytes(points(layout.volatile())),
+            megabytes(moving),
             megabytes(ribbons(Half::Volatile)),
             megabytes(curves),
             megabytes(staying + travelling),
@@ -755,7 +760,7 @@ fn pack(drawing: Drawing<'_>, eye: Vec3) -> Volatile {
     let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
 
     (
-        sight::point_vertices(drawing, layout.volatile(), None),
+        sight::posed_point_vertices(drawing, layout.volatile()),
         sight::point_indices(layout.volatile()),
         sight::curve_vertices(drawing, &layout, eye),
         stroke::ribbon_geometry(drawing, &layout, Half::Volatile, None),

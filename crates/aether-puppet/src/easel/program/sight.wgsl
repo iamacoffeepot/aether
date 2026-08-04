@@ -237,6 +237,31 @@ fn vs_point(
     return out;
 }
 
+// The same point with no binding to pose it from.
+//
+// The volatile half is re-solved on the CPU at whatever pose is running,
+// so it arrives already posed and an anchorage would address a face it
+// no longer sits on. Two entry points over one fragment stage rather
+// than one entry point reading zeroed corners, because the difference is
+// the *buffer*: the volatile half is the one that travels every frame,
+// and a binding it cannot use is bytes on the wire per frame.
+@vertex
+fn vs_point_posed(
+    @location(0) probe: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) slot: f32,
+    @location(3) ends: vec2<f32>,
+    @location(4) stroke: vec2<f32>,
+) -> Point {
+    var out: Point;
+    out.clip = texel_clip(slot);
+    out.probe = probe;
+    out.normal = normal;
+    out.stroke = vec4<f32>(stroke.x, ends.x, ends.y, stroke.y);
+
+    return out;
+}
+
 // Whether the mesh stands between this point and the eye —
 // `visibility::hidden`, asked of a depth image instead of a ray.
 //

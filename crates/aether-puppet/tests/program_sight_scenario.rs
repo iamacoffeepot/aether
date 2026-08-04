@@ -442,8 +442,8 @@ impl Rig {
                     harness,
                     "create_volatile_points",
                     &CreateGeometry {
-                        layout: sight::points_slot().layout,
-                        vertices: sight::point_vertices(drawing, layout.volatile(), None),
+                        layout: sight::posed_points_slot().layout,
+                        vertices: sight::posed_point_vertices(drawing, layout.volatile()),
                         indices: sight::point_indices(layout.volatile()),
                     },
                 ),
@@ -544,7 +544,7 @@ fn re_point(
                     "aether.render",
                     &UpdateGeometry {
                         geometry_id: rig.points[1],
-                        vertices: sight::point_vertices(drawing, layout.volatile(), None),
+                        vertices: sight::posed_point_vertices(drawing, layout.volatile()),
                         indices: sight::point_indices(layout.volatile()),
                     },
                 ),

@@ -194,6 +194,30 @@ pub fn ribbon_slot() -> GeometrySlotSpec {
 /// Bytes one ribbon vertex packs, in [`ribbon_slot`] declaration order.
 pub const RIBBON_VERTEX_BYTES: usize = 2 * (12 + 4 + 4) + 12 + 8 + 8 + 4 + 4;
 
+/// The same ribbon with no binding: where the pen already *is*.
+///
+/// The volatile half is re-solved on the CPU at whatever pose is
+/// running, so it arrives posed — and it is the half that travels every
+/// frame, which is why the binding it cannot use is worth not sending.
+/// [`super::sight::posed_points_slot`] divides for the same reason.
+#[must_use]
+pub fn posed_ribbon_slot() -> GeometrySlotSpec {
+    GeometrySlotSpec {
+        layout: vec![
+            VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 3, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 4, format: VertexFormat::Unorm8x4 },
+        ],
+    }
+}
+
+/// Bytes one already-posed ribbon vertex packs: where the pen goes, the
+/// chord across it, the two field texels, the two eye-free scalars and
+/// the ink.
+pub const POSED_RIBBON_VERTEX_BYTES: usize = 12 + 12 + 8 + 8 + 4;
+
 /// Uniform window for both passes — the WGSL `StrokeParams` block.
 pub struct StrokeUniforms {
     /// The matrix the drawing was solved for.
@@ -274,6 +298,12 @@ impl StrokeUniforms {
 /// [`sight::point_vertices`](super::sight::point_vertices) packs a
 /// stand-in point: a dispatch supplies one id per declared geometry
 /// slot or it warn-drops whole.
+///
+/// The *region* chooses the layout, not the rig: a geometry slot is
+/// declared once when the program registers and cannot ask whether this
+/// subject carries one. [`Half::Resident`] packs the anchored layout
+/// whether or not `bound` is `Some`, and an unrigged subject's points
+/// stand for themselves in an anchorage whose share row is empty.
 #[must_use]
 pub fn ribbon_geometry(
     drawing: Drawing<'_>,
@@ -281,6 +311,7 @@ pub fn ribbon_geometry(
     half: Half,
     bound: Option<Bound<'_>>,
 ) -> (Vec<u8>, Vec<u8>) {
+    let anchored_layout = half == Half::Resident;
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
     let mut anchored = Vec::new();
     let mut base = 0u32;
@@ -297,12 +328,14 @@ pub fn ribbon_geometry(
         let channels = [colour.r, colour.g, colour.b, 1.0];
         let authored = u32::from(curve.authored);
         for (at, (anchor, point)) in anchored.iter().zip(&curve.points).enumerate() {
-            let pen = bound
-                .zip(point.anchorage)
-                .map_or_else(|| Anchored::posed(anchor.pos, Vec3::ZERO), |(bound, at)| bound.anchored(at));
+            let pen = anchored_layout.then(|| {
+                bound
+                    .zip(point.anchorage)
+                    .map_or_else(|| Anchored::posed(anchor.pos, Vec3::ZERO), |(bound, at)| bound.anchored(at))
+            });
             for side in 0..2u32 {
                 let address = [((span.start + at as u32) * 4 + authored * 2 + side) as f32, span.start as f32];
-                vertices.extend_from_slice(&pack(&pen, anchor, address, channels));
+                pack(&mut vertices, pen.as_ref(), anchor, address, channels);
             }
         }
 
@@ -317,17 +350,22 @@ pub fn ribbon_geometry(
     }
 
     if vertices.is_empty() {
+        // The stand-in has to carry the region's own layout, since which
+        // of the two the slot was declared with is what the vertex fetch
+        // reads it as.
         let inert = Anchor { pos: Vec3::ZERO, along: Vec3::ZERO, half: 0.0, drift: 0.0 };
-        vertices.extend_from_slice(&pack(&Anchored::posed(Vec3::ZERO, Vec3::ZERO), &inert, [0.0, 0.0], [0.0; 4]));
+        let pen = anchored_layout.then(|| Anchored::posed(Vec3::ZERO, Vec3::ZERO));
+        pack(&mut vertices, pen.as_ref(), &inert, [0.0, 0.0], [0.0; 4]);
         indices.extend([0u32; 3].into_iter().flat_map(u32::to_le_bytes));
     }
 
     (vertices, indices)
 }
 
-/// One ribbon vertex: the pen's address on the sculpt, the rest chord
-/// across it, the two field texels, the two eye-free scalars, and the
-/// ink.
+/// One ribbon vertex: where the pen goes — as an address on the sculpt
+/// where the region carries one, as a position where it does not — then
+/// the rest chord across it, the two field texels, the two eye-free
+/// scalars, and the ink.
 ///
 /// The chord travels as the rest curve's and is turned by the point's
 /// own blend in the vertex stage rather than being posed corner by
@@ -336,37 +374,24 @@ pub fn ribbon_geometry(
 /// disagree about how to turn it only by the weight gradient across one
 /// triangle edge, which is a fraction of a degree on a mesh of this
 /// density and reaches the picture nowhere.
-fn pack(pen: &Anchored, anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) -> [u8; RIBBON_VERTEX_BYTES] {
+fn pack(vertices: &mut Vec<u8>, pen: Option<&Anchored>, anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) {
     let unorm = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let mut vertex = [0u8; RIBBON_VERTEX_BYTES];
-    let mut at = 0usize;
-    let mut lay = |bytes: &[u8]| {
-        vertex[at..at + bytes.len()].copy_from_slice(bytes);
-        at += bytes.len();
-    };
-    for corner in 0..2usize {
-        for value in pen.positions[corner].to_array() {
-            lay(&value.to_le_bytes());
+    match pen {
+        Some(pen) => {
+            for corner in 0..2usize {
+                vertices.extend(pen.positions[corner].to_array().into_iter().flat_map(f32::to_le_bytes));
+                vertices.extend(pen.joints[corner]);
+                vertices.extend(pen.shares[corner].map(unorm));
+            }
         }
-        lay(&pen.joints[corner]);
-        lay(&pen.shares[corner].map(unorm));
+        None => vertices.extend(anchor.pos.to_array().into_iter().flat_map(f32::to_le_bytes)),
     }
-    let scalars = [
-        anchor.along.x,
-        anchor.along.y,
-        anchor.along.z,
-        address[0],
-        address[1],
-        anchor.half,
-        anchor.drift,
-        pen.between,
-    ];
-    for value in scalars {
-        lay(&value.to_le_bytes());
+    let scalars = [anchor.along.x, anchor.along.y, anchor.along.z, address[0], address[1], anchor.half, anchor.drift];
+    vertices.extend(scalars.into_iter().flat_map(f32::to_le_bytes));
+    if let Some(pen) = pen {
+        vertices.extend(pen.between.to_le_bytes());
     }
-    lay(&channels.map(unorm));
-
-    vertex
+    vertices.extend(channels.map(unorm));
 }
 
 /// Where the ink sheet is created, in texels, for a canvas of `canvas`.
@@ -444,8 +469,8 @@ pub fn sheet_size(canvas: (usize, usize)) -> (usize, usize) {
 #[must_use]
 pub fn program() -> ProgramRegister {
     let planes = [SEEN, REACH, COVERAGE, TOTAL, REFERENCE].map(|index| InputSlot::Binding { index }).to_vec();
-    let ribbons = |geometry: u32, load: PassLoad| ProgramPass {
-        stage: PassStage::Draw(DrawPass { vertex_entry_point: "vs_stroke".to_owned(), geometry, depth: None, load }),
+    let ribbons = |entry: &str, geometry: u32, load: PassLoad| ProgramPass {
+        stage: PassStage::Draw(DrawPass { vertex_entry_point: entry.to_owned(), geometry, depth: None, load }),
         entry_point: "fs_stroke".to_owned(),
         inputs: planes.clone(),
         output: OutputSlot::Transient { index: RASTER },
@@ -463,8 +488,8 @@ pub fn program() -> ProgramRegister {
         repeat: None,
     };
     let passes = vec![
-        ribbons(RESIDENT, PassLoad::Clear),
-        ribbons(VOLATILE, PassLoad::Load),
+        ribbons("vs_stroke", RESIDENT, PassLoad::Clear),
+        ribbons("vs_stroke_posed", VOLATILE, PassLoad::Load),
         off_the_raster("fs_ink_plane", OutputSlot::Binding { index: INK_PLANE }),
         off_the_raster("fs_resolve", OutputSlot::Binding { index: INK }),
     ];
@@ -480,7 +505,7 @@ pub fn program() -> ProgramRegister {
         wgsl: format!("{STROKE_WGSL}\n{SKIN_WGSL}"),
         bindings,
         transients: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
-        geometries: vec![ribbon_slot(); GEOMETRY_COUNT],
+        geometries: vec![ribbon_slot(), posed_ribbon_slot()],
         depth_transients: Vec::new(),
         passes,
     }
@@ -491,6 +516,7 @@ mod tests {
     use super::*;
     use crate::easel::program::sight;
     use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
+    use aether_render::vertex_stride_bytes;
 
     /// Tripwire: the packed stride is what the register checks the
     /// vertex stage against, and a lane that slides here reads the
@@ -498,17 +524,12 @@ mod tests {
     /// that renders as a plausible drawing of the wrong occlusion.
     #[test]
     fn the_packed_vertex_matches_the_declared_layout() {
-        let stride: usize = ribbon_slot()
-            .layout
-            .iter()
-            .map(|attribute| match attribute.format {
-                VertexFormat::Float32x3 => 12,
-                VertexFormat::Float32x2 => 8,
-                VertexFormat::Float32 | VertexFormat::Unorm8x4 | VertexFormat::Uint8x4 => 4,
-            })
-            .sum();
-
-        assert_eq!(stride, RIBBON_VERTEX_BYTES);
+        assert_eq!(vertex_stride_bytes(&ribbon_slot().layout), RIBBON_VERTEX_BYTES, "the bound half's stride");
+        assert_eq!(
+            vertex_stride_bytes(&posed_ribbon_slot().layout),
+            POSED_RIBBON_VERTEX_BYTES,
+            "the posed half's stride",
+        );
     }
 
     /// Tripwire: each half's indices address its own buffer.
@@ -526,7 +547,7 @@ mod tests {
 
         for half in [Half::Resident, Half::Volatile] {
             let (vertices, indices) = ribbon_geometry(drawing, &layout, half, None);
-            let count = (vertices.len() / RIBBON_VERTEX_BYTES) as u32;
+            let count = (vertices.len() / POSED_RIBBON_VERTEX_BYTES) as u32;
             for corner in indices.chunks_exact(4) {
                 let at = u32::from_le_bytes(corner.try_into().expect("four bytes"));
                 assert!(at < count, "{half:?} indexes vertex {at} of {count}");

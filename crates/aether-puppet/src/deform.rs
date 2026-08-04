@@ -587,6 +587,23 @@ pub fn posed_surface(
     tone_gate(curves, settings)
 }
 
+/// `.npy` framing around `values`: the magic, a version, a header length
+/// and a header of that length.
+///
+/// Beside the reader it feeds rather than inside one test module,
+/// because the packers' own tests need a rig too and a second
+/// transcription of this framing is a second thing to get wrong.
+#[cfg(test)]
+pub(crate) fn npy(values: &[f32]) -> Vec<u8> {
+    let header = b"{'descr': '<f4', 'fortran_order': False, }    \n";
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend((header.len() as u16).to_le_bytes());
+    bytes.extend(header);
+    bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,18 +615,6 @@ mod tests {
     /// at full and half share.
     fn descriptor() -> &'static str {
         "bones chest head\nneck_share 0.35\npivot head 0.0 0.0 0.0\n"
-    }
-
-    /// `.npy` framing around `values`: the magic, a version, a header
-    /// length and a header of that length.
-    fn npy(values: &[f32]) -> Vec<u8> {
-        let header = b"{'descr': '<f4', 'fortran_order': False, }    \n";
-        let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
-        bytes.extend((header.len() as u16).to_le_bytes());
-        bytes.extend(header);
-        bytes.extend(values.iter().flat_map(|v| v.to_le_bytes()));
-
-        bytes
     }
 
     fn quarter_turn() -> Pose {

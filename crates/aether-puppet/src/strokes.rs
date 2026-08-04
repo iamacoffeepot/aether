@@ -409,7 +409,7 @@ impl Strokes {
         }
 
         self.solved = Some(Solved {
-            points: (sight::point_vertices(drawing, layout.volatile(), None), sight::point_indices(layout.volatile())),
+            points: (sight::posed_point_vertices(drawing, layout.volatile()), sight::point_indices(layout.volatile())),
             ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Volatile, None),
             curves: (sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)),
         });
@@ -572,10 +572,10 @@ impl Strokes {
         vec![
             create(sight::subject_slot().layout, subject),
             create(sight::points_slot().layout, resident.points),
-            create(sight::points_slot().layout, solved.points),
+            create(sight::posed_points_slot().layout, solved.points),
             create(sight::curves_slot().layout, solved.curves),
             create(stroke::ribbon_slot().layout, resident.ribbons),
-            create(stroke::ribbon_slot().layout, solved.ribbons),
+            create(stroke::posed_ribbon_slot().layout, solved.ribbons),
         ]
     }
 
