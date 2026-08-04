@@ -172,8 +172,16 @@ fn plane_bytes(plane: &[f32]) -> Vec<u8> {
 }
 
 impl Easel {
+    /// A canvas change orphans the painted sheet — the old pixels would
+    /// stretch over the new frustum — so it invalidates exactly as a
+    /// subject change does, with first-paint-immediate semantics on the
+    /// next render. A same-size announcement keeps the sheet.
     pub fn resized(&mut self, width: u32, height: u32) {
+        if self.window == Some((width, height)) {
+            return;
+        }
         self.window = Some((width, height));
+        self.painted_from = None;
     }
 
     /// A new subject or field arrived; the sheet no longer describes it.
@@ -485,5 +493,28 @@ impl Easel {
                 tint: aether_math::Rgba::new(1.0, 1.0, 1.0, 1.0),
             }],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tripwire: a canvas change must invalidate the painted sheet. The
+    // shipped bug this pins: `resized` recorded the new window but kept
+    // `painted_from`, so with an unmoved eye the develop gate skipped
+    // forever and the old sheet stretched over the new frustum (issue
+    // 4391 — the displaced ear flush after fullscreening).
+    #[test]
+    fn a_resize_invalidates_the_sheet_and_a_same_size_announcement_keeps_it() {
+        let mut easel = Easel::default();
+        easel.resized(800, 1000);
+        easel.painted_from = Some(Vec3::new(0.0, 0.0, 5.4));
+
+        easel.resized(800, 1000);
+        assert!(easel.painted_from.is_some(), "a same-size announcement must not force a repaint");
+
+        easel.resized(3024, 1670);
+        assert!(easel.painted_from.is_none(), "a canvas change must orphan the sheet so the next render repaints");
     }
 }
