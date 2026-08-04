@@ -219,8 +219,8 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
         },
         depth_stencil: spec.depth.then(|| wgpu::DepthStencilState {
             format: PROGRAM_DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::LessEqual,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
