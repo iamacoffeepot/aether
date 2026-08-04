@@ -9,7 +9,7 @@
 //! - **Occluded.** The point is real and front-facing, but something else
 //!   stands between it and the eye.
 
-use core::mem;
+use core::{iter, mem};
 
 use aether_math::Vec3;
 
@@ -40,15 +40,85 @@ pub fn hidden(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, bias: f32) -> bool {
     mesh.occluded(point.probe + point.normal * bias, to_eye / distance, distance)
 }
 
-fn is_drawn(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, class: FeatureClass, mode: Mode, bias: f32) -> bool {
-    if !matches!(class, FeatureClass::Silhouette | FeatureClass::Decal) {
-        let to_eye = (eye - point.probe).normalize();
-        if point.normal.dot(to_eye) < 0.02 {
-            return false;
+/// The half of the verdict that costs no ray: the point is on the near
+/// side of the surface. A silhouette grazes by definition and a decal is
+/// planted on a fitted plane, so neither is asked.
+fn faces_eye(eye: Vec3, point: &SurfacePoint, class: FeatureClass) -> bool {
+    if matches!(class, FeatureClass::Silhouette | FeatureClass::Decal) {
+        return true;
+    }
+
+    point.normal.dot((eye - point.probe).normalize()) >= 0.02
+}
+
+/// Which points of `span` the eye can actually see, one verdict per point.
+///
+/// A ray every `stride` points, and the verdict held in between — except
+/// across a window whose two ends disagree, where every skipped point is
+/// cast after all. The held verdict is right in the interior of a run and
+/// wrong only near its ends, which is exactly where being wrong shows:
+/// holding it there moves the end of a stroke up to `stride - 1` points
+/// off the edge the stroke actually disappears behind.
+fn visible(mesh: &Mesh, eye: Vec3, span: &[SurfacePoint], stride: usize, bias: f32) -> Vec<bool> {
+    // The last point is sampled whether or not it lands on the grid, so
+    // the final window has an end to be refined against like any other.
+    let last = span.len() - 1;
+    let samples: Vec<(usize, bool)> =
+        (0..last).step_by(stride).chain(iter::once(last)).map(|at| (at, !hidden(mesh, eye, &span[at], bias))).collect();
+
+    let mut seen = vec![false; span.len()];
+    for &(at, verdict) in &samples {
+        seen[at] = verdict;
+    }
+    for window in samples.windows(2) {
+        let ((from, before), (to, after)) = (window[0], window[1]);
+        if before == after {
+            seen[from..to].fill(before);
+        } else {
+            for (point, seen) in span[from + 1..to].iter().zip(&mut seen[from + 1..to]) {
+                *seen = !hidden(mesh, eye, point, bias);
+            }
         }
     }
 
-    mode == Mode::Ghost || !hidden(mesh, eye, point, bias)
+    seen
+}
+
+/// Which points of `curve` are drawn at all, one flag per point.
+///
+/// The rayless tests run per point — `keep` is a tone test with no ray
+/// behind it, so sampling it would band the hatch thresholds, and the
+/// facing test is a dot product. Only the occlusion ray is strided, and
+/// only inside a stretch that has already passed both, so nothing is cast
+/// for a point that is dropped either way.
+fn drawn(
+    mesh: &Mesh,
+    eye: Vec3,
+    curve: &Curve3,
+    keep: &dyn Fn(&SurfacePoint) -> bool,
+    mode: Mode,
+    stride: usize,
+    bias: f32,
+) -> Vec<bool> {
+    let mut flags: Vec<bool> = curve.points.iter().map(|p| keep(p) && faces_eye(eye, p, curve.class)).collect();
+    if mode == Mode::Ghost {
+        return flags;
+    }
+
+    let mut from = 0;
+    while from < flags.len() {
+        if !flags[from] {
+            from += 1;
+            continue;
+        }
+        let to = flags[from..].iter().position(|&on| !on).map_or(flags.len(), |offset| from + offset);
+        for (flag, seen) in flags[from..to].iter_mut().zip(visible(mesh, eye, &curve.points[from..to], stride, bias)) {
+            *flag = seen;
+        }
+        from = to;
+    }
+
+    flags
 }
 
 /// Split `curve` into the runs that survive, preserving order.
@@ -66,22 +136,7 @@ pub fn runs(
     stride: usize,
     bias: f32,
 ) -> Vec<Curve3> {
-    // The occlusion verdict is sampled every `stride` points and held in
-    // between. `keep` is not — it is a per-point tone test with no ray
-    // behind it, so sampling it would band the hatch thresholds.
-    let stride = stride.max(1);
-    let mut sampled = true;
-    let flags: Vec<bool> = curve
-        .points
-        .iter()
-        .enumerate()
-        .map(|(index, p)| {
-            if index % stride == 0 {
-                sampled = is_drawn(mesh, eye, p, curve.class, mode, bias);
-            }
-            keep(p) && sampled
-        })
-        .collect();
+    let flags = drawn(mesh, eye, curve, keep, mode, stride.max(1), bias);
 
     if flags.iter().all(|&f| f) {
         return vec![curve.clone()];
@@ -139,6 +194,26 @@ mod tests {
 
     use crate::feature::Pen;
 
+    /// A wall standing one unit in front of the drawing over `x < 0`, so a
+    /// line laid across `x = 0` is hidden on one side of it and clear on
+    /// the other with the edge between two known points.
+    fn wall() -> Mesh {
+        let obj = b"v -10 -10 1\nv 0 -10 1\nv 0 10 1\nv -10 10 1\nf 1 2 3\nf 1 3 4\n";
+
+        Mesh::from_obj_bytes(obj, 0).expect("two triangles are a mesh")
+    }
+
+    /// Twenty-one points stepping across the wall's edge. Points 0..=9 are
+    /// behind it and 10..=20 clear it, so a correct split hands back one
+    /// run of eleven.
+    fn across_the_edge() -> Curve3 {
+        let points = (0..21)
+            .map(|at| SurfacePoint::on_surface(Vec3::new(-0.95 + 0.1 * at as f32, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)))
+            .collect();
+
+        Curve3 { points, class: FeatureClass::Silhouette, pen: Pen::Ink, seed: 0, authored: false }
+    }
+
     fn curve(points: usize, authored: bool) -> Curve3 {
         Curve3 {
             points: vec![SurfacePoint::on_surface(Vec3::splat(0.0), Vec3::new(0.0, 0.0, 1.0)); points],
@@ -146,6 +221,30 @@ mod tests {
             pen: Pen::Ink,
             seed: 0,
             authored,
+        }
+    }
+
+    /// Tripwire: a stroke ends on the edge it disappears behind, whatever
+    /// the sampling stride.
+    ///
+    /// The strided verdict is held between samples, and no stride but 1
+    /// puts a sample on point 10 — so without the refinement the run
+    /// starts at the next sample instead and the drawing loses the points
+    /// between, which is the chopped stroke end this exists to catch.
+    ///
+    /// Three strides because the sampling has three shapes: 1 skips
+    /// nothing, 3 leaves the curve's last point off the sample grid, and 4
+    /// lands it on the grid — and the last point is sampled either way, so
+    /// a stride that divides the curve must not sample it twice.
+    #[test]
+    fn a_run_ends_on_the_occluding_edge_whatever_the_stride() {
+        let (wall, curve, eye) = (wall(), across_the_edge(), Vec3::new(0.0, 0.0, 10.0));
+
+        for stride in [1, 3, 4] {
+            let split = runs(&wall, eye, &curve, &|_| true, Mode::Opaque, stride, 1e-4);
+
+            assert_eq!(split.len(), 1, "stride {stride}: one clear stretch, so one run");
+            assert_eq!(split[0].points.len(), 11, "stride {stride}: the run starts where the wall ends");
         }
     }
 
