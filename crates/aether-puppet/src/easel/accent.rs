@@ -153,7 +153,7 @@ impl Eye {
     }
 
     /// How far out from the centre this eye is measured, in canvas
-    /// pixels — the box [`irises`] walks and the GPU iris pass tests
+    /// pixels — the box `irises` walks and the GPU iris pass tests
     /// against.
     pub fn reach(&self, height: usize) -> f32 {
         self.size() * IRIS_REACH + image::tuned(IRIS_MARGIN, height)

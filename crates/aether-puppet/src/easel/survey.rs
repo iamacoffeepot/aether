@@ -38,7 +38,7 @@ use super::palette;
 
 /// Centroid slots, indexed by class id: `0` is the background, which
 /// never carries one, and the labelled classes run up to
-/// [`CLASSES`](crate::labels::CLASSES).
+/// [`CLASSES`].
 pub const SLOTS: usize = CLASSES + 1;
 
 /// Visible fraction of its own lid loop over which an eye earns its

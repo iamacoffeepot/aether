@@ -34,7 +34,7 @@ pub const RAMP_ENTRY: &str = "fs_care_ramp";
 /// The schedule is fixed rather than derived from the canvas because the
 /// graph is static by construction — the same passes for every subject at
 /// every size. Starting past the widest canvas the easel paints at
-/// ([`CANVAS_LONG_EDGE`](crate::easel::CANVAS_LONG_EDGE)) costs a few
+/// (`easel::CANVAS_LONG_EDGE`) costs a few
 /// hops whose probes all clamp onto the border and find nothing new; it
 /// is what lets one schedule serve every size. The repeated final hop is
 /// the standard jump-flood refinement: the algorithm is approximate, and
@@ -64,7 +64,7 @@ impl JumpUniforms {
 
 /// Uniform window for the ramp — the WGSL `CareRampParams` block.
 pub struct RampUniforms {
-    /// [`CARE_FAR`] and [`CARE_NEAR`] at this canvas' own height.
+    /// `CARE_FAR` and `CARE_NEAR` at this canvas' own height.
     pub far: f32,
     pub near: f32,
 }

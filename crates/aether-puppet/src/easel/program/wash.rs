@@ -39,7 +39,7 @@
 //! slit a fraction of one. So the coarse half is the whole labelled box
 //! and the cheek flush, and the fine half is the aperture clip, the iris'
 //! own wash, the lid weight over it and the paper grain the sheet resolves
-//! against. [`Grain`] is which of the two a chain develops at; the seam
+//! against. `Grain` is which of the two a chain develops at; the seam
 //! between them is one bilinear lift of the light accumulator
 //! (`fs_light_lift`), taken after the last coarse coat and before the
 //! first fine one, which multiplicative absorption lets us reorder freely.

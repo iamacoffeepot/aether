@@ -590,7 +590,7 @@ impl<'a> Sheet<'a> {
     /// hardened at the atmosphere level into the mask the stain's wash
     /// develops from.
     ///
-    /// Split from [`Self::atmosphere`] and public so the parity scenario
+    /// Split from `Self::atmosphere` and public so the parity scenario
     /// can place the GPU stain on the same pixels the oracle places it
     /// on. The production develop has no such pixels — the class plane
     /// lives on the GPU — and estimates the stain's centre off the

@@ -1,5 +1,5 @@
 //! The face paint as authored passes (iamacoffeepot/aether#4387,
-//! ADR-0171): [`accent`](crate::easel::accent) re-spoken as one draw pass
+//! ADR-0171): [`accent`] re-spoken as one draw pass
 //! over the chart's aperture loops and five pointwise passes over what it
 //! leaves.
 //!
@@ -136,7 +136,7 @@ impl EyeUniform {
 /// and the presence is in canvas pixels. Rather than scale a frame from
 /// one extent to the other, both callers project the chart's own frames
 /// at their own extent through
-/// [`accent::project`](crate::easel::accent::project) and come here: one
+/// [`accent::project`] and come here: one
 /// statement of the packing, and no algebra that can slip a factor.
 ///
 /// `presence` is indexed as `eyes` is — how much of each eye the viewer
