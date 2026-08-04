@@ -24,9 +24,14 @@ use crate::math3::hash64;
 /// crossings never collide, coarse enough to absorb a last-bit difference.
 const GRID: f32 = 1e-5;
 
-type Cell = (i64, i64, i64);
+pub type Cell = (i64, i64, i64);
 
-fn cell(p: Vec3) -> Cell {
+/// Which welding cell a point falls in. Public because stroke identity
+/// is asked of the same quantisation — a curve's endpoints are what
+/// name it (`easel::program::sight::curve_id`), and they have to be
+/// quantised the way the weld quantised them or two spellings of one
+/// joint become two curves.
+pub fn cell(p: Vec3) -> Cell {
     ((p.x / GRID).round() as i64, (p.y / GRID).round() as i64, (p.z / GRID).round() as i64)
 }
 
