@@ -59,7 +59,12 @@ const MINIMUM_DEPOSIT: f32 = 0.002;
 /// Tone at which a material is fully lit, unless it names its own. The
 /// GPU shade pass takes the resolved value through its uniforms, so the
 /// dispatch encoder reads this too.
-pub(crate) const LIT: f32 = 0.92;
+///
+/// Public because it bounds a contract outside this crate's own code:
+/// the packed bake plane carries tone in an 8-bit unorm channel that
+/// clips at one, which is lossless only while every resolved `lit` stays
+/// below one. `tests/program_bake_scenario.rs` holds that.
+pub const LIT: f32 = 0.92;
 
 /// Tone at which a material is fully in shadow.
 const SHADOWED: f32 = 0.3;
