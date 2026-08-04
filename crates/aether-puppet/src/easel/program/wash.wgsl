@@ -31,13 +31,18 @@ struct MaskParams {
 }
 
 @group(0) @binding(0) var<uniform> mask_params: MaskParams;
-@group(1) @binding(0) var mask_classes: texture_2d<f32>;
+@group(1) @binding(0) var mask_packed: texture_2d<f32>;
 
 // palette.rs `mask_of` (and the figure mask inside `atmosphere_spill`):
-// one material's coverage over the region plane.
+// one material's coverage over the bake's class channel.
+//
+// The class rides the packed plane's red channel as `class / 255`, which
+// an 8-bit unorm carries exactly, so it comes back as the integer it is
+// under one multiply and a round (bake.wgsl's header states the contract;
+// care.wgsl decodes it the same way).
 @fragment
 fn fs_mask(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let labelled = textureLoad(mask_classes, vec2<i32>(position.xy), 0).r;
+    let labelled = round(textureLoad(mask_packed, vec2<i32>(position.xy), 0).r * 255.0);
     let remapped = select(labelled, MASK_SKIN, labelled == MASK_LIPS);
     let covered = select(f32(remapped == mask_params.material_class), f32(labelled != 0.0), mask_params.figure == 1u);
     return vec4<f32>(covered, 0.0, 0.0, 1.0);
@@ -54,16 +59,29 @@ struct ShadeParams {
     // Tone at which this material counts as fully lit — the material's
     // own `shade_lit`, or palette.rs LIT.
     lit: f32,
+    // Texels of the bound tone plane per texel of this pass's own output.
+    // One for a material developed at the plane's own extent; the
+    // reciprocal of the body divisor for a material developed finer than
+    // the bake it reads (the iris, wash.rs `Grain`).
+    source_scale: f32,
 }
 
 @group(0) @binding(0) var<uniform> shade_params: ShadeParams;
-@group(1) @binding(0) var shade_tone: texture_2d<f32>;
+@group(1) @binding(0) var shade_packed: texture_2d<f32>;
 
 // palette.rs `shade_of`: how much of a material's wash survives at each
 // pixel, given the light.
+//
+// The scaled read is a point sample of the coarser plane rather than a
+// filtered one, and deliberately: the tone plane is the key light, which
+// varies over the whole figure rather than over a texel, and a nearest
+// read of it at twice the rate costs the value plane nothing the wash's
+// own support blur does not immediately soften away.
 @fragment
 fn fs_shade(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let tone = textureLoad(shade_tone, vec2<i32>(position.xy), 0).r;
+    // The key light is the packed plane's green channel (bake.wgsl).
+    let source = vec2<i32>(floor(position.xy * shade_params.source_scale));
+    let tone = textureLoad(shade_packed, source, 0).g;
     let value = shade_params.shade_floor
         + (1.0 - shade_params.shade_floor) * hermite(shade_params.lit, SHADOWED, tone);
     return vec4<f32>(value, 0.0, 0.0, 1.0);
@@ -127,6 +145,37 @@ fn fs_lift(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let at = vec2<i32>(position.xy);
     let weight = mix(1.0, textureLoad(lift_weight, at, 0).r, lift_params.gate);
     return vec4<f32>(textureLoad(lift_density, at, 0).r * weight, 0.0, 0.0, 1.0);
+}
+
+struct LiftExtentParams {
+    // Texels of the bound accumulator per texel of this pass's output —
+    // the reciprocal of the body divisor (wash.rs `BODY_DIVISOR`).
+    source_scale: f32,
+}
+
+@group(0) @binding(0) var<uniform> lift_extent: LiftExtentParams;
+@group(1) @binding(0) var lift_extent_light: texture_2d<f32>;
+@group(1) @binding(1) var lift_extent_sampler: sampler;
+
+// The notch's one seam: the light accumulated over the notched body,
+// carried up to the sheet's own pixels so the accents can be absorbed
+// into it at full resolution.
+//
+// The read is filtered rather than pointwise, and this is the one place
+// in the wash where that is right. Everything absorbed so far is the low
+// frequencies the notch exists to develop coarsely (ADR-0170's
+// frequency-split argument) — a wash body, its tide lines already
+// softened, its granulation already settled — so a bilinear lift is the
+// reconstruction the sampling assumed, where a nearest one would put a
+// staircase along every tide line the body drew on the diagonal. The
+// accumulator is `Rgba8`, which is filterable, so the executor hands this
+// pass the linear sampler and the four taps cost one instruction.
+@fragment
+fn fs_light_lift(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let source = vec2<f32>(textureDimensions(lift_extent_light));
+    let uv = position.xy * lift_extent.source_scale / source;
+
+    return vec4<f32>(textureSampleLevel(lift_extent_light, lift_extent_sampler, uv, 0.0).rgb, 1.0);
 }
 
 // Where in the displaced halo the stain reaches full strength, how much

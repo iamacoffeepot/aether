@@ -560,15 +560,13 @@ impl WasmActor for Puppet {
             }
         }
 
-        // The easel, under everything above: develop when the view has
-        // settled, then stand the sheet behind the subject. The develop
-        // rasterizes its planes on the CPU and paints them through the
-        // registered wash program (ADR-0170); the gate keeps the
-        // rasterize off the frame cadence, and the presentation costs
-        // one textured rect. It runs after the ribbons
-        // rather than before because it reads them — the wash smears along
-        // the drawing's own strokes, and the drawing has to be solved for
-        // this eye first.
+        // The easel, under everything above: develop this view, then stand
+        // the sheet behind the subject. Every frame — the whole develop is
+        // two registered dispatches now (ADR-0170/0171), and nothing left
+        // on the CPU scales with the canvas — and the presentation costs
+        // one textured rect. It runs after the ribbons rather than before
+        // because it reads them: the wash smears along the drawing's own
+        // strokes, and the drawing has to be solved for this eye first.
         let view = easel::View {
             eye,
             target: self.target(),
@@ -590,31 +588,32 @@ impl WasmActor for Puppet {
                 anchors,
                 face,
             });
-            // The CPU split, deferred behind the easel's own gate: the
-            // wash smears along the drawing's strokes, so it wants the
-            // visible runs — and it wants them a hundred times less
-            // often than the frame does.
+            // The CPU split, asked for rather than handed over: the wash
+            // wants the visible runs to rasterize its own ink coverage
+            // plane from, and the easel is the only caller left that
+            // needs them — the frame's ink comes off the visibility
+            // field (ADR-0172) and never sees a CPU triangle.
             let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
             let split = || Self::split(subject, drawing, eye);
             let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &split, chart };
 
-            self.easel.develop(&painted, &view, self.dragging);
+            self.easel.develop(&painted, &view);
         }
 
         // The easel's mail for this frame, in dependency order: the
         // programs a re-laid graph has finished with, the program
-        // register (at the first develop and after a re-lay), the
-        // texture destroys a resize
-        // owes, the creates carrying a first develop at this size, then
-        // the updates, the ribbon geometry the ink pass rasterizes, and
-        // the dispatch that reads them all — to the same mailbox, so the
-        // render cap sees them in exactly this order.
+        // registers (both at the first develop, the wash's again after a
+        // re-lay), the texture destroys a resize owes, the creates
+        // carrying this canvas' resident planes, the geometry creates and
+        // the updates that move with the eye, then the two dispatches
+        // that read them all — to the same mailbox, so the render cap
+        // sees them in exactly this order.
         for destroy in self.easel.take_program_destroys() {
             render.send(&destroy);
         }
-        if let Some(register) = self.easel.take_register() {
+        for register in self.easel.take_registers() {
             self.awaiting.registers.push_back(Awaiting::Easel);
-            render.send(register);
+            render.send(&register);
         }
         for destroy in self.easel.take_destroys() {
             render.send(&destroy);
@@ -623,17 +622,14 @@ impl WasmActor for Puppet {
             self.awaiting.textures.push_back(Awaiting::Easel);
             render.send(&create);
         }
-        for update in self.easel.take_updates() {
-            render.send(&update);
-        }
-        if let Some(create) = self.easel.take_ink_create() {
+        for create in self.easel.take_geometry_creates() {
             self.awaiting.geometries.push_back(Awaiting::Easel);
             render.send(&create);
         }
-        if let Some(update) = self.easel.take_ink_update() {
+        for update in self.easel.take_geometry_updates() {
             render.send(&update);
         }
-        if let Some(dispatch) = self.easel.take_dispatch() {
+        for dispatch in self.easel.take_dispatch() {
             render.send(&dispatch);
         }
         let subject_radius = (subject.max - subject.min).length() * 0.5;
@@ -754,7 +750,7 @@ impl WasmActor for Puppet {
             }
         };
         match self.awaiting.geometries.pop_front() {
-            Some(Awaiting::Easel) => self.easel.ink_created(result),
+            Some(Awaiting::Easel) => self.easel.geometry_created(result),
             Some(Awaiting::Strokes) => self.strokes.geometry_created(result),
             None => {}
         }

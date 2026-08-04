@@ -317,8 +317,8 @@ const SPATTER_STRENGTH: (f32, f32) = (0.4, 0.7);
 
 /// Distances from the face over which the hand relaxes: cut to the line
 /// this close, wholly free past this far.
-const CARE_NEAR: f32 = 160.0;
-const CARE_FAR: f32 = 600.0;
+pub(crate) const CARE_NEAR: f32 = 160.0;
+pub(crate) const CARE_FAR: f32 = 600.0;
 
 /// Fraction of its granulation a material keeps in its tight coat.
 ///
@@ -434,42 +434,54 @@ const SHADE_SWING: (f32, f32) = (7.0, 4.0);
 /// How much of the coarse noise and of the mottle the tide-line noise is.
 const EDGE_MIX: (f32, f32) = (0.9, 0.5);
 
+/// The sheet of paper before anything is registered on it: its three
+/// noise fields and its own colour variation.
+///
+/// Split from [`Sheet`] because it is a pure function of the seed and the
+/// canvas — nothing in it can turn with the view — so the real-time easel
+/// pulps one sheet when a canvas is created and paints on it every frame
+/// after (iamacoffeepot/aether#4387). At 900x1200 the four fields cost
+/// about thirty-two milliseconds, which is twice a frame's whole budget
+/// for an answer that cannot change.
+pub struct Paper {
+    pub noise: NoisePlanes,
+    /// The paper's own colour variation, as a multiplier about one.
+    pub shade: Vec<f32>,
+}
+
+/// Pulp one sheet at `seed`, at the canvas' own size.
+#[must_use]
+pub fn paper(seed: u64, width: usize, height: usize) -> Paper {
+    let tooth = image::Noise::new(seed ^ TOOTH_SEED, TOOTH_NOISE.0, TOOTH_NOISE.1).plane(width, height);
+    let mottle = image::Noise::new(seed ^ MOTTLE_SEED, MOTTLE_NOISE.0, MOTTLE_NOISE.1).plane(width, height);
+    let coarse = image::Noise::new(seed ^ EDGE_SEED, EDGE_NOISE.0, EDGE_NOISE.1).plane(width, height);
+
+    let edge = coarse
+        .iter()
+        .zip(&mottle)
+        .map(|(&at, &blotch)| (at - 0.5) * EDGE_MIX.0 + (blotch - 0.5) * EDGE_MIX.1)
+        .collect();
+    let shade = tooth
+        .iter()
+        .zip(&mottle)
+        .map(|(&grain, &blotch)| 1.0 + ((grain - 0.5) * SHADE_SWING.0 + (blotch - 0.5) * SHADE_SWING.1) / 255.0)
+        .collect();
+
+    Paper { noise: NoisePlanes { tooth, mottle, edge }, shade }
+}
+
 impl<'a> Sheet<'a> {
     pub fn new(planes: Planes<'a>, seed: u64) -> Self {
         let (width, height) = (planes.width, planes.height);
-        let tooth = image::Noise::new(seed ^ TOOTH_SEED, TOOTH_NOISE.0, TOOTH_NOISE.1).plane(width, height);
-        let mottle = image::Noise::new(seed ^ MOTTLE_SEED, MOTTLE_NOISE.0, MOTTLE_NOISE.1).plane(width, height);
-        let coarse = image::Noise::new(seed ^ EDGE_SEED, EDGE_NOISE.0, EDGE_NOISE.1).plane(width, height);
-
-        let edge = coarse
-            .iter()
-            .zip(&mottle)
-            .map(|(&at, &blotch)| (at - 0.5) * EDGE_MIX.0 + (blotch - 0.5) * EDGE_MIX.1)
-            .collect();
-        let shade = tooth
-            .iter()
-            .zip(&mottle)
-            .map(|(&grain, &blotch)| 1.0 + ((grain - 0.5) * SHADE_SWING.0 + (blotch - 0.5) * SHADE_SWING.1) / 255.0)
-            .collect();
+        let Paper { noise, shade } = paper(seed, width, height);
         let care = care_field(planes.classes, width, height);
 
-        Self { planes, seed, noise: NoisePlanes { tooth, mottle, edge }, shade, care }
+        Self { planes, seed, noise, shade, care }
     }
 
     /// The paper's own colour variation, for [`palette::composite`].
     pub fn paper_shade(&self) -> &[f32] {
         &self.shade
-    }
-
-    /// The seed this sheet was pulped from, for the GPU dispatch encoder
-    /// ([`super::program::wash`]) to replay the same accident stream.
-    pub(crate) fn seed(&self) -> u64 {
-        self.seed
-    }
-
-    /// The planes this sheet paints from, for the same encoder.
-    pub(crate) fn planes(&self) -> Planes<'a> {
-        self.planes
     }
 
     /// The paper's shared noise, for upload as textures by a GPU wash.
@@ -576,10 +588,16 @@ impl<'a> Sheet<'a> {
     /// The stain's own coverage: the region's halo carried off the figure
     /// along the material's drift, cut back where the figure stands, and
     /// hardened at the atmosphere level into the mask the stain's wash
-    /// develops from. Split from [`Self::atmosphere`] so the GPU dispatch
-    /// encoder ([`super::program::wash`]) derives the stain's centroid
-    /// from the same pixels the spill pass writes.
-    pub(crate) fn atmosphere_spill(&self, mask: &[f32], policy: &Atmosphere) -> Vec<f32> {
+    /// develops from.
+    ///
+    /// Split from `Self::atmosphere` and public so the parity scenario
+    /// can place the GPU stain on the same pixels the oracle places it
+    /// on. The production develop has no such pixels — the class plane
+    /// lives on the GPU — and estimates the stain's centre off the
+    /// geometry instead ([`Easel`](super::Easel)); holding the two apart
+    /// is what keeps the scenario a test of the program's arithmetic
+    /// rather than of that estimate.
+    pub fn atmosphere_spill(&self, mask: &[f32], policy: &Atmosphere) -> Vec<f32> {
         let (width, height) = (self.planes.width, self.planes.height);
         let figure: Vec<f32> = self.planes.classes.iter().map(|&at| f32::from(at != 0)).collect();
 
@@ -815,7 +833,7 @@ struct Support {
 }
 
 /// Where the region sits, or `None` when nothing is covered at all.
-pub(crate) fn centroid(mask: &[f32], width: usize) -> Option<Vec2> {
+pub fn centroid(mask: &[f32], width: usize) -> Option<Vec2> {
     let mut sum = Vec2::new(0.0, 0.0);
     let mut count = 0.0;
 

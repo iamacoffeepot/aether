@@ -36,6 +36,9 @@
 //! the way the two above stand beside their oracles.
 
 pub mod bake;
+pub mod care;
+pub mod face;
+pub mod flow;
 pub mod ink;
 pub mod pigment;
 pub mod puddle;
