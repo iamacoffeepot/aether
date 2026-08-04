@@ -30,10 +30,10 @@
 //! is where a stroke is and which way it runs, and a half-claimed pixel
 //! would answer neither more truthfully.
 
-use aether_math::{Mat4, Vec2, Vec3};
+use aether_math::{Mat4, Rgb, Vec2, Vec3};
 use aether_render::{
     DrawPass, DrawTriangle, GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramPass, SlotExtent, SlotSpec,
-    TextureFormat, VertexAttribute, VertexFormat,
+    TextureFormat, Vertex, VertexAttribute, VertexFormat,
 };
 
 /// The ink pass' own WGSL. Never registered alone — the wash program's
@@ -131,11 +131,16 @@ pub const VERTEX_BYTES: usize = 12 + 12 + 12;
 /// drawing neutralizes through the content, never by restructuring the
 /// graph. The vertex stage's area floor culls the stand-in exactly as
 /// the oracle skips a degenerate triangle.
-fn corners(triangles: &[DrawTriangle]) -> Vec<[Vec3; 3]> {
-    match triangles {
-        [] => vec![[Vec3::new(0.0, 0.0, 0.0); 3]],
-        drawn => drawn.iter().map(|at| at.verts.map(|v| Vec3::new(v.x, v.y, v.z))).collect(),
-    }
+fn corners(triangles: &[DrawTriangle]) -> impl ExactSizeIterator<Item = [Vec3; 3]> + '_ {
+    const STAND_IN: [DrawTriangle; 1] =
+        [DrawTriangle { verts: [Vertex { x: 0.0, y: 0.0, z: 0.0, color: Rgb::BLACK }; 3] }];
+
+    let drawn = match triangles {
+        [] => STAND_IN.as_slice(),
+        drawn => drawn,
+    };
+
+    drawn.iter().map(|at| at.verts.map(|v| Vec3::new(v.x, v.y, v.z)))
 }
 
 /// The ribbon vertex buffer, packed for [`geometry_slot`]: three
@@ -173,6 +178,7 @@ pub fn vertices(triangles: &[DrawTriangle]) -> Vec<u8> {
 #[must_use]
 pub fn indices(triangles: &[DrawTriangle]) -> Vec<u8> {
     let count = u32::try_from(corners(triangles).len() * 3).unwrap_or(u32::MAX);
+
     (0..count).flat_map(u32::to_le_bytes).collect()
 }
 

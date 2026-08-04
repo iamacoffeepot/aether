@@ -43,14 +43,17 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_harness_substrate_capture::visual::{decode_png, encode_png};
 use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent, LoadResult, Render, WindowId, WindowSize};
-use aether_math::Vec3;
-use aether_puppet::easel::program::{sight, stroke};
+use aether_math::{Mat4, Vec2, Vec3};
+use aether_puppet::easel::program::wash::{Canvas, Faces, Frame, Placement, Presence};
+use aether_puppet::easel::program::{bake, face, ink, sight, stroke, wash};
+use aether_puppet::easel::survey::{self, Survey};
+use aether_puppet::easel::{View, accent};
 use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, Half};
-use aether_puppet::labels::Labels;
+use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{Load, Look, anchor, chart};
-use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
+use aether_puppet::{Load, Look, anchor, chart, ribbon, visibility};
+use aether_render::{DrawTriangle, PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
 /// The address a loaded component registers at (ADR-0099).
 const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
@@ -432,6 +435,240 @@ fn the_drawing_divides_by_volatility() {
             megabytes(travelling),
         );
     }
+}
+
+/// Vertical field of view — `Puppet::FIELD_OF_VIEW`, so the phases below
+/// project through the matrix the component's own frame does.
+const FIELD_OF_VIEW: f32 = 0.454;
+
+/// Occlusion sampling stride — `Puppet::VISIBILITY_STRIDE`, so the split
+/// timed below casts the rays the shipped one casts.
+const VISIBILITY_STRIDE: usize = 3;
+
+/// The studio's seed. Any seed rolls the same amount of work; this is the
+/// one the easel develops with, so the blob timed here is the shipped
+/// blob's size.
+const SHEET_SEED: u64 = 0x5375_6d69_7265;
+
+/// Repetitions each timed phase averages over.
+///
+/// The phases span three orders of magnitude — a matrix encode against a
+/// whole-drawing occlusion split — and the dear ones are the ones the
+/// mean is wanted for, so one count serves both rather than a schedule
+/// nobody can read a table against.
+const PHASE_REPEATS: u32 = 8;
+
+/// Where the render handler's CPU milliseconds go, phase by phase
+/// (iamacoffeepot/aether#4447).
+///
+/// Native rather than through the component, and it has to be: the guest
+/// is `wasm32-unknown-unknown`, which has no clock at all, so a phase
+/// timed inside the component would need a host call per phase and would
+/// price the call rather than the phase. What this measures instead is
+/// the same functions the guest runs, on the same subject, at the same
+/// framing — so the *proportions* are the handler's even though the
+/// absolute milliseconds are a native build's rather than a wasm one's.
+/// Read it against the whole-handler EWMA the pacing instrument prints.
+///
+/// ```text
+/// AETHER_CROSSFEED_DIR=/path/to/dir \
+///     cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture the_render_handler_divides_by_phase
+/// ```
+#[test]
+#[ignore = "instrument; needs the shipped subject in AETHER_CROSSFEED_DIR"]
+fn the_render_handler_divides_by_phase() {
+    let Some(dir) = subject_dir() else {
+        return;
+    };
+    let at = Subject::load(&dir);
+    let view = view_at(AZIMUTH);
+    let volatile = at.volatile_at(view.eye);
+    let drawing = Drawing { resident: &at.resident, volatile: &volatile };
+    let canvas = Canvas { width: WIDTH as usize, height: HEIGHT as usize };
+
+    eprintln!(
+        "phase: at {WIDTH}x{HEIGHT}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats",
+        at.resident.len(),
+        volatile.len(),
+    );
+    time_the_develop(&at, drawing, &view, canvas);
+    time_the_eye_moved_half(&at, drawing, &view);
+}
+
+/// The phases `Easel::develop` runs, in the order it runs them — the ones
+/// a held view now skips entirely.
+fn time_the_develop(at: &Subject, drawing: Drawing<'_>, view: &View, canvas: Canvas) {
+    let (body_width, body_height) = canvas.body();
+    let drawn =
+        phase("split — the visible runs the ink plane rasterizes", PHASE_REPEATS, || at.split(drawing, view.eye));
+    let survey = phase("survey::measure — per subject", 1, || Survey::measure(&at.mesh, &at.scores));
+    let centroids = phase("survey::centroids", PHASE_REPEATS, || {
+        survey.centroids(&at.mesh, view.eye, &view.view_proj, body_width, body_height)
+    });
+    let frames = phase("chart::eye_frames", PHASE_REPEATS, || {
+        chart::eye_frames(&at.mesh, &at.anchors, at.chart_face(), at.settings.eye_style)
+    });
+    let (fine_eyes, body_eyes) = phase("accent::project — both extents", PHASE_REPEATS, || {
+        (
+            accent::project(&frames, &view.view_proj, canvas.width, canvas.height),
+            accent::project(&frames, &view.view_proj, body_width, body_height),
+        )
+    });
+    let presence: Vec<f32> = phase("survey::presence — the aperture cast", PHASE_REPEATS, || {
+        fine_eyes.iter().map(|eye| survey::presence(&at.mesh, view.eye, &frames[eye.frame()].aperture)).collect()
+    });
+
+    let program = phase("wash::program — the graph lay, per canvas height", 1, || wash::program(canvas.height));
+    // The stain poles are a few dozen float operations and are stood in
+    // for rather than reconstructed; what the blob write is priced
+    // against is the placement's shape.
+    let placement = Placement { centroids: &centroids, stains: &centroids, iris: iris_of(&fine_eyes) };
+    let wanted = Presence::of(&placement);
+    let slice =
+        phase("seed_uniforms — per canvas and visible set", 1, || program.seed_uniforms(SHEET_SEED, canvas, wanted));
+    let frame = Frame {
+        view_proj: view.view_proj,
+        placement,
+        faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }),
+    };
+    let wash_uniforms =
+        phase("frame_uniforms — the wash blob", PHASE_REPEATS, || program.frame_uniforms(&slice, &frame));
+    phase("bake uniforms", PHASE_REPEATS, || bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode());
+
+    let ink_bytes = phase("ink pack — the drawing's vertex and index buffers", PHASE_REPEATS, || {
+        (ink::vertices(&drawn), ink::indices(&drawn))
+    });
+    let aperture_bytes = phase("aperture pack", PHASE_REPEATS, || {
+        (
+            face::vertices(&fine_eyes, canvas.width, canvas.height),
+            face::indices(&fine_eyes, canvas.width, canvas.height),
+        )
+    });
+    phase("bake pack — per subject", 1, || {
+        (bake::vertices(&at.mesh, &at.scores, &at.settings), bake::indices(&at.mesh))
+    });
+
+    let megabytes = |bytes: usize| bytes as f64 / 1.0e6;
+    eprintln!(
+        "phase: a develop that re-derives ships {:.2} MB of geometry — ink {:.2} MB over {} triangles, aperture \
+         {:.3} MB — and {} bytes of wash uniforms",
+        megabytes(ink_bytes.0.len() + ink_bytes.1.len() + aperture_bytes.0.len() + aperture_bytes.1.len()),
+        megabytes(ink_bytes.0.len() + ink_bytes.1.len()),
+        drawn.len(),
+        megabytes(aperture_bytes.0.len() + aperture_bytes.1.len()),
+        wash_uniforms.len(),
+    );
+}
+
+/// The half only an eye that moved pays: the volatile curves and the
+/// field's own re-pack of them. Neither is the easel's, and neither is
+/// skippable — an orbit frame genuinely re-solves both.
+fn time_the_eye_moved_half(at: &Subject, drawing: Drawing<'_>, view: &View) {
+    phase("volatile extraction — the eye-moved half", PHASE_REPEATS, || at.volatile_at(view.eye));
+    phase("strokes pack — the volatile field and ribbon buffers", PHASE_REPEATS, || {
+        let layout = sight::layout(drawing, (WIDTH, HEIGHT)).expect("the drawing fits");
+        (
+            sight::point_vertices(drawing, layout.volatile()),
+            sight::point_indices(layout.volatile()),
+            sight::curve_vertices(drawing, &layout, view.eye),
+            stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
+        )
+    });
+}
+
+/// The subject the phases are measured against, assembled once — the
+/// mesh, its material field, and everything the component solves at load.
+struct Subject {
+    mesh: Mesh,
+    labels: Labels,
+    settings: Settings,
+    anchors: anchor::Anchors,
+    scores: Vec<[f32; CLASSES]>,
+    resident: Vec<Curve3>,
+}
+
+impl Subject {
+    fn load(dir: &Path) -> Self {
+        let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
+            .expect("parse the subject");
+        let labels =
+            Labels::parse(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
+                .expect("parse the material field");
+        let settings = Settings::default();
+        let anchors = anchor::Anchors::measure(&mesh, &labels).expect("the subject carries a charted face");
+        let scores = labels.vertex_scores(&mesh.positions);
+        let resident = extract::surface(&mesh, Some(&labels), Some(&anchors), &settings);
+
+        Self { mesh, labels, settings, anchors, scores, resident }
+    }
+
+    fn chart_face(&self) -> chart::Face {
+        self.settings.face.expect("the default settings chart a face")
+    }
+
+    /// The drawing's eye-dependent half, exactly as `Puppet::on_render`
+    /// assembles it.
+    fn volatile_at(&self, eye: Vec3) -> Vec<Curve3> {
+        chart::marks(&self.mesh, &self.anchors, self.chart_face(), &self.settings, eye)
+            .into_iter()
+            .chain(extract::suggestive(&self.mesh, Some(&self.labels), eye, &self.settings))
+            .chain(extract::silhouettes(&self.mesh, eye))
+            .collect()
+    }
+
+    /// The drawing split into visible runs and ribboned — `Puppet::split`,
+    /// which the easel asks for once per develop.
+    fn split(&self, drawing: Drawing<'_>, eye: Vec3) -> Vec<DrawTriangle> {
+        let mut triangles = Vec::new();
+        for curve in drawing.curves() {
+            let mode = visibility::Mode::Opaque;
+            let bias = self.mesh.surface_bias();
+            for run in visibility::runs(&self.mesh, eye, curve, &|_| true, mode, VISIBILITY_STRIDE, bias) {
+                ribbon::ribbon(&run, eye, 0, &mut triangles);
+            }
+        }
+
+        triangles
+    }
+}
+
+/// One phase's mean, in milliseconds, and its result.
+///
+/// The last repetition's value is the one returned, so a phase feeds the
+/// phase that consumes it without being run an extra time for the value.
+fn phase<T>(label: &str, repeats: u32, mut work: impl FnMut() -> T) -> T {
+    let started = Instant::now();
+    let mut last = work();
+    for _ in 1..repeats {
+        last = work();
+    }
+    eprintln!("phase: {label:<58} {:>8.3} ms", started.elapsed().as_secs_f64() * 1000.0 / f64::from(repeats.max(1)));
+
+    last
+}
+
+/// The camera the component holds at `azimuth`, the whole `View` the
+/// easel develops through.
+fn view_at(azimuth: f32) -> View {
+    let (eye, aspect) = (eye_at(azimuth), WIDTH as f32 / HEIGHT as f32);
+    let view_proj =
+        Mat4::perspective_rh(FIELD_OF_VIEW, aspect, 0.05, 40.0) * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+
+    View { eye, target: Vec3::ZERO, view_proj, aspect, field_of_view: FIELD_OF_VIEW }
+}
+
+/// The iris pole, area-weighted over the projected eyes — the easel's own
+/// `iris_centre`, which is private to it.
+fn iris_of(eyes: &[accent::Eye]) -> Option<Vec2> {
+    let (mut sum, mut weight) = (Vec2::new(0.0, 0.0), 0.0);
+    for eye in eyes {
+        let area = eye.size() * eye.size();
+        sum += eye.centre() * area;
+        weight += area;
+    }
+
+    (weight > 0.0).then(|| sum / weight)
 }
 
 /// Where the frame's GPU time goes, pass by pass, across every program
