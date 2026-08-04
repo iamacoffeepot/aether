@@ -77,6 +77,23 @@ impl FeatureClass {
             Self::Hatch { .. } => 1.15,
         }
     }
+
+    /// Shortest run worth drawing, in page pixels. Detail too small to read
+    /// is dropped rather than inked as noise — a relief field on a
+    /// reconstruction throws off specks, and a speck at full weight reads as
+    /// dirt on the paper.
+    ///
+    /// The floor is per class because a speck means something different in
+    /// each. Tone and surface marking are where the specks land, so they
+    /// hold the high floors; a silhouette run that short is still the edge
+    /// of the form, and dropping it opens a gap in an outline.
+    pub fn min_length(self) -> f32 {
+        match self {
+            Self::Silhouette => 1.5,
+            Self::Decal => 4.0,
+            Self::Hatch { .. } => 3.5,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

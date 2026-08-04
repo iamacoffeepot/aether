@@ -26,32 +26,25 @@ use aether_render::{DrawTriangle, Vertex};
 use crate::feature::{Curve3, Pen};
 use crate::style::{pressure, wander};
 
+/// Page pixels per radian of arc: the one bridge between the offline
+/// renderer's page-space measurements and the angular units used here.
+/// The offline renderer draws on a 900 px page at this field of view,
+/// which works out to ~1410 px per radian. Any figure quoted in page
+/// pixels — a width, a wobble, a length floor — divides by this to cross.
+const PAGE_PIXELS_PER_RADIAN: f32 = 1410.0;
+
 /// Half-width of a stroke at unit distance, in radians. Multiplied by the
 /// distance to the eye it becomes a world half-width that projects to the
 /// same size wherever the subject sits.
-/// Derived, not guessed: the offline renderer draws a silhouette 2 px wide
-/// on a 900 px page at this field of view, which is ~1410 px per radian.
-/// Half of 2 px, divided by that scale, divided again by the silhouette's
-/// own `base_width` of 2.0 — since this is multiplied by the class weight.
+/// Derived, not guessed: half of the offline silhouette's 2 px, divided by
+/// the conversion above, divided again by the silhouette's own `base_width`
+/// of 2.0 — since this is multiplied by the class weight.
 const ANGULAR_HALF_WIDTH: f32 = 0.00035;
 
-/// How far the hand wanders, in the same angular units.
-/// The same conversion applied to the offline silhouette wobble of 0.8 px.
-const ANGULAR_WOBBLE: f32 = 0.00057;
-
-/// Shortest *extracted* stroke worth drawing, in radians of arc. Detail too
-/// small to read is dropped rather than inked as noise — a relief field on a
-/// reconstruction throws off specks, and a speck at full weight reads as
-/// dirt on the paper.
-///
-/// It does not reach an authored mark, and that exemption is not a nicety.
-/// The floor is a noise rejector, and the chart draws no noise: a cupid's
-/// bow is a fifth of a mouth wide, a lip corner tick is smaller still, and
-/// the iris hook arrives as two short arcs because a lid crosses it. Every
-/// one of those is under the floor and every one of them was silently
-/// missing — the mouth came out as two bare lines and the eyes as blanks,
-/// with nothing having errored.
-const MIN_ANGULAR_LENGTH: f32 = 0.004;
+/// One page pixel of hand-wander, in the same angular units. Bare, because
+/// `ribbon` multiplies it by the class's own `wobble_amplitude` — which is
+/// already in page pixels — so the class amplitude lands exactly once.
+const ANGULAR_WOBBLE: f32 = 1.0 / PAGE_PIXELS_PER_RADIAN;
 
 fn ink(pen: Pen) -> Rgb {
     match pen {
@@ -97,7 +90,14 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
         })
         .collect();
     let length = angular.last().copied().unwrap_or(0.0);
-    if !curve.authored && length < MIN_ANGULAR_LENGTH {
+    // The floor does not reach an authored mark, and that exemption is not a
+    // nicety. It is a noise rejector, and the chart draws no noise: a cupid's
+    // bow is a fifth of a mouth wide, a lip corner tick is smaller still, and
+    // the iris hook arrives as two short arcs because a lid crosses it. Every
+    // one of those is under the floor and every one of them was silently
+    // missing — the mouth came out as two bare lines and the eyes as blanks,
+    // with nothing having errored.
+    if !curve.authored && length < curve.class.min_length() / PAGE_PIXELS_PER_RADIAN {
         return;
     }
 
@@ -105,6 +105,13 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
     // so a stroke bends the same way from every angle and stays continuous
     // across a weld. Neither is true of anything keyed to the page.
     let seed = curve.seed ^ jitter;
+
+    // The stroke's own average distance, against which each of its points is
+    // near or far. Taken per stroke rather than per scene so the cue reads as
+    // one line turning through depth, not as a global fog.
+    let reference_depth =
+        curve.points.iter().map(|point| (point.pos - eye).length()).sum::<f32>() / curve.points.len() as f32;
+
     let rail = |index: usize| -> (Vec3, Vec3) {
         let point = curve.points[index];
         let previous = curve.points[index.saturating_sub(1)].pos;
@@ -123,7 +130,12 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
         };
 
         let taper = pressure(angular.get(index.saturating_sub(1)).copied().unwrap_or(0.0), length);
-        let half = ANGULAR_HALF_WIDTH * depth * weight * taper * point.weight;
+        // Nearer stroke points are bolder — the one cue that keeps a flat
+        // line drawing from reading as a decal on glass. The angular
+        // half-width above holds screen width constant through depth, so
+        // this rides on top of it rather than being cancelled by it.
+        let depth_weight = (reference_depth / depth).clamp(0.82, 1.22);
+        let half = ANGULAR_HALF_WIDTH * depth * weight * depth_weight * taper * point.weight;
         let drift = wander(seed, point.pos) * ANGULAR_WOBBLE * depth * amplitude;
         let centre = point.pos + across * drift;
 
