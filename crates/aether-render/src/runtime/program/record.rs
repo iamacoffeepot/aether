@@ -395,16 +395,13 @@ fn encode_passes(
             // accumulates rather than each iteration wiping the last.
             // Depth follows the shared-slot rule: the dispatch's first
             // reference to a slot clears it, later ones load it.
-            let depth = match draw.depth {
-                None => None,
-                Some(slot) => {
-                    let clear = !depth_cleared.contains(&slot);
-                    if clear {
-                        depth_cleared.push(slot);
-                    }
-                    Some(ProgramDepthAttachment { view: depth_view(slot), clear })
+            let depth = draw.depth.map(|slot| {
+                let clear = !depth_cleared.contains(&slot);
+                if clear {
+                    depth_cleared.push(slot);
                 }
-            };
+                ProgramDepthAttachment { view: depth_view(slot), clear }
+            });
             let realized = geometries.entries[&dispatch.geometries[draw.geometry as usize]]
                 .realized
                 .as_ref()

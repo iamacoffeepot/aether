@@ -342,13 +342,13 @@ fn validate_draw(
         })?;
 
     let slot = mail.geometries.get(draw.geometry as usize).ok_or_else(|| {
-        format!("pass {index}: geometry slot {} is out of range ({} declared)", draw.geometry, mail.geometries.len(),)
+        format!("pass {index}: geometry slot {} is out of range ({} declared)", draw.geometry, mail.geometries.len())
     })?;
     check_vertex_interface(module, index, vertex_entry_index, draw.geometry, &slot.layout)?;
 
     if let Some(depth) = draw.depth {
         let extent = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
-            format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len(),)
+            format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len())
         })?;
         if extent != output_extent {
             return Err(format!(
@@ -438,14 +438,14 @@ fn writes_frag_depth(module: &Module, entry_index: usize) -> bool {
     let Some(result) = &module.entry_points[entry_index].function.result else {
         return false;
     };
-    match &result.binding {
-        Some(binding) => matches!(binding, Binding::BuiltIn(BuiltIn::FragDepth)),
-        None => match &module.types[result.ty].inner {
-            TypeInner::Struct { members, .. } => {
-                members.iter().any(|member| matches!(member.binding, Some(Binding::BuiltIn(BuiltIn::FragDepth))))
-            }
-            _ => false,
-        },
+    if let Some(binding) = &result.binding {
+        return matches!(binding, Binding::BuiltIn(BuiltIn::FragDepth));
+    }
+    match &module.types[result.ty].inner {
+        TypeInner::Struct { members, .. } => {
+            members.iter().any(|member| matches!(member.binding, Some(Binding::BuiltIn(BuiltIn::FragDepth))))
+        }
+        _ => false,
     }
 }
 
