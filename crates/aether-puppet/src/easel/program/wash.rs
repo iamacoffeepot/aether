@@ -526,6 +526,19 @@ const fn transient(index: u32) -> InputSlot {
     InputSlot::Transient { index }
 }
 
+/// Where a quantity the develop paints with stands: the filterable soft
+/// plane, so the sweeps that read it can pair their taps
+/// ([`puddle::SOFT_PLANE_FORMAT`]). Every intermediate in the graph is
+/// one of these but the care flood's two hops, which carry texel indices
+/// rather than quantities and stand at [`plane_slot`] instead.
+const fn soft_slot(extent: SlotExtent) -> SlotSpec {
+    SlotSpec { format: puddle::SOFT_PLANE_FORMAT, extent }
+}
+
+/// The 32-bit data plane: what a binding staged from the CPU or written
+/// by another program stands at, and what the care flood's seeds need. A
+/// seed is a linear texel index, an integer past a million on this
+/// canvas, which would not survive eleven bits of mantissa.
 const fn plane_slot(extent: SlotExtent) -> SlotSpec {
     SlotSpec { format: TextureFormat::R32Float, extent }
 }
@@ -560,6 +573,13 @@ impl Graph {
     }
 
     fn plane(&mut self, extent: SlotExtent) -> u32 {
+        self.transients.push(soft_slot(extent));
+        (self.transients.len() - 1) as u32
+    }
+
+    /// A transient at [`plane_slot`] — the care flood's two hops, and
+    /// nothing else.
+    fn index_plane(&mut self, extent: SlotExtent) -> u32 {
         self.transients.push(plane_slot(extent));
         (self.transients.len() - 1) as u32
     }
@@ -596,7 +616,23 @@ impl Graph {
     /// ride one composite kernel per axis (iamacoffeepot/aether#4441), so
     /// the chain is two passes rather than six. Returns the blurred plane
     /// and the plan its window is written from.
+    ///
+    /// A chain reads through a filtering sampler, so its source has to
+    /// stand at the soft plane ([`soft_slot`]). Every transient in this
+    /// graph does; a *binding* need not — the one the flow sweeps is the
+    /// ink layer's own 32-bit coverage plane — so a binding source is
+    /// carried onto one first ([`puddle::soft_carry_pass`]), a pointwise
+    /// pass whose cost is a rounding error against the sweeps it makes
+    /// pairable.
     fn blur(&mut self, source: InputSlot, radius_pixels: f32, extent: SlotExtent) -> (InputSlot, BlurPlan) {
+        let source = match source {
+            InputSlot::Binding { .. } => {
+                let out = self.plane(extent);
+                self.passes.push(puddle::soft_carry_pass(source, OutputSlot::Transient { index: out }));
+                transient(out)
+            }
+            other => other,
+        };
         let tuned = image::tuned(radius_pixels, self.extent_height(extent));
         let divisor = puddle::blur_divisor(tuned);
         let plan = BlurPlan {
@@ -985,7 +1021,11 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
     // How closely the hand is held, flooded out of the bake's own class
     // channel rather than chamfered on the CPU.
     let care_window = graph.window(care::UNIFORM_BYTES);
-    let (care_carry, care_relay, care_out) = (graph.plane(body), graph.plane(body), graph.plane(body));
+    // The two flood hops carry seed indices and so stand at the wider
+    // plane; what the ramp resolves them into is a quantity like any
+    // other, and stands where every other quantity does.
+    let (care_carry, care_relay) = (graph.index_plane(body), graph.index_plane(body));
+    let care_out = graph.plane(body);
     graph.passes.extend(care::passes(
         binding(PACKED),
         care_carry,
