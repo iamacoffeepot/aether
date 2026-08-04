@@ -9,7 +9,7 @@
 //! - **Occluded.** The point is real and front-facing, but something else
 //!   stands between it and the eye.
 
-use core::{iter, mem};
+use core::mem;
 
 use aether_math::Vec3;
 
@@ -42,16 +42,14 @@ pub fn hidden(mesh: &Mesh, eye: Vec3, point: &SurfacePoint, bias: f32) -> bool {
 
 /// The half of the verdict that costs no ray: the point is on the near
 /// side of the surface. A silhouette grazes by definition and a decal is
-/// planted on a fitted plane, so neither is asked.
-fn faces_eye(eye: Vec3, point: &SurfacePoint, class: FeatureClass) -> bool {
-    if matches!(class, FeatureClass::Silhouette | FeatureClass::Decal) {
-        return true;
-    }
-
+/// planted on a fitted plane, so neither is asked — which is a property of
+/// the curve, so [`drawn`] asks it once per curve rather than per point.
+fn faces_eye(eye: Vec3, point: &SurfacePoint) -> bool {
     point.normal.dot((eye - point.probe).normalize()) >= 0.02
 }
 
-/// Which points of `span` the eye can actually see, one verdict per point.
+/// Which points of `span` the eye can actually see, written one verdict per
+/// point into `seen`.
 ///
 /// A ray every `stride` points, and the verdict held in between — except
 /// across a window whose two ends disagree, where every skipped point is
@@ -59,29 +57,42 @@ fn faces_eye(eye: Vec3, point: &SurfacePoint, class: FeatureClass) -> bool {
 /// wrong only near its ends, which is exactly where being wrong shows:
 /// holding it there moves the end of a stroke up to `stride - 1` points
 /// off the edge the stroke actually disappears behind.
-fn visible(mesh: &Mesh, eye: Vec3, span: &[SurfacePoint], stride: usize, bias: f32) -> Vec<bool> {
+///
+/// One pass, carrying the previous sample in a pair of locals and writing
+/// into the caller's flags. The window it is closing is always the one
+/// behind the sample just cast, so the sample list it used to collect
+/// first was a frame's worth of allocation for two values at a time.
+fn visible(mesh: &Mesh, eye: Vec3, span: &[SurfacePoint], stride: usize, bias: f32, seen: &mut [bool]) {
     // The last point is sampled whether or not it lands on the grid, so
     // the final window has an end to be refined against like any other.
     let last = span.len() - 1;
-    let samples: Vec<(usize, bool)> =
-        (0..last).step_by(stride).chain(iter::once(last)).map(|at| (at, !hidden(mesh, eye, &span[at], bias))).collect();
-
-    let mut seen = vec![false; span.len()];
-    for &(at, verdict) in &samples {
-        seen[at] = verdict;
+    let mut previous = (0, !hidden(mesh, eye, &span[0], bias));
+    seen[0] = previous.1;
+    if last == 0 {
+        return;
     }
-    for window in samples.windows(2) {
-        let ((from, before), (to, after)) = (window[0], window[1]);
-        if before == after {
-            seen[from..to].fill(before);
+
+    let mut at = stride;
+    loop {
+        let sample = at.min(last);
+        let verdict = !hidden(mesh, eye, &span[sample], bias);
+        seen[sample] = verdict;
+
+        let (from, before) = previous;
+        if before == verdict {
+            seen[from..sample].fill(before);
         } else {
-            for (point, seen) in span[from + 1..to].iter().zip(&mut seen[from + 1..to]) {
+            for (point, seen) in span[from + 1..sample].iter().zip(&mut seen[from + 1..sample]) {
                 *seen = !hidden(mesh, eye, point, bias);
             }
         }
-    }
 
-    seen
+        if sample == last {
+            return;
+        }
+        previous = (sample, verdict);
+        at += stride;
+    }
 }
 
 /// Which points of `curve` are drawn at all, one flag per point.
@@ -91,16 +102,17 @@ fn visible(mesh: &Mesh, eye: Vec3, span: &[SurfacePoint], stride: usize, bias: f
 /// facing test is a dot product. Only the occlusion ray is strided, and
 /// only inside a stretch that has already passed both, so nothing is cast
 /// for a point that is dropped either way.
-fn drawn(
+fn drawn<K: Fn(&SurfacePoint) -> bool + ?Sized>(
     mesh: &Mesh,
     eye: Vec3,
     curve: &Curve3,
-    keep: &dyn Fn(&SurfacePoint) -> bool,
+    keep: &K,
     mode: Mode,
     stride: usize,
     bias: f32,
 ) -> Vec<bool> {
-    let mut flags: Vec<bool> = curve.points.iter().map(|p| keep(p) && faces_eye(eye, p, curve.class)).collect();
+    let grazes = matches!(curve.class, FeatureClass::Silhouette | FeatureClass::Decal);
+    let mut flags: Vec<bool> = curve.points.iter().map(|p| keep(p) && (grazes || faces_eye(eye, p))).collect();
     if mode == Mode::Ghost {
         return flags;
     }
@@ -112,9 +124,7 @@ fn drawn(
             continue;
         }
         let to = flags[from..].iter().position(|&on| !on).map_or(flags.len(), |offset| from + offset);
-        for (flag, seen) in flags[from..to].iter_mut().zip(visible(mesh, eye, &curve.points[from..to], stride, bias)) {
-            *flag = seen;
-        }
+        visible(mesh, eye, &curve.points[from..to], stride, bias, &mut flags[from..to]);
         from = to;
     }
 
@@ -127,36 +137,68 @@ fn drawn(
 /// supply, because it belongs to the mesh the curve was extracted from
 /// rather than to `mesh`, the one being cast against. The two are the same
 /// for hatch and crease and differ for a silhouette solved coarse.
-pub fn runs(
+/// `keep` is taken by generic reference rather than as a `&dyn Fn` so the
+/// common predicate — the caller that keeps every point, tone having been
+/// gated once at load — compiles to nothing. As a trait object it was an
+/// indirect call per point of the drawing, two hundred thousand of them a
+/// frame, to be told `true`.
+pub fn runs<K: Fn(&SurfacePoint) -> bool + ?Sized>(
     mesh: &Mesh,
     eye: Vec3,
     curve: &Curve3,
-    keep: &dyn Fn(&SurfacePoint) -> bool,
+    keep: &K,
     mode: Mode,
     stride: usize,
     bias: f32,
 ) -> Vec<Curve3> {
     let flags = drawn(mesh, eye, curve, keep, mode, stride.max(1), bias);
 
-    if flags.iter().all(|&f| f) {
+    // Both ends of the range are worth naming, and one count answers
+    // both. A curve wholly on the far side of the figure is the common
+    // case at any eye — half the hatching is behind her — and it has
+    // nothing to split, so it should not be walked again to discover
+    // that.
+    let seen = flags.iter().filter(|&&on| on).count();
+    if seen == flags.len() {
         return vec![curve.clone()];
     }
+    if seen == 0 {
+        return Vec::new();
+    }
 
-    let mut segments: Vec<Vec<SurfacePoint>> = Vec::new();
+    // Straight into the surviving curves: the run of points and the curve
+    // that carries it are built together, so a drawing's worth of points
+    // is moved once rather than gathered into a list of runs and moved
+    // again.
+    //
+    // Each survivor spells its fields out rather than filling them from
+    // `..curve.clone()`. The struct-update form reads better and costs a
+    // full copy of the source curve's points per run — allocated, memcpy'd
+    // and dropped unread, because `points` overwrites it — which on a
+    // drawing split into a thousand runs a frame is most of the split.
+    let mut survivors: Vec<Curve3> = Vec::new();
     let mut current: Vec<SurfacePoint> = Vec::new();
+    let close = |current: &mut Vec<SurfacePoint>, survivors: &mut Vec<Curve3>| {
+        if current.len() >= 2 {
+            survivors.push(Curve3 {
+                points: mem::take(current),
+                class: curve.class,
+                pen: curve.pen,
+                seed: curve.seed,
+                authored: curve.authored,
+            });
+        } else {
+            current.clear();
+        }
+    };
     for (point, &on) in curve.points.iter().zip(&flags) {
         if on {
             current.push(*point);
         } else if !current.is_empty() {
-            segments.push(mem::take(&mut current));
+            close(&mut current, &mut survivors);
         }
     }
-    if !current.is_empty() {
-        segments.push(current);
-    }
-
-    let survivors: Vec<Curve3> =
-        segments.into_iter().filter(|s| s.len() >= 2).map(|points| Curve3 { points, ..curve.clone() }).collect();
+    close(&mut current, &mut survivors);
 
     whole_or_nothing(curve, survivors)
 }
