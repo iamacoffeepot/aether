@@ -41,7 +41,8 @@ use aether_trace::walk::TreeWalk;
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
-use crate::pump_stats;
+use crate::poll_config::PollConfig;
+use crate::pump_stats::PumpStats;
 use crate::settlement_config::SettlementConfig;
 use aether_actor::{Addressable, Root};
 use aether_fs::NamespaceRoots;
@@ -193,6 +194,14 @@ pub struct SubstrateHarness {
     /// reaches under nextest saturation; [`Duration::MAX`] is the "no cap —
     /// wait forever" sentinel (`AETHER_SETTLEMENT_CAP_SECS=0`).
     settlement_cap: Duration,
+    /// Ceiling the pump clamps its quiet backoff to (issue 4453),
+    /// resolved like `settlement_cap` — builder override, else
+    /// `AETHER_HARNESS_POLL_CAP_MICROS` via `PollConfig`.
+    poll_cap: Duration,
+    /// Where the pump slept while waiting, since the last
+    /// [`Self::take_pump_stats`]. Per-harness so two harnesses in one
+    /// test binary cannot share or reset each other's numbers.
+    pump_stats: PumpStats,
     /// Stable session identity for reply addressing. The substrate
     /// echoes this on every reply addressed to `SourceAddr::Session`,
     /// so the loopback receiver can recognise its own replies.
@@ -261,6 +270,7 @@ pub struct SubstrateHarnessBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
+    poll_cap: Option<Duration>,
     render_hook: Option<HookFactory>,
     component_host: bool,
     compose: Vec<ComposeFn>,
@@ -278,6 +288,7 @@ impl Default for SubstrateHarnessBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
+            poll_cap: None,
             render_hook: None,
             component_host: false,
             compose: Vec::new(),
@@ -382,6 +393,19 @@ impl SubstrateHarnessBuilder {
     #[must_use]
     pub fn settlement_cap(mut self, cap: Option<Duration>) -> Self {
         self.settlement_cap = cap;
+        self
+    }
+
+    /// Issue 4453: override the ceiling the pump clamps its quiet backoff
+    /// to. `None` (the default) resolves `AETHER_HARNESS_POLL_CAP_MICROS`
+    /// (argv > env > default 10 ms) via `PollConfig`; `Some(d)` pins it.
+    /// A fine value shrinks the observation lag a frame containing a long
+    /// silent handler is measured through, at the cost of CPU spent
+    /// polling — the trade an instrument wants and a normal scenario does
+    /// not. Per-harness, no process env.
+    #[must_use]
+    pub fn poll_cap(mut self, cap: Option<Duration>) -> Self {
+        self.poll_cap = cap;
         self
     }
 
@@ -535,6 +559,7 @@ impl SubstrateHarness {
             trace_ring_capacity,
             trace_ring_max_capacity,
             settlement_cap,
+            poll_cap,
             render_hook,
             component_host,
             compose,
@@ -559,6 +584,7 @@ impl SubstrateHarness {
             trace_max: trace_ring_max_capacity.unwrap_or(trace),
         };
         let settlement_cap = settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
+        let poll_cap = poll_cap.unwrap_or_else(|| PollConfig::from_env().to_cap());
 
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
@@ -651,6 +677,8 @@ impl SubstrateHarness {
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
             settlement_cap,
+            poll_cap,
+            pump_stats: PumpStats::default(),
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
             stashed_replies: HashMap::new(),
             observed_kinds,
@@ -667,6 +695,14 @@ impl SubstrateHarness {
     /// other sinks and direct component-to-component flows are not
     /// observed (v1).
     ///
+    /// Read and reset where the pump slept (issue 4453). An instrument
+    /// brackets one op by calling this on either side of it; the returned
+    /// [`PumpStats::overshoot_bound`] states how much of the op's wall
+    /// clock could be observation lag rather than work.
+    pub fn take_pump_stats(&mut self) -> PumpStats {
+        self.pump_stats.take()
+    }
+
     /// # Panics
     /// Panics if the `observed_kinds` mutex is poisoned — fail-fast
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
@@ -1217,7 +1253,7 @@ impl SubstrateHarness {
         // observed up to a whole capped sleep after it actually finished,
         // and that lag is indistinguishable from work at this seam.
         const BACKOFF_FLOOR: Duration = Duration::from_micros(50);
-        let backoff_cap = pump_stats::backoff_cap();
+        let backoff_cap = self.poll_cap;
         // Wall-clock budget for consecutive quiet (no-progress) time
         // before giving up — a deadlock/livelock backstop, not the gate a
         // healthy reply meets, so it reads the runtime-configurable
@@ -1311,7 +1347,7 @@ impl SubstrateHarness {
                     return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
                 }
                 thread::sleep(backoff);
-                pump_stats::record_sleep(backoff, backoff >= backoff_cap);
+                self.pump_stats.record_sleep(backoff, backoff >= backoff_cap);
                 backoff = (backoff * 2).min(backoff_cap);
             }
         }

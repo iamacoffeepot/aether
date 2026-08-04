@@ -28,6 +28,7 @@ mod harness;
 #[cfg(test)]
 mod mail_latency;
 pub mod perf;
+mod poll_config;
 pub mod pump_stats;
 mod settlement_config;
 pub mod test_helpers;
@@ -48,5 +49,7 @@ pub use harness::{
 // config-dump registry (`chassis_known_keys`), which enumerates every
 // knob's `META`; the `SettlementOverlay` rides along so the chassis CLI roots
 // can flatten `--settlement-cap-secs` into `--help` (issue 3882).
+pub use poll_config::{PollConfig, PollConfigLayer, PollOverlay};
+pub use pump_stats::PumpStats;
 pub use settlement_config::{SettlementConfig, SettlementConfigLayer, SettlementOverlay};
 pub use unsupported_cap::UnsupportedSubstrateHarnessCapability;
