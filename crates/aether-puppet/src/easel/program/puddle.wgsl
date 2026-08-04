@@ -59,10 +59,20 @@ fn plane_out(value: f32) -> vec4<f32> {
 // window average (its own tripwire test pins that equivalence). The axis
 // rides the uniform window so one entry point serves both sweeps; three
 // horizontal-then-vertical iterations reproduce `image::blur`.
+//
+// The window is stated as a half-width in texels rather than a tap count,
+// so it can fall between texels: a tap's weight is how much of its own
+// texel the window covers, which is one for every tap inside and a
+// fraction for the pair straddling each end. At the half-integer widths
+// the CPU rounds to — radius plus a half — every weight is one or zero
+// and the average is the CPU's exactly; a chain swept at a reduced extent
+// (iamacoffeepot/aether#4437) needs the widths between, since the window
+// it wants is the full-extent one divided by an extent divisor and lands
+// wherever that division puts it.
 struct BoxBlurParams {
     axis_x: i32,
     axis_y: i32,
-    radius_texels: i32,
+    half_width_texels: f32,
 }
 
 @group(0) @binding(0) var<uniform> box_blur: BoxBlurParams;
@@ -72,12 +82,77 @@ struct BoxBlurParams {
 fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let at = vec2<i32>(position.xy);
     let axis = vec2<i32>(box_blur.axis_x, box_blur.axis_y);
+    // Only the outermost pair is ever partly covered, so the sweep stays
+    // one load and one add per tap and pays the fraction once.
+    let half_width = box_blur.half_width_texels;
+    let reach = i32(ceil(half_width - 0.5));
+    let straddle = half_width - f32(reach) + 0.5;
 
     var sum = 0.0;
-    for (var tap = -box_blur.radius_texels; tap <= box_blur.radius_texels; tap++) {
+    for (var tap = 1 - reach; tap < reach; tap++) {
         sum += load_clamped(box_blur_source, at + axis * tap);
     }
-    return plane_out(sum / f32(2 * box_blur.radius_texels + 1));
+    if reach == 0 {
+        sum = load_clamped(box_blur_source, at);
+    } else {
+        sum += straddle
+            * (load_clamped(box_blur_source, at - axis * reach) + load_clamped(box_blur_source, at + axis * reach));
+    }
+    return plane_out(sum / (2.0 * half_width));
+}
+
+// The two ends of a reduced-extent blur chain (iamacoffeepot/aether#4437).
+// Blur discards high frequencies by construction, so the sweeps between
+// these two need no more texels than the softening leaves standing: the
+// chain runs on a plane `divisor` times smaller on each axis, which is
+// `divisor` cubed less work once the box window shrinks with it. The
+// downsample averages each divisor-square block — the same box average
+// the sweeps do, so the reduction is itself part of the softening rather
+// than a resample laid on top — and the upsample carries the result back
+// bilinearly, edges clamped exactly as the sweeps clamp theirs.
+struct ScaleParams {
+    divisor: i32,
+}
+
+@group(0) @binding(0) var<uniform> box_scale: ScaleParams;
+@group(1) @binding(0) var box_scale_source: texture_2d<f32>;
+
+@fragment
+fn fs_box_downsample(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(position.xy) * box_scale.divisor;
+
+    var sum = 0.0;
+    for (var down = 0; down < box_scale.divisor; down++) {
+        for (var across = 0; across < box_scale.divisor; across++) {
+            sum += load_clamped(box_scale_source, base + vec2<i32>(across, down));
+        }
+    }
+    return plane_out(sum / f32(box_scale.divisor * box_scale.divisor));
+}
+
+@fragment
+fn fs_box_upsample(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    // Texel centres, not corners: the reduced texel covering full-extent
+    // texel p is centred at (p + 0.5) / divisor, so the bilinear weights
+    // come off that coordinate less the half-texel the corner sits at.
+    let at = vec2<f32>(vec2<i32>(position.xy));
+    let source = (at + vec2<f32>(0.5, 0.5)) / f32(box_scale.divisor) - vec2<f32>(0.5, 0.5);
+
+    let corner = floor(source);
+    let fraction = source - corner;
+    let x0 = i32(corner.x);
+    let y0 = i32(corner.y);
+    let upper = mix(
+        load_clamped(box_scale_source, vec2<i32>(x0, y0)),
+        load_clamped(box_scale_source, vec2<i32>(x0 + 1, y0)),
+        fraction.x,
+    );
+    let lower = mix(
+        load_clamped(box_scale_source, vec2<i32>(x0, y0 + 1)),
+        load_clamped(box_scale_source, vec2<i32>(x0 + 1, y0 + 1)),
+        fraction.x,
+    );
+    return plane_out(mix(upper, lower, fraction.y));
 }
 
 // field.rs `shrink`: resample the region smaller about the wash's centroid

@@ -48,8 +48,9 @@ use aether_kinds::QuadSpace;
 use aether_math::{Rgba, Vec2};
 use aether_puppet::easel::image;
 use aether_puppet::easel::program::puddle::{
-    BoxBlurUniforms, EDGE_BAND, PUDDLE_WGSL, RIM_RESTRIDE, RIM_VARY, RIM_VARY_CEILING, RimUniforms, ShrinkUniforms,
-    ThresholdUniforms, box_blur_passes, box_radius_texels, plane_slot, rim_pass, shrink_pass, threshold_pass,
+    BoxBlurChain, BoxBlurUniforms, EDGE_BAND, PUDDLE_WGSL, RIM_RESTRIDE, RIM_VARY, RIM_VARY_CEILING, RimUniforms,
+    ShrinkUniforms, ThresholdUniforms, box_blur_passes, box_half_width, plane_slot, reduced_plane_slot, rim_pass,
+    shrink_pass, threshold_pass,
 };
 use aether_puppet::math3::hash_unit;
 use aether_render::QuadBlend;
@@ -70,6 +71,22 @@ const PLANE_HEIGHT: usize = 32;
 /// step of slack without admitting any wrong-window bug, which shifts
 /// pixels by tens of steps.
 const TOLERANCE_STEPS: f32 = 3.0;
+
+/// Budget for the reduced-extent chain, which softens by a little more
+/// than the oracle by construction: the block average and the bilinear
+/// carry-back add their own support to the window, and the carry-back
+/// resolves the reduced plane's curve as straight lines between its
+/// samples. Both are fractions of a step across the interior of a field
+/// this smooth. The plane's clamped border is where they are not: the
+/// sweep there repeats the reduced plane's last texel, which is already
+/// an average of the last few of the oracle's, so the two extend their
+/// edges differently and the border rows carry the whole budget. The
+/// mechanism bugs named below move whole neighbourhoods by tens of steps.
+const REDUCED_TOLERANCE_STEPS: f32 = 8.0;
+
+/// The reduction [`a_reduced_extent_blur_chain_matches_cpu_blur`] sweeps
+/// at.
+const DIVISOR: u32 = 2;
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
 /// is available — every scenario here executes programs for real.
@@ -227,6 +244,13 @@ fn srgb_byte_to_linear(byte: u8) -> f32 {
 /// CPU oracle (clamped to the displayable `[0, 1]` the readback path can
 /// carry).
 fn assert_plane_close(op: &str, developed: &[f32], expected: &[f32]) {
+    assert_plane_within(op, developed, expected, TOLERANCE_STEPS);
+}
+
+/// [`assert_plane_close`] against a budget the op states for itself — the
+/// reduced-extent chain, whose plane genuinely carries fewer texels than
+/// the oracle's.
+fn assert_plane_within(op: &str, developed: &[f32], expected: &[f32], budget: f32) {
     assert_eq!(developed.len(), expected.len(), "{op}: plane sizes must agree");
     let mut worst = 0.0f32;
     let mut worst_at = (0, 0);
@@ -239,9 +263,9 @@ fn assert_plane_close(op: &str, developed: &[f32], expected: &[f32]) {
         }
     }
     assert!(
-        worst <= TOLERANCE_STEPS,
+        worst <= budget,
         "{op}: GPU develop drifts {worst:.2} linear 8-bit steps from the CPU oracle at {worst_at:?} \
-         (budget {TOLERANCE_STEPS})",
+         (budget {budget})",
     );
 }
 
@@ -287,15 +311,64 @@ fn box_blur_chain_matches_cpu_blur() {
     let radius_pixels = 5.1;
     let expected = image::blur(&field, PLANE_WIDTH, PLANE_HEIGHT, radius_pixels);
 
+    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: 1 };
     let register = plane_program(
         1,
         2,
-        box_blur_passes(InputSlot::Binding { index: 0 }, 0, 1, OutputSlot::Binding { index: output_binding(1) }, 0),
+        box_blur_passes(InputSlot::Binding { index: 0 }, &chain, OutputSlot::Binding { index: output_binding(1) }, 0),
     );
-    let uniforms = BoxBlurUniforms { radius_texels: box_radius_texels(radius_pixels) }.encode().to_vec();
+    let uniforms =
+        BoxBlurUniforms { half_width_texels: box_half_width(radius_pixels, chain.divisor), divisor: chain.divisor }
+            .encode()
+            .to_vec();
     let developed = develop(&mut harness, &register, &[&field], uniforms);
 
     assert_plane_close("box blur", &developed, &expected);
+}
+
+/// The reduced-extent blur chain against the same CPU oracle
+/// (iamacoffeepot/aether#4437): a chain that sweeps a plane half as wide
+/// on each axis, opened by the block-average downsample and closed by the
+/// bilinear upsample, must still land the softening the full-extent chain
+/// lands. The radius here halves exactly, so the reduction costs the
+/// oracle nothing it can be held to — what is left to get wrong is the
+/// mechanism. The named bugs: a downsample reading the reduced texel's
+/// own coordinate rather than its block (the softening lands a quarter of
+/// the plane away), an upsample sampling corners instead of texel centres
+/// (a half-texel shift the whole plane carries), one that drops the
+/// bilinear weights for a nearest read (the reduced texels show as
+/// blocks), and a sweep window still sized for the full extent (double
+/// the softening asked for).
+#[test]
+fn a_reduced_extent_blur_chain_matches_cpu_blur() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = boot();
+
+    // Smooth by construction, as every plane the wash blurs is: the
+    // reduction discards frequencies above its own extent, so a
+    // pseudo-random field would measure the discarding rather than the
+    // chain. Twice BOX_TO_GAUSSIAN times MIN_REDUCED_RADIUS, so both
+    // extents round to a whole box radius and neither side rounds away
+    // from the other.
+    let field = disc_mask(Vec2::new(23.0, 15.0), 6.0, 20.0);
+    let radius_pixels = 13.6;
+    let expected = image::blur(&field, PLANE_WIDTH, PLANE_HEIGHT, radius_pixels);
+
+    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: DIVISOR };
+    let mut register = plane_program(
+        1,
+        2,
+        box_blur_passes(InputSlot::Binding { index: 0 }, &chain, OutputSlot::Binding { index: output_binding(1) }, 0),
+    );
+    register.transients = vec![reduced_plane_slot(DIVISOR); 2];
+    let uniforms = BoxBlurUniforms { half_width_texels: box_half_width(radius_pixels, DIVISOR), divisor: DIVISOR }
+        .encode()
+        .to_vec();
+    let developed = develop(&mut harness, &register, &[&field], uniforms);
+
+    assert_plane_within("reduced box blur", &developed, &expected, REDUCED_TOLERANCE_STEPS);
 }
 
 /// The scale-about-centroid resample against a transcription of
