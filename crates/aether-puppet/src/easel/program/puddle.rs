@@ -21,11 +21,13 @@
 //! full pass graph; the parity scenarios in
 //! `tests/program_puddle_scenario.rs` drive each op standalone.
 //!
-//! Ops read and write [`plane_slot`] data planes (`R32Float`, so an
-//! intermediate never quantizes); a chain's final pass may instead target
-//! an `Rgba8` writable binding, which quantizes the plane to 8 bits at the
-//! very end — the form the parity scenarios observe through the overlay
-//! path.
+//! Ops read and write data planes: [`plane_slot`]'s `R32Float` where a
+//! texel carries a label or an index, and [`soft_plane_slot`]'s filterable
+//! `R16Float` where it carries a quantity — which is everywhere a blur
+//! chain sweeps, since the pairing that halves its fetches is a filtered
+//! read. A chain's final pass may instead target an `Rgba8` writable
+//! binding, which quantizes the plane to 8 bits at the very end — the form
+//! the parity scenarios observe through the overlay path.
 
 use aether_math::Vec2;
 use aether_render::{InputSlot, OutputSlot, PassStage, ProgramPass, SlotExtent, SlotSpec, TextureFormat};
@@ -42,6 +44,9 @@ pub const BOX_BLUR_ENTRY: &str = "fs_box_blur";
 /// as a single kernel ([`composite_taps`]).
 pub const FUSED_BLUR_X_ENTRY: &str = "fs_fused_blur_x";
 pub const FUSED_BLUR_Y_ENTRY: &str = "fs_fused_blur_y";
+
+/// Entry point of the carry onto the soft plane ([`soft_carry_pass`]).
+pub const SOFT_CARRY_ENTRY: &str = "fs_soft_carry";
 
 /// Entry points of a reduced-extent chain's two ends: the block average
 /// into the reduced plane and the bilinear carry back out of it.
@@ -77,13 +82,37 @@ pub fn plane_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Full }
 }
 
+/// The plane format a blur chain reads and writes, and the one the wash
+/// carries its whole develop in: `R16Float`, which core WebGPU filters.
+///
+/// The blur is what asks for it. A symmetric kernel's taps pair exactly
+/// into one filtered read apiece ([`fused_taps`]), which is half the
+/// fetches of the same kernel taken point by point — and the sweeps are
+/// where a develop's fetches almost all are. Filtering is a property of
+/// the format, not of the pass, so the source has to stand at a
+/// filterable one for the pairing to be available at all.
+///
+/// What it costs is mantissa: about eleven bits against the 32-bit
+/// plane's twenty-four. A plane carries coverage, density or value, all
+/// resolved into an eight-bit sheet at the end, so the quantization sits
+/// three bits under the finest step the picture can show. A label or a
+/// texel index is the case this is wrong for — the care flood's seeds
+/// stay at [`plane_slot`]'s format for exactly that reason.
+pub const SOFT_PLANE_FORMAT: TextureFormat = TextureFormat::R16Float;
+
+/// [`SOFT_PLANE_FORMAT`] at the full extent — what a standalone blur
+/// scenario declares for the planes it hands the chain.
+pub fn soft_plane_slot() -> SlotSpec {
+    SlotSpec { format: SOFT_PLANE_FORMAT, extent: SlotExtent::Full }
+}
+
 /// The plane a blur chain of [`BoxBlurChain::divisor`] sweeps over: the
-/// data plane at a `divisor`-th of the canvas on each axis. A divisor of
-/// one is [`plane_slot`] itself — the executor pools both onto the same
-/// texture (ADR-0170), so a full-extent chain declared this way allocates
-/// nothing extra.
+/// soft plane at a `divisor`-th of the canvas on each axis. A divisor of
+/// one is [`soft_plane_slot`] itself — the executor pools both onto the
+/// same texture (ADR-0170), so a full-extent chain declared this way
+/// allocates nothing extra.
 pub fn reduced_plane_slot(divisor: u32) -> SlotSpec {
-    SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Divided { divisor } }
+    SlotSpec { format: SOFT_PLANE_FORMAT, extent: SlotExtent::Divided { divisor } }
 }
 
 /// Extents a blur chain may run reduced at, widest reduction first. Two
@@ -128,15 +157,19 @@ pub fn blur_divisor(radius_pixels: f32) -> u32 {
         .unwrap_or(1)
 }
 
-/// Weight vectors the fused sweep's uniform block declares, matching the
-/// WGSL `array<vec4<f32>, FUSED_BLUR_VECTORS>` this side fills.
+/// Vectors the fused sweep's uniform block declares, matching the WGSL
+/// `array<vec4<f32>, FUSED_BLUR_VECTORS>` this side fills. Each carries
+/// two `(offset, weight)` reads, so the block holds twice this many.
 const FUSED_WEIGHT_VECTORS: usize = 12;
 
-/// Weights one fused kernel carries, from the centre out. Three sweeps of
-/// reach `r` convolve to a kernel of reach `3r`, so this covers every
-/// chain whose sweeps reach fifteen texels — the whole palette on any
-/// canvas up to around two and a half thousand pixels tall. A chain past
-/// it sweeps its [`BLUR_PASSES`] iterations instead ([`fuses`]).
+/// Composite taps one fused kernel carries either side of its centre.
+/// Each pair of them rides one filtered read ([`fused_taps`]) and the
+/// block holds `2 * FUSED_WEIGHT_VECTORS` reads, so the ceiling is four
+/// times the vector count. Three sweeps of reach `r` convolve to a
+/// kernel of reach `3r`, so this covers every chain whose sweeps reach
+/// fifteen texels — the whole palette on any canvas up to around two and
+/// a half thousand pixels tall. A chain past it sweeps its
+/// [`BLUR_PASSES`] iterations instead ([`fuses`]).
 pub const MAX_FUSED_WEIGHTS: usize = 4 * FUSED_WEIGHT_VECTORS;
 
 /// The chain's [`BLUR_PASSES`] box sweeps convolved into one kernel, from
@@ -171,6 +204,40 @@ pub fn composite_taps(half_width_texels: f32) -> Vec<f32> {
 /// iterations.
 pub fn fuses(half_width_texels: f32) -> bool {
     BLUR_PASSES as usize * sweep_reach(half_width_texels) < MAX_FUSED_WEIGHTS
+}
+
+/// One side of a fused kernel as the reads a filtering sampler answers
+/// it in: the centre tap, then one `(offset, weight)` per *pair* of
+/// composite taps (iamacoffeepot/aether#4387).
+///
+/// The pairing is exact rather than an approximation of the kernel.
+/// Reading at a fractional offset between texels `i` and `i + 1` hands
+/// back `(1 - f) * t[i] + f * t[i + 1]`, so a read at
+/// `(i * w[i] + (i + 1) * w[i + 1]) / (w[i] + w[i + 1])` scaled by
+/// `w[i] + w[i + 1]` is `w[i] * t[i] + w[i + 1] * t[i + 1]` — the two
+/// taps the kernel wanted, out of one fetch instead of two. The sweeps
+/// are where nearly every fetch in a develop is, so halving them is the
+/// develop's own pacing; what pays for it is the plane standing at a
+/// filterable format ([`SOFT_PLANE_FORMAT`]) and the sampler's own
+/// sub-texel weight, which is finer than the eight-bit sheet the plane
+/// resolves into.
+///
+/// A trailing unpaired tap rides alone with its own integer offset, so
+/// an even and an odd kernel both come out exact.
+pub fn fused_taps(half_width_texels: f32) -> (f32, Vec<(f32, f32)>) {
+    let kernel = composite_taps(half_width_texels);
+    let mut taps = Vec::with_capacity(kernel.len() / 2);
+    for (near, pair) in kernel[1..].chunks(2).enumerate() {
+        let (first, second) = (pair[0], pair.get(1).copied().unwrap_or(0.0));
+        let weight = first + second;
+        if weight <= 0.0 {
+            continue;
+        }
+        let near = (1 + 2 * near) as f32;
+        taps.push(((near * first + (near + 1.0) * second) / weight, weight));
+    }
+
+    (kernel[0], taps)
 }
 
 /// One sweep's taps: how much of its own texel the window covers, which
@@ -228,9 +295,9 @@ pub struct BoxBlurUniforms {
     pub divisor: u32,
 }
 
-/// Bytes of the `FusedBlurParams` window: the pair count, the padding
-/// the uniform address space's sixteen-byte array stride forces, then the
-/// packed weights.
+/// Bytes of the `FusedBlurParams` window: the read count and the centre
+/// weight, the padding the uniform address space's sixteen-byte array
+/// stride forces, then the packed `(offset, weight)` reads.
 const FUSED_BLUR_WINDOW_BYTES: u32 = 16 + 16 * FUSED_WEIGHT_VECTORS as u32;
 
 /// Bytes of one `BoxBlurParams` uniform window.
@@ -250,11 +317,13 @@ impl BoxBlurUniforms {
     /// The four windows, in the blob layout the shader declares.
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         let mut bytes = [0u8; Self::BYTES as usize];
-        let taps = composite_taps(self.half_width_texels);
-        if taps.len() <= MAX_FUSED_WEIGHTS {
-            bytes[0..4].copy_from_slice(&((taps.len() - 1) as u32).to_le_bytes());
-            for (slot, weight) in bytes[16..].chunks_exact_mut(4).zip(&taps) {
-                slot.copy_from_slice(&weight.to_le_bytes());
+        if fuses(self.half_width_texels) {
+            let (centre, taps) = fused_taps(self.half_width_texels);
+            bytes[0..4].copy_from_slice(&(taps.len() as u32).to_le_bytes());
+            bytes[4..8].copy_from_slice(&centre.to_le_bytes());
+            for (slot, (offset, weight)) in bytes[16..].chunks_exact_mut(8).zip(&taps) {
+                slot[0..4].copy_from_slice(&offset.to_le_bytes());
+                slot[4..8].copy_from_slice(&weight.to_le_bytes());
             }
         }
 
@@ -410,6 +479,15 @@ impl ShrinkUniforms {
             self.scale.to_le_bytes(),
         ])
     }
+}
+
+/// The carry onto the soft plane: one pointwise pass taking a plane a
+/// chain was handed from outside the graph — a binding another program
+/// wrote, a texture staged from the CPU — onto [`SOFT_PLANE_FORMAT`], so
+/// the sweeps that read it can pair their taps through a filtering
+/// sampler. Takes no uniform window.
+pub fn soft_carry_pass(source: InputSlot, output: OutputSlot) -> ProgramPass {
+    pass(SOFT_CARRY_ENTRY, vec![source], output, 0, 0)
 }
 
 /// The scale-about-centroid resample (`field::shrink`): one pass reading
@@ -627,6 +705,47 @@ mod tests {
                 taps.len(),
             );
             assert_eq!(taps.len(), BLUR_PASSES as usize * sweep_reach(half_width) + 1, "reach {half_width}");
+        }
+    }
+
+    /// Every read the fused sweep makes, unpacked back into the two taps
+    /// a filtering sampler resolves it into, must be the composite kernel
+    /// it was folded from. A read at offset `o` between texels `i` and
+    /// `i + 1` is answered `(1 - f) * t[i] + f * t[i + 1]` for
+    /// `f = o - i`, so scaling that by the read's weight has to give back
+    /// `w[i] * t[i] + w[i + 1] * t[i + 1]` — which is the whole reason
+    /// the pairing is exact rather than an approximation of the kernel.
+    ///
+    /// The named bugs, each of which softens by the wrong amount without
+    /// looking obviously wrong: an offset averaged rather than weighted
+    /// (the pair's split ignores which tap is heavier), the two weights
+    /// transposed in that average (the read leans the wrong way), a
+    /// weight halved because the pair was read as one tap counted twice,
+    /// and a trailing odd tap folded against a zero as though it had a
+    /// partner (its offset drifts a half-texel outward).
+    ///
+    /// Tripwire: the reads unpack to the kernel, taps and weights both.
+    #[test]
+    fn the_reads_a_fused_sweep_makes_unpack_to_the_kernel() {
+        for half_width in [0.5f32, 1.5, 2.5, 3.375, 7.375, 15.5] {
+            let kernel = composite_taps(half_width);
+            let (centre, reads) = super::fused_taps(half_width);
+            assert!((centre - kernel[0]).abs() < 1e-6, "half-width {half_width}: the centre tap moved");
+
+            let mut unpacked = vec![0.0f32; kernel.len()];
+            unpacked[0] = centre;
+            for &(offset, weight) in &reads {
+                let near = offset.floor();
+                let fraction = offset - near;
+                let near = near as usize;
+                unpacked[near] += weight * (1.0 - fraction);
+                if near + 1 < unpacked.len() {
+                    unpacked[near + 1] += weight * fraction;
+                }
+            }
+
+            let worst = kernel.iter().zip(&unpacked).map(|(want, got)| (want - got).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 1e-6, "half-width {half_width}: an unpacked read drifts {worst} from the kernel");
         }
     }
 }

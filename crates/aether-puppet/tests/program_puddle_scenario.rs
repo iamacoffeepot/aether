@@ -50,7 +50,7 @@ use aether_puppet::easel::image;
 use aether_puppet::easel::program::puddle::{
     BLUR_PASSES, BoxBlurChain, BoxBlurUniforms, EDGE_BAND, MAX_FUSED_WEIGHTS, PUDDLE_WGSL, RIM_RESTRIDE, RIM_VARY,
     RIM_VARY_CEILING, RimUniforms, ShrinkUniforms, ThresholdUniforms, box_blur_passes, box_half_width, plane_slot,
-    reduced_plane_slot, rim_pass, shrink_pass, threshold_pass,
+    reduced_plane_slot, rim_pass, shrink_pass, soft_carry_pass, soft_plane_slot, threshold_pass,
 };
 use aether_puppet::math3::hash_unit;
 use aether_render::QuadBlend;
@@ -319,12 +319,20 @@ fn box_blur_chain_matches_cpu_blur() {
 
     let half_width_texels = box_half_width(radius_pixels, 1);
     let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: 1, half_width_texels };
-    let register = plane_program(
-        1,
-        2,
-        box_blur_passes(InputSlot::Binding { index: 0 }, &chain, OutputSlot::Binding { index: output_binding(1) }, 0),
-    );
-    assert_eq!(register.passes.len(), 2, "a chain this narrow fuses to one sweep per axis");
+    // A fused sweep pairs its taps through a filtering sampler, so the
+    // plane it reads has to stand at the soft format; the field arrives
+    // here as a staged 32-bit binding, so it is carried onto one first,
+    // exactly as the wash's own graph carries the ink plane.
+    let mut passes = vec![soft_carry_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 2 })];
+    passes.extend(box_blur_passes(
+        InputSlot::Transient { index: 2 },
+        &chain,
+        OutputSlot::Binding { index: output_binding(1) },
+        0,
+    ));
+    let mut register = plane_program(1, 3, passes);
+    register.transients = vec![soft_plane_slot(); 3];
+    assert_eq!(register.passes.len(), 3, "a chain this narrow fuses to one sweep per axis, over the carried plane");
     let uniforms = BoxBlurUniforms { half_width_texels, divisor: chain.divisor }.encode().to_vec();
     let developed = develop(&mut harness, &register, &[&field], uniforms);
 

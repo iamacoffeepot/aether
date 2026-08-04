@@ -7,9 +7,13 @@
 // with everything off the plane reading as zero, and the threshold band is
 // the same hermite ramp over the same displaced noise window.
 //
-// Every op reads its planes through textureLoad at integer texel
-// coordinates, exactly as the CPU indexes them; the pass input contract's
-// samplers are never declared. Entry points take the fragment's
+// Every op but one reads its planes through textureLoad at integer texel
+// coordinates, exactly as the CPU indexes them, and leaves the pass input
+// contract's samplers undeclared. The exception is the fused sweep, which
+// declares its sampler and reads between texels on purpose: a symmetric
+// kernel's taps pair into one filtered read apiece, which is the same
+// kernel out of half the fetches (iamacoffeepot/aether#4387). Entry points
+// take the fragment's
 // @builtin(position), whose xy at a fragment center is (x + 0.5, y + 0.5),
 // so the vec2<i32> truncation below recovers the exact texel index. Each
 // writes its scalar result across rgb with alpha one: an R32Float target
@@ -137,36 +141,78 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
 const FUSED_BLUR_VECTORS: u32 = 12u;
 
 struct FusedBlurParams {
-    // Tap pairs past the centre — the kernel spans `2 * pairs + 1` taps.
-    pairs: i32,
-    weights: array<vec4<f32>, FUSED_BLUR_VECTORS>,
+    // Filtered reads past the centre, each standing for a pair of the
+    // composite kernel's taps — so the kernel spans up to `4 * reads + 1`
+    // taps and costs `2 * reads + 1` fetches.
+    reads: i32,
+    // The kernel's own centre tap, which lands on a texel centre and so
+    // is a point read whatever the sampler does.
+    centre: f32,
+    // `(offset, weight)` per read, two to a vector: the offset in texels
+    // from the fragment's own centre, and the summed weight of the pair
+    // the read stands for (`puddle::fused_taps`).
+    reads_at: array<vec4<f32>, FUSED_BLUR_VECTORS>,
 }
 
 @group(0) @binding(0) var<uniform> fused_blur: FusedBlurParams;
 @group(1) @binding(0) var fused_blur_source: texture_2d<f32>;
+@group(1) @binding(1) var fused_blur_sampler: sampler;
 
-fn fused_weight(tap: i32) -> f32 {
-    return fused_blur.weights[tap / 4][tap % 4];
+// The mirrored read of `load_reflected`, taken at a fractional position
+// rather than a texel index, so a filtering sampler can answer it.
+//
+// `at` is in texel-centre coordinates: texel `i` sits at `f32(i)`. The
+// fold is the continuous form of the integer one above — reflection about
+// `-0.5` and about `extent - 0.5`, the two half-sample lines the CPU
+// mirrors across — and a reflection commutes with a linear interpolation,
+// so folding the coordinate lands where folding each of the pair's two
+// texels would. Past the fold the sampler's clamp answers the residual
+// exactly as the CPU's does, because the texel a clamp reaches for and
+// the texel a fold reaches for are the same one at the edge.
+fn sample_reflected(at: vec2<f32>, extent: vec2<f32>) -> f32 {
+    let under = select(at, -1.0 - at, at < vec2<f32>(-0.5, -0.5));
+    let folded = select(under, 2.0 * extent - 1.0 - under, under > extent - vec2<f32>(0.5, 0.5));
+
+    return textureSampleLevel(fused_blur_source, fused_blur_sampler, (folded + 0.5) / extent, 0.0).r;
 }
 
-fn fused_sweep(at: vec2<i32>, axis: vec2<i32>) -> vec4<f32> {
-    var sum = fused_weight(0) * load_reflected(fused_blur_source, at);
-    for (var tap = 1; tap <= fused_blur.pairs; tap++) {
-        let reach = axis * tap;
-        sum += fused_weight(tap)
-            * (load_reflected(fused_blur_source, at - reach) + load_reflected(fused_blur_source, at + reach));
+fn fused_sweep(at: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
+    let extent = vec2<f32>(textureDimensions(fused_blur_source));
+
+    var sum = fused_blur.centre * sample_reflected(at, extent);
+    for (var read = 0; read < fused_blur.reads; read++) {
+        let packed = fused_blur.reads_at[read / 2];
+        let tap = select(packed.xy, packed.zw, (read & 1) == 1);
+        let reach = axis * tap.x;
+        sum += tap.y * (sample_reflected(at - reach, extent) + sample_reflected(at + reach, extent));
     }
     return plane_out(sum);
 }
 
 @fragment
 fn fs_fused_blur_x(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    return fused_sweep(vec2<i32>(position.xy), vec2<i32>(1, 0));
+    return fused_sweep(position.xy - 0.5, vec2<f32>(1.0, 0.0));
 }
 
 @fragment
 fn fs_fused_blur_y(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    return fused_sweep(vec2<i32>(position.xy), vec2<i32>(0, 1));
+    return fused_sweep(position.xy - 0.5, vec2<f32>(0.0, 1.0));
+}
+
+@group(1) @binding(0) var soft_carry_source: texture_2d<f32>;
+
+// A plane carried across, texel for texel, onto the soft plane the sweeps
+// read (iamacoffeepot/aether#4387).
+//
+// A chain pairs its taps through a filtering sampler; filtering is a
+// property of the format; and a plane a chain is handed from outside the
+// graph — a binding another program wrote, a texture staged from the CPU
+// — stands at whatever format its owner declared. So it is carried onto
+// the format the sweeps need first. Pointwise and one fetch, against the
+// several hundred a sweep of the same plane makes.
+@fragment
+fn fs_soft_carry(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return plane_out(textureLoad(soft_carry_source, vec2<i32>(position.xy), 0).r);
 }
 
 // The two ends of a reduced-extent blur chain (iamacoffeepot/aether#4437).
