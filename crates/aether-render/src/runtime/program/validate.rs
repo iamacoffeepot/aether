@@ -10,6 +10,7 @@ use naga::{
     AddressSpace, Binding, BuiltIn, Handle, Module, Scalar, ScalarKind, ShaderStage, Type, TypeInner, VectorSize,
 };
 
+use super::super::surface::render_limits;
 use crate::{
     DrawPass, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, SlotExtent,
     SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
@@ -20,6 +21,23 @@ use crate::{
 /// render passes per dispatch. Generous against the named consumer (a
 /// wash chain is hundreds of pours).
 const MAX_REPEAT_COUNT: u32 = 4096;
+
+/// Ceiling on the render passes one dispatch encodes, summed over every
+/// pass's repeat count. [`MAX_REPEAT_COUNT`] bounds a single entry, which
+/// leaves the product of many entries unbounded — a graph of a few dozen
+/// maximally-repeated passes is a small mail that asks the executor to
+/// encode millions of passes and stalls the frame. Generous against the
+/// named consumer (a wash chain is hundreds of pours in one pass).
+const MAX_PASS_ITERATIONS: u64 = 65_536;
+
+/// Ceiling on the uniform bytes one dispatch stages. `encode_passes`
+/// copies every iteration's window into an offset-aligned staging buffer,
+/// so the allocation is the sum over passes of
+/// `repeat_count * align_up(bound_window_bytes)` — driven by the declared
+/// graph, not by the dispatch blob's size, since a zero `uniform_stride`
+/// lets 4096 iterations rebind one small window. Unbounded, a 64 KiB mail
+/// stages gigabytes and overflows the `u32` offset the bind group takes.
+const MAX_UNIFORM_STAGING_BYTES: u64 = 64 << 20;
 
 /// A pass slot with the register-only `PassOutput` alias resolved away:
 /// what the executor actually binds or attaches.
@@ -167,6 +185,8 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         passes.push(plan);
     }
 
+    check_encode_budget(&passes)?;
+
     let final_output = passes.last().expect("passes checked non-empty").output;
     let ResolvedSlot::Binding(output_binding) = final_output else {
         return Err("the final pass must write a dispatch binding (the program's result texture)".to_owned());
@@ -187,6 +207,37 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         output_binding,
         written_bindings,
     })
+}
+
+/// What the whole graph costs the executor per dispatch, checked once the
+/// per-pass plans are known. Both ceilings are register-time so the cost
+/// is refused where it is declared rather than discovered at record time,
+/// where the encode is already underway on the driver thread and the only
+/// remaining outcomes are a stalled frame, a multi-gigabyte allocation, or
+/// an overflowed offset. One bounded walk over the passes.
+fn check_encode_budget(passes: &[PassPlan]) -> Result<(), String> {
+    let align = u64::from(render_limits().min_uniform_buffer_offset_alignment).max(4);
+    let mut iterations: u64 = 0;
+    let mut staged_bytes: u64 = 0;
+    for pass in passes {
+        let bound = u64::from(pass.uniform_length).max(super::MIN_BOUND_UNIFORM_BYTES);
+        iterations = iterations.saturating_add(u64::from(pass.repeat_count));
+        staged_bytes =
+            staged_bytes.saturating_add(u64::from(pass.repeat_count).saturating_mul(bound.next_multiple_of(align)));
+    }
+    if iterations > MAX_PASS_ITERATIONS {
+        return Err(format!(
+            "the graph encodes {iterations} pass iterations per dispatch, over the supported maximum \
+             {MAX_PASS_ITERATIONS}",
+        ));
+    }
+    if staged_bytes > MAX_UNIFORM_STAGING_BYTES {
+        return Err(format!(
+            "the graph stages {staged_bytes} uniform bytes per dispatch, over the supported maximum \
+             {MAX_UNIFORM_STAGING_BYTES}",
+        ));
+    }
+    Ok(())
 }
 
 fn check_extent(extent: SlotExtent, slot: impl Fn() -> String) -> Result<(), String> {
@@ -698,6 +749,56 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             ..base()
         });
         assert!(zero_repeat.contains("repeat count"), "repeat class: {zero_repeat}");
+
+        let zero_divisor = rejection(&ProgramRegister {
+            transients: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Divided { divisor: 0 } }],
+            ..base()
+        });
+        assert!(zero_divisor.contains("divisor must be at least 1"), "divisor class: {zero_divisor}");
+
+        let binding_past_list = rejection(&ProgramRegister {
+            passes: vec![ProgramPass { inputs: vec![InputSlot::Binding { index: 7 }], ..valid_pass() }],
+            ..base()
+        });
+        assert!(binding_past_list.contains("binding slot 7 is out of range"), "binding class: {binding_past_list}");
+    }
+
+    /// The executor's per-dispatch cost is declared by the graph, so both
+    /// ceilings must reject at register — the bugs pinned are a graph of
+    /// many maximally-repeated passes asking the executor to encode
+    /// millions of render passes (a stalled frame), and the same shape
+    /// staging gigabytes of uniform windows from a small mail, which
+    /// overflows the `u32` offset `encode_passes` casts and panics the
+    /// driver thread. `MAX_REPEAT_COUNT` bounds one entry and neither of
+    /// these, which is why they are checked over the whole pass list.
+    #[test]
+    fn encode_budget_ceilings_reject_at_register() {
+        let base = |passes: Vec<ProgramPass>| ProgramRegister {
+            wgsl: MODULE.to_owned(),
+            bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
+            transients: vec![],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes,
+        };
+        let repeated = |length: u32| ProgramPass {
+            repeat: Some(PassRepeat { count: MAX_REPEAT_COUNT, uniform_stride: 0 }),
+            ..pass("fs_copy", vec![InputSlot::Binding { index: 0 }], OutputSlot::Binding { index: 1 }, 0, length)
+        };
+
+        // 32 x 4096 = 131072 iterations, past the iteration ceiling while
+        // each window stays small.
+        let too_many_iterations = rejection(&base((0..32).map(|_| repeated(4)).collect()));
+        assert!(too_many_iterations.contains("pass iterations per dispatch"), "iteration class: {too_many_iterations}");
+
+        // 8 x 4096 = 32768 iterations (under the iteration ceiling) but
+        // 8 x 4096 x 4 KiB = 128 MiB staged, past the byte ceiling.
+        let too_many_bytes = rejection(&base((0..8).map(|_| repeated(4096)).collect()));
+        assert!(too_many_bytes.contains("uniform bytes per dispatch"), "staging class: {too_many_bytes}");
+
+        // The named consumer's shape — one maximally-repeated pass over a
+        // small window — stays comfortably inside both ceilings.
+        assert!(validate(&base(vec![repeated(64)])).is_ok(), "a wash-shaped chain must still register");
     }
 
     /// A draw-pass module: one entry per shape the draw validation has

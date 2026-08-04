@@ -142,6 +142,15 @@ impl TextureRegistry {
                 error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
             };
         };
+        let max_dimension = super::surface::render_limits().max_texture_dimension_2d;
+        if mail.width > max_dimension || mail.height > max_dimension {
+            return CreateTextureResult::Err {
+                error: format!(
+                    "texture dimensions {}x{} exceed the device limit max_texture_dimension_2d = {max_dimension}",
+                    mail.width, mail.height,
+                ),
+            };
+        }
         if mail.sampling == TextureSampling::Linear && !mail.format.filterable() {
             return CreateTextureResult::Err {
                 error: format!("{:?} cannot be linear-filtered; create it with Nearest sampling", mail.format),

@@ -65,6 +65,39 @@ pub struct BootedOffscreen {
 /// commits to RGBA at boot so the capture readback stays swizzle-free.
 const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+/// The limits every aether render device is created with. Both boot paths
+/// request exactly these, so the ceilings actor-supplied dimensions are
+/// validated against (`max_texture_dimension_2d`) and the alignment the
+/// program executor stages uniform windows at
+/// (`min_uniform_buffer_offset_alignment`) are known before any device
+/// exists — which is what lets `create_texture` reject an oversized
+/// request at mail time even though the GPU boots lazily. Sourcing both
+/// the request and the validation here is what keeps them from drifting:
+/// raising the requested limits automatically raises what validation
+/// admits.
+#[must_use]
+pub fn render_limits() -> wgpu::Limits {
+    wgpu::Limits::default()
+}
+
+/// Route wgpu errors that escape every error scope into the render log
+/// instead of wgpu's default handler, which panics the thread it lands on
+/// (`default_error_handler` in wgpu's backend). An actor's invalid graph
+/// or oversized request must not take the renderer — and with it the
+/// fleet's picture — down, so the frame's work is dropped loudly rather
+/// than fatally. Validation this crate performs up front is still the
+/// primary contract; this is the backstop for what slips past it, and an
+/// error logged here is a bug in that validation, not a normal outcome.
+fn install_uncaptured_error_handler(device: &wgpu::Device) {
+    device.on_uncaptured_error(Arc::new(|error| {
+        tracing::error!(
+            target: "aether_render",
+            %error,
+            "uncaptured wgpu error; dropping the frame's work rather than panicking the renderer",
+        );
+    }));
+}
+
 /// Map the resolved `AETHER_WIREFRAME` value to `(wants_line, wants_overlay)`:
 ///   unset / `"" | "0" | "off"` → filled (default), neither flag
 ///   `"line"` → the main pipeline draws in `PolygonMode::Line`
@@ -136,12 +169,13 @@ pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-render offscreen device"),
         required_features,
-        required_limits: wgpu::Limits::default(),
+        required_limits: render_limits(),
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::default(),
     }))
     .expect("request_device");
+    install_uncaptured_error_handler(&device);
 
     BootedOffscreen {
         device: Arc::new(device),
@@ -218,7 +252,7 @@ pub fn boot_surface(
     }))
     .map_err(|error| format!("request compatible render adapter: {error}"))?;
     let adapter_info = adapter.get_info();
-    let limits = wgpu::Limits::default();
+    let limits = render_limits();
     let (config, format) = surface_configuration(&surface, &adapter, size, None)?;
 
     // Wireframe rendering is opt-in via `AETHER_WIREFRAME`; the line modes
@@ -235,6 +269,7 @@ pub fn boot_surface(
         trace: wgpu::Trace::default(),
     }))
     .map_err(|error| format!("request render device: {error}"))?;
+    install_uncaptured_error_handler(&device);
 
     let device = Arc::new(device);
     let queue = Arc::new(queue);
