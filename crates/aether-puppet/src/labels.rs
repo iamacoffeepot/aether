@@ -25,6 +25,25 @@ pub const LIPS: u8 = 6;
 pub const BROW: u8 = 7;
 pub const EYE: u8 = 8;
 
+/// How many labelled classes the field carries, `SKIN..=EYE`.
+pub const CLASSES: usize = EYE as usize;
+
+/// The classification blur of the source pipeline (spike 139's
+/// `MATERIAL_BLUR`), as a gaussian sigma in lattice cells.
+///
+/// The field is a hard voxel quantisation, and the surface it labels is
+/// thinner than a cell in places — an ear is two sheets around one
+/// labelled shell, so the nearest voxel to a point on the outer sheet is
+/// as likely to say inner ear as hair. The source pipeline never reads
+/// the nearest voxel: it blurs each class into an indicator volume and
+/// argmaxes the blurred scores, so a thin shell's classification pools
+/// over its neighbourhood and the sheet behind it gets a vote.
+const SCORE_SIGMA: f32 = 1.2;
+
+/// Gather radius for `SCORE_SIGMA`, in cells. At 2.5 sigma the kernel
+/// is under half a percent of its peak.
+const SCORE_REACH: i32 = 3;
+
 pub fn class_of(name: &str) -> Option<u8> {
     match name {
         "skin" => Some(SKIN),
@@ -65,12 +84,26 @@ impl Labels {
             return None;
         }
 
+        let mut labels = Self { cells, n, origin: Vec3::splat(0.0), spacing: 1.0 };
+        labels.place_against(min, max, pad);
+
+        Some(labels)
+    }
+
+    /// Re-place the lattice against a mesh's bounds.
+    ///
+    /// The two loads settle in either order, and a field that lands
+    /// before its mesh is first placed against stand-in bounds. Those
+    /// bounds scale the whole lattice, so a 5% span error displaces a
+    /// sample by cells — most at the crown, where the ear tips then read
+    /// the concha's labels (issue 4401). Whoever holds the mesh calls
+    /// this again once the real bounds are in.
+    pub fn place_against(&mut self, min: Vec3, max: Vec3, pad: f32) {
         let centre = (min + max) * 0.5;
         let span = (max - min).to_array().into_iter().fold(f32::MIN, f32::max);
-        let origin = centre - Vec3::splat(span * (0.5 + pad));
-        let spacing = span * (1.0 + 2.0 * pad) / (n - 1) as f32;
 
-        Some(Self { cells, n, origin, spacing })
+        self.origin = centre - Vec3::splat(span * (0.5 + pad));
+        self.spacing = span * (1.0 + 2.0 * pad) / (self.n - 1) as f32;
     }
 
     fn at(&self, ix: i32, iy: i32, iz: i32) -> u8 {
@@ -121,5 +154,44 @@ impl Labels {
 
     pub fn is(&self, p: Vec3, wanted: &[u8]) -> bool {
         wanted.contains(&self.sample(p))
+    }
+
+    /// Every class's blurred indicator evaluated at `p` — the source
+    /// pipeline's classification signal (spikes 139/142).
+    ///
+    /// Equivalent to gaussian-blurring each class's indicator volume at
+    /// `SCORE_SIGMA` and reading the result at `p`, computed as a
+    /// gather so no blurred volume is ever materialized. The consumer
+    /// interpolates these scores across a face and argmaxes *after*
+    /// interpolation — argmaxing here would reduce the whole exercise to
+    /// nearest-neighbour with extra steps (spike 142's warning).
+    pub fn class_scores(&self, p: Vec3) -> [f32; CLASSES] {
+        let cell = (p - self.origin) / self.spacing;
+        let (ix, iy, iz) = (cell.x.round() as i32, cell.y.round() as i32, cell.z.round() as i32);
+
+        let mut scores = [0.0; CLASSES];
+        for dx in -SCORE_REACH..=SCORE_REACH {
+            for dy in -SCORE_REACH..=SCORE_REACH {
+                for dz in -SCORE_REACH..=SCORE_REACH {
+                    let found = self.at(ix + dx, iy + dy, iz + dz);
+                    if found == 0 {
+                        continue;
+                    }
+
+                    let offset =
+                        Vec3::new((ix + dx) as f32 - cell.x, (iy + dy) as f32 - cell.y, (iz + dz) as f32 - cell.z);
+                    scores[usize::from(found) - 1] += (-offset.dot(offset) / (2.0 * SCORE_SIGMA * SCORE_SIGMA)).exp();
+                }
+            }
+        }
+
+        scores
+    }
+
+    /// [`Self::class_scores`] over a vertex list, the per-vertex half of
+    /// the source pipeline's per-pixel classification. Computed once per
+    /// subject load and interpolated per pixel by the region rasterizer.
+    pub fn vertex_scores(&self, positions: &[Vec3]) -> Vec<[f32; CLASSES]> {
+        positions.iter().map(|&p| self.class_scores(p)).collect()
     }
 }
