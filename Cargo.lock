@@ -842,6 +842,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-puppet-idle"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-puppet",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "aether-puppet-turntable"
 version = "0.3.0-alpha"
 dependencies = [
