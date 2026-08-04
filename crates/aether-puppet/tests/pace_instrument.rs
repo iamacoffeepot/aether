@@ -41,6 +41,7 @@ use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
+use aether_harness_substrate_capture::visual::{decode_png, encode_png};
 use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent, LoadResult, Render, WindowId, WindowSize};
 use aether_math::Vec3;
 use aether_puppet::easel::program::{sight, stroke};
@@ -215,16 +216,24 @@ fn the_frame_paces_at_the_pinned_framing() {
         .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("prime", HarnessOp::advance(24))])
         .expect("prime the pinned framing");
 
-    photograph(&mut harness, "AETHER_PUPPET_GATE_PNG", "the pinned framing");
+    if let Some(pinned) = photograph(&mut harness, "AETHER_PUPPET_GATE_PNG", "the pinned framing") {
+        compare_against_baseline(&pinned);
+    }
     assert_the_develop_repeats(&mut harness);
 
     let still = timed(&mut harness, None);
+    let still_cpu = handler_cost(&mut harness, Render::ID);
     let orbit = timed(&mut harness, Some(AZIMUTH));
+    let orbit_cpu = handler_cost(&mut harness, Render::ID);
     let after = timed(&mut harness, None);
     eprintln!(
         "pace: static frame {still:.2} ms (and {after:.2} ms after the orbit), orbit frame {orbit:.2} ms, at \
          {WIDTH}x{HEIGHT} over {SAMPLES} frames each",
     );
+    // The component's own share of each, read straight after its
+    // condition so the EWMA is that condition's. What the frame carries
+    // beyond it is the GPU, the host's encode, and the present.
+    eprintln!("pace: of which the component's render handler — static {still_cpu:.2} ms, orbit {orbit_cpu:.2} ms");
 
     let turned = AZIMUTH + (SAMPLES + WARMUP - 1) as f32 * ORBIT_STEP;
     harness
@@ -269,14 +278,73 @@ fn assert_the_develop_repeats(harness: &mut SubstrateHarness) {
 /// Write one frame out under the path `variable` names, or do nothing
 /// when it is unset. Outside every timed loop, because a capture encodes
 /// a PNG synchronously and its cost is the image's entropy (#4422).
-fn photograph(harness: &mut SubstrateHarness, variable: &str, what: &str) {
-    let Ok(path) = env::var(variable) else {
-        return;
-    };
+fn photograph(harness: &mut SubstrateHarness, variable: &str, what: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env::var(variable).ok()?);
     let captured = harness.execute(vec![("gate", HarnessOp::capture())]).expect("capture the frame");
     let png = captured.captured("gate").expect("the capture step ran");
     fs::write(&path, png).expect("write the gate png");
-    eprintln!("pace: wrote {what} to {path} ({} bytes)", png.len());
+    eprintln!("pace: wrote {what} to {} ({} bytes)", path.display(), png.len());
+
+    Some(path)
+}
+
+/// One handler's current mean, in milliseconds — the same per-handler
+/// EWMA `actor_cost` reads. Zero when the handler has never run.
+fn handler_cost(harness: &mut SubstrateHarness, kind: aether_data::KindId) -> f64 {
+    let read = harness
+        .execute(vec![("cost", HarnessOp::send_and_await_reply(PUPPET, &CostTail { kind: Some(kind) }))])
+        .expect("query one handler's cost");
+    match read.reply::<CostTailResult>("cost").expect("decode CostTailResult") {
+        CostTailResult::Ok { rows } => rows.first().map_or(0.0, |row| row.mean_nanos as f64 / 1.0e6),
+        CostTailResult::Err { .. } => 0.0,
+    }
+}
+
+/// Score the frame just photographed against a baseline written by an
+/// earlier run, and write the difference out. Both paths come from the
+/// environment and both are optional, so an ordinary run does none of
+/// this — it is the A/B a change to the look is argued with.
+///
+/// Differences are reported in 8-bit steps of the worst channel, which
+/// is the same currency `program_wash_scenario` states its budgets in.
+/// The difference image is amplified so a change the eye would otherwise
+/// have to hunt for is visible at a glance; the numbers beside it are
+/// what the amplification must not be read instead of.
+fn compare_against_baseline(after: &Path) {
+    let (Ok(baseline), Ok(diff)) = (env::var("AETHER_PUPPET_BASELINE_PNG"), env::var("AETHER_PUPPET_DIFF_PNG")) else {
+        return;
+    };
+    let read = |path: &Path| {
+        decode_png(&fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())))
+            .unwrap_or_else(|error| panic!("decode {}: {error}", path.display()))
+    };
+    let (before, after) = (read(Path::new(&baseline)), read(after));
+    assert_eq!(
+        (before.width, before.height),
+        (after.width, after.height),
+        "a difference between two framings of different sizes is unmeasured, not a result",
+    );
+
+    let mut amplified = vec![0u8; after.rgba.len()];
+    let (mut sum, mut worst, mut past_eight) = (0u64, 0u8, 0u64);
+    for ((out, was), now) in
+        amplified.chunks_exact_mut(4).zip(before.rgba.chunks_exact(4)).zip(after.rgba.chunks_exact(4))
+    {
+        let step = (0..3).map(|channel| was[channel].abs_diff(now[channel])).max().unwrap_or(0);
+        sum += u64::from(step);
+        worst = worst.max(step);
+        past_eight += u64::from(step > 8);
+        out.copy_from_slice(&[step.saturating_mul(8), step.saturating_mul(8), step.saturating_mul(8), 255]);
+    }
+
+    let texels = (after.rgba.len() / 4) as f64;
+    fs::write(&diff, encode_png(&amplified, after.width, after.height).expect("encode the difference png"))
+        .expect("write the difference png");
+    eprintln!(
+        "pace: against {baseline} — mean {:.3} steps, worst {worst}, {:.3}% of texels past 8; difference (8x) at {diff}",
+        sum as f64 / texels,
+        100.0 * past_eight as f64 / texels,
+    );
 }
 
 /// One condition's mean frame, in milliseconds. `orbit` turns the camera
