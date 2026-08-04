@@ -10,8 +10,9 @@
 //! and the canvas, so a frame that moved none of the three would spend
 //! forty-eight passes deriving what is already standing in its own
 //! textures. What that costs the layer is the bookkeeping to say when
-//! one of them moved — [`Strokes::dispatched`] — and everything else
-//! here is sized for the frames that did: geometry replaced in place
+//! one of them moved — a revision, and the revision the planes standing
+//! there were produced from — and everything else here is sized for the
+//! frames that did move one: geometry replaced in place
 //! rather than recreated, only the volatile half of it travelling, and
 //! the uniform blobs written at dispatch time, which is where the
 //! canvas is known.
@@ -394,8 +395,8 @@ impl Strokes {
     /// before the next creates.
     ///
     /// Their replacements arrive blank, so the planes stand for nothing
-    /// until a dispatch fills them again — which is what clearing
-    /// [`Self::dispatched`] says.
+    /// until a dispatch fills them again — which is what clearing the
+    /// dispatched revision says.
     pub fn take_destroys(&mut self) -> Vec<DestroyTexture> {
         if self.textures.asking || self.sized == self.canvas || self.sized.is_none() {
             return Vec::new();
