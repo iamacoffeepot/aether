@@ -48,9 +48,9 @@ use aether_kinds::QuadSpace;
 use aether_math::{Rgba, Vec2};
 use aether_puppet::easel::image;
 use aether_puppet::easel::program::puddle::{
-    BoxBlurChain, BoxBlurUniforms, EDGE_BAND, PUDDLE_WGSL, RIM_RESTRIDE, RIM_VARY, RIM_VARY_CEILING, RimUniforms,
-    ShrinkUniforms, ThresholdUniforms, box_blur_passes, box_half_width, plane_slot, reduced_plane_slot, rim_pass,
-    shrink_pass, threshold_pass,
+    BLUR_PASSES, BoxBlurChain, BoxBlurUniforms, EDGE_BAND, MAX_FUSED_WEIGHTS, PUDDLE_WGSL, RIM_RESTRIDE, RIM_VARY,
+    RIM_VARY_CEILING, RimUniforms, ShrinkUniforms, ThresholdUniforms, box_blur_passes, box_half_width, plane_slot,
+    reduced_plane_slot, rim_pass, shrink_pass, threshold_pass,
 };
 use aether_puppet::math3::hash_unit;
 use aether_render::QuadBlend;
@@ -291,15 +291,21 @@ fn edge_noise(salt: u64) -> Vec<f32> {
     (0..PLANE_WIDTH * PLANE_HEIGHT).map(|i| (hash_unit(i as u64 ^ salt) - 0.5) * 1.4).collect()
 }
 
-/// The separable box blur against `image::blur` on a pseudo-random field.
-/// Six authored sweeps (three iterations, horizontal then vertical) must
-/// average exactly the window the CPU running sum averages. The named
-/// bugs: a tap window sized `2r` or `2r + 2` (an off-by-one either side
-/// of a sweep's loop bounds), an edge folded one texel short (the border
-/// rows drift while the interior stays plausible), the horizontal and
-/// vertical windows swapped so anisotropy sneaks into a square blur, and
-/// an iteration miscount (two or four box passes read as a blur but land
-/// whole neighbourhoods off the three-pass oracle).
+/// The fused blur chain against `image::blur` on a pseudo-random field.
+/// Two authored sweeps — the chain's three iterations convolved into one
+/// kernel per axis (iamacoffeepot/aether#4441) — must land the softening
+/// the CPU's three landed, over the whole plane and not merely inside it:
+/// the plane's mirrored edge (iamacoffeepot/aether#4444) is what makes
+/// re-extending between three sweeps land where extending once does, so
+/// the border rows are held to the same budget as the interior.
+///
+/// The named bugs: a tap window sized `2r` or `2r + 2` (an off-by-one
+/// either side of a sweep's loop bounds), an edge folded one texel short
+/// (the border rows drift while the interior stays plausible), the
+/// horizontal and vertical sweeps reading the same axis so anisotropy
+/// sneaks into a square blur, and a kernel convolved from the wrong
+/// iteration count (two or four box passes read as a blur but land whole
+/// neighbourhoods off the three-pass oracle).
 #[test]
 fn box_blur_chain_matches_cpu_blur() {
     if !require_wgpu_only() {
@@ -311,19 +317,50 @@ fn box_blur_chain_matches_cpu_blur() {
     let radius_pixels = 5.1;
     let expected = image::blur(&field, PLANE_WIDTH, PLANE_HEIGHT, radius_pixels);
 
-    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: 1 };
+    let half_width_texels = box_half_width(radius_pixels, 1);
+    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: 1, half_width_texels };
     let register = plane_program(
         1,
         2,
         box_blur_passes(InputSlot::Binding { index: 0 }, &chain, OutputSlot::Binding { index: output_binding(1) }, 0),
     );
-    let uniforms =
-        BoxBlurUniforms { half_width_texels: box_half_width(radius_pixels, chain.divisor), divisor: chain.divisor }
-            .encode()
-            .to_vec();
+    assert_eq!(register.passes.len(), 2, "a chain this narrow fuses to one sweep per axis");
+    let uniforms = BoxBlurUniforms { half_width_texels, divisor: chain.divisor }.encode().to_vec();
     let developed = develop(&mut harness, &register, &[&field], uniforms);
 
     assert_plane_close("box blur", &developed, &expected);
+}
+
+/// A chain whose composite outruns the weights the uniform block carries
+/// keeps its [`BLUR_PASSES`] iterations, and those are the six sweeps
+/// they always were — bit-for-bit the CPU running sum, border included.
+/// The named bug: a fused sweep laid anyway over a kernel the block
+/// truncates, which softens by whatever fraction of the window survived.
+#[test]
+fn a_blur_too_wide_to_fuse_keeps_its_iterations() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = boot();
+
+    let field = disc_mask(Vec2::new(23.0, 15.0), 6.0, 20.0);
+    // Past the point where three sweeps of this reach convolve to more
+    // weights than the block declares.
+    let radius_pixels = 1.7 * (MAX_FUSED_WEIGHTS / BLUR_PASSES as usize + 1) as f32;
+    let expected = image::blur(&field, PLANE_WIDTH, PLANE_HEIGHT, radius_pixels);
+
+    let half_width_texels = box_half_width(radius_pixels, 1);
+    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: 1, half_width_texels };
+    let register = plane_program(
+        1,
+        2,
+        box_blur_passes(InputSlot::Binding { index: 0 }, &chain, OutputSlot::Binding { index: output_binding(1) }, 0),
+    );
+    assert_eq!(register.passes.len(), 2 * BLUR_PASSES as usize, "a chain this wide keeps its iterations");
+    let uniforms = BoxBlurUniforms { half_width_texels, divisor: chain.divisor }.encode().to_vec();
+    let developed = develop(&mut harness, &register, &[&field], uniforms);
+
+    assert_plane_close("unfused box blur", &developed, &expected);
 }
 
 /// The reduced-extent blur chain against the same CPU oracle
@@ -356,16 +393,15 @@ fn a_reduced_extent_blur_chain_matches_cpu_blur() {
     let radius_pixels = 13.6;
     let expected = image::blur(&field, PLANE_WIDTH, PLANE_HEIGHT, radius_pixels);
 
-    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: DIVISOR };
+    let half_width_texels = box_half_width(radius_pixels, DIVISOR);
+    let chain = BoxBlurChain { scratch: 0, carry: 1, divisor: DIVISOR, half_width_texels };
     let mut register = plane_program(
         1,
         2,
         box_blur_passes(InputSlot::Binding { index: 0 }, &chain, OutputSlot::Binding { index: output_binding(1) }, 0),
     );
     register.transients = vec![reduced_plane_slot(DIVISOR); 2];
-    let uniforms = BoxBlurUniforms { half_width_texels: box_half_width(radius_pixels, DIVISOR), divisor: DIVISOR }
-        .encode()
-        .to_vec();
+    let uniforms = BoxBlurUniforms { half_width_texels, divisor: DIVISOR }.encode().to_vec();
     let developed = develop(&mut harness, &register, &[&field], uniforms);
 
     assert_plane_within("reduced box blur", &developed, &expected, REDUCED_TOLERANCE_STEPS);
