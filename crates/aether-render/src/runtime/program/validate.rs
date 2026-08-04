@@ -854,7 +854,7 @@ fn fs_depth_writer() -> DepthOut {
             }],
             ..base()
         });
-        assert!(undeclared_depth.contains("must declare a depth transient"), "frag-depth class: {undeclared_depth}",);
+        assert!(undeclared_depth.contains("must declare a depth transient"), "frag-depth class: {undeclared_depth}");
     }
 
     /// The uniform window must cover the block whichever stage reads it:
