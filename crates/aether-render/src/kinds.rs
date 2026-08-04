@@ -210,9 +210,13 @@ pub struct CreateTexture {
 /// Reply to `CreateTexture`. `Ok` carries the assigned `texture_id` —
 /// thread it into `DrawTexturedQuads.texture_id` and
 /// `UpdateTexture.texture_id`. `Err` carries a human-readable reason —
-/// a zero dimension, a `pixels` length that doesn't match the texture
-/// format's byte count (or isn't empty for a `Writable` texture), or
-/// `Linear` sampling on the non-filterable `R32Float` format.
+/// a zero dimension, a dimension past the device's
+/// `max_texture_dimension_2d` (named against the limit, since the
+/// texture is realized lazily and an unchecked one would fault the
+/// frame that first drew with it rather than this reply), a `pixels`
+/// length that doesn't match the texture format's byte count (or isn't
+/// empty for a `Writable` texture), or `Linear` sampling on the
+/// non-filterable `R32Float` format.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.render.create_texture_result")]
 pub enum CreateTextureResult {
@@ -702,7 +706,11 @@ pub struct ProgramPass {
 /// every pass's entry point exists as a fragment entry, every slot is
 /// written before it is read (the sequence-index check), no pass reads
 /// its own output, every uniform window covers the uniform block its
-/// entry point declares, the final pass writes a dispatch binding
+/// entry point declares, the graph's per-dispatch cost stays inside the
+/// executor's budget (the render passes it encodes and the uniform bytes
+/// it stages, both summed over the whole pass list — a per-pass repeat
+/// ceiling alone leaves their product unbounded), the final pass writes
+/// a dispatch binding
 /// declared `Full` extent (the program's result texture, whose size is
 /// the reference every other extent scales from) — and finally wgpu
 /// shader-module + pipeline creation under a validation error scope
