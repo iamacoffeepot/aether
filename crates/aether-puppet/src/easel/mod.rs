@@ -1,25 +1,33 @@
 //! The easel: watercolour laid under the drawing
 //! (iamacoffeepot/aether#4349).
 //!
-//! The wash never runs at frame rate. Each render stage costs one textured
-//! material rect — a sheet of painted paper standing behind the subject,
-//! re-oriented to face the eye every frame — and the painting on it is
-//! re-developed only when the view has settled somewhere new. The ink is
-//! solved live above it and wins the depth test, so during an orbit the
-//! drawing moves over a held painting, and a couple of seconds after the
-//! camera rests the sheet catches up. Repaint on the twos: the paint
-//! re-develops rather than smears.
+//! The wash runs at frame rate. Each render stage develops the whole
+//! painting afresh — a sheet of painted paper standing behind the subject,
+//! re-oriented to face the eye — and costs one textured material rect to
+//! show. The ink is solved live above it and wins the depth test, so the
+//! drawing and the paint under it move together through an orbit rather
+//! than the paint lagging a held view behind (iamacoffeepot/aether#4387).
 //!
-//! [`regions`] bakes the painter's input maps through the drawing's own
-//! camera; [`field`] turns a region into wet paint on the CPU — the
-//! parity oracle — while [`program`] speaks the same develop as one
-//! registered ADR-0170 render program; [`palette`] owns the pigments.
-//! This module is the orchestrator: when to develop, what to upload, and
-//! where the sheet stands. A due repaint rasterizes the planes, flow and
-//! accents on the CPU exactly as before, but the coats and the composite
-//! run on the GPU: the planes upload as `R32Float` registry textures,
-//! the accidents ride the uniform blob, and one dispatch develops the
-//! writable `Rgba8` sheet the billboard samples.
+//! [`field`] turns a region into wet paint on the CPU — the parity
+//! oracle — while [`program`] speaks the same develop as registered
+//! ADR-0170/0171 render programs; [`palette`] owns the pigments;
+//! [`regions`] keeps the CPU bake the oracle rasterizes through.
+//! This module is the orchestrator: what is resident, what is staged per
+//! frame, and where the sheet stands.
+//!
+//! # What a frame costs
+//!
+//! Two dispatches and three uniform blobs. Everything that is a pure
+//! function of the subject is measured once when it loads — the survey's
+//! per-vertex classes and areas ([`survey`]), the bake's vertex buffer —
+//! and everything that is a pure function of the seed and the canvas is
+//! pulped once when the canvas is created: the paper's noise fields
+//! ([`field::paper`], about thirty-two milliseconds at 900x1200, which is
+//! twice a whole frame's budget) and the accident stream the uniform blob
+//! replays ([`wash::SeedUniforms`]). What is left per frame is the two
+//! matrices, the chart's two dozen points per eye, one pass over the
+//! vertices for the centroids, and the ribbon and aperture geometries the
+//! drawing and the chart move.
 
 pub mod accent;
 #[cfg(test)]
@@ -31,14 +39,18 @@ pub mod program;
 pub mod regions;
 pub mod survey;
 
-use aether_math::{Mat4, Vec3};
+use std::collections::VecDeque;
+
+use aether_math::{Mat4, Vec2, Vec3};
 use aether_render::{
     CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect,
     MaterialTexturedRect, ProgramDestroy, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling,
-    TextureUsage, UpdateGeometry, UpdateTexture,
+    TextureUsage, UpdateGeometry,
 };
 
-use program::wash::{self, WashBindings, WashProgram};
+use program::wash::{self, Canvas, Faces, Frame, Placement, Presence, SeedUniforms, WashBindings, WashProgram};
+use program::{bake, face, ink};
+use survey::Survey;
 
 use crate::anchor::Anchors;
 use crate::chart::{self, Face};
@@ -46,21 +58,14 @@ use crate::extract::Settings;
 use crate::labels;
 use crate::mesh::Mesh;
 
-/// Frames the view must hold still before the sheet re-develops — about
-/// two seconds at the chassis' 60 Hz cadence. The first painting of a
-/// subject skips the wait; there is nothing on the sheet to hold.
-const SETTLE_FRAMES: u32 = 120;
-
 /// Long-edge ceiling on the wash canvas.
 ///
-/// The wash carries only the low frequencies, so it used to develop at
-/// half the window's pixels and lose nothing the eye could find. The
-/// accents ended that: an iris is a couple of dozen pixels across at this
-/// framing and its slit a fraction of one, so at half resolution the eye
-/// shape goes and what is left is a blue smudge behind the ink. The sheet
-/// now develops at the window's own pixels up to this ceiling — which is
-/// the resolution every distance in the engine was tuned at — and the
-/// settle gate keeps the extra cost off the frame path.
+/// The sheet develops at the window's own pixels up to this ceiling —
+/// which is the resolution every distance in the engine was tuned at — and
+/// the wash body under it develops coarser again by
+/// [`wash::BODY_DIVISOR`]. The accents do not: an iris is a couple of
+/// dozen pixels across at this framing and its slit a fraction of one, so
+/// they are exactly the content the sheet's own pixels exist for.
 pub(crate) const CANVAS_LONG_EDGE: usize = 1280;
 
 /// The studio's one seed — `Sumire` in ASCII — so the same view develops
@@ -101,9 +106,8 @@ pub struct Chart<'a> {
 /// Everything the easel reads of the subject for one development: the
 /// surface the wash bakes off, its per-vertex material scores
 /// ([`labels::Labels::vertex_scores`], solved once at load), the drawing
-/// solved for this eye (the flow's source), and the chart when the
-/// subject has a face. Borrowed for the call — the easel keeps none of
-/// it.
+/// solved for this eye, and the chart when the subject has a face.
+/// Borrowed for the call — the easel keeps none of it.
 pub struct Subject<'a> {
     pub mesh: &'a Mesh,
     pub scores: &'a [[f32; labels::CLASSES]],
@@ -119,31 +123,46 @@ pub struct Subject<'a> {
     pub chart: Option<Chart<'a>>,
 }
 
-/// The plane textures one develop uploads, in [`WashBindings`]
-/// declaration order; the writable sheet makes the binding count.
-const PLANE_COUNT: usize = 12;
+/// The two programs the develop registers, in the order it sends them —
+/// which is the order the render cap answers them.
+const BAKE: usize = 0;
+const WASH: usize = 1;
+const PROGRAMS: usize = 2;
 
-/// One develop's data, staged between the CPU rasterize and the mail
-/// that carries it: the plane pixel buffers in binding order and the
-/// uniform blob the dispatch windows into.
-struct Develop {
-    width: usize,
-    height: usize,
-    planes: Vec<Vec<u8>>,
-    uniforms: Vec<u8>,
-}
+/// The geometry slots the develop keeps resident, in create order.
+const SUBJECT_GEOMETRY: usize = 0;
+const INK_GEOMETRY: usize = 1;
+const APERTURE_GEOMETRY: usize = 2;
+const GEOMETRIES: usize = 3;
 
-/// The ribbon geometry for one develop, packed for the ink pass' vertex
-/// layout and waiting for the mail that carries it.
-struct InkGeometry {
+/// The sampled plane textures one canvas carries, before the writable
+/// sheet that completes the set.
+const PLANE_COUNT: usize = 6;
+
+/// One geometry's packed buffers, waiting for the mail that ships them.
+struct GeometryBytes {
     vertices: Vec<u8>,
     indices: Vec<u8>,
 }
 
-/// Where the resident ribbon geometry stands: nothing sent yet, a create
-/// in flight whose id has not come back, or the id the render cap
-/// assigned. Only the last can be dispatched against, and only the first
-/// may send a create — the same hold the plane creates keep.
+/// One frame's staged work: the two uniform blobs and whichever
+/// geometries moved. Overwritten every develop — a frame the render cap
+/// could not serve is dropped rather than queued, since the next frame's
+/// answer supersedes it anyway.
+struct Staged {
+    canvas: Canvas,
+    bake_uniforms: Vec<u8>,
+    wash_uniforms: Vec<u8>,
+    /// The drawing, re-solved for this eye.
+    ink: GeometryBytes,
+    /// The chart's aperture loops, re-projected for this eye.
+    aperture: GeometryBytes,
+}
+
+/// Where a resident buffer stands: nothing sent yet, a create in flight
+/// whose id has not come back, or the id the render cap assigned. Only
+/// the last can be dispatched against, and only the first may send a
+/// create.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum Resident {
     #[default]
@@ -152,67 +171,81 @@ enum Resident {
     Live(u32),
 }
 
-/// Which graph the register in flight was sent for. A resize can re-lay
-/// the graph while one is still unanswered, and the id coming back then
-/// belongs to a program the easel has already moved past.
+impl Resident {
+    fn id(self) -> Option<u32> {
+        match self {
+            Self::Live(geometry_id) => Some(geometry_id),
+            _ => None,
+        }
+    }
+}
+
+/// What one unanswered register was sent for. Ids come back in send
+/// order, so the easel keeps one of these per register in flight and
+/// matches them off the front.
+///
+/// A resize can re-lay the wash graph while its register is still
+/// unanswered, and the id coming back then belongs to a program the
+/// easel has already moved past — hence the third arm, which routes
+/// that id to the release list instead of letting it become the one the
+/// easel dispatches against.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Registering {
-    /// The graph the easel means to dispatch against.
-    Current,
-    /// A graph the canvas has outgrown.
+    /// The bake graph, which no canvas ever outgrows.
+    Bake,
+    /// The wash graph the easel means to dispatch against.
+    Wash,
+    /// A wash graph the canvas outgrew before its id arrived.
     Stale,
 }
 
 /// The creates for one canvas size are in flight; the render cap
 /// answers them in send order, so the collected ids land in binding
-/// order. The uniforms wait here for the dispatch that follows.
+/// order.
 struct Creating {
     ids: Vec<u32>,
-    size: (usize, usize),
-    uniforms: Vec<u8>,
+    canvas: Canvas,
 }
 
-/// The wash layer's state machine: a developed repaint waiting to
-/// upload, the registered program and plane textures the render cap
-/// assigned, and the settle gate between paintings.
+/// The wash layer's state machine: the registered programs, the resident
+/// geometry and textures, and this frame's staged develop.
 #[derive(Default)]
 pub struct Easel {
     window: Option<(u32, u32)>,
-    /// The eye on the previous render stage, for the settle gate: motion
-    /// resets the count, stillness accumulates it.
-    last_seen: Option<Vec3>,
-    frames_still: u32,
-    painted_from: Option<Vec3>,
     /// The wash program's graph and window layout, laid at the first
     /// develop and re-laid only when the canvas changes height — the one
     /// thing its blur extents are chosen against.
     program: Option<WashProgram>,
-    /// A register is in flight, and which graph for; further registers
-    /// hold until it answers.
-    registering: Option<Registering>,
-    /// The program id the render cap assigned.
-    program_id: Option<u32>,
+    /// The program ids the render cap assigned, by slot: [`BAKE`] then
+    /// [`WASH`]. A slot is empty until its register answers, and the wash
+    /// slot empties again whenever a resize re-lays the graph.
+    programs: [Option<u32>; PROGRAMS],
+    /// The registers in flight, in send order; hold further registers
+    /// until every one of them answers.
+    registering: VecDeque<Registering>,
     /// Programs a re-lay left behind, released once the canvas' own graph
     /// has been registered in their place.
     stale_programs: Vec<u32>,
-    /// A develop not yet on the GPU.
-    pending: Option<Develop>,
-    /// The bound registry textures and the size they were created at.
-    textures: Option<(WashBindings, (usize, usize))>,
+    /// The bound registry textures and the canvas they were created at.
+    textures: Option<(WashBindings, Canvas)>,
     /// Creates are in flight; hold further creates until they answer.
     creating: Option<Creating>,
-    /// A develop's uniforms whose planes are already staged, waiting for
-    /// the dispatch mail.
-    dispatch_uniforms: Option<Vec<u8>>,
-    /// This develop's ribbon geometry, waiting for the create or update
-    /// that ships it.
-    ink: Option<InkGeometry>,
-    /// Where that geometry stands with the render cap.
-    resident_ink: Resident,
+    /// The three resident geometries, indexed by the slot constants.
+    geometries: [Resident; GEOMETRIES],
+    /// The subject's vertex buffer, waiting for the create that ships it.
+    /// Packed once per subject: nothing in it turns with the view.
+    subject_geometry: Option<GeometryBytes>,
+    /// What the subject measures independent of the view, for the
+    /// centroids the accidents are placed about.
+    survey: Option<Survey>,
+    /// The accident stream, rolled for this seed, canvas and visible set.
+    seed_slice: Option<SeedUniforms>,
+    /// This frame's develop, staged between the CPU half and the mail.
+    frame: Option<Staged>,
     /// At least one dispatch has been sent, so the sheet holds paint
     /// rather than the writable texture's transparent clear.
     developed: bool,
-    /// The render cap refused the register or a create — the headless
+    /// The render cap refused a register or a create — the headless
     /// chassis' fail-fast reply — so the easel stops asking rather than
     /// warn-storming.
     disabled: bool,
@@ -225,38 +258,45 @@ fn plane_bytes(plane: &[f32]) -> Vec<u8> {
 }
 
 impl Easel {
-    /// A canvas change orphans the painted sheet — the old pixels would
-    /// stretch over the new frustum — so it invalidates exactly as a
-    /// subject change does, with first-paint-immediate semantics on the
-    /// next render. A same-size announcement keeps the sheet.
+    /// A canvas change orphans every plane pulped for the old one — the
+    /// paper's grain is sampled at the canvas' own rate — so it releases
+    /// the whole texture set and the seed slice rolled against it. The
+    /// programs and the resident geometry survive: neither knows the
+    /// canvas size.
     pub fn resized(&mut self, width: u32, height: u32) {
         if self.window == Some((width, height)) {
             return;
         }
         self.window = Some((width, height));
-        self.painted_from = None;
+        self.seed_slice = None;
     }
 
-    /// A new subject or field arrived; the sheet no longer describes it.
+    /// A new subject or field arrived; everything measured off the old one
+    /// has to be measured again.
     pub fn subject_changed(&mut self) {
-        self.painted_from = None;
+        self.survey = None;
+        self.subject_geometry = None;
+        self.geometries[SUBJECT_GEOMETRY] = Resident::Absent;
     }
 
-    /// The reply to a requested register. `Err` disables the easel for
-    /// the session, exactly as a refused create does. An id answering a
-    /// register the canvas has outgrown joins the release list instead of
-    /// becoming the one the easel dispatches against.
+    /// The reply to one requested register. Ids arrive in send order, so
+    /// each answers the front of the in-flight queue. `Err` disables the
+    /// easel for the session, exactly as a refused create does; an id
+    /// answering a register the canvas has outgrown joins the release
+    /// list instead of becoming the one the easel dispatches against.
     pub fn registered(&mut self, result: Result<u32, ()>) {
-        let stale = self.registering.take() == Some(Registering::Stale);
-        match result {
-            Ok(program_id) if stale => self.stale_programs.push(program_id),
-            Ok(program_id) => self.program_id = Some(program_id),
-            Err(()) => self.disabled = true,
+        let sent_for = self.registering.pop_front();
+        match (result, sent_for) {
+            (Ok(program_id), Some(Registering::Bake)) => self.programs[BAKE] = Some(program_id),
+            (Ok(program_id), Some(Registering::Wash)) => self.programs[WASH] = Some(program_id),
+            (Ok(program_id), Some(Registering::Stale)) => self.stale_programs.push(program_id),
+            (Ok(_), None) => {}
+            (Err(()), _) => self.disabled = true,
         }
     }
 
     /// The reply to one requested create. Ids arrive in send order —
-    /// binding order — and the thirteenth completes the set.
+    /// binding order — and the seventh completes the set.
     pub fn created(&mut self, result: Result<u32, ()>) {
         let Ok(texture_id) = result else {
             self.creating = None;
@@ -272,82 +312,58 @@ impl Easel {
             self.creating = Some(creating);
             return;
         }
-        let Creating { ids, size, uniforms } = creating;
+        let Creating { ids, canvas } = creating;
         let bindings = WashBindings {
-            classes: ids[0],
-            tone: ids[1],
-            care: ids[2],
-            tooth: ids[3],
-            edge: ids[4],
+            packed: ids[0],
+            tooth: ids[1],
+            edge: ids[2],
+            tooth_fine: ids[3],
+            edge_fine: ids[4],
             paper_shade: ids[5],
-            flow_x: ids[6],
-            flow_y: ids[7],
-            coherence: ids[8],
-            lift: ids[9],
-            iris: ids[10],
-            blush: ids[11],
-            sheet: ids[12],
+            sheet: ids[6],
         };
-        self.textures = Some((bindings, size));
-        self.dispatch_uniforms = Some(uniforms);
+        self.textures = Some((bindings, canvas));
     }
 
-    /// The reply to the one requested geometry create. `Err` disables the
-    /// easel for the session, as a refused plane create does — the ink
-    /// pass is part of the graph, so a program without it develops
-    /// nothing worth showing.
-    pub fn ink_created(&mut self, result: Result<u32, ()>) {
+    /// The reply to one requested geometry create. Ids arrive in send
+    /// order — the subject's, the drawing's, the chart's. `Err` disables
+    /// the easel for the session, as a refused plane create does: every
+    /// geometry here is bound by a declared pass, so a program without one
+    /// develops nothing worth showing.
+    pub fn geometry_created(&mut self, result: Result<u32, ()>) {
         let Ok(geometry_id) = result else {
-            self.resident_ink = Resident::Absent;
             self.disabled = true;
             return;
         };
-        self.resident_ink = Resident::Live(geometry_id);
-    }
-
-    /// The first develop's ribbon geometry: created once to earn an id,
-    /// then re-shipped by [`Easel::take_ink_update`] for the life of the
-    /// session.
-    pub fn take_ink_create(&mut self) -> Option<CreateGeometry> {
-        if self.disabled || self.resident_ink != Resident::Absent {
-            return None;
-        }
-        let InkGeometry { vertices, indices } = self.ink.take()?;
-
-        self.resident_ink = Resident::Creating;
-        Some(CreateGeometry { layout: program::ink::geometry_slot().layout, vertices, indices })
-    }
-
-    /// Every later develop's ribbon geometry, replacing the resident
-    /// bytes in place. The layout is fixed at create, so only the
-    /// contents travel.
-    pub fn take_ink_update(&mut self) -> Option<UpdateGeometry> {
-        let Resident::Live(geometry_id) = self.resident_ink else {
-            return None;
+        let Some(slot) = self.geometries.iter().position(|at| *at == Resident::Creating) else {
+            return;
         };
-        let InkGeometry { vertices, indices } = self.ink.take()?;
-
-        Some(UpdateGeometry { geometry_id, vertices, indices })
+        self.geometries[slot] = Resident::Live(geometry_id);
     }
 
     /// The window's own pixels, clamped to the long-edge ceiling.
-    fn canvas(&self) -> Option<(usize, usize)> {
+    fn canvas(&self) -> Option<Canvas> {
         let (width, height) = self.window?;
         let (width, height) = ((width as usize).max(1), (height as usize).max(1));
 
         let long = width.max(height);
         if long <= CANVAS_LONG_EDGE {
-            return Some((width, height));
+            return Some(Canvas { width, height });
         }
         let scale = CANVAS_LONG_EDGE as f32 / long as f32;
-        Some((((width as f32 * scale) as usize).max(1), ((height as f32 * scale) as usize).max(1)))
+        Some(Canvas {
+            width: ((width as f32 * scale) as usize).max(1),
+            height: ((height as f32 * scale) as usize).max(1),
+        })
     }
 
     /// The exact planes a develop at the current view would paint from,
     /// for the dump diagnostic — same canvas clamp, same rasterize, no
-    /// settle gate and no paint. `None` before the first resize.
+    /// paint. `None` before the first resize. The CPU rasterize is the
+    /// oracle's, not the frame path's.
     pub fn bake_planes(&self, subject: &Subject<'_>, view: &View) -> Option<regions::RegionPlanes> {
-        let (width, height) = self.canvas()?;
+        let canvas = self.canvas()?;
+        let (width, height) = canvas.body();
 
         Some(regions::rasterize(
             subject.mesh,
@@ -360,129 +376,128 @@ impl Easel {
         ))
     }
 
-    /// Re-develop the sheet if the view has settled somewhere unpainted.
-    /// The CPU keeps only the rasterize — planes, flow, accents, the
-    /// paper's noise — and the accident stream the uniform blob replays;
-    /// the coats and the composite run as the registered wash program,
-    /// so the render handler no longer blocks on the blurs. The gate is
-    /// what keeps even the rasterize off every frame: never mid-drag,
-    /// never twice for one view, never before the eye has rested.
-    pub fn develop(&mut self, subject: &Subject<'_>, view: &View, dragging: bool) {
+    /// Develop the sheet for this view.
+    ///
+    /// Every frame, unconditionally: nothing here scales with the canvas
+    /// any more, so there is no rasterize to keep off the frame cadence
+    /// and no reason for the paint to lag the drawing it sits under. What
+    /// this does is measure the subject if it has not been measured, roll
+    /// the accident stream if the visible set has changed, and stage the
+    /// two uniform blobs and the two geometries that move.
+    pub fn develop(&mut self, subject: &Subject<'_>, view: &View) {
         if self.disabled {
             return;
         }
-
-        if dragging || self.last_seen != Some(view.eye) {
-            self.frames_still = 0;
-        } else {
-            self.frames_still += 1;
-        }
-        self.last_seen = Some(view.eye);
-        if self.painted_from == Some(view.eye) || (self.painted_from.is_some() && self.frames_still < SETTLE_FRAMES) {
-            return;
-        }
-        let Some((width, height)) = self.canvas() else {
+        let Some(canvas) = self.canvas() else {
             return;
         };
+        let (body_width, body_height) = canvas.body();
         let Subject { mesh, scores, settings, drawn, chart } = subject;
         // Past the gate, so this is the one place the CPU still splits
         // the drawing into visible runs — once per develop, not once
         // per frame.
         let drawn = &drawn();
 
-        let regions = regions::rasterize(mesh, scores, settings, view.eye, &view.view_proj, width, height);
-        let planes =
-            field::Planes { classes: &regions.class, tone: &regions.tone, facing: &regions.facing, width, height };
+        let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores));
+        if self.subject_geometry.is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
+            self.subject_geometry =
+                Some(GeometryBytes { vertices: bake::vertices(mesh, scores, settings), indices: bake::indices(mesh) });
+        }
 
-        // Asked of the chart per repaint rather than cached with the
+        // Where each material sits, off the surface that projects into it
+        // rather than off the pixels it covered — the class plane lives on
+        // the GPU and ADR-0170 declines a readback (see `survey`).
+        let centroids = survey.centroids(mesh, view.eye, &view.view_proj, body_width, body_height);
+
+        // The chart, asked afresh per frame rather than cached with the
         // anchors: gaze moves the iris inside its own aperture, so a frame
         // solved once at load would leave the paint looking where she used
         // to look.
-        let accents = chart.as_ref().map(|chart| {
-            let frames = chart::eye_frames(chart.mesh, chart.anchors, chart.face, settings.eye_style);
+        let frames = chart
+            .as_ref()
+            .map(|chart| chart::eye_frames(chart.mesh, chart.anchors, chart.face, settings.eye_style))
+            .unwrap_or_default();
+        let fine_eyes = accent::project(&frames, &view.view_proj, canvas.width, canvas.height);
+        let body_eyes = accent::project(&frames, &view.view_proj, body_width, body_height);
+        let presence: Vec<f32> =
+            fine_eyes.iter().map(|eye| survey::presence(mesh, view.eye, &frames[eye.frame()].aperture)).collect();
 
-            accent::paint(&frames, &view.view_proj, &planes)
-        });
+        let stains = stain_centres(&centroids, body_height);
+        let placement = Placement { centroids: &centroids, stains: &stains, iris: iris_centre(&fine_eyes) };
+        let wanted = Presence::of(&placement);
 
-        // Gesture follows form: the drawing already knows which way the
-        // hair runs, so the wash asks it rather than guessing. Baked here
-        // and dropped here — it describes this view of this drawing, and a
-        // view that moves invalidates it along with the sheet.
-        let flow = image::structure_tensor_flow(&regions::ink(drawn, &view.view_proj, width, height), width, height);
-
-        let sheet = field::Sheet::new(planes, SHEET_SEED);
         // A canvas of a new height wants its own graph: how far the water
         // reaches in pixels is what decides the extent each blur sweeps
         // at, so the structure follows the height and a resize re-lays it.
-        if self.program.as_ref().is_none_or(|program| program.canvas_height() != height) {
+        // The bake graph knows no canvas and survives the re-lay.
+        if self.program.as_ref().is_none_or(|program| program.canvas_height() != canvas.height) {
             self.program = None;
-            self.stale_programs.extend(self.program_id.take());
-            self.registering = self.registering.map(|_| Registering::Stale);
+            self.stale_programs.extend(self.programs[WASH].take());
+            for sent_for in &mut self.registering {
+                if *sent_for == Registering::Wash {
+                    *sent_for = Registering::Stale;
+                }
+            }
         }
-        let program = self.program.get_or_insert_with(|| wash::program(height));
-        let uniforms = program.uniforms(&sheet, Some(&flow), accents.as_ref(), view.view_proj);
+        let program = self.program.get_or_insert_with(|| wash::program(canvas.height));
+        let slice = self
+            .seed_slice
+            .take()
+            .filter(|slice| slice.serves(SHEET_SEED, canvas, wanted))
+            .unwrap_or_else(|| program.seed_uniforms(SHEET_SEED, canvas, wanted));
 
-        // The same triangles the CPU rasterize above just walked, staged
-        // for the ink pass to rasterize on the GPU. Re-shipped every
-        // develop rather than registered once: the drawing is solved
-        // fresh for each eye, and a posed mesh will solve it per frame.
-        self.ink = Some(InkGeometry { vertices: program::ink::vertices(drawn), indices: program::ink::indices(drawn) });
+        let faces = chart.as_ref().map(|_| Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence });
+        let frame = Frame { view_proj: view.view_proj, placement, faces };
 
-        // The plane pixel buffers, in binding order. An absent chart
-        // uploads zero planes for the accent inputs — the uniforms
-        // already neutralize the passes that would read them.
-        let zero = || vec![0u8; width * height * 4];
-        let accent_planes = accents.as_ref().and_then(|accents| {
-            accents
-                .mask(palette::IRIS)
-                .map(|iris| [plane_bytes(&accents.lift), plane_bytes(iris), plane_bytes(&accents.blush)])
+        self.frame = Some(Staged {
+            canvas,
+            bake_uniforms: bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode().to_vec(),
+            wash_uniforms: program.frame_uniforms(&slice, &frame),
+            ink: GeometryBytes { vertices: ink::vertices(drawn), indices: ink::indices(drawn) },
+            aperture: GeometryBytes {
+                vertices: face::vertices(&fine_eyes, canvas.width, canvas.height),
+                indices: face::indices(&fine_eyes, canvas.width, canvas.height),
+            },
         });
-        let [lift, iris, blush] = accent_planes.unwrap_or_else(|| [zero(), zero(), zero()]);
-        let plane_buffers = vec![
-            regions.class.iter().flat_map(|&class| f32::from(class).to_le_bytes()).collect(),
-            plane_bytes(&regions.tone),
-            plane_bytes(sheet.care()),
-            plane_bytes(&sheet.noise().tooth),
-            plane_bytes(&sheet.noise().edge),
-            plane_bytes(sheet.paper_shade()),
-            plane_bytes(&flow.x),
-            plane_bytes(&flow.y),
-            plane_bytes(&flow.coherence),
-            lift,
-            iris,
-            blush,
-        ];
-
-        self.pending = Some(Develop { width, height, planes: plane_buffers, uniforms });
-        self.painted_from = Some(view.eye);
-        self.frames_still = 0;
+        self.seed_slice = Some(slice);
     }
 
     /// The programs a re-lay left behind, to release after the canvas'
     /// own graph has registered — sent then rather than at the re-lay so
     /// nothing is destroyed while a dispatch could still name it.
     pub fn take_program_destroys(&mut self) -> Vec<ProgramDestroy> {
-        if self.program_id.is_none() {
+        if self.programs[WASH].is_none() {
             return Vec::new();
         }
         self.stale_programs.drain(..).map(|program_id| ProgramDestroy { program_id }).collect()
     }
 
-    /// The register mail carrying the wash program: at the first develop
-    /// — by then the GPU device exists, since a develop only ever follows
-    /// a render stage — and again whenever a resize re-lays the graph.
-    /// The reply lands in [`Easel::registered`].
-    pub fn take_register(&mut self) -> Option<&ProgramRegister> {
-        if self.disabled || self.registering.is_some() || self.program_id.is_some() || self.pending.is_none() {
-            return None;
+    /// The register mail carrying whichever programs the easel is missing:
+    /// both at the first develop — by then the GPU device exists, since a
+    /// develop only ever follows a render stage — and the wash's alone
+    /// whenever a resize re-lays its graph. The replies land in
+    /// [`Easel::registered`] in this order.
+    pub fn take_registers(&mut self) -> Vec<ProgramRegister> {
+        if self.disabled || !self.registering.is_empty() || self.frame.is_none() {
+            return Vec::new();
         }
+        let Some(program) = self.program.as_ref() else {
+            return Vec::new();
+        };
 
-        let register = self.program.as_ref()?.register();
-        self.registering = Some(Registering::Current);
-        Some(register)
+        let mut registers = Vec::with_capacity(PROGRAMS);
+        if self.programs[BAKE].is_none() {
+            self.registering.push_back(Registering::Bake);
+            registers.push(bake::program());
+        }
+        if self.programs[WASH].is_none() {
+            self.registering.push_back(Registering::Wash);
+            registers.push(program.register().clone());
+        }
+        registers
     }
 
-    /// The textures whose size no longer matches the pending develop, to
+    /// The textures whose canvas no longer matches the staged develop, to
     /// release before the next creates. Resize is the only path here, and
     /// it releases the whole set — the plane textures and the sheet.
     pub fn take_destroys(&mut self) -> Vec<DestroyTexture> {
@@ -492,105 +507,168 @@ impl Easel {
         let stale = self
             .textures
             .as_ref()
-            .zip(self.pending.as_ref())
-            .is_some_and(|((_, size), pending)| *size != (pending.width, pending.height));
+            .zip(self.frame.as_ref())
+            .is_some_and(|((_, canvas), staged)| *canvas != staged.canvas);
         if !stale {
             return Vec::new();
         }
 
-        // Uniforms staged for the released textures window a develop at
-        // the old size; the pending develop re-stages its own.
-        self.dispatch_uniforms = None;
         let Some((bindings, _)) = self.textures.take() else {
             return Vec::new();
         };
         bindings.to_vec().into_iter().map(|texture_id| DestroyTexture { texture_id }).collect()
     }
 
-    /// The creates carrying the first develop at this size: the plane
-    /// pixels ride the creates themselves, the writable sheet is created
-    /// empty, and the uniforms wait for the dispatch that follows once
-    /// every id has answered.
+    /// The creates carrying this canvas' resident planes: the paper pulped
+    /// at both extents, the packed plane the bake writes, and the writable
+    /// sheet the composite resolves into.
+    ///
+    /// This is where the thirty-two milliseconds of noise go — once per
+    /// canvas, never again, because none of it can turn with the view.
     pub fn take_creates(&mut self) -> Vec<CreateTexture> {
-        if self.disabled || self.program_id.is_none() || self.creating.is_some() || self.textures.is_some() {
+        if self.disabled
+            || self.programs.iter().any(Option::is_none)
+            || self.creating.is_some()
+            || self.textures.is_some()
+        {
             return Vec::new();
         }
-        let Some(develop) = self.pending.take() else {
+        let Some(staged) = self.frame.as_ref() else {
             return Vec::new();
         };
+        let canvas = staged.canvas;
+        let (body_width, body_height) = canvas.body();
 
-        let (width, height) = (develop.width as u32, develop.height as u32);
-        let mut creates: Vec<CreateTexture> = develop
-            .planes
-            .into_iter()
-            .map(|pixels| CreateTexture {
-                width,
-                height,
-                format: TextureFormat::R32Float,
-                sampling: TextureSampling::Nearest,
-                usage: TextureUsage::Sampled,
-                pixels,
-            })
-            .collect();
-        creates.push(CreateTexture {
-            width,
-            height,
+        let body = field::paper(SHEET_SEED, body_width, body_height);
+        let fine = field::paper(SHEET_SEED, canvas.width, canvas.height);
+        let data = |width: usize, height: usize, plane: &[f32]| CreateTexture {
+            width: width as u32,
+            height: height as u32,
+            format: TextureFormat::R32Float,
+            sampling: TextureSampling::Nearest,
+            usage: TextureUsage::Sampled,
+            pixels: plane_bytes(plane),
+        };
+        let target = |width: usize, height: usize, sampling: TextureSampling| CreateTexture {
+            width: width as u32,
+            height: height as u32,
             format: TextureFormat::Rgba8,
-            sampling: TextureSampling::Linear,
+            sampling,
             usage: TextureUsage::Writable,
             pixels: Vec::new(),
-        });
+        };
 
-        self.creating =
-            Some(Creating { ids: Vec::new(), size: (develop.width, develop.height), uniforms: develop.uniforms });
-        creates
+        self.creating = Some(Creating { ids: Vec::new(), canvas });
+        vec![
+            // The bake's own output. Nearest is not a preference here: the
+            // class channel is an integer in disguise, and a linear filter
+            // across a material boundary averages the labels either side
+            // into a third the surface never carried (`program::bake`).
+            target(body_width, body_height, TextureSampling::Nearest),
+            data(body_width, body_height, &body.noise.tooth),
+            data(body_width, body_height, &body.noise.edge),
+            data(canvas.width, canvas.height, &fine.noise.tooth),
+            data(canvas.width, canvas.height, &fine.noise.edge),
+            data(canvas.width, canvas.height, &fine.shade),
+            target(canvas.width, canvas.height, TextureSampling::Linear),
+        ]
     }
 
-    /// A freshly developed repaint over existing same-size textures: one
-    /// update per plane, with the uniforms staged for the dispatch that
-    /// follows in the same frame.
-    pub fn take_updates(&mut self) -> Vec<UpdateTexture> {
-        let matches = self
-            .textures
-            .as_ref()
-            .zip(self.pending.as_ref())
-            .is_some_and(|((_, size), pending)| *size == (pending.width, pending.height));
-        if !matches {
+    /// The geometry creates, in the order [`Easel::geometry_created`]
+    /// collects their ids: the subject the bake rasterizes, the drawing
+    /// the ink pass does, and the chart's aperture loops the face pass
+    /// fills. One create each, then updated in place for the session.
+    pub fn take_geometry_creates(&mut self) -> Vec<CreateGeometry> {
+        if self.disabled {
+            return Vec::new();
+        }
+        let Some(staged) = self.frame.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut creates = Vec::new();
+        let mut claim = |slot: usize, layout, bytes: &GeometryBytes| {
+            creates.push(CreateGeometry { layout, vertices: bytes.vertices.clone(), indices: bytes.indices.clone() });
+            slot
+        };
+        // One create in flight at a time: the reply carries no slot, so
+        // the collector matches it against the one slot that is asking.
+        if self.geometries.contains(&Resident::Creating) {
+            return Vec::new();
+        }
+        if self.geometries[SUBJECT_GEOMETRY] == Resident::Absent
+            && let Some(subject) = self.subject_geometry.as_ref()
+        {
+            self.geometries[claim(SUBJECT_GEOMETRY, bake::geometry_slot().layout, subject)] = Resident::Creating;
+            return creates;
+        }
+        if self.geometries[INK_GEOMETRY] == Resident::Absent {
+            self.geometries[claim(INK_GEOMETRY, ink::geometry_slot().layout, &staged.ink)] = Resident::Creating;
+            return creates;
+        }
+        if self.geometries[APERTURE_GEOMETRY] == Resident::Absent {
+            self.geometries[claim(APERTURE_GEOMETRY, face::geometry_slot().layout, &staged.aperture)] =
+                Resident::Creating;
+            return creates;
+        }
+
+        Vec::new()
+    }
+
+    /// The two geometries that move with the eye, replacing the resident
+    /// bytes in place. The subject's does not: nothing in its buffer turns
+    /// with the view, so it is uploaded once and left alone.
+    pub fn take_geometry_updates(&mut self) -> Vec<UpdateGeometry> {
+        let Some(staged) = self.frame.as_ref() else {
+            return Vec::new();
+        };
+
+        [(INK_GEOMETRY, &staged.ink), (APERTURE_GEOMETRY, &staged.aperture)]
+            .into_iter()
+            .filter_map(|(slot, bytes)| {
+                self.geometries[slot].id().map(|geometry_id| UpdateGeometry {
+                    geometry_id,
+                    vertices: bytes.vertices.clone(),
+                    indices: bytes.indices.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The two dispatches developing this frame: the bake filling the
+    /// packed plane off the subject's own geometry, then the wash reading
+    /// it. Sent after the geometry updates they read, in the same frame,
+    /// and in this order — the wash samples what the bake wrote.
+    pub fn take_dispatch(&mut self) -> Vec<ProgramDispatch> {
+        let (Some(bake_id), Some(wash_id)) = (self.programs[BAKE], self.programs[WASH]) else {
+            return Vec::new();
+        };
+        let Some((bindings, canvas)) = self.textures.as_ref() else {
+            return Vec::new();
+        };
+        let live: Option<Vec<u32>> = self.geometries.iter().map(|at| at.id()).collect();
+        let (Some(ids), Some(staged)) = (live, self.frame.take()) else {
+            return Vec::new();
+        };
+        if staged.canvas != *canvas {
             return Vec::new();
         }
 
-        let (Some(develop), Some((bindings, _))) = (self.pending.take(), self.textures.as_ref()) else {
-            return Vec::new();
-        };
-        let (width, height) = (develop.width as u32, develop.height as u32);
-        let updates = bindings
-            .to_vec()
-            .into_iter()
-            .zip(develop.planes)
-            .map(|(texture_id, pixels)| UpdateTexture { texture_id, x: 0, y: 0, width, height, pixels })
-            .collect();
-
-        self.dispatch_uniforms = Some(develop.uniforms);
-        updates
-    }
-
-    /// The dispatch developing the staged planes into the sheet. Sent
-    /// after the updates it reads, in the same frame — the program's
-    /// passes record before the material pass that samples the sheet, so
-    /// the billboard shows this develop, not the last one.
-    pub fn take_dispatch(&mut self) -> Option<ProgramDispatch> {
-        let program_id = self.program_id?;
-        let (bindings, _) = self.textures.as_ref()?;
-        // Checked before the uniforms are taken, so a develop whose
-        // geometry create is still in flight keeps them for the frame
-        // that can use them rather than dispatching without its ink.
-        let Resident::Live(geometry_id) = self.resident_ink else {
-            return None;
-        };
-        let uniforms = self.dispatch_uniforms.take()?;
-
         self.developed = true;
-        Some(ProgramDispatch { program_id, bindings: bindings.to_vec(), geometries: vec![geometry_id], uniforms })
+        vec![
+            ProgramDispatch {
+                program_id: bake_id,
+                bindings: vec![bindings.packed],
+                geometries: vec![ids[SUBJECT_GEOMETRY]],
+                uniforms: staged.bake_uniforms,
+            },
+            ProgramDispatch {
+                program_id: wash_id,
+                bindings: bindings.to_vec(),
+                geometries: vec![ids[INK_GEOMETRY], ids[APERTURE_GEOMETRY]],
+                uniforms: staged.wash_uniforms,
+            },
+        ]
     }
 
     /// The sheet, standing behind the subject and facing the eye.
@@ -644,45 +722,103 @@ impl Easel {
     }
 }
 
+/// Where each material's atmosphere stain sits, about which its pours,
+/// its lost edge and its thrown drops are placed.
+///
+/// The stain *itself* is placed exactly: `fs_atmosphere_spill` reads the
+/// material's halo and the standing figure off planes the GPU already
+/// holds, so the mask the stain develops from is the oracle's own. What
+/// this estimates is only the pole the accidents inside that mask are
+/// measured about, and the estimate is the region's centre carried along
+/// the material's own drift.
+///
+/// It is an approximation, and an honest account of it is that the spill's
+/// true centroid sits further out again: the figure cuts the halo back
+/// wherever it stands, so what survives hangs off the silhouette rather
+/// than straddling the region. On the parity fixture the two sit some
+/// twenty texels apart on a hundred-and-twenty-texel canvas. That
+/// redistributes the stain's own internal texture — which of its three
+/// pours lands where, which way its edge is given up — without moving the
+/// stain, and the reference board records this mark as its weakest
+/// anyway: displacing a blur is not the same as pouring deliberately.
+/// Deciding where the air ought to go is a taste pass, and when it is
+/// taken the pole is what it will name.
+fn stain_centres(centroids: &[Option<Vec2>; survey::SLOTS], height: usize) -> [Option<Vec2>; survey::SLOTS] {
+    let mut stains = [None; survey::SLOTS];
+    for material in palette::MATERIALS {
+        let Some(policy) = material.atmosphere.as_ref() else {
+            continue;
+        };
+        let drift = Vec2::new(image::tuned(policy.drift.0, height), image::tuned(policy.drift.1, height));
+        stains[usize::from(material.class)] =
+            centroids.get(usize::from(material.class)).copied().flatten().map(|centre| centre + drift);
+    }
+
+    stains
+}
+
+/// Where the iris meta-material sits on the sheet.
+///
+/// The chart owns the iris the way the field owns every other region, so
+/// this is measured off the projected eyes rather than off a class:
+/// the mean of the iris centres weighted by how much canvas each ellipse
+/// covers, which is the area-weighted mean the coverage plane's own
+/// centroid would have given. An eye turned edge-on covers nothing and
+/// weighs nothing, exactly as its collapsed coverage would.
+fn iris_centre(eyes: &[accent::Eye]) -> Option<Vec2> {
+    let (mut sum, mut weight) = (Vec2::new(0.0, 0.0), 0.0);
+    for eye in eyes {
+        let area = eye.size() * eye.size();
+        sum += eye.centre() * area;
+        weight += area;
+    }
+
+    (weight > 0.0).then(|| sum / weight)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Tripwire: a canvas change must invalidate the painted sheet. The
-    // shipped bug this pins: `resized` recorded the new window but kept
-    // `painted_from`, so with an unmoved eye the develop gate skipped
-    // forever and the old sheet stretched over the new frustum (issue
-    // 4391 — the displaced ear flush after fullscreening).
+    // Tripwire: a canvas change must release the paper pulped for the old
+    // one. The paper's grain is sampled at the canvas' own rate, so a
+    // sheet kept across a resize granulates against a texture of the wrong
+    // size — and the shipped bug this pins is its ancestor (issue 4391 —
+    // the displaced ear flush after fullscreening).
     #[test]
-    fn a_resize_invalidates_the_sheet_and_a_same_size_announcement_keeps_it() {
+    fn a_resize_orphans_the_seed_slice_and_a_same_size_announcement_keeps_it() {
         let mut easel = Easel::default();
         easel.resized(800, 1000);
-        easel.painted_from = Some(Vec3::new(0.0, 0.0, 5.4));
+        let canvas = easel.canvas().expect("a resized easel has a canvas");
+        easel.seed_slice = Some(wash::program(canvas.height).seed_uniforms(SHEET_SEED, canvas, Presence::default()));
 
         easel.resized(800, 1000);
-        assert!(easel.painted_from.is_some(), "a same-size announcement must not force a repaint");
+        assert!(easel.seed_slice.is_some(), "a same-size announcement must not orphan the accident stream");
 
         easel.resized(3024, 1670);
-        assert!(easel.painted_from.is_none(), "a canvas change must orphan the sheet so the next render repaints");
+        assert!(easel.seed_slice.is_none(), "a canvas change must, so the next develop re-rolls at the new size");
     }
 
     // A register answered after the canvas outgrew the graph it was sent
     // for names a program the easel must not dispatch against: its blur
     // extents were chosen for the old canvas, so every reduced chain
     // would sweep the wrong plane. The bug shape without this routing is
-    // worse than a wrong develop — the stale id becomes `program_id`, the
+    // worse than a wrong develop — the stale id fills the wash slot, the
     // register gate sees a program already registered, and the graph for
     // the canvas actually on screen is never sent at all.
     #[test]
     fn a_register_answered_after_a_re_lay_is_released_rather_than_dispatched_against() {
-        let mut easel = Easel { registering: Some(Registering::Stale), ..Easel::default() };
+        // The wash register the resize overtook, then the one it sent in
+        // its place; ids come back in that order.
+        let registering = VecDeque::from([Registering::Stale, Registering::Wash]);
+        let mut easel = Easel { registering, ..Easel::default() };
 
         easel.registered(Ok(7));
-        assert_eq!(easel.program_id, None, "a stale register must not become the program the easel dispatches");
+        assert_eq!(easel.programs[WASH], None, "a stale register must not become the program the easel dispatches");
         assert!(easel.take_program_destroys().is_empty(), "nothing is released before the canvas' own graph is live");
 
         easel.registered(Ok(9));
-        assert_eq!(easel.program_id, Some(9), "the register after it answers for the canvas' own graph");
+        assert_eq!(easel.programs[WASH], Some(9), "the register after it answers for the canvas' own graph");
         assert_eq!(
             easel.take_program_destroys().into_iter().map(|destroy| destroy.program_id).collect::<Vec<u32>>(),
             vec![7],

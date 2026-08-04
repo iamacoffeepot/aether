@@ -321,12 +321,16 @@ pub struct Flow {
     pub coherence: Vec<f32>,
 }
 
-/// How far the drawing is softened before its gradient is taken.
-const GRADIENT_BLUR: f32 = 3.2;
+/// How far the drawing is softened before its gradient is taken. Public
+/// because the authored flow passes soften with the wash's own blur chain
+/// and so have to be given the same radius
+/// ([`program::flow`](super::program::flow)).
+pub const GRADIENT_BLUR: f32 = 3.2;
 
 /// How far tensor components are pooled — wide enough that one stroke
-/// speaks for its neighbourhood.
-const TENSOR_BLUR: f32 = 14.0;
+/// speaks for its neighbourhood. Public for the same reason
+/// [`GRADIENT_BLUR`] is.
+pub const TENSOR_BLUR: f32 = 14.0;
 
 /// Below this trace the tensor is noise, not orientation.
 const TENSOR_FLOOR: f32 = 1e-7;

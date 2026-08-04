@@ -112,6 +112,14 @@ const FLUSH_STRENGTH: f32 = 0.55;
 /// One eye's frame on the canvas: the chart's planted frame after the
 /// develop's own camera has had it.
 pub struct Eye {
+    /// Which of the chart's planted frames this eye came from.
+    ///
+    /// [`project`] drops a frame the near plane has eaten, so the
+    /// projected list does not index the planted one. Everything asked of
+    /// the *world* frame afterwards — how much of the lid loop the viewer
+    /// can see ([`survey::presence`](crate::easel::survey::presence))
+    /// above all — is asked through this.
+    frame: usize,
     centre: Vec2,
     /// The iris' two radii as canvas offsets. Projected rather than
     /// scaled, so a turned eye's ellipse is foreshortened by the same
@@ -124,6 +132,11 @@ pub struct Eye {
 }
 
 impl Eye {
+    /// Which planted frame this eye was projected from.
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+
     /// Where the iris centre landed on the canvas.
     pub fn centre(&self) -> Vec2 {
         self.centre
@@ -210,10 +223,12 @@ pub fn project(frames: &[EyeFrame], view_proj: &Mat4, width: usize, height: usiz
 
     frames
         .iter()
-        .filter_map(|frame| {
+        .enumerate()
+        .filter_map(|(index, frame)| {
             let centre = on_canvas(frame.centre)?;
 
             Some(Eye {
+                frame: index,
                 centre,
                 width: on_canvas(frame.width_tip)? - centre,
                 height: on_canvas(frame.height_tip)? - centre,

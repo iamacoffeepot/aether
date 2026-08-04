@@ -21,7 +21,7 @@ use aether_render::{
     TextureFormat, VertexAttribute, VertexFormat,
 };
 
-use crate::easel::accent::Eye;
+use crate::easel::accent::{self, Eye};
 
 /// The face WGSL. Never registered alone — the wash program's
 /// [`module`](super::wash::module) concatenates it with its siblings.
@@ -31,7 +31,11 @@ pub const FACE_WGSL: &str = include_str!("face.wgsl");
 pub const APERTURE_VERTEX_ENTRY: &str = "vs_aperture";
 pub const APERTURE_ENTRY: &str = "fs_aperture";
 pub const IRIS_ENTRY: &str = "fs_iris";
-pub const LIFT_ENTRY: &str = "fs_lift";
+/// The lid's weight over the iris. Named for what it produces rather
+/// than for what consumes it: `wash.wgsl`'s `fs_lift` is the pass that
+/// *applies* this plane to the finished iris density, and the two share
+/// one module once [`module`](super::wash::module) concatenates them.
+pub const LID_WEIGHT_ENTRY: &str = "fs_lid_weight";
 pub const FLUSH_ENTRY: &str = "fs_blush_flush";
 pub const GATE_ENTRY: &str = "fs_blush_gate";
 
@@ -121,6 +125,46 @@ impl EyeUniform {
 
         bytes
     }
+}
+
+/// Every projected eye as the shader reads it, at the extent the eyes
+/// were projected onto.
+///
+/// The wash develops the face twice over at two resolutions — the iris
+/// and its lid at the sheet's own pixels, the cheek flush at the notched
+/// body's — and every quantity in [`EyeUniform`] but the pupil fractions
+/// and the presence is in canvas pixels. Rather than scale a frame from
+/// one extent to the other, both callers project the chart's own frames
+/// at their own extent through
+/// [`accent::project`](crate::easel::accent::project) and come here: one
+/// statement of the packing, and no algebra that can slip a factor.
+///
+/// `presence` is indexed as `eyes` is — how much of each eye the viewer
+/// can actually see, which is a world-space question and so the same
+/// number at either extent.
+#[must_use]
+pub fn eyes(eyes: &[Eye], presence: &[f32], height: usize) -> Vec<EyeUniform> {
+    let midline = accent::midline(eyes);
+
+    eyes.iter()
+        .enumerate()
+        .map(|(index, eye)| {
+            let (across, down) = eye.inverse().unwrap_or((Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.0)));
+            let (apple, radii) = accent::apple_of(eye, midline);
+
+            EyeUniform {
+                centre: eye.centre(),
+                across,
+                down,
+                pupil: eye.pupil(),
+                reach: eye.reach(height),
+                valid: eye.inverse().is_some(),
+                apple,
+                radii,
+                presence: presence.get(index).copied().unwrap_or(0.0),
+            }
+        })
+        .collect()
 }
 
 /// Uniform window every face pass binds — the WGSL `FaceParams` block:

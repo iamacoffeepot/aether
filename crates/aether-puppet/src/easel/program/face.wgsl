@@ -85,9 +85,16 @@ fn eye_apple(eye: Eye) -> vec2<f32> { return eye.reach_valid_apple.zw; }
 fn eye_radii(eye: Eye) -> vec2<f32> { return eye.radii_presence.xy; }
 fn eye_presence(eye: Eye) -> f32 { return eye.radii_presence.z; }
 
+// Three scalar words of padding rather than one `vec3<u32>`: a three-lane
+// vector aligns to sixteen, so it would sit at offset sixteen rather than
+// four and push the array to thirty-two — a block of 288 bytes against the
+// 272 `FaceUniforms::BYTES` states. Scalars align to four and pack where
+// the comment says they do.
 struct FaceParams {
     count: u32,
-    unused: vec3<u32>,
+    unused_a: u32,
+    unused_b: u32,
+    unused_c: u32,
     eyes: array<Eye, 4>,
 }
 
@@ -167,7 +174,7 @@ fn fs_iris(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 // is a texel the lift never touches either. Where two eyes overlap the
 // later one wins, as it does there.
 @fragment
-fn fs_lift(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_lid_weight(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = floor(position.xy);
     let held = hermite(CLIP_EDGE_LOW, CLIP_EDGE_HIGH, textureLoad(face_clip, vec2<i32>(position.xy), 0).r);
     if held < CLIP_FLOOR {

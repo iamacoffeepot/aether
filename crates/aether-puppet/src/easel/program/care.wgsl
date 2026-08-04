@@ -73,8 +73,8 @@ fn care_seed_distance(seed: f32, here: vec2<f32>, width: f32) -> f32 {
 fn fs_care_seed(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let at = vec2<i32>(position.xy);
     let size = textureDimensions(care_source);
-    let class = round(textureLoad(care_source, at, 0).r * 255.0);
-    let feature = class == CARE_LIPS || class == CARE_BROW || class == CARE_EYE;
+    let labelled = round(textureLoad(care_source, at, 0).r * 255.0);
+    let feature = labelled == CARE_LIPS || labelled == CARE_BROW || labelled == CARE_EYE;
 
     let index = f32(at.y) * f32(size.x) + f32(at.x);
     return vec4<f32>(select(CARE_UNSEEDED, index, feature), 0.0, 0.0, 1.0);
