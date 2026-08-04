@@ -24,19 +24,21 @@ pub fn build_fullscreen_vertex_module(device: &wgpu::Device) -> wgpu::ShaderModu
     })
 }
 
-/// Group-0 layout for a pass's uniform window: one fragment-visible
-/// uniform buffer with a dynamic offset, so a repeated pass rebinds its
+/// Group-0 layout for a pass's uniform window: one uniform buffer with
+/// a dynamic offset, so a repeated pass rebinds its
 /// per-iteration window as an offset rather than a fresh bind group.
 /// `bound_bytes` is the window length the pass binds (at least the
 /// shader's declared block size — the render cap validates that at
-/// register time).
+/// register time). Visible to both stages: a draw pass's authored
+/// vertex stage reads the same window its fragment stage does
+/// (ADR-0171), and visibility a stage does not use costs nothing.
 #[must_use]
 pub fn program_uniform_layout(device: &wgpu::Device, bound_bytes: u64) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("aether program uniform bind group layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: true,
@@ -145,6 +147,107 @@ pub fn build_program_pipeline(
     })
 }
 
+/// The one depth format a draw pass's depth transient realizes as
+/// (ADR-0171). Fixed rather than declared: a program's depth slot
+/// carries an extent alone.
+pub const PROGRAM_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// One draw pass's pipeline shape (ADR-0171): the authored module's
+/// vertex and fragment entry points over a bound geometry, into a color
+/// attachment of `color_format`. `vertex_attributes` and
+/// `vertex_stride_bytes` come from the geometry slot's declared layout,
+/// which the render cap has already checked the vertex stage's
+/// interface against. `depth` builds the `LessEqual` depth-write state
+/// a declared depth transient attaches to; a pass declaring none
+/// rasterizes in draw order.
+pub struct ProgramDrawPipelineSpec<'a> {
+    pub module: &'a wgpu::ShaderModule,
+    pub vertex_entry_point: &'a str,
+    pub fragment_entry_point: &'a str,
+    pub vertex_stride_bytes: u64,
+    pub vertex_attributes: &'a [wgpu::VertexAttribute],
+    pub color_format: wgpu::TextureFormat,
+    pub blend: Option<wgpu::BlendState>,
+    pub depth: bool,
+    pub uniform_layout: &'a wgpu::BindGroupLayout,
+    pub inputs_layout: &'a wgpu::BindGroupLayout,
+}
+
+/// Build one draw pass pipeline from its [`ProgramDrawPipelineSpec`].
+/// Culling stays off — winding is the authoring actor's business, and
+/// the substrate has no view on which side of a face it is painting.
+#[must_use]
+pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipelineSpec<'_>) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("aether program draw pipeline layout"),
+        bind_group_layouts: &[Some(spec.uniform_layout), Some(spec.inputs_layout)],
+        immediate_size: 0,
+    });
+    let vertex_buffers = [wgpu::VertexBufferLayout {
+        array_stride: spec.vertex_stride_bytes,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: spec.vertex_attributes,
+    }];
+    let fragment_targets = [Some(wgpu::ColorTargetState {
+        format: spec.color_format,
+        blend: spec.blend,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("aether program draw pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: spec.module,
+            entry_point: Some(spec.vertex_entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vertex_buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: spec.module,
+            entry_point: Some(spec.fragment_entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &fragment_targets,
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: spec.depth.then(|| wgpu::DepthStencilState {
+            format: PROGRAM_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Create one depth transient for the program transient pool
+/// (ADR-0171): a `Depth32Float` attachment draw passes clear and test
+/// against. Render-attachment only — nothing samples it, and the pass
+/// that shares it does so by attaching it again.
+#[must_use]
+pub fn create_program_depth_transient(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("aether program depth transient"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: PROGRAM_DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    })
+}
+
 /// Create one transient intermediate texture for the program transient
 /// pool (ADR-0170): a render target program passes write and later
 /// passes sample — `RENDER_ATTACHMENT | TEXTURE_BINDING`, no CPU
@@ -209,4 +312,77 @@ pub fn record_program_pass(encoder: &mut wgpu::CommandEncoder, draw: &ProgramPas
     pass.set_bind_group(0, draw.uniform_bind_group, &[draw.uniform_offset]);
     pass.set_bind_group(1, draw.inputs_bind_group, &[]);
     pass.draw(0..3, 0..1);
+}
+
+/// The depth attachment of one recorded draw pass iteration: the pooled
+/// transient's view, and whether this iteration is the dispatch's first
+/// reference to that slot (clear to the far plane) or a later one
+/// (load, so consecutive passes sharing a slot agree on occlusion).
+pub struct ProgramDepthAttachment<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub clear: bool,
+}
+
+/// One recorded draw pass iteration (ADR-0171): the pass's pipeline, the
+/// color slot view it renders into under the pass's declared load
+/// semantic, an optional depth attachment, the group-0 uniform window
+/// and group-1 input pairs, and the bound geometry's realized buffers.
+pub struct ProgramDrawPass<'a> {
+    pub pipeline: &'a wgpu::RenderPipeline,
+    pub target_view: &'a wgpu::TextureView,
+    pub clear_color: bool,
+    pub depth: Option<ProgramDepthAttachment<'a>>,
+    pub uniform_bind_group: &'a wgpu::BindGroup,
+    pub uniform_offset: u32,
+    pub inputs_bind_group: &'a wgpu::BindGroup,
+    pub vertex_buffer: &'a wgpu::Buffer,
+    pub index_buffer: &'a wgpu::Buffer,
+    pub index_count: u32,
+}
+
+/// Record one draw pass iteration into `encoder`: an indexed
+/// triangle-list draw of the bound geometry through the pass pipeline
+/// into the color attachment, optionally depth-tested. A geometry with
+/// no indices still runs the pass — its clears are the caller's
+/// declaration — and issues no draw.
+pub fn record_program_draw_pass(encoder: &mut wgpu::CommandEncoder, draw: &ProgramDrawPass<'_>) {
+    let load = if draw.clear_color {
+        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+    } else {
+        wgpu::LoadOp::Load
+    };
+    let depth_attachment = draw.depth.as_ref().map(|depth| wgpu::RenderPassDepthStencilAttachment {
+        view: depth.view,
+        depth_ops: Some(wgpu::Operations {
+            load: if depth.clear {
+                wgpu::LoadOp::Clear(1.0)
+            } else {
+                wgpu::LoadOp::Load
+            },
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil_ops: None,
+    });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("aether program draw pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: draw.target_view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: depth_attachment,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    if draw.index_count == 0 {
+        return;
+    }
+    pass.set_pipeline(draw.pipeline);
+    pass.set_bind_group(0, draw.uniform_bind_group, &[draw.uniform_offset]);
+    pass.set_bind_group(1, draw.inputs_bind_group, &[]);
+    pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+    pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..draw.index_count, 0, 0..1);
 }

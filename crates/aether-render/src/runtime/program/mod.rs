@@ -10,11 +10,14 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    build_fullscreen_vertex_module, build_program_pipeline, program_inputs_layout, program_uniform_layout,
+    ProgramDrawPipelineSpec, build_fullscreen_vertex_module, build_program_draw_pipeline, build_program_pipeline,
+    program_inputs_layout, program_uniform_layout,
 };
 
+use super::geometry::{GeometryRegistry, wgpu_vertex_attributes};
 use super::pipeline::RenderGpu;
 use super::texture::TextureRegistry;
+use crate::kinds::vertex_stride_bytes;
 use crate::{ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat};
 
 mod record;
@@ -97,16 +100,39 @@ impl ProgramRegistry {
                     pass.inputs.iter().map(|slot| plan.slot_format(*slot).filterable()).collect();
                 let inputs_layout = program_inputs_layout(device, &filterable);
                 let output_format = plan.slot_format(pass.output);
-                let pipeline = build_program_pipeline(
-                    device,
-                    &fullscreen,
-                    &module,
-                    &pass.entry_point,
-                    super::texture::wgpu_texture_format(output_format),
-                    blend_for(output_format),
-                    &uniform_layout,
-                    &inputs_layout,
-                );
+                let color_format = super::texture::wgpu_texture_format(output_format);
+                let pipeline = match &pass.draw {
+                    None => build_program_pipeline(
+                        device,
+                        &fullscreen,
+                        &module,
+                        &pass.entry_point,
+                        color_format,
+                        blend_for(output_format),
+                        &uniform_layout,
+                        &inputs_layout,
+                    ),
+                    Some(draw) => {
+                        let layout = &plan.geometries[draw.geometry as usize].layout;
+                        let attributes = wgpu_vertex_attributes(layout);
+                        build_program_draw_pipeline(
+                            device,
+                            &ProgramDrawPipelineSpec {
+                                module: &module,
+                                vertex_entry_point: &draw.vertex_entry_point,
+                                fragment_entry_point: &pass.entry_point,
+                                vertex_stride_bytes: u64::try_from(vertex_stride_bytes(layout))
+                                    .expect("vertex stride fits u64"),
+                                vertex_attributes: &attributes,
+                                color_format,
+                                blend: blend_for(output_format),
+                                depth: draw.depth.is_some(),
+                                uniform_layout: &uniform_layout,
+                                inputs_layout: &inputs_layout,
+                            },
+                        )
+                    }
+                };
                 PassGpu { pipeline, uniform_layout, inputs_layout, bound_uniform_bytes }
             })
             .collect();
@@ -142,6 +168,7 @@ impl ProgramRegistry {
         gpu: &RenderGpu,
         encoder: &mut wgpu::CommandEncoder,
         textures: &mut TextureRegistry,
+        geometries: &mut GeometryRegistry,
         dispatches: &[ProgramDispatch],
     ) {
         for dispatch in dispatches {
@@ -153,7 +180,7 @@ impl ProgramRegistry {
                 );
                 continue;
             };
-            record::record_dispatch(gpu, encoder, program, &mut self.transient_pool, textures, dispatch);
+            record::record_dispatch(gpu, encoder, program, &mut self.transient_pool, textures, geometries, dispatch);
         }
     }
 }

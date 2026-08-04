@@ -372,7 +372,7 @@ impl RenderCapabilityState {
         // registry textures the material and overlay passes below sample,
         // so a dispatch and a draw over its output land in one frame.
         let dispatches = mem::take(&mut self.pending_program_dispatches);
-        self.programs.record(gpu, encoder, &mut self.textures, &dispatches);
+        self.programs.record(gpu, encoder, &mut self.textures, &mut self.geometries, &dispatches);
         let extras_storage: [&wgpu::RenderPipeline; 1];
         let extras: &[&wgpu::RenderPipeline] = match self.wire_pipeline.as_ref() {
             Some(pipeline) => {

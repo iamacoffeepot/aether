@@ -8,13 +8,17 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
-use aether_substrate::render::{ProgramPassDraw, create_program_transient, record_program_pass};
+use aether_substrate::render::{
+    PROGRAM_DEPTH_FORMAT, ProgramDepthAttachment, ProgramDrawPass, ProgramPassDraw, create_program_depth_transient,
+    create_program_transient, record_program_draw_pass, record_program_pass,
+};
 
+use super::super::geometry::GeometryRegistry;
 use super::super::pipeline::RenderGpu;
 use super::super::texture::{TextureRegistry, wgpu_texture_format};
 use super::validate::{ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{RegisteredProgram, TransientKey};
-use crate::{ProgramDispatch, TextureSampling, TextureUsage};
+use crate::{PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
 
 /// One transient's physical allocation for a dispatch: which pool class
 /// it draws from and which slot within that class it occupies.
@@ -26,16 +30,21 @@ struct TransientAssignment {
 /// Execute one dispatch into `encoder`, or warn-drop it whole: the
 /// checks run first, so a rejected dispatch records nothing and the
 /// frame survives untouched.
+// The realize / pool / encode sequence takes the two registries plus the
+// pool and the dispatch; threading them through a bundle struct for the
+// one call site would only rename the same borrows.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_dispatch(
     gpu: &RenderGpu,
     encoder: &mut wgpu::CommandEncoder,
     program: &RegisteredProgram,
     pool: &mut HashMap<TransientKey, Vec<wgpu::TextureView>>,
     textures: &mut TextureRegistry,
+    geometries: &mut GeometryRegistry,
     dispatch: &ProgramDispatch,
 ) {
     let plan = &program.plan;
-    let Some(reference) = check_dispatch(plan, textures, dispatch) else {
+    let Some(reference) = check_dispatch(plan, textures, geometries, dispatch) else {
         return;
     };
 
@@ -44,19 +53,29 @@ pub(super) fn record_dispatch(
             entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
         }
     }
+    for pass_plan in &plan.passes {
+        if let Some(draw) = &pass_plan.draw
+            && let Some(entry) = geometries.entries.get_mut(&dispatch.geometries[draw.geometry as usize])
+        {
+            entry.ensure_realized(&gpu.device, &gpu.queue);
+        }
+    }
     let assignments = assign_transients(plan, reference);
-    for assignment in assignments.iter().flatten() {
+    let depth_assignments = assign_depth_transients(plan, reference);
+    for assignment in assignments.iter().chain(depth_assignments.iter()).flatten() {
         let views = pool.entry(assignment.key).or_default();
         while views.len() <= assignment.physical {
             let (width, height, format) = assignment.key;
-            views.push(
+            let texture = if format == PROGRAM_DEPTH_FORMAT {
+                create_program_depth_transient(&gpu.device, width, height)
+            } else {
                 create_program_transient(&gpu.device, width, height, format)
-                    .create_view(&wgpu::TextureViewDescriptor::default()),
-            );
+            };
+            views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
         }
     }
 
-    encode_passes(gpu, encoder, program, pool, textures, dispatch, &assignments);
+    encode_passes(gpu, encoder, program, pool, textures, geometries, dispatch, &assignments, &depth_assignments);
 }
 
 /// Run every dispatch-time check, warn-dropping on the first mismatch.
@@ -66,7 +85,12 @@ pub(super) fn record_dispatch(
 // tracing fields naming program, pass, and binding, and splitting per
 // class would scatter the single rejection narrative.
 #[allow(clippy::too_many_lines)]
-fn check_dispatch(plan: &ProgramPlan, textures: &TextureRegistry, dispatch: &ProgramDispatch) -> Option<(u32, u32)> {
+fn check_dispatch(
+    plan: &ProgramPlan,
+    textures: &TextureRegistry,
+    geometries: &GeometryRegistry,
+    dispatch: &ProgramDispatch,
+) -> Option<(u32, u32)> {
     let program_id = dispatch.program_id;
     if dispatch.bindings.len() != plan.bindings.len() {
         tracing::warn!(
@@ -75,6 +99,16 @@ fn check_dispatch(plan: &ProgramPlan, textures: &TextureRegistry, dispatch: &Pro
             declared = plan.bindings.len(),
             supplied = dispatch.bindings.len(),
             "program dispatch binding count disagrees with the registered graph; dropping the dispatch",
+        );
+        return None;
+    }
+    if dispatch.geometries.len() != plan.geometries.len() {
+        tracing::warn!(
+            target: "aether_render",
+            program_id,
+            declared = plan.geometries.len(),
+            supplied = dispatch.geometries.len(),
+            "program dispatch geometry count disagrees with the registered graph; dropping the dispatch",
         );
         return None;
     }
@@ -141,6 +175,34 @@ fn check_dispatch(plan: &ProgramPlan, textures: &TextureRegistry, dispatch: &Pro
     }
 
     for (pass, pass_plan) in plan.passes.iter().enumerate() {
+        if let Some(draw) = &pass_plan.draw {
+            let binding = draw.geometry as usize;
+            let geometry_id = dispatch.geometries[binding];
+            let Some(entry) = geometries.entries.get(&geometry_id) else {
+                tracing::warn!(
+                    target: "aether_render",
+                    program_id,
+                    pass,
+                    binding,
+                    geometry_id,
+                    "program dispatch geometry binding names an unknown geometry id; dropping the dispatch",
+                );
+                return None;
+            };
+            if entry.layout != plan.geometries[binding].layout {
+                tracing::warn!(
+                    target: "aether_render",
+                    program_id,
+                    pass,
+                    binding,
+                    geometry_id,
+                    declared = ?plan.geometries[binding].layout,
+                    bound = ?entry.layout,
+                    "program dispatch geometry layout disagrees with the registered graph; dropping the dispatch",
+                );
+                return None;
+            }
+        }
         if pass_plan.uniform_length > 0 {
             let end = u64::from(pass_plan.uniform_offset)
                 + u64::from(pass_plan.repeat_count - 1) * u64::from(pass_plan.uniform_stride)
@@ -185,17 +247,19 @@ fn check_dispatch(plan: &ProgramPlan, textures: &TextureRegistry, dispatch: &Pro
 /// of `min_uniform_buffer_offset_alignment`, and dispatch windows carry
 /// no alignment of their own), upload it once, and record the passes.
 // Staging, bind groups, and pass encoding share the per-pass borrow
-// structure; splitting them would re-thread the same six context
+// structure; splitting them would re-thread the same context
 // arguments — the same shape `record_overlay_batches` keeps.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn encode_passes(
     gpu: &RenderGpu,
     encoder: &mut wgpu::CommandEncoder,
     program: &RegisteredProgram,
     pool: &HashMap<TransientKey, Vec<wgpu::TextureView>>,
     textures: &TextureRegistry,
+    geometries: &GeometryRegistry,
     dispatch: &ProgramDispatch,
     assignments: &[Option<TransientAssignment>],
+    depth_assignments: &[Option<TransientAssignment>],
 ) {
     let plan = &program.plan;
     let align = usize::try_from(gpu.device.limits().min_uniform_buffer_offset_alignment)
@@ -250,8 +314,14 @@ fn encode_passes(
             assignments[transient as usize].as_ref().expect("read/written transients were assigned physical slots");
         &pool[&assignment.key][assignment.physical]
     };
+    let depth_view = |slot: u32| {
+        let assignment =
+            depth_assignments[slot as usize].as_ref().expect("depth slots a pass names were assigned physical slots");
+        &pool[&assignment.key][assignment.physical]
+    };
 
     let mut written: Vec<ResolvedSlot> = Vec::new();
+    let mut depth_cleared: Vec<u32> = Vec::new();
     for ((pass_plan, pass_gpu), offsets) in plan.passes.iter().zip(&program.passes_gpu).zip(&iteration_offsets) {
         let uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("aether program uniform bind group"),
@@ -300,20 +370,55 @@ fn encode_passes(
             ResolvedSlot::Binding(binding) => &binding_views[&dispatch.bindings[binding as usize]],
             ResolvedSlot::Transient(transient) => transient_view(transient),
         };
-        for &uniform_offset in offsets {
-            let clear = !written.contains(&pass_plan.output);
-            if clear {
+        for (iteration, &uniform_offset) in offsets.iter().enumerate() {
+            let first_write = !written.contains(&pass_plan.output);
+            if first_write {
                 written.push(pass_plan.output);
             }
-            record_program_pass(
+            let Some(draw) = &pass_plan.draw else {
+                record_program_pass(
+                    encoder,
+                    &ProgramPassDraw {
+                        pipeline: &pass_gpu.pipeline,
+                        target_view,
+                        clear: first_write,
+                        uniform_bind_group: &uniform_bind_group,
+                        uniform_offset,
+                        inputs_bind_group: &inputs_bind_group,
+                    },
+                );
+                continue;
+            };
+
+            // A draw pass's declared load is authoritative on its color
+            // output; its later repeat iterations load so a repeat
+            // accumulates rather than each iteration wiping the last.
+            // Depth follows the shared-slot rule: the dispatch's first
+            // reference to a slot clears it, later ones load it.
+            let depth = draw.depth.map(|slot| {
+                let clear = !depth_cleared.contains(&slot);
+                if clear {
+                    depth_cleared.push(slot);
+                }
+                ProgramDepthAttachment { view: depth_view(slot), clear }
+            });
+            let realized = geometries.entries[&dispatch.geometries[draw.geometry as usize]]
+                .realized
+                .as_ref()
+                .expect("realized before encode");
+            record_program_draw_pass(
                 encoder,
-                &ProgramPassDraw {
+                &ProgramDrawPass {
                     pipeline: &pass_gpu.pipeline,
                     target_view,
-                    clear,
+                    clear_color: draw.load == PassLoad::Clear && iteration == 0,
+                    depth,
                     uniform_bind_group: &uniform_bind_group,
                     uniform_offset,
                     inputs_bind_group: &inputs_bind_group,
+                    vertex_buffer: &realized.vertex_buffer,
+                    index_buffer: &realized.index_buffer,
+                    index_count: realized.index_count,
                 },
             );
         }
@@ -361,10 +466,39 @@ fn assign_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Option<Tr
     assignments
 }
 
+/// Assign each depth slot a physical `Depth32Float` texture in its
+/// resolved-extent class, skipping slots no pass names. Unlike color
+/// transients these are not liveness-packed: sharing a depth buffer is
+/// the declaration's whole point (two passes naming one slot is how
+/// occlusion agrees between them), so two *distinct* slots must never
+/// land on one physical texture however disjoint their use looks.
+fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Option<TransientAssignment>> {
+    let mut allocated: HashMap<TransientKey, usize> = HashMap::new();
+    plan.depth_transients
+        .iter()
+        .enumerate()
+        .map(|(slot, extent)| {
+            let slot = u32::try_from(slot).expect("depth slot index fits u32");
+            let named = plan.passes.iter().any(|pass| pass.draw.as_ref().is_some_and(|draw| draw.depth == Some(slot)));
+            named.then(|| {
+                let (width, height) = resolve_extent(*extent, reference);
+                let key = (width, height, PROGRAM_DEPTH_FORMAT);
+                let physical = allocated.entry(key).or_insert(0);
+                let assigned = *physical;
+                *physical += 1;
+                TransientAssignment { key, physical: assigned }
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat};
+    use crate::{
+        DrawPass, GeometrySlotSpec, InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent,
+        SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
+    };
 
     const MODULE: &str = r"
 @group(1) @binding(0) var source_texture: texture_2d<f32>;
@@ -402,6 +536,8 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             wgsl: MODULE.to_owned(),
             bindings: vec![full, full],
             transients: vec![full; 3],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 copy_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }),
                 copy_pass(InputSlot::Transient { index: 0 }, OutputSlot::Transient { index: 1 }),
@@ -418,5 +554,68 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         // they must differ; transient 0's range ends at pass 1, freeing
         // its texture for transient 2's write at pass 2.
         assert_eq!(physicals, vec![0, 1, 0]);
+    }
+
+    const DRAW_MODULE: &str = r"
+@vertex
+fn vs_flat(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position, 1.0);
+}
+
+@fragment
+fn fs_opaque() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+";
+
+    fn draw_pass(depth: Option<u32>) -> ProgramPass {
+        ProgramPass {
+            stage: PassStage::Draw(DrawPass {
+                vertex_entry_point: "vs_flat".to_owned(),
+                geometry: 0,
+                depth,
+                load: PassLoad::Clear,
+            }),
+            entry_point: "fs_opaque".to_owned(),
+            inputs: Vec::new(),
+            output: OutputSlot::Binding { index: 0 },
+            uniform_offset: 0,
+            uniform_length: 0,
+            repeat: None,
+        }
+    }
+
+    /// ADR-0171 depth pooling: two passes naming one depth slot share
+    /// one physical texture (that sharing is what makes their occlusion
+    /// agree), two *distinct* slots never do however disjoint their use
+    /// looks, and a declared slot no pass names allocates nothing. The
+    /// named bugs: liveness-packing depth the way color transients are
+    /// packed, which would alias two slots onto one buffer and let one
+    /// pass's depth occlude another's geometry; and a named slot left
+    /// unassigned, which panics the encode path that resolves its view.
+    #[test]
+    fn depth_slots_share_by_name_and_never_alias() {
+        let full = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let mail = ProgramRegister {
+            wgsl: DRAW_MODULE.to_owned(),
+            bindings: vec![full],
+            transients: Vec::new(),
+            geometries: vec![GeometrySlotSpec {
+                layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
+            }],
+            depth_transients: vec![SlotExtent::Full; 3],
+            passes: vec![draw_pass(Some(0)), draw_pass(Some(0)), draw_pass(Some(1))],
+        };
+        let plan = super::super::validate::validate(&mail).expect("draw graph validates");
+
+        let assignments = assign_depth_transients(&plan, (64, 48));
+        let physicals: Vec<Option<usize>> =
+            assignments.iter().map(|slot| slot.as_ref().map(|assigned| assigned.physical)).collect();
+        assert_eq!(physicals, vec![Some(0), Some(1), None]);
+        assert_eq!(
+            assignments[0].as_ref().expect("slot 0 named").key,
+            assignments[1].as_ref().expect("slot 1 named").key,
+            "same-extent depth slots share a pool class, so only the physical index may separate them",
+        );
     }
 }

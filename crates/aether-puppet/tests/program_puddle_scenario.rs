@@ -93,7 +93,14 @@ fn plane_program(input_count: usize, transient_count: usize, passes: Vec<Program
     let mut bindings = vec![plane_slot(); input_count];
     bindings.push(SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full });
 
-    ProgramRegister { wgsl: PUDDLE_WGSL.to_owned(), bindings, transients: vec![plane_slot(); transient_count], passes }
+    ProgramRegister {
+        wgsl: PUDDLE_WGSL.to_owned(),
+        bindings,
+        transients: vec![plane_slot(); transient_count],
+        geometries: Vec::new(),
+        depth_transients: Vec::new(),
+        passes,
+    }
 }
 
 /// The output binding's index under [`plane_program`]'s layout.
@@ -187,7 +194,7 @@ fn develop(
         }],
     };
     let pre = vec![
-        envelope("aether.render", &ProgramDispatch { program_id, bindings, uniforms }),
+        envelope("aether.render", &ProgramDispatch { program_id, bindings, geometries: Vec::new(), uniforms }),
         envelope("aether.render", &overlay),
     ];
     let captured =

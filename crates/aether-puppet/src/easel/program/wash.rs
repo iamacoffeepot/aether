@@ -553,7 +553,14 @@ pub fn program() -> WashProgram {
 
     let mut bindings = vec![puddle::plane_slot(); SHEET as usize];
     bindings.push(sheet_slot());
-    let register = ProgramRegister { wgsl: module(), bindings, transients: graph.transients, passes: graph.passes };
+    let register = ProgramRegister {
+        wgsl: module(),
+        bindings,
+        transients: graph.transients,
+        geometries: Vec::new(),
+        depth_transients: Vec::new(),
+        passes: graph.passes,
+    };
 
     WashProgram { register, materials, blush_coat, uniform_bytes: graph.uniform_bytes }
 }

@@ -585,16 +585,72 @@ pub enum OutputSlot {
     Transient { index: u32 },
 }
 
-/// Which GPU stage a program pass runs (ADR-0170). One variant today:
-/// every named consumer's operations are gathers or pointwise math, so
-/// version one executes fragment passes only. A `Compute` arm arrives
-/// as an addition when a consumer needs shared-memory tiles, reductions,
-/// or scatter writes — the slot / extent / uniform-window vocabulary is
-/// stage-agnostic.
+/// One geometry slot a program declares (ADR-0171) — an entry in
+/// `ProgramRegister.geometries` that a `ProgramDispatch.geometries` id
+/// fills, the same supply shape texture bindings use. `layout` is the
+/// vertex layout the slot's geometry must have been created with: the
+/// register builds each draw pass's vertex buffer layout from it and
+/// checks the authored vertex stage's interface against it, and a
+/// dispatch whose geometry disagrees warn-drops.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GeometrySlotSpec {
+    pub layout: Vec<VertexAttribute>,
+}
+
+/// What a draw pass does to its color output before drawing (ADR-0171).
+/// Unlike a fragment pass — whose first write in a dispatch always
+/// clears and whose later writes load — a draw pass declares this
+/// outright, so a layered bake states its own composition.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PassLoad {
+    /// Clear the output to transparent black, then draw.
+    Clear,
+    /// Load whatever the output already holds and draw over it — the
+    /// retained pixels of a writable binding across dispatches, or an
+    /// earlier pass's work within one.
+    Load,
+}
+
+/// The `PassStage::Draw` declaration (ADR-0171): what a rasterizing pass
+/// needs beyond what every pass declares. The pass's fragment entry
+/// point, input slots, color output, and uniform window stay on
+/// [`ProgramPass`]; this carries the vertex half.
+///
+/// `depth` names an index into `ProgramRegister.depth_transients`. The
+/// declaration *is* the depth rule: a pass depth-tests exactly when it
+/// names a depth slot (`Depth32Float`, `LessEqual`, depth-write on), and
+/// a pass naming none rasterizes in draw order with no depth at all.
+/// The first pass of a dispatch to name a given slot clears it to the
+/// far plane and later passes naming the same slot load it, so
+/// consecutive draw passes agree on occlusion by naming one slot.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DrawPass {
+    /// Vertex entry point in the program's WGSL module. It consumes the
+    /// geometry slot's declared attributes at their `@location` indices
+    /// and may read the pass's uniform window, which binds at
+    /// `@group(0) @binding(0)` for the vertex stage as well as the
+    /// fragment stage.
+    pub vertex_entry_point: String,
+    /// Index into `ProgramRegister.geometries` — the slot whose id the
+    /// dispatch supplies.
+    pub geometry: u32,
+    /// Index into `ProgramRegister.depth_transients`, or `None` for a
+    /// pass that does not depth-test.
+    pub depth: Option<u32>,
+    pub load: PassLoad,
+}
+
+/// Which GPU stage a program pass runs (ADR-0170, ADR-0171). A `Compute`
+/// arm arrives as an addition when a consumer needs shared-memory tiles,
+/// reductions, or scatter writes — the slot / extent / uniform-window
+/// vocabulary is stage-agnostic.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PassStage {
     /// A fullscreen-triangle fragment pipeline over a render attachment.
     Fragment,
+    /// An indexed triangle-list draw of a bound geometry through an
+    /// authored vertex stage, optionally depth-tested (ADR-0171).
+    Draw(DrawPass),
 }
 
 /// Repetition of one program pass (ADR-0170): the pass records `count`
@@ -615,8 +671,11 @@ pub struct PassRepeat {
 /// One pass in a program's declared graph (ADR-0170). The graph is a
 /// sequence: a pass may read only slots already written, which makes
 /// the DAG check a single index comparison at register time.
-/// `entry_point` names a fragment entry in the program's WGSL module;
-/// `inputs` bind in order as the pass's group-1 texture / sampler
+/// `entry_point` names a fragment entry in the program's WGSL module —
+/// paired with the substrate's fullscreen vertex stage for a
+/// `PassStage::Fragment` pass, or with the authored vertex stage the
+/// `PassStage::Draw` declaration names (ADR-0171). `inputs` bind in
+/// order as the pass's group-1 texture / sampler
 /// pairs; `output` is the render attachment. `uniform_offset` /
 /// `uniform_length` window the dispatch's uniform blob in bytes — the
 /// window binds at `@group(0) @binding(0)` and must cover the uniform
@@ -651,9 +710,9 @@ pub struct ProgramPass {
 /// `Err` instead of crashing the substrate. A rejected register
 /// consumes no id.
 ///
-/// The shader contract: the substrate owns the vertex stage (a
-/// fullscreen triangle), so the module declares fragment entry points
-/// only. An entry point may take `@location(0) uv: vec2<f32>` — `(0, 0)`
+/// The shader contract: the substrate owns the vertex stage of a
+/// fragment pass (a fullscreen triangle), so such a pass's entry point
+/// may take `@location(0) uv: vec2<f32>` — `(0, 0)`
 /// top-left to `(1, 1)` bottom-right, texture convention — and returns
 /// `@location(0) vec4<f32>`. Its uniform window binds at
 /// `@group(0) @binding(0) var<uniform>`; its input slots bind in
@@ -666,6 +725,15 @@ pub struct ProgramPass {
 /// repeat's iterations, a second pass onto the same slot — load the
 /// existing content.
 ///
+/// A `PassStage::Draw` pass (ADR-0171) replaces the fullscreen vertex
+/// stage with an authored one over a bound geometry and states its own
+/// color load semantic instead of following the clear-on-first-write
+/// rule. `geometries` declares the geometry slots a dispatch fills by
+/// id, and `depth_transients` the pooled `Depth32Float` targets draw
+/// passes clear and test against — declared as extents alone, since
+/// their format is fixed. Both lists are empty for a fragment-only
+/// program, which registers exactly as it did before this arm existed.
+///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
 /// assigned like texture and instrument ids. Desktop-only — the
 /// headless chassis replies `Err` (fail-fast, ADR-0105), and a register
@@ -677,6 +745,13 @@ pub struct ProgramRegister {
     pub wgsl: String,
     pub bindings: Vec<SlotSpec>,
     pub transients: Vec<SlotSpec>,
+    /// Geometry slots draw passes bind, filled by id per dispatch
+    /// (ADR-0171). Empty for a fragment-only program.
+    pub geometries: Vec<GeometrySlotSpec>,
+    /// Pooled `Depth32Float` targets draw passes clear and test
+    /// against, declared as extents against the reference (ADR-0171).
+    /// Empty for a fragment-only program.
+    pub depth_transients: Vec<SlotExtent>,
     pub passes: Vec<ProgramPass>,
 }
 
@@ -705,12 +780,16 @@ pub enum ProgramRegisterResult {
 /// when dispatched again.
 ///
 /// `bindings` names one registry texture id per declared
-/// `ProgramRegister.bindings` slot, in order; `uniforms` is one byte
+/// `ProgramRegister.bindings` slot, in order; `geometries` names one
+/// registry geometry id per declared `ProgramRegister.geometries` slot
+/// (ADR-0171), also in order; `uniforms` is one byte
 /// blob the passes window into (each window is copied into an aligned
 /// staging arrangement, so windows need no alignment of their own —
 /// pack them tight). Runtime mismatches — an unknown `program_id`, a
-/// wrong binding count, an unknown texture id, a binding whose format,
-/// size, or writability disagrees with the declared graph, a uniform
+/// wrong binding or geometry count, an unknown texture or geometry id,
+/// a binding whose format,
+/// size, or writability disagrees with the declared graph, a geometry
+/// whose layout disagrees with its declared slot, a uniform
 /// window past the blob's end, or a pass whose input and output resolve
 /// to the same texture — warn-drop the dispatch naming the program,
 /// pass, and binding in the render actor's log ring, the same
@@ -721,6 +800,9 @@ pub enum ProgramRegisterResult {
 pub struct ProgramDispatch {
     pub program_id: u32,
     pub bindings: Vec<u32>,
+    /// One geometry id per declared `ProgramRegister.geometries` slot,
+    /// in order. Empty for a fragment-only program.
+    pub geometries: Vec<u32>,
     #[serde(with = "aether_data::bytes")]
     pub uniforms: Vec<u8>,
 }

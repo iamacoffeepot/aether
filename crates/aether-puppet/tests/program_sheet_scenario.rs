@@ -274,6 +274,8 @@ fn care_mix_matches_the_cpu_ramp() {
             wgsl: sheet_module(),
             bindings: vec![plane_slot(), plane_slot(), plane_slot(), sheet_slot()],
             transients: vec![plane_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 care_mix_pass(
                     InputSlot::Binding { index: 0 },
@@ -286,8 +288,12 @@ fn care_mix_matches_the_cpu_ramp() {
         },
     );
 
-    let dispatch =
-        ProgramDispatch { program_id, bindings: vec![tight_id, loose_id, care_id, output_id], uniforms: Vec::new() };
+    let dispatch = ProgramDispatch {
+        program_id,
+        bindings: vec![tight_id, loose_id, care_id, output_id],
+        geometries: Vec::new(),
+        uniforms: Vec::new(),
+    };
     let img =
         capture_side_by_side(&mut harness, &dispatch, &overlay(output_id, 4.0, side), &overlay(oracle_id, 36.0, side));
 
@@ -358,6 +364,8 @@ fn lost_edge_gives_way_where_the_cpu_does() {
             wgsl: sheet_module(),
             bindings: vec![plane_slot(), plane_slot(), sheet_slot()],
             transients: vec![plane_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 lost_edge_pass(
                     InputSlot::Binding { index: 0 },
@@ -373,6 +381,7 @@ fn lost_edge_gives_way_where_the_cpu_does() {
     let dispatch = ProgramDispatch {
         program_id,
         bindings: vec![hard_id, soft_id, output_id],
+        geometries: Vec::new(),
         uniforms: LostEdgeParams { centre: Vec2::new(15.5, 15.5), angle: 3.0 }.encode().to_vec(),
     };
     let img =
@@ -444,6 +453,8 @@ fn palette_composite_matches_the_cpu_sheet() {
             wgsl: sheet_module(),
             bindings: vec![plane_slot(), plane_slot(), plane_slot(), plane_slot(), sheet_slot()],
             transients: vec![sheet_slot(), sheet_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 light_prime_pass(OutputSlot::Transient { index: 0 }),
                 coat_absorb_pass(
@@ -476,6 +487,7 @@ fn palette_composite_matches_the_cpu_sheet() {
     let dispatch = ProgramDispatch {
         program_id,
         bindings: vec![skin_id, glaze_id, dress_id, shade_id, sheet_id],
+        geometries: Vec::new(),
         uniforms: coats.iter().flat_map(|coat| CoatParams { pigment: coat.pigment, cap: coat.cap }.encode()).collect(),
     };
     let img =

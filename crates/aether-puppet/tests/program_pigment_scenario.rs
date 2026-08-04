@@ -213,7 +213,7 @@ fn developed_plane(
         }],
     };
     let pre = vec![
-        envelope("aether.render", &ProgramDispatch { program_id, bindings, uniforms }),
+        envelope("aether.render", &ProgramDispatch { program_id, bindings, geometries: Vec::new(), uniforms }),
         envelope("aether.render", &overlay),
     ];
 
@@ -388,6 +388,8 @@ fn granulate_program_matches_the_cpu_oracle() {
                 SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full },
             ],
             transients: vec![plane_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 granulate_pass(
                     InputSlot::Binding { index: 0 },
@@ -443,6 +445,8 @@ fn sag_program_matches_the_cpu_oracle() {
             wgsl: format!("{PIGMENT_WGSL}\n{SHOW_WGSL}"),
             bindings: vec![plane_slot(), SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
             transients: vec![plane_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 sag_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }, 0),
                 show_pass(0, 1),
@@ -497,6 +501,8 @@ fn spatter_program_matches_the_cpu_oracle() {
             wgsl: format!("{PIGMENT_WGSL}\n{SHOW_WGSL}"),
             bindings: vec![plane_slot(), SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
             transients: vec![plane_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 spatter_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }, 0),
                 show_pass(0, 1),
@@ -597,6 +603,8 @@ fn smear_program_matches_the_cpu_oracle() {
                 SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full },
             ],
             transients: vec![plane_slot(), plane_slot()],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes,
         },
     );
