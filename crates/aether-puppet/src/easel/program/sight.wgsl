@@ -287,34 +287,76 @@ fn fs_arc_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     return vec4<f32>(here + ahead, 0.0, 0.0, 1.0);
 }
 
-// One doubling of the reach scan: relax each texel against the two
-// `2^k` away, paying the arc between them.
+// One doubling of the reach scan, walking backwards: relax each texel
+// against the one `2^k` behind it, paying the arc between them.
 //
 // Exact, not approximate. After the pass at stride `2^k` every texel
-// holds the least arc to any barrier within `2^(k+1) - 1` points of it:
-// a barrier further out than `2^k` is reached through the neighbour at
-// `2^k` and the arc telescopes, and one nearer than that was already
-// found by the previous pass and survives the `min`.
+// holds the least arc to any barrier within `2^(k+1) - 1` points behind
+// it: a barrier further back than `2^k` is reached through the
+// neighbour at `2^k` and the arc telescopes, and one nearer than that
+// was already found by the previous pass and survives the `min`.
+//
+// Directional rather than symmetric because the consumer needs more
+// than the nearest barrier. `style::pressure` ramps over
+// `min(RAMP, total * 0.45)`, so the taper wants the *run's own arc* as
+// well as the distance to its ends — and a run's arc is exactly the
+// backward reach plus the forward one. A symmetric `min` collapses the
+// two before they can be added, which is why this splits.
 @fragment
-fn fs_reach_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_head_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let flat = i32(flat_of(vec2<u32>(position.xy)));
     let stride = i32(params.stride);
 
     let here = load_flat(source, flat, REACH_FAR);
     let back = load_flat(source, flat - stride, REACH_FAR) + load_flat(second, flat - stride, 0.0);
+
+    return vec4<f32>(min(here, back), 0.0, 0.0, 1.0);
+}
+
+// The same doubling walking forwards. The arc a hop pays is read at the
+// texel it leaves rather than the one it lands on, since the chain's
+// weight at `i` spans from `i` onward.
+@fragment
+fn fs_tail_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let flat = i32(flat_of(vec2<u32>(position.xy)));
+    let stride = i32(params.stride);
+
+    let here = load_flat(source, flat, REACH_FAR);
     let ahead = load_flat(source, flat + stride, REACH_FAR) + load_flat(second, flat, 0.0);
 
-    return vec4<f32>(min(here, min(back, ahead)), 0.0, 0.0, 1.0);
+    return vec4<f32>(min(here, ahead), 0.0, 0.0, 1.0);
 }
 
 // The reach as the field a consumer binds: arc to the nearest hidden
-// point or curve end, saturating rather than running away where the
-// scan's window found nothing.
+// point or curve end in either direction, saturating rather than
+// running away where the scan's window found nothing.
 @fragment
 fn fs_reach_out(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let reach = textureLoad(source, vec2<i32>(position.xy), 0).r;
+    let texel = vec2<i32>(position.xy);
+    let head = textureLoad(source, texel, 0).r;
+    let tail = textureLoad(second, texel, 0).r;
 
-    return vec4<f32>(min(reach, REACH_FAR), 0.0, 0.0, 1.0);
+    return vec4<f32>(min(min(head, tail), REACH_FAR), 0.0, 0.0, 1.0);
+}
+
+// The arc of the run a point sits in: the barrier behind plus the
+// barrier ahead. `style::pressure` caps its ramp at 45% of this, which
+// is what keeps a short stroke from tapering to nothing at its own
+// middle.
+//
+// The two halves saturate independently at `REACH_FAR`, so a run longer
+// than the scan's window reads as far rather than as its true arc — and
+// that is exactly when the cap stops binding, since the ramp is already
+// the constant `RAMP` there. At a curve's own end the barrier texel
+// carries zero arc, so the sum is exact; only a run ended by a hidden
+// point carries the two boundary arcs with it.
+@fragment
+fn fs_total_out(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let texel = vec2<i32>(position.xy);
+    let head = textureLoad(source, texel, 0).r;
+    let tail = textureLoad(second, texel, 0).r;
+
+    return vec4<f32>(min(head, REACH_FAR) + min(tail, REACH_FAR), 0.0, 0.0, 1.0);
 }
 
 // The coverage scan's seed: a point counts toward its curve's coverage

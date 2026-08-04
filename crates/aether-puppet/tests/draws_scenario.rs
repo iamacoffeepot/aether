@@ -84,7 +84,13 @@ fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) {
 /// reached.
 fn drawn_fraction(harness: &mut SubstrateHarness, label: &'static str) -> f32 {
     let captured = harness
-        .execute(vec![("prime", HarnessOp::advance(1)), (label, HarnessOp::capture())])
+        // Several frames, not one: since ADR-0172 the ink is rendered by
+        // a program rather than streamed as triangles, so it reaches the
+        // frame only once the register, the texture creates and the
+        // geometry creates have each answered — a handful of round trips
+        // rather than the same tick. The wash layer has always warmed up
+        // this way; the pen does now too.
+        .execute(vec![("prime", HarnessOp::advance(12)), (label, HarnessOp::capture())])
         .expect("prime + capture");
     let png = captured.captured(label).expect("the capture step ran");
     let img = decode_png(png).expect("decode the captured png");

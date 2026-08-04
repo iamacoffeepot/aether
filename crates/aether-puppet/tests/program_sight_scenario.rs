@@ -272,7 +272,7 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &Cr
 /// `R32Float` planes (nearest — `R32Float` refuses a filtering sampler,
 /// and the values are quantities either way) and the probe's `Rgba8`.
 fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -> Vec<u32> {
-    const PLANE_LABELS: [&str; sight::PLANE_COUNT] = ["create_seen", "create_reach", "create_coverage"];
+    const PLANE_LABELS: [&str; sight::PLANE_COUNT] = ["create_seen", "create_reach", "create_coverage", "create_total"];
     let (width, height) = (width as u32, height as u32);
 
     let mut targets: Vec<u32> = PLANE_LABELS

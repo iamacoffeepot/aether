@@ -46,7 +46,22 @@ const ANGULAR_HALF_WIDTH: f32 = 0.00035;
 /// already in page pixels — so the class amplitude lands exactly once.
 const ANGULAR_WOBBLE: f32 = 1.0 / PAGE_PIXELS_PER_RADIAN;
 
-fn ink(pen: Pen) -> Rgb {
+/// One point's rail pair, solved but not yet widened.
+///
+/// `offset` reaches from the centre to the right rail at full pressure,
+/// so a consumer scales it by whatever taper it believes in and mirrors
+/// it for the left. That is the whole difference between the two
+/// consumers: [`ribbon`] multiplies by the `taper` solved here from the
+/// run it was handed, and the ink pass' vertex stage multiplies by one
+/// read from the visibility field instead.
+#[derive(Clone, Copy)]
+pub struct Rail {
+    pub centre: Vec3,
+    pub offset: Vec3,
+    pub taper: f32,
+}
+
+pub fn ink(pen: Pen) -> Rgb {
     match pen {
         Pen::Ink => Rgb::new(0.106, 0.106, 0.122),
         Pen::Accent => Rgb::new(0.247, 0.498, 0.816),
@@ -66,14 +81,21 @@ fn ink(pen: Pen) -> Rgb {
     }
 }
 
-/// One visible run as a triangle strip, or nothing if it is too short to
-/// read once projected.
-pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle>) {
+/// One curve's rail pairs, or nothing if it is too short to read once
+/// projected.
+///
+/// Everything here is view-dependent and so is re-solved whenever the
+/// eye moves — the perpendicular, the depth weighting, the wobble's
+/// world argument. The taper is solved too, but only against the arc of
+/// the curve it was handed: a caller that split the curve into visible
+/// runs first gets ends anchored on those runs, and a caller that hands
+/// the whole curve over gets ends anchored on the curve. The ink pass
+/// is the second kind and overrides the taper from the field.
+pub fn rails(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<Rail>) -> bool {
     if curve.points.len() < 2 {
-        return;
+        return false;
     }
 
-    let colour = ink(curve.pen);
     let weight = curve.class.base_width();
     let amplitude = curve.class.wobble_amplitude();
 
@@ -98,7 +120,7 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
     // missing — the mouth came out as two bare lines and the eyes as blanks,
     // with nothing having errored.
     if !curve.authored && length < curve.class.min_length() / PAGE_PIXELS_PER_RADIAN {
-        return;
+        return false;
     }
 
     // The wobble's phase is per-stroke and its argument is world position,
@@ -112,7 +134,7 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
     let reference_depth =
         curve.points.iter().map(|point| (point.pos - eye).length()).sum::<f32>() / curve.points.len() as f32;
 
-    let rail = |index: usize| -> (Vec3, Vec3) {
+    let rail = |index: usize| -> Rail {
         let point = curve.points[index];
         let previous = curve.points[index.saturating_sub(1)].pos;
         let next = curve.points[(index + 1).min(curve.points.len() - 1)].pos;
@@ -135,16 +157,36 @@ pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle
         // half-width above holds screen width constant through depth, so
         // this rides on top of it rather than being cancelled by it.
         let depth_weight = (reference_depth / depth).clamp(0.82, 1.22);
-        let half = ANGULAR_HALF_WIDTH * depth * weight * depth_weight * taper * point.weight;
+        let half = ANGULAR_HALF_WIDTH * depth * weight * depth_weight * point.weight;
         let drift = wander(seed, point.pos) * ANGULAR_WOBBLE * depth * amplitude;
         let centre = point.pos + across * drift;
 
-        (centre - across * half, centre + across * half)
+        Rail { centre, offset: across * half, taper }
     };
 
-    let mut previous = rail(0);
-    for index in 1..curve.points.len() {
-        let current = rail(index);
+    out.extend((0..curve.points.len()).map(rail));
+
+    true
+}
+
+/// One visible run as a triangle strip, or nothing if it is too short to
+/// read once projected.
+///
+/// The CPU path, and after ADR-0172 the parity oracle rather than the
+/// per-frame producer: the ink the frame shows is rasterized from
+/// [`rails`] by the stroke program instead.
+pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle>) {
+    let mut solved = Vec::with_capacity(curve.points.len());
+    if !rails(curve, eye, jitter, &mut solved) {
+        return;
+    }
+
+    let colour = ink(curve.pen);
+    let widened = |rail: &Rail| (rail.centre - rail.offset * rail.taper, rail.centre + rail.offset * rail.taper);
+
+    let mut previous = widened(&solved[0]);
+    for rail in &solved[1..] {
+        let current = widened(rail);
         out.push(triangle(previous.0, current.0, current.1, colour));
         out.push(triangle(previous.0, current.1, previous.1, colour));
         previous = current;

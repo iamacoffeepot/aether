@@ -204,7 +204,11 @@ pub fn runs<K: Fn(&SurfacePoint) -> bool + ?Sized>(
 }
 
 /// How much of an authored mark has to survive for any of it to be drawn.
-const CHART_COVERAGE: f32 = 0.35;
+///
+/// The ink pass compares the field's own coverage plane against this
+/// same figure in its vertex stage (ADR-0172), so the rule has one
+/// number wherever it is applied.
+pub const CHART_COVERAGE: f32 = 0.35;
 
 /// An authored mark goes whole or not at all.
 ///

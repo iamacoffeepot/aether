@@ -80,6 +80,7 @@ pub mod math3;
 pub mod mesh;
 pub mod plant;
 pub mod ribbon;
+pub mod strokes;
 pub mod style;
 pub mod visibility;
 pub mod weld;
@@ -96,6 +97,7 @@ use aether_render::{
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 use feature::Curve3;
 use mesh::Mesh;
@@ -201,7 +203,7 @@ pub struct Puppet {
     /// The window redraws continuously whether or not anything moved, and
     /// without this every one of those redraws re-marched 868k faces and
     /// re-cast every occlusion ray to arrive at the identical answer.
-    drawn: Vec<DrawTriangle>,
+    curves: Vec<Curve3>,
     drawn_from: Option<Vec3>,
     /// Held until extraction runs, because the answer is not known until
     /// both assets have landed.
@@ -214,6 +216,29 @@ pub struct Puppet {
     /// The wash layer under the ink (#4349): a painted sheet standing
     /// behind the subject, re-developed when the view settles.
     easel: easel::Easel,
+    /// The ink layer over it (ADR-0172): the visibility field and the
+    /// stroke program, re-solved whenever the eye moves.
+    strokes: strokes::Strokes,
+    /// Which layer each in-flight reply belongs to. The easel and the
+    /// ink both register programs and create textures and geometry, and
+    /// the replies carry no sender — so the answer is position: the
+    /// render cap replies to one kind in the order that kind was sent.
+    awaiting: Awaiting3,
+}
+
+/// The layer an in-flight ask belongs to.
+#[derive(Clone, Copy)]
+enum Awaiting {
+    Easel,
+    Strokes,
+}
+
+/// One queue per reply kind, since the three kinds interleave freely.
+#[derive(Default)]
+struct Awaiting3 {
+    registers: VecDeque<Awaiting>,
+    textures: VecDeque<Awaiting>,
+    geometries: VecDeque<Awaiting>,
 }
 
 impl Puppet {
@@ -266,12 +291,14 @@ impl WasmActor for Puppet {
             dragging: false,
             cursor: Vec2::new(0.0, 0.0),
             aspect: ASPECT_UNTIL_MEASURED,
-            drawn: Vec::new(),
+            curves: Vec::new(),
             drawn_from: None,
             owed: None,
             surface: Vec::new(),
             settings: extract::Settings::default(),
             easel: easel::Easel::default(),
+            strokes: strokes::Strokes::default(),
+            awaiting: Awaiting3::default(),
             // Facing her, slightly above, far enough back that her whole
             // height fits the frame at this field of view.
             look: Look { azimuth: 0.0, elevation: 3.0, distance: 5.4, height: 0.0 },
@@ -300,6 +327,7 @@ impl WasmActor for Puppet {
         if size.width > 0 && size.height > 0 {
             self.aspect = size.width as f32 / size.height as f32;
             self.easel.resized(size.width, size.height);
+            self.strokes.resized(size.width, size.height);
         }
     }
 
@@ -425,6 +453,7 @@ impl WasmActor for Puppet {
         self.surface = extract::surface(subject, self.labels.as_ref(), self.anchors.as_ref(), &self.settings);
         self.drawn_from = None;
         self.easel.subject_changed();
+        self.strokes.subject_changed(subject);
         tracing::info!(
             target: "aether_puppet",
             faces = subject.faces.len(),
@@ -459,8 +488,9 @@ impl WasmActor for Puppet {
             aspect: self.aspect,
             field_of_view: FIELD_OF_VIEW,
         };
-        let painted =
-            easel::Subject { mesh: subject, scores, settings: &self.settings, drawn: &self.drawn, chart: None };
+        let (curves, eye) = (&self.curves, self.eye());
+        let split = || Self::split(subject, curves, eye);
+        let painted = easel::Subject { mesh: subject, scores, settings: &self.settings, drawn: &split, chart: None };
         let Some(planes) = self.easel.bake_planes(&painted, &view) else {
             tracing::warn!(target: "aether_puppet", "dump_planes: no canvas before the first resize");
             return;
@@ -496,47 +526,35 @@ impl WasmActor for Puppet {
 
         let eye = self.eye();
         if self.drawn_from != Some(eye) {
-            let mut triangles: Vec<DrawTriangle> = Vec::new();
-
             // The face rides the per-eye path rather than the cached
             // surface, because the nose bar retires once her face turns
             // over its own bridge and that is a question about where the
             // eye is. Suggestive contours are there for the same reason —
-            // they are the silhouette one derivative out. Both cost a ray
-            // per point against a mesh already indexed for occlusion.
-            let drawing = self
+            // they are the silhouette one derivative out.
+            self.curves = self
                 .surface
                 .iter()
                 .cloned()
                 .chain(self.face(subject, eye))
                 .chain(extract::suggestive(subject, self.labels.as_ref(), eye, &self.settings))
-                .chain(extract::silhouettes(subject, eye));
-
-            for curve in drawing {
-                // Tone gating already happened at load — it does not depend
-                // on the eye — so all that is left per frame is occlusion,
-                // and that is always asked of the fine mesh: what stands in
-                // front of a stroke is a question about the real surface.
-                // Every curve is extracted from that same mesh, so they all
-                // carry its ray bias into the split.
-                for run in visibility::runs(
-                    subject,
-                    eye,
-                    &curve,
-                    &|_| true,
-                    visibility::Mode::Opaque,
-                    VISIBILITY_STRIDE,
-                    subject.surface_bias(),
-                ) {
-                    ribbon::ribbon(&run, eye, 0, &mut triangles);
-                }
-            }
-
-            self.drawn = triangles;
+                .chain(extract::silhouettes(subject, eye))
+                .collect();
             self.drawn_from = Some(eye);
-        }
-        if !self.drawn.is_empty() {
-            render.send_many(&self.drawn);
+
+            // Occlusion is no longer asked here. The drawing goes to the
+            // GPU whole — every curve, unsplit — and the visibility
+            // field decides which of its points carry width (ADR-0172).
+            // What is left on this side is the lay-out and the pack:
+            // extraction above, and the rail solve inside `solve`.
+            if !self.strokes.solve(&self.curves, eye, self.view_matrix(), subject.surface_bias(), self.aspect)
+                && self.strokes.live()
+            {
+                tracing::warn!(
+                    target: "aether_puppet",
+                    curves = self.curves.len(),
+                    "the drawing does not fit the visibility field; no ink this frame",
+                );
+            }
         }
 
         // The easel, under everything above: develop when the view has
@@ -569,8 +587,13 @@ impl WasmActor for Puppet {
                 anchors,
                 face,
             });
-            let painted =
-                easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &self.drawn, chart };
+            // The CPU split, deferred behind the easel's own gate: the
+            // wash smears along the drawing's strokes, so it wants the
+            // visible runs — and it wants them a hundred times less
+            // often than the frame does.
+            let curves = &self.curves;
+            let split = || Self::split(subject, curves, eye);
+            let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &split, chart };
 
             self.easel.develop(&painted, &view, self.dragging);
         }
@@ -582,18 +605,21 @@ impl WasmActor for Puppet {
         // the dispatch that reads them all — to the same mailbox, so the
         // render cap sees them in exactly this order.
         if let Some(register) = self.easel.take_register() {
+            self.awaiting.registers.push_back(Awaiting::Easel);
             render.send(register);
         }
         for destroy in self.easel.take_destroys() {
             render.send(&destroy);
         }
         for create in self.easel.take_creates() {
+            self.awaiting.textures.push_back(Awaiting::Easel);
             render.send(&create);
         }
         for update in self.easel.take_updates() {
             render.send(&update);
         }
         if let Some(create) = self.easel.take_ink_create() {
+            self.awaiting.geometries.push_back(Awaiting::Easel);
             render.send(&create);
         }
         if let Some(update) = self.easel.take_ink_update() {
@@ -606,6 +632,65 @@ impl WasmActor for Puppet {
         if let Some(sheet) = self.easel.draw(&view, subject_radius) {
             render.send(&sheet);
         }
+
+        // The ink's own mail, in the same dependency order and after
+        // the wash's — the sheet draws in the material pass and the ink
+        // composites in the overlay pass, so the ink lands on top by
+        // the pass order rather than by anything sent here.
+        for register in self.strokes.take_registers() {
+            self.awaiting.registers.push_back(Awaiting::Strokes);
+            render.send(&register);
+        }
+        for destroy in self.strokes.take_destroys() {
+            render.send(&destroy);
+        }
+        for create in self.strokes.take_creates() {
+            self.awaiting.textures.push_back(Awaiting::Strokes);
+            render.send(&create);
+        }
+        for create in self.strokes.take_geometry_creates() {
+            self.awaiting.geometries.push_back(Awaiting::Strokes);
+            render.send(&create);
+        }
+        for update in self.strokes.take_geometry_updates() {
+            render.send(&update);
+        }
+        for dispatch in self.strokes.take_dispatches() {
+            render.send(&dispatch);
+        }
+        // After the sheet, and blending over it: the material pass
+        // writes no depth, so the two billboards compose in send order.
+        if let Some(ink) = self.strokes.draw(&view, subject_radius) {
+            render.send(&ink);
+        }
+    }
+
+    /// The drawing split into visible runs and ribboned, on the CPU.
+    ///
+    /// The frame's ink no longer comes from here — the stroke program
+    /// rasterizes it from the visibility field — but the wash's flow
+    /// bake still reads triangles, and the parity gates still compare
+    /// against this. Tone gating already happened at load, so all that
+    /// is asked per call is occlusion, and always of the fine mesh:
+    /// what stands in front of a stroke is a question about the real
+    /// surface.
+    fn split(subject: &Mesh, curves: &[Curve3], eye: Vec3) -> Vec<DrawTriangle> {
+        let mut triangles = Vec::new();
+        for curve in curves {
+            for run in visibility::runs(
+                subject,
+                eye,
+                curve,
+                &|_| true,
+                visibility::Mode::Opaque,
+                VISIBILITY_STRIDE,
+                subject.surface_bias(),
+            ) {
+                ribbon::ribbon(&run, eye, 0, &mut triangles);
+            }
+        }
+
+        triangles
     }
 
     /// The render cap answered the easel's program register. `Err` is
@@ -614,12 +699,17 @@ impl WasmActor for Puppet {
     /// it ask again every settle.
     #[handler::single]
     fn on_program_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResult) {
-        match result {
-            ProgramRegisterResult::Ok { program_id } => self.easel.registered(Ok(program_id)),
+        let result = match result {
+            ProgramRegisterResult::Ok { program_id } => Ok(program_id),
             ProgramRegisterResult::Err { reason } => {
-                tracing::info!(target: "aether_puppet", reason = %reason, "easel disabled: program register refused");
-                self.easel.registered(Err(()));
+                tracing::info!(target: "aether_puppet", reason = %reason, "layer disabled: program register refused");
+                Err(())
             }
+        };
+        match self.awaiting.registers.pop_front() {
+            Some(Awaiting::Easel) => self.easel.registered(result),
+            Some(Awaiting::Strokes) => self.strokes.registered(result),
+            None => {}
         }
     }
 
@@ -628,12 +718,17 @@ impl WasmActor for Puppet {
     /// for the session rather than letting it ask again every settle.
     #[handler::single]
     fn on_texture_created(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateTextureResult) {
-        match result {
-            CreateTextureResult::Ok { texture_id } => self.easel.created(Ok(texture_id)),
+        let result = match result {
+            CreateTextureResult::Ok { texture_id } => Ok(texture_id),
             CreateTextureResult::Err { error } => {
-                tracing::info!(target: "aether_puppet", error = %error, "easel disabled: create_texture refused");
-                self.easel.created(Err(()));
+                tracing::info!(target: "aether_puppet", error = %error, "layer disabled: create_texture refused");
+                Err(())
             }
+        };
+        match self.awaiting.textures.pop_front() {
+            Some(Awaiting::Easel) => self.easel.created(result),
+            Some(Awaiting::Strokes) => self.strokes.created(result),
+            None => {}
         }
     }
 
@@ -643,12 +738,17 @@ impl WasmActor for Puppet {
     /// its geometry has nothing to dispatch.
     #[handler::single]
     fn on_geometry_created(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateGeometryResult) {
-        match result {
-            CreateGeometryResult::Ok { geometry_id } => self.easel.ink_created(Ok(geometry_id)),
+        let result = match result {
+            CreateGeometryResult::Ok { geometry_id } => Ok(geometry_id),
             CreateGeometryResult::Err { reason } => {
-                tracing::info!(target: "aether_puppet", reason = %reason, "easel disabled: create_geometry refused");
-                self.easel.ink_created(Err(()));
+                tracing::info!(target: "aether_puppet", reason = %reason, "layer disabled: create_geometry refused");
+                Err(())
             }
+        };
+        match self.awaiting.geometries.pop_front() {
+            Some(Awaiting::Easel) => self.easel.ink_created(result),
+            Some(Awaiting::Strokes) => self.strokes.geometry_created(result),
+            None => {}
         }
     }
 }

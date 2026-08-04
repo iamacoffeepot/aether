@@ -55,6 +55,15 @@ pub fn program_uniform_layout(device: &wgpu::Device, bound_bytes: u64) -> wgpu::
 /// filterability: a filterable input gets the `Float { filterable: true }`
 /// / `Filtering` pair, a data-plane input (`R32Float`) the non-filtering
 /// pair, matching the shared [`super::TextureBindings`] convention.
+///
+/// Visible to both stages, for the same reason the uniform window is
+/// (ADR-0172): a draw pass whose vertex stage displaces geometry by a
+/// data plane — the ink ribbons reading their own visibility field —
+/// must `textureLoad` that plane before the rasterizer exists to have a
+/// fragment stage. Sampling with implicit derivatives stays a
+/// fragment-only operation by WGSL's own rule, so widening the layout
+/// grants a vertex stage `textureLoad` / `textureSampleLevel` and
+/// nothing more, and visibility a stage does not use costs nothing.
 #[must_use]
 pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu::BindGroupLayout {
     let mut entries = Vec::with_capacity(filterable.len() * 2);
@@ -62,7 +71,7 @@ pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu
     for &filterable in filterable {
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -72,7 +81,7 @@ pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu
         });
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base + 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Sampler(if filterable {
                 wgpu::SamplerBindingType::Filtering
             } else {
