@@ -112,7 +112,7 @@ pub const PLANE_COUNT: usize = 4;
 /// drawing's points in two buffers.
 ///
 /// The points divide by volatility rather than by class
-/// ([`Drawing`](crate::feature::Drawing)). [`RESIDENT`] carries the
+/// ([`Drawing`]). [`RESIDENT`] carries the
 /// curves that do not depend on the eye and travels once per subject;
 /// [`VOLATILE`] carries the rest and travels per re-split. The two
 /// occupy disjoint texels, so the passes that rasterize them write into
