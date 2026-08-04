@@ -45,15 +45,15 @@ use aether_harness_substrate_capture::visual::{decode_png, encode_png};
 use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent, LoadResult, Render, WindowId, WindowSize};
 use aether_math::{Mat4, Vec2, Vec3};
 use aether_puppet::easel::program::wash::{Canvas, Faces, Frame, Placement, Presence};
-use aether_puppet::easel::program::{bake, face, ink, sight, stroke, wash};
+use aether_puppet::easel::program::{bake, face, sight, stroke, wash};
 use aether_puppet::easel::survey::{self, Survey};
 use aether_puppet::easel::{View, accent};
 use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{Load, Look, anchor, chart, ribbon, visibility};
-use aether_render::{DrawTriangle, PassTimingRow, ProgramTimings, ProgramTimingsResult};
+use aether_puppet::{Load, Look, anchor, chart};
+use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
 /// The address a loaded component registers at (ADR-0099).
 const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
@@ -220,7 +220,7 @@ fn the_frame_paces_at_the_pinned_framing() {
         .expect("prime the pinned framing");
 
     if let Some(pinned) = photograph(&mut harness, "AETHER_PUPPET_GATE_PNG", "the pinned framing") {
-        compare_against_baseline(&pinned);
+        compare_against_baseline(&pinned, "AETHER_PUPPET_BASELINE_PNG", "AETHER_PUPPET_DIFF_PNG");
     }
     assert_the_develop_repeats(&mut harness);
 
@@ -242,7 +242,11 @@ fn the_frame_paces_at_the_pinned_framing() {
     harness
         .execute(vec![("turn", HarnessOp::send_and_settle(PUPPET, &look(turned))), ("settle", HarnessOp::advance(8))])
         .expect("settle the turned framing");
-    photograph(&mut harness, "AETHER_PUPPET_TURNED_PNG", &format!("azimuth {turned:.1} after the orbit"));
+    if let Some(turned) =
+        photograph(&mut harness, "AETHER_PUPPET_TURNED_PNG", &format!("azimuth {turned:.1} after the orbit"))
+    {
+        compare_against_baseline(&turned, "AETHER_PUPPET_TURNED_BASELINE_PNG", "AETHER_PUPPET_TURNED_DIFF_PNG");
+    }
 }
 
 /// Tripwire: a held view must develop the same sheet every frame.
@@ -308,13 +312,18 @@ fn handler_cost(harness: &mut SubstrateHarness, kind: aether_data::KindId) -> f6
 /// environment and both are optional, so an ordinary run does none of
 /// this — it is the A/B a change to the look is argued with.
 ///
+/// The variables are named by the caller rather than fixed, because the
+/// two framings this instrument photographs are two separate A/Bs: the
+/// pinned one is the gate, and the turned one is where a change that only
+/// shows once the camera has moved is caught.
+///
 /// Differences are reported in 8-bit steps of the worst channel, which
 /// is the same currency `program_wash_scenario` states its budgets in.
 /// The difference image is amplified so a change the eye would otherwise
 /// have to hunt for is visible at a glance; the numbers beside it are
 /// what the amplification must not be read instead of.
-fn compare_against_baseline(after: &Path) {
-    let (Ok(baseline), Ok(diff)) = (env::var("AETHER_PUPPET_BASELINE_PNG"), env::var("AETHER_PUPPET_DIFF_PNG")) else {
+fn compare_against_baseline(after: &Path, baseline_variable: &str, diff_variable: &str) {
+    let (Ok(baseline), Ok(diff)) = (env::var(baseline_variable), env::var(diff_variable)) else {
         return;
     };
     let read = |path: &Path| {
@@ -441,10 +450,6 @@ fn the_drawing_divides_by_volatility() {
 /// project through the matrix the component's own frame does.
 const FIELD_OF_VIEW: f32 = 0.454;
 
-/// Occlusion sampling stride — `Puppet::VISIBILITY_STRIDE`, so the split
-/// timed below casts the rays the shipped one casts.
-const VISIBILITY_STRIDE: usize = 3;
-
 /// The studio's seed. Any seed rolls the same amount of work; this is the
 /// one the easel develops with, so the blob timed here is the shipped
 /// blob's size.
@@ -492,16 +497,14 @@ fn the_render_handler_divides_by_phase() {
         at.resident.len(),
         volatile.len(),
     );
-    time_the_develop(&at, drawing, &view, canvas);
+    time_the_develop(&at, &view, canvas);
     time_the_eye_moved_half(&at, drawing, &view);
 }
 
 /// The phases `Easel::develop` runs, in the order it runs them — the ones
 /// a held view now skips entirely.
-fn time_the_develop(at: &Subject, drawing: Drawing<'_>, view: &View, canvas: Canvas) {
+fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
     let (body_width, body_height) = canvas.body();
-    let drawn =
-        phase("split — the visible runs the ink plane rasterizes", PHASE_REPEATS, || at.split(drawing, view.eye));
     let survey = phase("survey::measure — per subject", 1, || Survey::measure(&at.mesh, &at.scores));
     let centroids = phase("survey::centroids", PHASE_REPEATS, || {
         survey.centroids(&at.mesh, view.eye, &view.view_proj, body_width, body_height)
@@ -527,18 +530,11 @@ fn time_the_develop(at: &Subject, drawing: Drawing<'_>, view: &View, canvas: Can
     let wanted = Presence::of(&placement);
     let slice =
         phase("seed_uniforms — per canvas and visible set", 1, || program.seed_uniforms(SHEET_SEED, canvas, wanted));
-    let frame = Frame {
-        view_proj: view.view_proj,
-        placement,
-        faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }),
-    };
+    let frame = Frame { placement, faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }) };
     let wash_uniforms =
         phase("frame_uniforms — the wash blob", PHASE_REPEATS, || program.frame_uniforms(&slice, &frame));
     phase("bake uniforms", PHASE_REPEATS, || bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode());
 
-    let ink_bytes = phase("ink pack — the drawing's vertex and index buffers", PHASE_REPEATS, || {
-        (ink::vertices(&drawn), ink::indices(&drawn))
-    });
     let aperture_bytes = phase("aperture pack", PHASE_REPEATS, || {
         (
             face::vertices(&fine_eyes, canvas.width, canvas.height),
@@ -551,11 +547,8 @@ fn time_the_develop(at: &Subject, drawing: Drawing<'_>, view: &View, canvas: Can
 
     let megabytes = |bytes: usize| bytes as f64 / 1.0e6;
     eprintln!(
-        "phase: a develop that re-derives ships {:.2} MB of geometry — ink {:.2} MB over {} triangles, aperture \
-         {:.3} MB — and {} bytes of wash uniforms",
-        megabytes(ink_bytes.0.len() + ink_bytes.1.len() + aperture_bytes.0.len() + aperture_bytes.1.len()),
-        megabytes(ink_bytes.0.len() + ink_bytes.1.len()),
-        drawn.len(),
+        "phase: a develop that re-derives ships {:.3} MB of geometry — the aperture alone — and {} bytes of wash \
+         uniforms",
         megabytes(aperture_bytes.0.len() + aperture_bytes.1.len()),
         wash_uniforms.len(),
     );
@@ -615,21 +608,6 @@ impl Subject {
             .chain(extract::suggestive(&self.mesh, Some(&self.labels), eye, &self.settings))
             .chain(extract::silhouettes(&self.mesh, eye))
             .collect()
-    }
-
-    /// The drawing split into visible runs and ribboned — `Puppet::split`,
-    /// which the easel asks for once per develop.
-    fn split(&self, drawing: Drawing<'_>, eye: Vec3) -> Vec<DrawTriangle> {
-        let mut triangles = Vec::new();
-        for curve in drawing.curves() {
-            let mode = visibility::Mode::Opaque;
-            let bias = self.mesh.surface_bias();
-            for run in visibility::runs(&self.mesh, eye, curve, &|_| true, mode, VISIBILITY_STRIDE, bias) {
-                ribbon::ribbon(&run, eye, 0, &mut triangles);
-            }
-        }
-
-        triangles
     }
 }
 

@@ -53,8 +53,9 @@
 //! they are extracted once at load and kept, and so are the anchors the
 //! chart draws around. Per frame there is the silhouette, the charted face
 //! (its nose bar retires once she turns far enough for the profile to draw
-//! her nose itself), the suggestive contours, and the visibility split —
-//! everything that depends on where the eye is, and nothing else. The
+//! her nose itself) and the suggestive contours — everything that depends
+//! on where the eye is, and nothing else. Occlusion is not among them any
+//! more: it is a field the GPU derives per frame (ADR-0172). The
 //! offline renderer recomputes all of it every frame because it has no
 //! reason not to; here that difference is most of the frame budget.
 //!
@@ -93,7 +94,7 @@ use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Rende
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{Mat4, Vec2, Vec3};
 use aether_render::{
-    CreateGeometryResult, CreateTextureResult, DrawTriangle, ProgramRegisterResult, RenderCapability, ViewProjection,
+    CreateGeometryResult, CreateTextureResult, ProgramRegisterResult, RenderCapability, ViewProjection,
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
@@ -126,22 +127,6 @@ const ORBIT_DEGREES_PER_PIXEL: f32 = 0.25;
 
 /// Fraction of the current distance one wheel notch covers.
 const DOLLY_PER_NOTCH: f32 = 0.08;
-
-/// Cast an occlusion ray every Nth point rather than at all of them.
-///
-/// A curve's points sit a triangle apart, far finer than the scale at which
-/// occlusion actually changes — an edge a stroke disappears behind is many
-/// points wide. Sampling every third takes two thirds of the rays off the
-/// frame, and the split refines any window whose ends disagree, so a stroke
-/// still ends on the edge it disappears behind rather than at the next
-/// sample.
-///
-/// Measured on the kitsune at the default framing, with the silhouette
-/// solved on the fine mesh: casting at every point instead costs 15.5ms of
-/// the eye-moved path against 9.6ms sampled-and-refined, which is most of
-/// a frame's headroom for a drawing that differs by a hundredth of a
-/// percent of its points.
-const VISIBILITY_STRIDE: usize = 3;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.load_context")]
@@ -510,9 +495,13 @@ impl WasmActor for Puppet {
             aspect: self.aspect,
             field_of_view: FIELD_OF_VIEW,
         };
-        let (drawing, eye) = (Drawing { resident: &self.surface, volatile: &self.volatile }, self.eye());
-        let split = || Self::split(subject, drawing, eye);
-        let painted = easel::Subject { mesh: subject, scores, settings: &self.settings, drawn: &split, chart: None };
+        let painted = easel::Subject {
+            mesh: subject,
+            scores,
+            settings: &self.settings,
+            ink: self.strokes.ink_plane(),
+            chart: None,
+        };
         let Some(planes) = self.easel.bake_planes(&painted, &view) else {
             tracing::warn!(target: "aether_puppet", "dump_planes: no canvas before the first resize");
             return;
@@ -606,26 +595,54 @@ impl WasmActor for Puppet {
                 anchors,
                 face,
             });
-            // The CPU split, asked for rather than handed over: the wash
-            // wants the visible runs to rasterize its own ink coverage
-            // plane from, and the easel is the only caller left that
-            // needs them — the frame's ink comes off the visibility
-            // field (ADR-0172) and never sees a CPU triangle.
-            let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
-            let split = || Self::split(subject, drawing, eye);
-            let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &split, chart };
+            // Where the ink stands, named rather than re-derived: the
+            // stroke program reduced it out of the very raster it drew
+            // the frame's ink from, one dispatch ago in this same handler
+            // (iamacoffeepot/aether#4451).
+            let ink = self.strokes.ink_plane();
+            let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, ink, chart };
 
             self.easel.develop(&painted, &view);
         }
 
-        // The easel's mail for this frame, in dependency order: the
-        // programs a re-laid graph has finished with, the program
-        // registers (both at the first develop, the wash's again after a
-        // re-lay), the texture destroys a resize owes, the creates
-        // carrying this canvas' resident planes, the geometry creates and
-        // the updates that move with the eye, then the two dispatches
-        // that read them all — to the same mailbox, so the render cap
-        // sees them in exactly this order.
+        // The ink's own mail first, in dependency order: the register,
+        // the texture destroys a resize owes, the creates, the geometry
+        // creates and the updates the eye moved, then the field's
+        // dispatch and the ink's. A program's passes record in dispatch
+        // arrival order, and the ink's last pass but one writes the
+        // coverage plane the wash below binds — so this order is what
+        // makes the paint read this frame's drawing rather than the
+        // frame before's.
+        for register in self.strokes.take_registers() {
+            self.awaiting.registers.push_back(Awaiting::Strokes);
+            render.send(&register);
+        }
+        for destroy in self.strokes.take_destroys() {
+            render.send(&destroy);
+        }
+        for create in self.strokes.take_creates() {
+            self.awaiting.textures.push_back(Awaiting::Strokes);
+            render.send(&create);
+        }
+        for create in self.strokes.take_geometry_creates() {
+            self.awaiting.geometries.push_back(Awaiting::Strokes);
+            render.send(&create);
+        }
+        for update in self.strokes.take_geometry_updates() {
+            render.send(&update);
+        }
+        for dispatch in self.strokes.take_dispatches() {
+            render.send(&dispatch);
+        }
+
+        // The easel's, in the same dependency order: the programs a
+        // re-laid graph has finished with, the program registers (both at
+        // the first develop, the wash's again after a re-lay), the
+        // texture destroys a resize owes, the creates carrying this
+        // canvas' resident planes, the geometry creates and the update
+        // that moves with the eye, then the two dispatches that read them
+        // all — to the same mailbox, so the render cap sees them in
+        // exactly this order.
         for destroy in self.easel.take_program_destroys() {
             render.send(&destroy);
         }
@@ -650,69 +667,18 @@ impl WasmActor for Puppet {
         for dispatch in self.easel.take_dispatch() {
             render.send(&dispatch);
         }
+
+        // The two billboards, sheet first. The material pass writes no
+        // depth, so they compose in send order — which is what places the
+        // ink in front of the paint, rather than anything about the order
+        // their programs were dispatched in above.
         let subject_radius = (subject.max - subject.min).length() * 0.5;
         if let Some(sheet) = self.easel.draw(&view, subject_radius) {
             render.send(&sheet);
         }
-
-        // The ink's own mail, in the same dependency order and after
-        // the wash's — the sheet draws in the material pass and the ink
-        // composites in the overlay pass, so the ink lands on top by
-        // the pass order rather than by anything sent here.
-        for register in self.strokes.take_registers() {
-            self.awaiting.registers.push_back(Awaiting::Strokes);
-            render.send(&register);
-        }
-        for destroy in self.strokes.take_destroys() {
-            render.send(&destroy);
-        }
-        for create in self.strokes.take_creates() {
-            self.awaiting.textures.push_back(Awaiting::Strokes);
-            render.send(&create);
-        }
-        for create in self.strokes.take_geometry_creates() {
-            self.awaiting.geometries.push_back(Awaiting::Strokes);
-            render.send(&create);
-        }
-        for update in self.strokes.take_geometry_updates() {
-            render.send(&update);
-        }
-        for dispatch in self.strokes.take_dispatches() {
-            render.send(&dispatch);
-        }
-        // After the sheet, and blending over it: the material pass
-        // writes no depth, so the two billboards compose in send order.
         if let Some(ink) = self.strokes.draw(&view, subject_radius) {
             render.send(&ink);
         }
-    }
-
-    /// The drawing split into visible runs and ribboned, on the CPU.
-    ///
-    /// The frame's ink no longer comes from here — the stroke program
-    /// rasterizes it from the visibility field — but the wash's flow
-    /// bake still reads triangles, and the parity gates still compare
-    /// against this. Tone gating already happened at load, so all that
-    /// is asked per call is occlusion, and always of the fine mesh:
-    /// what stands in front of a stroke is a question about the real
-    /// surface.
-    fn split(subject: &Mesh, drawing: Drawing<'_>, eye: Vec3) -> Vec<DrawTriangle> {
-        let mut triangles = Vec::new();
-        for curve in drawing.curves() {
-            for run in visibility::runs(
-                subject,
-                eye,
-                curve,
-                &|_| true,
-                visibility::Mode::Opaque,
-                VISIBILITY_STRIDE,
-                subject.surface_bias(),
-            ) {
-                ribbon::ribbon(&run, eye, 0, &mut triangles);
-            }
-        }
-
-        triangles
     }
 
     /// The render cap answered the easel's program register. `Err` is

@@ -71,10 +71,10 @@ use aether_math::{Mat4, Rgb, Rgba, Vec2, Vec3};
 use aether_puppet::chart::EyeFrame;
 use aether_puppet::easel::field::{self, Planes, Sheet};
 use aether_puppet::easel::image::{self, Flow};
+use aether_puppet::easel::program::face;
 use aether_puppet::easel::program::wash::{self, Canvas, Faces, Frame, Placement, Presence, WashBindings, WashProgram};
-use aether_puppet::easel::program::{face, ink};
 use aether_puppet::easel::survey::SLOTS;
-use aether_puppet::easel::{accent, palette};
+use aether_puppet::easel::{accent, palette, regions};
 use aether_puppet::labels::{BROW, DRESS, EYE, HAIR, INNER_EAR, LIPS, SKIN, TUFT};
 use aether_render::QuadBlend;
 use aether_render::{
@@ -251,14 +251,14 @@ fn striped_ink() -> Vec<f32> {
     (0..CANVAS_WIDTH * CANVAS_HEIGHT).map(|i| f32::from(((i % CANVAS_WIDTH) / STRIPE).is_multiple_of(2))).collect()
 }
 
-/// The same stripes as ribbon triangles for the ink pass to rasterize.
+/// The same stripes as ribbon triangles, which the oracle rasterizes into
+/// the ink coverage plane this scenario binds.
 ///
-/// The flow field is solved on the GPU now, off whatever the ink pass
-/// draws, so the two develops only share a flow if they share a drawing.
-/// Each stripe is a quad spanning its own three pixel columns; the camera
-/// maps world x linearly onto the canvas, so a quad's edges land exactly
-/// between pixel centres and the rasterized coverage is the CPU plane
-/// texel for texel.
+/// The flow field is solved on the GPU now, off whatever plane the wash
+/// is handed, so the two develops only share a flow if they share a
+/// drawing. Each stripe is a quad spanning its own three pixel columns;
+/// the camera maps world x linearly onto the canvas, so a quad's edges
+/// land exactly between pixel centres.
 fn striped_ribbons() -> Vec<DrawTriangle> {
     let at = |x: usize, y: f32| Vertex {
         x: x as f32 / CANVAS_WIDTH as f32 - 0.5,
@@ -445,6 +445,12 @@ const EXPECTED_COATS: [(&str, u8); 10] = [
 struct Develop {
     program: WashProgram,
     bindings: WashBindings,
+    /// The ink coverage plane, staged from the oracle's own rasterization
+    /// rather than reduced off a raster. The wash reads this plane and
+    /// nothing else about the drawing, so what the scenario owes it is
+    /// the plane; where the plane comes from is the ink layer's parity,
+    /// held in `program_ink_plane_scenario`.
+    ink: u32,
     geometries: Vec<u32>,
 }
 
@@ -515,7 +521,6 @@ fn the_wash_program_develops_the_cpu_sheet() {
         let (centroids, stains) = (notched(&centroids), notched(&stains));
         let placement = Placement { centroids: &centroids, stains: &stains, iris };
         let frame = Frame {
-            view_proj: camera(),
             placement: Placement { centroids: &centroids, stains: &stains, iris },
             faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }),
         };
@@ -523,7 +528,7 @@ fn the_wash_program_develops_the_cpu_sheet() {
 
         let dispatch = ProgramDispatch {
             program_id: register(&mut harness, &develop.program),
-            bindings: develop.bindings.to_vec(),
+            bindings: develop.bindings.dispatched(develop.ink),
             geometries: develop.geometries.clone(),
             uniforms: develop.program.frame_uniforms(&seed, &frame),
         };
@@ -561,8 +566,8 @@ fn register(harness: &mut SubstrateHarness, program: &WashProgram) -> u32 {
 }
 
 /// Everything one develop binds: the bake's packed plane and the paper,
-/// each at the extent its own reader develops at, plus the two geometries
-/// the drawing and the chart supply.
+/// each at the extent its own reader develops at, the ink coverage plane
+/// the drawing landed on, and the geometry the chart supplies.
 fn stage(
     harness: &mut SubstrateHarness,
     divisor: u32,
@@ -587,29 +592,18 @@ fn stage(
         sheet: rgba_nearest(harness, "sheet", Vec::new()),
     };
 
-    let ribbons = striped_ribbons();
-    let geometries = vec![
-        create_geometry(
-            harness,
-            "ink_geometry",
-            &CreateGeometry {
-                layout: ink::geometry_slot().layout,
-                vertices: ink::vertices(&ribbons),
-                indices: ink::indices(&ribbons),
-            },
-        ),
-        create_geometry(
-            harness,
-            "aperture_geometry",
-            &CreateGeometry {
-                layout: face::geometry_slot().layout,
-                vertices: face::vertices(eyes, canvas.width, canvas.height),
-                indices: face::indices(eyes, canvas.width, canvas.height),
-            },
-        ),
-    ];
+    let ink = data_plane(harness, "ink", body, &regions::ink(&striped_ribbons(), &camera(), body.0, body.1));
+    let geometries = vec![create_geometry(
+        harness,
+        "aperture_geometry",
+        &CreateGeometry {
+            layout: face::geometry_slot().layout,
+            vertices: face::vertices(eyes, canvas.width, canvas.height),
+            indices: face::indices(eyes, canvas.width, canvas.height),
+        },
+    )];
 
-    Develop { program: wash::program_at(canvas.height, divisor), bindings, geometries }
+    Develop { program: wash::program_at(canvas.height, divisor), bindings, ink, geometries }
 }
 
 /// The smear must have something to ride: without coherent flow inside

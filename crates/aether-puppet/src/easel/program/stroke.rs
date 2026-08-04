@@ -55,6 +55,7 @@ use aether_render::{
 };
 
 use super::sight::Layout;
+use super::wash;
 use crate::feature::{Drawing, Half};
 use crate::ribbon::{self, Anchor};
 use crate::style;
@@ -75,9 +76,12 @@ pub const TOTAL: u32 = 3;
 pub const REFERENCE: u32 = 4;
 /// The supersampled ink sheet, and so the reference extent.
 pub const INK: u32 = 5;
+/// The wash's ink coverage plane: where ink stands, reduced to the wash
+/// body's own extent (iamacoffeepot/aether#4451).
+pub const INK_PLANE: u32 = 6;
 
 /// How many bindings a dispatch supplies.
-pub const BINDING_COUNT: usize = 6;
+pub const BINDING_COUNT: usize = 7;
 
 /// Geometry slot indices: the drawing's ribbons in two buffers, divided
 /// by volatility the way the field's points are. The subject is not
@@ -119,6 +123,28 @@ pub fn plane_slot() -> SlotSpec {
 #[must_use]
 pub fn ink_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }
+}
+
+/// Raster texels per ink-coverage texel on each axis: the supersample
+/// this program renders at, times the notch the wash body develops at.
+///
+/// Restated in the WGSL as `INK_PLANE_FOOTPRINT`, because a Rust constant
+/// cannot be imported there; the two must move together.
+pub const INK_PLANE_FOOTPRINT: u32 = SUPERSAMPLE * wash::BODY_DIVISOR;
+
+/// The wash's ink coverage plane, at the extent the wash body develops
+/// at — `R32Float`, the shape [`wash::program`] binds it as.
+///
+/// The divisor is what makes the two programs agree on one texture
+/// without either knowing the other's reference extent. This program
+/// resolves it against twice the canvas and the wash resolves its own
+/// against the canvas, and both floor divisions land on the same texel
+/// count for as long as the two layers develop at one canvas — which is
+/// why [`crate::easel::wash_canvas`] is the single place either resolves
+/// one.
+#[must_use]
+pub fn ink_plane_slot() -> SlotSpec {
+    SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Divided { divisor: INK_PLANE_FOOTPRINT } }
 }
 
 /// The ribbon geometry's layout: [`ribbon::Anchor`] in full, the two
@@ -297,9 +323,35 @@ pub fn sheet_size(canvas: (usize, usize)) -> (usize, usize) {
 
 /// The whole ink pass as one register graph.
 ///
-/// Three passes: the two ribbon halves into a raster transient — the
+/// Four passes: the two ribbon halves into a raster transient — the
 /// resident one clearing it, the volatile one loading what it left —
-/// then the resolve that turns it into the sheet the frame composites.
+/// then the wash's ink coverage plane reduced out of that raster, then
+/// the resolve that turns it into the sheet the frame composites.
+///
+/// # The coverage plane, and why it is derived here
+///
+/// The wash yields boundary duty to the ink: its flow field runs along
+/// the strokes, and its tide lines stop at them. What it needs to know
+/// is where ink stands — the drawing's own alpha rather than its colour
+/// — and that is exactly what the raster above holds, one frame at a
+/// time, with every hidden point already collapsed by the field. So
+/// `fs_ink_plane` reduces it: one texel of the wash body's extent takes
+/// the greatest alpha over the [`INK_PLANE_FOOTPRINT`]-square block of
+/// raster texels it covers, which claims a body texel exactly when a
+/// stroke passes anywhere through it (iamacoffeepot/aether#4451).
+///
+/// That the reduction is a maximum rather than a mean is the whole of
+/// it. Most of the drawing is thinner than one body texel, and a mean —
+/// or a single tap — would find a stroke only where it happened to pass
+/// near a sample, so the flow would be solved from a dashed drawing and
+/// report a confident orientation off the wrong lines. The maximum is
+/// also what the CPU rasterization it replaces meant by its half-pixel
+/// slack: claim the texel the stroke touches, not the texel whose centre
+/// it happens to cover.
+///
+/// It sits before the resolve because the resolve writes the reference
+/// binding, and the last pass' output binding is what states the
+/// reference extent.
 ///
 /// # There is no depth here, and that is a deviation from ADR-0172
 ///
@@ -347,22 +399,25 @@ pub fn program() -> ProgramRegister {
         uniform_length: StrokeUniforms::BYTES,
         repeat: None,
     };
+    let off_the_raster = |entry_point: &str, output: OutputSlot| ProgramPass {
+        stage: PassStage::Fragment,
+        entry_point: entry_point.to_owned(),
+        inputs: vec![InputSlot::Transient { index: RASTER }],
+        output,
+        uniform_offset: 0,
+        uniform_length: StrokeUniforms::BYTES,
+        repeat: None,
+    };
     let passes = vec![
         ribbons(RESIDENT, PassLoad::Clear),
         ribbons(VOLATILE, PassLoad::Load),
-        ProgramPass {
-            stage: PassStage::Fragment,
-            entry_point: "fs_resolve".to_owned(),
-            inputs: vec![InputSlot::Transient { index: RASTER }],
-            output: OutputSlot::Binding { index: INK },
-            uniform_offset: 0,
-            uniform_length: StrokeUniforms::BYTES,
-            repeat: None,
-        },
+        off_the_raster("fs_ink_plane", OutputSlot::Binding { index: INK_PLANE }),
+        off_the_raster("fs_resolve", OutputSlot::Binding { index: INK }),
     ];
 
-    let mut bindings = vec![plane_slot(); BINDING_COUNT - 1];
+    let mut bindings = vec![plane_slot(); BINDING_COUNT - 2];
     bindings.push(ink_slot());
+    bindings.push(ink_plane_slot());
 
     ProgramRegister {
         wgsl: STROKE_WGSL.to_owned(),

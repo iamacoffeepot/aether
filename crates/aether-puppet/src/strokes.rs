@@ -22,8 +22,9 @@
 //! 1. [`sight`] writes the four field planes at canvas resolution —
 //!    the point's verdict, its reach, its curve's coverage, its run's
 //!    arc.
-//! 2. [`stroke`] reads those planes in its vertex stage and rasterizes
-//!    the ribbons into a supersampled ink sheet.
+//! 2. [`stroke`] reads those planes in its vertex stage, rasterizes
+//!    the ribbons into a supersampled ink sheet, and reduces that same
+//!    raster into the wash's ink coverage plane on the way past.
 //!
 //! The sheet then composites as a screen-space quad, which puts it in
 //! the overlay pass — after the material pass the wash sheet draws in,
@@ -40,8 +41,9 @@ use aether_render::{
     VertexAttribute,
 };
 
-use crate::easel::View;
+use crate::easel::program::wash::BODY_DIVISOR;
 use crate::easel::program::{sight, stroke};
+use crate::easel::{View, wash_canvas};
 use crate::feature::{Drawing, Half};
 use crate::mesh::Mesh;
 
@@ -217,8 +219,12 @@ const INK_DEPTH_FLOOR: f32 = 0.25;
 
 /// Programs registered, in send order.
 const PROGRAM_COUNT: usize = 2;
-/// The five field planes plus the ink sheet.
-const TEXTURE_COUNT: usize = sight::PLANE_COUNT + 1;
+/// The five field planes, the ink sheet, and the wash's ink coverage
+/// plane — the stroke program's binding order.
+const TEXTURE_COUNT: usize = sight::PLANE_COUNT + 2;
+/// Where the sheet and the coverage plane sit among them.
+const SHEET: usize = sight::PLANE_COUNT;
+const INK_PLANE: usize = sight::PLANE_COUNT + 1;
 /// The field's four — subject, resident points, volatile points,
 /// curves — then the ink's two ribbon halves.
 const GEOMETRY_COUNT: usize = sight::GEOMETRY_COUNT + stroke::GEOMETRY_COUNT;
@@ -251,7 +257,11 @@ impl Strokes {
 
     /// The canvas to solve at.
     ///
-    /// The window when one has been announced. Otherwise a stand-in of
+    /// The window when one has been announced, resolved through
+    /// [`wash_canvas`] — the wash resolves its own the same way, and the
+    /// two have to land on one canvas because the coverage plane this
+    /// layer writes is a binding of both their programs
+    /// (iamacoffeepot/aether#4451). Otherwise a stand-in of
     /// the same shape as the frustum, which is all the ink needs: it
     /// composites as a world-space billboard spanning the frustum's own
     /// cross-section, so the sheet's *resolution* is a quality choice
@@ -259,8 +269,9 @@ impl Strokes {
     /// difference from a screen-space quad, which cannot be placed
     /// without knowing the window in pixels.
     fn resolve_canvas(&self, aspect: f32) -> (u32, u32) {
-        if let Some(window) = self.window {
-            return window;
+        if let Some((width, height)) = self.window {
+            let canvas = wash_canvas(width, height);
+            return (canvas.width as u32, canvas.height as u32);
         }
         let aspect = if aspect.is_finite() && aspect > 0.0 {
             aspect
@@ -289,6 +300,23 @@ impl Strokes {
     #[must_use]
     pub fn live(&self) -> bool {
         !self.disabled
+    }
+
+    /// The wash's ink coverage plane, once the set it belongs to stands.
+    ///
+    /// The wash binds this and reads where the drawing landed out of it
+    /// (iamacoffeepot/aether#4451). `None` until every texture in the set
+    /// has answered — a partial set has no id at this slot — and again
+    /// after a resize releases them, which is what makes the caller
+    /// re-read it per frame rather than keep it.
+    ///
+    /// A plane that stands but has never been dispatched into is
+    /// transparent, so a wash developed against it paints without a
+    /// drawing for the frame or two before the first dispatch lands,
+    /// exactly as the sheet shows no ink over the same frames.
+    #[must_use]
+    pub fn ink_plane(&self) -> Option<u32> {
+        self.textures.ids.get(INK_PLANE).copied()
     }
 
     /// Solve one frame's drawing for the GPU: lay the field out over
@@ -410,9 +438,10 @@ impl Strokes {
     }
 
     /// The creates for one canvas size: five writable field planes at
-    /// canvas resolution, then the ink sheet at twice its edge.
+    /// canvas resolution, the ink sheet at twice its edge, and the wash's
+    /// ink coverage plane at the wash body's own extent.
     ///
-    /// Every one is `Writable` — a program writes all five — and the
+    /// Every one is `Writable` — a program writes all seven — and the
     /// planes sample `Nearest` because a field texel is a point's
     /// verdict rather than a picture, while the sheet samples `Linear`
     /// so the composite down to the window resolves its supersample.
@@ -435,7 +464,7 @@ impl Strokes {
             pixels: Vec::new(),
         };
         let (sheet_width, sheet_height) = (width * stroke::SUPERSAMPLE, height * stroke::SUPERSAMPLE);
-        let mut creates = vec![plane; sight::PLANE_COUNT];
+        let mut creates = vec![plane.clone(); sight::PLANE_COUNT];
         creates.push(CreateTexture {
             width: sheet_width,
             height: sheet_height,
@@ -443,6 +472,16 @@ impl Strokes {
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
             pixels: Vec::new(),
+        });
+        // The wash body's own texels, which is what the coverage pass
+        // resolves to against this program's doubled reference and what
+        // the wash resolves to against the canvas. Both are floor
+        // divisions of the same canvas, so the two extents are the same
+        // number rather than two numbers that agree.
+        creates.push(CreateTexture {
+            width: (width / BODY_DIVISOR).max(1),
+            height: (height / BODY_DIVISOR).max(1),
+            ..plane
         });
 
         creates
@@ -600,7 +639,7 @@ impl Strokes {
         if !self.drawn {
             return None;
         }
-        let texture_id = *self.textures.ids.get(sight::PLANE_COUNT)?;
+        let texture_id = *self.textures.ids.get(SHEET)?;
 
         let forward = (view.target - view.eye).normalize_or(Vec3::new(0.0, 0.0, -1.0));
         // In front of the subject's near side, and so in front of the
