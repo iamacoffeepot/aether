@@ -8,9 +8,44 @@
 
 use std::collections::HashMap;
 
+use crate::VertexFormat;
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, vertex_stride_bytes,
 };
+
+/// Realized form of one declared attribute format. Variant names match
+/// their `wgpu::VertexFormat` counterparts, so the mapping is a
+/// rename.
+pub(super) fn wgpu_vertex_format(format: VertexFormat) -> wgpu::VertexFormat {
+    match format {
+        VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
+        VertexFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
+        VertexFormat::Float32 => wgpu::VertexFormat::Float32,
+        VertexFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
+        VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+    }
+}
+
+/// The `wgpu::VertexAttribute` list one declared layout realizes as
+/// (ADR-0171): attributes pack in declaration order with no padding, so
+/// each offset is the running sum of the formats before it and the
+/// whole run spans [`vertex_stride_bytes`]. The draw-pass pipeline
+/// builder binds these at slot 0.
+pub(super) fn wgpu_vertex_attributes(layout: &[VertexAttribute]) -> Vec<wgpu::VertexAttribute> {
+    let mut offset = 0u64;
+    layout
+        .iter()
+        .map(|attribute| {
+            let realized = wgpu::VertexAttribute {
+                format: wgpu_vertex_format(attribute.format),
+                offset,
+                shader_location: attribute.location,
+            };
+            offset += attribute.format.bytes() as u64;
+            realized
+        })
+        .collect()
+}
 
 /// The wgpu buffers a staged geometry realizes into at first GPU use:
 /// the packed vertex buffer, the 32-bit index buffer, and the index

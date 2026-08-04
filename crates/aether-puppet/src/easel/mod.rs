@@ -437,7 +437,7 @@ impl Easel {
         let uniforms = self.dispatch_uniforms.take()?;
 
         self.developed = true;
-        Some(ProgramDispatch { program_id, bindings: bindings.to_vec(), uniforms })
+        Some(ProgramDispatch { program_id, bindings: bindings.to_vec(), geometries: Vec::new(), uniforms })
     }
 
     /// The sheet, standing behind the subject and facing the eye.

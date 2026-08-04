@@ -87,6 +87,8 @@ fn ping_pong_register() -> ProgramRegister {
         wgsl: MODULE.to_owned(),
         bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
         transients: vec![full(TextureFormat::Rgba8)],
+        geometries: Vec::new(),
+        depth_transients: Vec::new(),
         passes: vec![
             pass("fs_threshold", vec![InputSlot::Binding { index: 0 }], OutputSlot::Transient { index: 0 }, 0, 4),
             pass("fs_invert", vec![InputSlot::PassOutput { pass: 0 }], OutputSlot::Binding { index: 1 }, 4, 4),
@@ -267,7 +269,10 @@ fn ping_pong_program_writes_expected_pixels_into_output() {
     // uniform-offset boundary).
     let uniforms: Vec<u8> = [0.5f32, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
     let pre = vec![
-        envelope("aether.render", &ProgramDispatch { program_id, bindings: vec![source_id, output_id], uniforms }),
+        envelope(
+            "aether.render",
+            &ProgramDispatch { program_id, bindings: vec![source_id, output_id], geometries: Vec::new(), uniforms },
+        ),
         envelope("aether.render", &output_overlay(output_id)),
     ];
     let captured =
@@ -338,7 +343,12 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
     let pre = vec![
         envelope(
             "aether.render",
-            &ProgramDispatch { program_id, bindings: vec![wrong_format_id, output_id], uniforms },
+            &ProgramDispatch {
+                program_id,
+                bindings: vec![wrong_format_id, output_id],
+                geometries: Vec::new(),
+                uniforms,
+            },
         ),
         envelope("aether.render", &output_overlay(output_id)),
         envelope(

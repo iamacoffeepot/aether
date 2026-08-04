@@ -6,9 +6,14 @@
 
 use naga::front::wgsl;
 use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
-use naga::{AddressSpace, Module, ShaderStage};
+use naga::{
+    AddressSpace, Binding, BuiltIn, Handle, Module, Scalar, ScalarKind, ShaderStage, Type, TypeInner, VectorSize,
+};
 
-use crate::{InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat};
+use crate::{
+    DrawPass, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, SlotExtent,
+    SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
+};
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
 /// cannot ask the executor to encode an effectively unbounded number of
@@ -28,15 +33,30 @@ pub enum ResolvedSlot {
 
 /// One validated pass: entry point, resolved slots, uniform window, and
 /// the flattened repeat (`repeat_count` is 1 for an unrepeated pass).
+/// `draw` is `Some` for a `PassStage::Draw` pass and `None` for a
+/// fullscreen fragment pass.
 #[derive(Debug)]
 pub struct PassPlan {
     pub entry_point: String,
+    pub draw: Option<DrawPlan>,
     pub inputs: Vec<ResolvedSlot>,
     pub output: ResolvedSlot,
     pub uniform_offset: u32,
     pub uniform_length: u32,
     pub repeat_count: u32,
     pub uniform_stride: u32,
+}
+
+/// One validated draw pass (ADR-0171): the authored vertex entry, the
+/// geometry slot the dispatch fills, the depth slot it clears and tests
+/// against (`None` for a pass that does not depth-test), and the color
+/// load semantic it declared.
+#[derive(Debug)]
+pub struct DrawPlan {
+    pub vertex_entry_point: String,
+    pub geometry: u32,
+    pub depth: Option<u32>,
+    pub load: PassLoad,
 }
 
 /// One transient's declaration plus its live range over the pass
@@ -57,6 +77,11 @@ pub struct TransientPlan {
 pub struct ProgramPlan {
     pub bindings: Vec<SlotSpec>,
     pub transients: Vec<TransientPlan>,
+    /// Declared geometry slots (ADR-0171), in dispatch-supply order.
+    pub geometries: Vec<GeometrySlotSpec>,
+    /// Declared depth transients (ADR-0171), by extent — the format is
+    /// fixed at `Depth32Float`.
+    pub depth_transients: Vec<SlotExtent>,
     pub passes: Vec<PassPlan>,
     /// The dispatch binding the final pass writes — the program's
     /// result texture, whose size is the reference extent.
@@ -110,6 +135,12 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     for (index, spec) in mail.transients.iter().enumerate() {
         check_extent(spec.extent, || format!("transient {index}"))?;
     }
+    for (index, extent) in mail.depth_transients.iter().enumerate() {
+        check_extent(*extent, || format!("depth transient {index}"))?;
+    }
+    for (index, slot) in mail.geometries.iter().enumerate() {
+        check_geometry_slot(index, slot)?;
+    }
 
     let mut transients: Vec<TransientPlan> =
         mail.transients.iter().map(|spec| TransientPlan { spec: *spec, first_write: None, last_use: None }).collect();
@@ -147,7 +178,15 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         ));
     }
 
-    Ok(ProgramPlan { bindings: mail.bindings.clone(), transients, passes, output_binding, written_bindings })
+    Ok(ProgramPlan {
+        bindings: mail.bindings.clone(),
+        transients,
+        geometries: mail.geometries.clone(),
+        depth_transients: mail.depth_transients.clone(),
+        passes,
+        output_binding,
+        written_bindings,
+    })
 }
 
 fn check_extent(extent: SlotExtent, slot: impl Fn() -> String) -> Result<(), String> {
@@ -155,6 +194,22 @@ fn check_extent(extent: SlotExtent, slot: impl Fn() -> String) -> Result<(), Str
         SlotExtent::Divided { divisor: 0 } => Err(format!("{}: extent divisor must be at least 1", slot())),
         SlotExtent::Full | SlotExtent::Divided { .. } => Ok(()),
     }
+}
+
+/// A declared geometry slot must be a layout a vertex buffer can be
+/// built from: at least one attribute, and no location claimed twice.
+/// Both would otherwise surface as an opaque `pipeline creation failed`
+/// from wgpu's own attribute validation.
+fn check_geometry_slot(index: usize, slot: &GeometrySlotSpec) -> Result<(), String> {
+    if slot.layout.is_empty() {
+        return Err(format!("geometry slot {index}: layout declares no attributes"));
+    }
+    for (position, attribute) in slot.layout.iter().enumerate() {
+        if slot.layout[..position].iter().any(|earlier| earlier.location == attribute.location) {
+            return Err(format!("geometry slot {index}: layout declares location {} twice", attribute.location));
+        }
+    }
+    Ok(())
 }
 
 // One linear walk per pass — entry point, inputs, output, window,
@@ -170,10 +225,12 @@ fn validate_pass(
     index: usize,
     pass: &ProgramPass,
 ) -> Result<PassPlan, String> {
-    // `PassStage` has one variant, so nothing to check yet; destructure
-    // so a future `Compute` arm fails to compile here rather than
-    // silently building a fragment pipeline.
-    let PassStage::Fragment = pass.stage;
+    // Matched rather than destructured so a future `Compute` arm fails
+    // to compile here rather than silently building a fragment pipeline.
+    let declared_draw = match &pass.stage {
+        PassStage::Fragment => None,
+        PassStage::Draw(draw) => Some(draw),
+    };
 
     let entry_index = module
         .entry_points
@@ -199,7 +256,23 @@ fn validate_pass(
         return Err(format!("pass {index} reads its own output slot"));
     }
 
-    if let Some(block_bytes) = uniform_block_bytes(module, info, entry_index)
+    let output_extent = match output {
+        ResolvedSlot::Binding(binding) => mail.bindings[binding as usize].extent,
+        ResolvedSlot::Transient(transient) => mail.transients[transient as usize].extent,
+    };
+    let draw = declared_draw
+        .map(|declared| validate_draw(mail, module, index, declared, (entry_index, &pass.entry_point), output_extent))
+        .transpose()?;
+
+    // The window must cover whichever stages read the block: a draw
+    // pass's vertex stage binds the same group-0 window its fragment
+    // stage does.
+    let block_bytes = [Some(entry_index), draw.as_ref().map(|resolved| resolved.vertex_entry_index)]
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| uniform_block_bytes(module, info, entry))
+        .max();
+    if let Some(block_bytes) = block_bytes
         && pass.uniform_length < block_bytes
     {
         return Err(format!(
@@ -224,6 +297,7 @@ fn validate_pass(
 
     Ok(PassPlan {
         entry_point: pass.entry_point.clone(),
+        draw: draw.map(|validated| validated.plan),
         inputs,
         output,
         uniform_offset: pass.uniform_offset,
@@ -231,6 +305,210 @@ fn validate_pass(
         repeat_count,
         uniform_stride,
     })
+}
+
+/// A validated draw declaration plus the naga entry index of its vertex
+/// stage, which the caller needs for the shared uniform-window check.
+struct ValidatedDraw {
+    plan: DrawPlan,
+    vertex_entry_index: usize,
+}
+
+/// The `PassStage::Draw` half of pass validation (ADR-0171), in check
+/// order: the vertex entry exists, the geometry slot the dispatch fills
+/// is declared, the vertex stage's interface agrees with that slot's
+/// layout, and the depth declaration is coherent with the pass.
+///
+/// The depth rule: a pass depth-tests exactly when it names a depth
+/// slot, so the only two ways to be wrong are naming a slot that does
+/// not exist or resolve to the color output's extent (wgpu requires
+/// attachments of one size), and writing `@builtin(frag_depth)` from
+/// the fragment stage with no depth attachment to write it into.
+fn validate_draw(
+    mail: &ProgramRegister,
+    module: &Module,
+    index: usize,
+    draw: &DrawPass,
+    fragment_entry: (usize, &str),
+    output_extent: SlotExtent,
+) -> Result<ValidatedDraw, String> {
+    let (fragment_entry_index, fragment_entry_point) = fragment_entry;
+    let vertex_entry_index = module
+        .entry_points
+        .iter()
+        .position(|entry| entry.stage == ShaderStage::Vertex && entry.name == draw.vertex_entry_point)
+        .ok_or_else(|| {
+            format!("pass {index}: no vertex entry point named `{}` in the module", draw.vertex_entry_point)
+        })?;
+
+    let slot = mail.geometries.get(draw.geometry as usize).ok_or_else(|| {
+        format!("pass {index}: geometry slot {} is out of range ({} declared)", draw.geometry, mail.geometries.len(),)
+    })?;
+    check_vertex_interface(module, index, vertex_entry_index, draw.geometry, &slot.layout)?;
+
+    if let Some(depth) = draw.depth {
+        let extent = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
+            format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len(),)
+        })?;
+        if extent != output_extent {
+            return Err(format!(
+                "pass {index}: depth transient {depth} declares extent {extent:?}, which does not match its color \
+                 output's extent {output_extent:?} — a depth attachment must be the size of the color attachment \
+                 it tests for",
+            ));
+        }
+    } else if writes_frag_depth(module, fragment_entry_index) {
+        return Err(format!(
+            "pass {index}: entry point `{fragment_entry_point}` writes @builtin(frag_depth), so the pass must \
+             declare a depth transient to write it into",
+        ));
+    }
+
+    Ok(ValidatedDraw {
+        plan: DrawPlan {
+            vertex_entry_point: draw.vertex_entry_point.clone(),
+            geometry: draw.geometry,
+            depth: draw.depth,
+            load: draw.load,
+        },
+        vertex_entry_index,
+    })
+}
+
+/// Check the vertex stage's declared interface against the geometry
+/// slot's layout through naga's reflection: every `@location` the stage
+/// reads must be declared by the layout, and its WGSL type must be the
+/// one that location's format is consumed as. A layout attribute the
+/// stage ignores is fine — the vertex buffer supplies it, and nothing
+/// reads it.
+fn check_vertex_interface(
+    module: &Module,
+    index: usize,
+    vertex_entry_index: usize,
+    geometry: u32,
+    layout: &[VertexAttribute],
+) -> Result<(), String> {
+    for (location, ty) in entry_input_locations(module, vertex_entry_index) {
+        let Some(attribute) = layout.iter().find(|attribute| attribute.location == location) else {
+            return Err(format!(
+                "pass {index}: the vertex stage reads @location({location}), which geometry slot {geometry}'s layout \
+                 does not declare",
+            ));
+        };
+        if !consumes_format(&module.types[ty].inner, attribute.format) {
+            return Err(format!(
+                "pass {index}: the vertex stage reads @location({location}) as {}, but geometry slot {geometry} \
+                 declares it {:?}, which is consumed as {}",
+                describe_type(module, ty),
+                attribute.format,
+                wgsl_type_name(attribute.format),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every `@location` binding an entry point's arguments carry, flattened
+/// through a struct argument's members. Built-in inputs (a vertex index,
+/// a fragment position) carry no location and are skipped — they come
+/// from the pipeline, not from a vertex buffer.
+fn entry_input_locations(module: &Module, entry_index: usize) -> Vec<(u32, Handle<Type>)> {
+    let mut locations = Vec::new();
+    for argument in &module.entry_points[entry_index].function.arguments {
+        match &argument.binding {
+            Some(Binding::Location { location, .. }) => locations.push((*location, argument.ty)),
+            Some(_) => {}
+            None => {
+                if let TypeInner::Struct { members, .. } = &module.types[argument.ty].inner {
+                    for member in members {
+                        if let Some(Binding::Location { location, .. }) = &member.binding {
+                            locations.push((*location, member.ty));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    locations
+}
+
+/// Whether a fragment entry point writes `@builtin(frag_depth)`, either
+/// as its whole result or as one member of a struct result.
+fn writes_frag_depth(module: &Module, entry_index: usize) -> bool {
+    let Some(result) = &module.entry_points[entry_index].function.result else {
+        return false;
+    };
+    match &result.binding {
+        Some(binding) => matches!(binding, Binding::BuiltIn(BuiltIn::FragDepth)),
+        None => match &module.types[result.ty].inner {
+            TypeInner::Struct { members, .. } => {
+                members.iter().any(|member| matches!(member.binding, Some(Binding::BuiltIn(BuiltIn::FragDepth))))
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Whether a WGSL type is the one a declared attribute format is
+/// consumed as. The integer formats arrive as integers and the
+/// normalized ones as floats — the hardware conversion is part of the
+/// format, so the shape the shader must declare is fixed per format.
+fn consumes_format(inner: &TypeInner, format: VertexFormat) -> bool {
+    let (vector_size, kind) = expected_shape(format);
+    match (inner, vector_size) {
+        (TypeInner::Scalar(scalar), None) => scalar.kind == kind && scalar.width == 4,
+        (TypeInner::Vector { size, scalar }, Some(expected)) => {
+            *size == expected && scalar.kind == kind && scalar.width == 4
+        }
+        _ => false,
+    }
+}
+
+/// The vector width (`None` for a scalar) and scalar kind one declared
+/// attribute format is consumed as.
+fn expected_shape(format: VertexFormat) -> (Option<VectorSize>, ScalarKind) {
+    match format {
+        VertexFormat::Float32 => (None, ScalarKind::Float),
+        VertexFormat::Float32x2 => (Some(VectorSize::Bi), ScalarKind::Float),
+        VertexFormat::Float32x3 => (Some(VectorSize::Tri), ScalarKind::Float),
+        VertexFormat::Unorm8x4 => (Some(VectorSize::Quad), ScalarKind::Float),
+        VertexFormat::Uint8x4 => (Some(VectorSize::Quad), ScalarKind::Uint),
+    }
+}
+
+/// The WGSL spelling of the type a declared attribute format is
+/// consumed as — what a rejected register tells the author to write.
+fn wgsl_type_name(format: VertexFormat) -> &'static str {
+    match format {
+        VertexFormat::Float32 => "f32",
+        VertexFormat::Float32x2 => "vec2<f32>",
+        VertexFormat::Float32x3 => "vec3<f32>",
+        VertexFormat::Unorm8x4 => "vec4<f32>",
+        VertexFormat::Uint8x4 => "vec4<u32>",
+    }
+}
+
+/// A WGSL-shaped rendering of a naga type, for the mismatch message.
+/// Anything that is neither a scalar nor a vector cannot be an
+/// attribute, so its declared name (or a stand-in) is enough to name
+/// what the author wrote.
+fn describe_type(module: &Module, ty: Handle<Type>) -> String {
+    match &module.types[ty].inner {
+        TypeInner::Scalar(scalar) => scalar_name(*scalar),
+        TypeInner::Vector { size, scalar } => format!("vec{}<{}>", *size as u8, scalar_name(*scalar)),
+        _ => module.types[ty].name.clone().unwrap_or_else(|| "a non-attribute type".to_owned()),
+    }
+}
+
+fn scalar_name(scalar: Scalar) -> String {
+    let prefix = match scalar.kind {
+        ScalarKind::Sint => "i",
+        ScalarKind::Uint => "u",
+        ScalarKind::Float => "f",
+        ScalarKind::Bool => return "bool".to_owned(),
+        ScalarKind::AbstractInt | ScalarKind::AbstractFloat => return "an abstract numeric type".to_owned(),
+    };
+    format!("{prefix}{}", u32::from(scalar.width) * 8)
 }
 
 fn resolve_input(
@@ -339,6 +617,8 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             wgsl: MODULE.to_owned(),
             bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
             transients: vec![full(TextureFormat::Rgba8); 3],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![
                 pass("fs_copy", vec![InputSlot::Binding { index: 0 }], OutputSlot::Transient { index: 0 }, 0, 4),
                 pass("fs_copy", vec![InputSlot::Transient { index: 0 }], OutputSlot::Transient { index: 1 }, 0, 4),
@@ -375,6 +655,8 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             wgsl: MODULE.to_owned(),
             bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
             transients: vec![],
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
             passes: vec![valid_pass()],
         };
 
@@ -416,5 +698,191 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             ..base()
         });
         assert!(zero_repeat.contains("repeat count"), "repeat class: {zero_repeat}");
+    }
+
+    /// A draw-pass module: one entry per shape the draw validation has
+    /// to see. `vs_flat` reads position alone and takes its clip depth
+    /// from the uniform window (the vertex stage reading group 0 is what
+    /// makes the window's visibility load-bearing); `vs_tinted` reads a
+    /// second location; `fs_depth_writer` writes `@builtin(frag_depth)`.
+    const DRAW_MODULE: &str = r"
+struct DrawParams { color: vec4<f32>, depth: f32 }
+@group(0) @binding(0) var<uniform> draw_params: DrawParams;
+
+@vertex
+fn vs_flat(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position.xy, draw_params.depth, 1.0);
+}
+
+@vertex
+fn vs_tinted(@location(0) position: vec3<f32>, @location(1) tint: vec4<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position.xy, tint.x, 1.0);
+}
+
+@fragment
+fn fs_flat() -> @location(0) vec4<f32> {
+    return draw_params.color;
+}
+
+@fragment
+fn fs_opaque() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+
+struct DepthOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+}
+
+@fragment
+fn fs_depth_writer() -> DepthOut {
+    return DepthOut(draw_params.color, draw_params.depth);
+}
+";
+
+    /// Bytes of `DrawParams`: a `vec4<f32>` then an `f32`, padded out to
+    /// the struct's 16-byte alignment.
+    const DRAW_PARAMS_BYTES: u32 = 32;
+
+    fn position_slot() -> GeometrySlotSpec {
+        GeometrySlotSpec { layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }] }
+    }
+
+    fn draw_stage(vertex_entry: &str, geometry: u32, depth: Option<u32>) -> PassStage {
+        PassStage::Draw(DrawPass {
+            vertex_entry_point: vertex_entry.to_owned(),
+            geometry,
+            depth,
+            load: PassLoad::Clear,
+        })
+    }
+
+    /// ADR-0171 draw validation: each new failure class replies its own
+    /// distinguishable reason. The bugs pinned, one per class: a typo'd
+    /// vertex entry or geometry slot reaching wgpu as an opaque
+    /// `pipeline creation failed`; a vertex stage reading an attribute
+    /// the bound geometry never supplies (undefined vertex data rather
+    /// than a rejected register); a location whose WGSL type disagrees
+    /// with the declared format, which reads the same bytes as a
+    /// different quantity; a depth slot that cannot attach to its color
+    /// output because their extents differ; and a fragment stage
+    /// writing `@builtin(frag_depth)` into a pass with no depth
+    /// attachment to receive it.
+    #[test]
+    fn draw_validation_classes_have_distinguishable_reasons() {
+        let draw_pass = || ProgramPass {
+            stage: draw_stage("vs_flat", 0, Some(0)),
+            entry_point: "fs_flat".to_owned(),
+            inputs: Vec::new(),
+            output: OutputSlot::Binding { index: 0 },
+            uniform_offset: 0,
+            uniform_length: DRAW_PARAMS_BYTES,
+            repeat: None,
+        };
+        let base = || ProgramRegister {
+            wgsl: DRAW_MODULE.to_owned(),
+            bindings: vec![full(TextureFormat::Rgba8)],
+            transients: Vec::new(),
+            geometries: vec![position_slot()],
+            depth_transients: vec![SlotExtent::Full],
+            passes: vec![draw_pass()],
+        };
+
+        let plan = validate(&base()).expect("the baseline draw program validates");
+        let drawn = plan.passes[0].draw.as_ref().expect("the draw pass carries a draw plan");
+        assert_eq!(drawn.vertex_entry_point, "vs_flat");
+        assert_eq!(drawn.depth, Some(0));
+
+        let missing_vertex = rejection(&ProgramRegister {
+            passes: vec![ProgramPass { stage: draw_stage("vs_missing", 0, Some(0)), ..draw_pass() }],
+            ..base()
+        });
+        assert!(missing_vertex.contains("no vertex entry point"), "vertex-entry class: {missing_vertex}");
+
+        let bad_slot = rejection(&ProgramRegister {
+            passes: vec![ProgramPass { stage: draw_stage("vs_flat", 3, Some(0)), ..draw_pass() }],
+            ..base()
+        });
+        assert!(bad_slot.contains("geometry slot 3 is out of range"), "geometry-range class: {bad_slot}");
+
+        let undeclared_location = rejection(&ProgramRegister {
+            passes: vec![ProgramPass { stage: draw_stage("vs_tinted", 0, Some(0)), ..draw_pass() }],
+            ..base()
+        });
+        assert!(
+            undeclared_location.contains("@location(1)") && undeclared_location.contains("does not declare"),
+            "unbound-location class: {undeclared_location}",
+        );
+
+        let wrong_format = rejection(&ProgramRegister {
+            geometries: vec![GeometrySlotSpec {
+                layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x2 }],
+            }],
+            ..base()
+        });
+        assert!(wrong_format.contains("consumed as vec2<f32>"), "format-mismatch class: {wrong_format}");
+
+        let duplicate_location = rejection(&ProgramRegister {
+            geometries: vec![GeometrySlotSpec {
+                layout: vec![
+                    VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
+                    VertexAttribute { location: 0, format: VertexFormat::Float32 },
+                ],
+            }],
+            ..base()
+        });
+        assert!(duplicate_location.contains("location 0 twice"), "duplicate-location class: {duplicate_location}");
+
+        let bad_depth = rejection(&ProgramRegister {
+            passes: vec![ProgramPass { stage: draw_stage("vs_flat", 0, Some(4)), ..draw_pass() }],
+            ..base()
+        });
+        assert!(bad_depth.contains("depth transient 4 is out of range"), "depth-range class: {bad_depth}");
+
+        let mismatched_depth =
+            rejection(&ProgramRegister { depth_transients: vec![SlotExtent::Divided { divisor: 2 }], ..base() });
+        assert!(
+            mismatched_depth.contains("does not match its color output's extent"),
+            "depth-extent class: {mismatched_depth}",
+        );
+
+        let undeclared_depth = rejection(&ProgramRegister {
+            passes: vec![ProgramPass {
+                stage: draw_stage("vs_flat", 0, None),
+                entry_point: "fs_depth_writer".to_owned(),
+                ..draw_pass()
+            }],
+            ..base()
+        });
+        assert!(undeclared_depth.contains("must declare a depth transient"), "frag-depth class: {undeclared_depth}",);
+    }
+
+    /// The uniform window must cover the block whichever stage reads it:
+    /// a draw pass whose *vertex* stage is the only reader of group 0
+    /// still needs a window long enough, or the pipeline binds a buffer
+    /// shorter than the shader's declared block and wgpu rejects it at
+    /// register — an opaque failure instead of the named window class.
+    #[test]
+    fn draw_uniform_window_covers_the_vertex_stage_block() {
+        let mail = ProgramRegister {
+            wgsl: DRAW_MODULE.to_owned(),
+            bindings: vec![full(TextureFormat::Rgba8)],
+            transients: Vec::new(),
+            geometries: vec![position_slot()],
+            depth_transients: Vec::new(),
+            passes: vec![ProgramPass {
+                stage: draw_stage("vs_flat", 0, None),
+                // A fragment entry that reads nothing from group 0, so
+                // only the vertex stage's use can drive the check.
+                entry_point: "fs_opaque".to_owned(),
+                inputs: Vec::new(),
+                output: OutputSlot::Binding { index: 0 },
+                uniform_offset: 0,
+                uniform_length: 4,
+                repeat: None,
+            }],
+        };
+        let short = rejection(&mail);
+        assert!(short.contains("uniform window"), "window class over the vertex stage: {short}");
     }
 }

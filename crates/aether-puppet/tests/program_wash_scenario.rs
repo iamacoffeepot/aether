@@ -354,6 +354,7 @@ fn the_wash_program_develops_the_cpu_sheet() {
     let dispatch = ProgramDispatch {
         program_id,
         bindings: bindings.to_vec(),
+        geometries: Vec::new(),
         uniforms: program.uniforms(&sheet, Some(&flow), Some(&accents)),
     };
     let pre = vec![
