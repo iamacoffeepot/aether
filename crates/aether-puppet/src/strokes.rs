@@ -3,11 +3,19 @@
 //! The wash has the [`easel`](crate::easel) for this; the ink has this.
 //! The two are shaped alike — register once, create per canvas size,
 //! dispatch per repaint, present as a rect — and differ in cadence,
-//! which is the whole reason they are separate state machines. The
-//! easel develops when the view *stops* moving. The ink is re-solved
-//! whenever the view moves at all, so everything here is sized for the
-//! per-frame path: no settle gate, geometry replaced in place rather
-//! than recreated, and the uniform blob rewritten every frame.
+//! which is the whole reason they are separate state machines.
+//!
+//! The easel develops every frame. The ink does not, and does not need
+//! to: its planes and its sheet are a function of the drawing, the view
+//! and the canvas, so a frame that moved none of the three would spend
+//! forty-eight passes deriving what is already standing in its own
+//! textures. What that costs the layer is the bookkeeping to say when
+//! one of them moved — a revision, and the revision the planes standing
+//! there were produced from — and everything else here is sized for the
+//! frames that did move one: geometry replaced in place
+//! rather than recreated, only the volatile half of it travelling, and
+//! the uniform blobs written at dispatch time, which is where the
+//! canvas is known.
 //!
 //! Two programs run, in order, against one set of textures:
 //!
@@ -93,6 +101,11 @@ type Packed = (Vec<u8>, Vec<u8>);
 /// The resident half is not here. It belongs to the subject rather than
 /// to the frame, and it is staged in [`Strokes::resident`] beside the
 /// subject's own mesh.
+///
+/// Taken by whichever of the creates and the updates ships it, so a
+/// staging can travel once and only once — the creates move the same
+/// buffers the updates would, and shipping the emptied vectors
+/// afterwards would replace the resident drawing with nothing.
 struct Solved {
     points: Packed,
     ribbons: Packed,
@@ -102,13 +115,27 @@ struct Solved {
     ///
     /// [`ribbon::reference_depth`]: crate::ribbon::reference_depth
     curves: Packed,
-    sight_uniforms: Vec<u8>,
-    stroke_uniforms: Vec<u8>,
-    /// Whether the buffers above have already been moved out — by the
-    /// creates, which take the same staging the updates would. Shipping
-    /// the emptied vectors afterwards would replace the resident
-    /// drawing with nothing.
-    travelled: bool,
+}
+
+/// The view the drawing on the GPU was solved through, and how much of
+/// the field it laid out into.
+///
+/// Held past the dispatch that carried it, which is what lets the layer
+/// re-fill its planes without a fresh solve. Nothing a point or a ribbon
+/// vertex carries is a function of the canvas — a packed slot is the
+/// flat texel index and the shader divides it by the field's own width
+/// from the uniform — so a resize needs new textures, a re-encoded blob,
+/// and a dispatch, and no re-pack at all.
+#[derive(Clone, Copy)]
+struct Standing {
+    view_proj: Mat4,
+    eye: Vec3,
+    bias: f32,
+    /// Texels the layout occupied, gaps included. A canvas the drawing
+    /// outgrew cannot be dispatched into: the texels past its end are
+    /// not addressable, so the strokes that landed there would go
+    /// silently missing rather than arrive smaller.
+    occupied: usize,
 }
 
 /// The subject's own packed drawing, waiting for the create or update.
@@ -149,6 +176,27 @@ pub struct Strokes {
     /// subject, cleared by the solve that packs it.
     resident_stale: bool,
     solved: Option<Solved>,
+    /// The view the drawing standing on the GPU was solved through.
+    standing: Option<Standing>,
+    /// What the field's planes and the ink sheet would be produced from
+    /// now. Bumped by every input either of them is a function of — a
+    /// solve (a new drawing at a new view) and a canvas change.
+    revision: u64,
+    /// The revision the standing planes and sheet *were* produced from,
+    /// and `None` when they hold nothing — before the first dispatch,
+    /// and again after a resize releases the textures.
+    ///
+    /// This is the whole of the field's cadence
+    /// (iamacoffeepot/aether#4448). The chain is 45 passes over the
+    /// canvas and its output is a function of the drawing, the view and
+    /// the field's extent alone, so a frame that changed none of them
+    /// would re-derive the planes it already has. Keyed on the inputs
+    /// rather than on elapsed frames, because the skip is only sound
+    /// while the planes standing there came from the inputs standing
+    /// here — the first frame, a freshly loaded drawing and a resize's
+    /// blank textures all have to re-fill, and none of them is a
+    /// question about how long it has been.
+    dispatched: Option<u64>,
     /// At least one dispatch has landed, so the sheet holds ink rather
     /// than a writable texture's transparent clear.
     drawn: bool,
@@ -182,8 +230,23 @@ const RIBBONS: [usize; stroke::GEOMETRY_COUNT] =
 impl Strokes {
     /// A canvas change orphans every texture in the set — the field's
     /// capacity and the sheet's size both follow it.
+    ///
+    /// The canvas is resolved here rather than waiting for the next
+    /// solve. A solve happens when the eye moves; a window is resized
+    /// with the camera held all the time, and a canvas that only caught
+    /// up at the next solve left the field and the sheet standing at the
+    /// old size until something else moved.
     pub fn resized(&mut self, width: u32, height: u32) {
         self.window = Some((width, height));
+        self.recanvas((width, height));
+    }
+
+    /// Point the layer at a canvas, and note the change if it is one.
+    fn recanvas(&mut self, canvas: (u32, u32)) {
+        if self.canvas != Some(canvas) {
+            self.canvas = Some(canvas);
+            self.revision += 1;
+        }
     }
 
     /// The canvas to solve at.
@@ -217,6 +280,7 @@ impl Strokes {
     pub fn subject_changed(&mut self, mesh: &Mesh) {
         self.subject_bytes = Some((sight::subject_vertices(mesh), sight::subject_indices(mesh)));
         self.resident_stale = true;
+        self.revision += 1;
     }
 
     /// Whether the layer can be asked to draw at all. A refused
@@ -257,7 +321,7 @@ impl Strokes {
             return false;
         }
         let field = self.resolve_canvas(aspect);
-        self.canvas = Some(field);
+        self.recanvas(field);
         let Ok(layout) = sight::layout(drawing, field) else {
             return false;
         };
@@ -273,10 +337,9 @@ impl Strokes {
             points: (sight::point_vertices(drawing, layout.volatile()), sight::point_indices(layout.volatile())),
             ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
             curves: (sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)),
-            sight_uniforms: sight::SightUniforms { view_proj, eye, field, bias }.encode(),
-            stroke_uniforms: stroke::StrokeUniforms { view_proj, eye, bias, field }.encode(),
-            travelled: false,
         });
+        self.standing = Some(Standing { view_proj, eye, bias, occupied: layout.occupied() });
+        self.revision += 1;
 
         true
     }
@@ -320,7 +383,7 @@ impl Strokes {
     /// there is a drawing to show. Both go out together — the replies
     /// come back in this order.
     pub fn take_registers(&mut self) -> Vec<ProgramRegister> {
-        if self.disabled || self.programs.asking || self.programs.ready(PROGRAM_COUNT) || self.solved.is_none() {
+        if self.disabled || self.programs.asking || self.programs.ready(PROGRAM_COUNT) || self.standing.is_none() {
             return Vec::new();
         }
 
@@ -330,6 +393,10 @@ impl Strokes {
 
     /// The textures whose size no longer matches the window, released
     /// before the next creates.
+    ///
+    /// Their replacements arrive blank, so the planes stand for nothing
+    /// until a dispatch fills them again — which is what clearing the
+    /// dispatched revision says.
     pub fn take_destroys(&mut self) -> Vec<DestroyTexture> {
         if self.textures.asking || self.sized == self.canvas || self.sized.is_none() {
             return Vec::new();
@@ -337,6 +404,7 @@ impl Strokes {
 
         self.sized = None;
         self.drawn = false;
+        self.dispatched = None;
         let stale = mem::take(&mut self.textures.ids);
         stale.into_iter().map(|texture_id| DestroyTexture { texture_id }).collect()
     }
@@ -397,13 +465,12 @@ impl Strokes {
             return Vec::new();
         }
         let (subject, resident) = (self.subject_bytes.take(), self.resident.take());
-        let (Some(subject), Some(resident), Some(solved)) = (subject, resident, self.solved.as_mut()) else {
+        let (Some(subject), Some(resident), Some(solved)) = (subject, resident, self.solved.take()) else {
             return Vec::new();
         };
 
         self.geometries.asking = true;
         self.subject = Resident::Creating;
-        solved.travelled = true;
         let create = |layout: Vec<VertexAttribute>, packed: Packed| CreateGeometry {
             layout,
             vertices: packed.0,
@@ -412,10 +479,10 @@ impl Strokes {
         vec![
             create(sight::subject_slot().layout, subject),
             create(sight::points_slot().layout, resident.points),
-            create(sight::points_slot().layout, mem::take(&mut solved.points)),
-            create(sight::curves_slot().layout, mem::take(&mut solved.curves)),
+            create(sight::points_slot().layout, solved.points),
+            create(sight::curves_slot().layout, solved.curves),
             create(stroke::ribbon_slot().layout, resident.ribbons),
-            create(stroke::ribbon_slot().layout, mem::take(&mut solved.ribbons)),
+            create(stroke::ribbon_slot().layout, solved.ribbons),
         ]
     }
 
@@ -449,11 +516,10 @@ impl Strokes {
         // megabytes of vertex bytes at this scale and it is rebuilt
         // every frame the eye moves, so a copy here is a copy of it per
         // frame. The dispatch that follows needs only the uniforms.
-        if let Some(solved) = self.solved.as_mut().filter(|solved| !solved.travelled) {
-            solved.travelled = true;
-            ship(sight::VOLATILE as usize, mem::take(&mut solved.points));
-            ship(sight::CURVES as usize, mem::take(&mut solved.curves));
-            ship(RIBBONS[stroke::VOLATILE as usize], mem::take(&mut solved.ribbons));
+        if let Some(solved) = self.solved.take() {
+            ship(sight::VOLATILE as usize, solved.points);
+            ship(sight::CURVES as usize, solved.curves);
+            ship(RIBBONS[stroke::VOLATILE as usize], solved.ribbons);
         }
 
         updates
@@ -463,31 +529,50 @@ impl Strokes {
     /// read. The field's planes are the ink's inputs, and a program's
     /// passes record in dispatch arrival order, so this order is what
     /// makes the ink read this frame's field rather than the last.
+    ///
+    /// Both or neither, and only when something they are a function of
+    /// moved. The field is the drawing, the view and the extent; the ink
+    /// is those planes and the same three. So one revision governs the
+    /// pair, and a frame that matches the revision the standing planes
+    /// were produced from ships nothing — a held camera pays the whole
+    /// chain's 45 passes once and then nothing at all
+    /// (iamacoffeepot/aether#4448). The uniform blobs are encoded here
+    /// rather than at solve time because the extent is one of their
+    /// fields and a resize changes it without a solve.
     pub fn take_dispatches(&mut self) -> Vec<ProgramDispatch> {
         if !self.textures.ready(TEXTURE_COUNT) || !self.geometries.ready(GEOMETRY_COUNT) {
             return Vec::new();
         }
-        let (programs, textures, geometries) = (&self.programs.ids, &self.textures.ids, &self.geometries.ids);
-        if self.subject.id().is_none() {
+        if self.subject.id().is_none() || self.dispatched == Some(self.revision) {
             return Vec::new();
         }
-        let Some(solved) = self.solved.take() else {
+        let (Some(standing), Some(field)) = (self.standing, self.canvas) else {
             return Vec::new();
         };
+        // A canvas the standing drawing outgrew. Held rather than
+        // dispatched into, and held without recording the revision, so
+        // the next solve — which re-lays the drawing against the new
+        // extent, or refuses it by name — is what resolves this.
+        if standing.occupied > field.0 as usize * field.1 as usize {
+            return Vec::new();
+        }
+        let (programs, textures, geometries) = (&self.programs.ids, &self.textures.ids, &self.geometries.ids);
 
         self.drawn = true;
+        self.dispatched = Some(self.revision);
+        let Standing { view_proj, eye, bias, .. } = standing;
         vec![
             ProgramDispatch {
                 program_id: programs[0],
                 bindings: textures[..sight::PLANE_COUNT].to_vec(),
                 geometries: geometries[..sight::GEOMETRY_COUNT].to_vec(),
-                uniforms: solved.sight_uniforms,
+                uniforms: sight::SightUniforms { view_proj, eye, field, bias }.encode(),
             },
             ProgramDispatch {
                 program_id: programs[1],
                 bindings: textures.clone(),
                 geometries: RIBBONS.map(|slot| geometries[slot]).to_vec(),
-                uniforms: solved.stroke_uniforms,
+                uniforms: stroke::StrokeUniforms { view_proj, eye, bias, field }.encode(),
             },
         ]
     }
@@ -574,6 +659,121 @@ mod tests {
             pen: Pen::Ink,
             seed,
             authored: false,
+        }
+    }
+
+    /// Everything mounted: the two programs registered, the six
+    /// textures created at the announced canvas, the six geometries
+    /// created — the state a layer reaches a few frames after the first
+    /// solve, and the state every dispatch question below is asked from.
+    ///
+    /// The ids are the ask order, which is what the layer treats them
+    /// as, so an id here is its own slot.
+    fn mounted(strokes: &mut Strokes, mesh: &Mesh, drawing: Drawing<'_>, canvas: (u32, u32)) {
+        strokes.resized(canvas.0, canvas.1);
+        strokes.subject_changed(mesh);
+        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, 1.0), "the first solve");
+
+        assert_eq!(strokes.take_registers().len(), PROGRAM_COUNT, "one register per program");
+        for id in 0..PROGRAM_COUNT as u32 {
+            strokes.registered(Ok(id));
+        }
+        assert!(strokes.take_destroys().is_empty(), "nothing to release before the first create");
+        assert_eq!(strokes.take_creates().len(), TEXTURE_COUNT, "one create per plane, and the sheet");
+        for id in 0..TEXTURE_COUNT as u32 {
+            strokes.created(Ok(id));
+        }
+        assert_eq!(strokes.take_geometry_creates().len(), GEOMETRY_COUNT, "one create per declared slot");
+        for id in 0..GEOMETRY_COUNT as u32 {
+            strokes.geometry_created(Ok(id));
+        }
+    }
+
+    /// The extent one dispatch's `SightParams` carries, read back out of
+    /// the packed blob's first window.
+    fn dispatched_field(dispatch: &ProgramDispatch) -> (u32, u32) {
+        let lane = |at: usize| f32::from_le_bytes(dispatch.uniforms[at..at + 4].try_into().expect("four bytes"));
+
+        (lane(80) as u32, lane(84) as u32)
+    }
+
+    /// Tripwire: a held view dispatches the field once and then not
+    /// again.
+    ///
+    /// The field's chain is 45 passes over the canvas and its planes are
+    /// a function of the drawing, the view and the extent — so a frame
+    /// that moved none of them would spend the chain deriving the planes
+    /// already standing in its own textures. The failure is invisible in
+    /// the picture and shows only as a still camera costing what a
+    /// turning one does, which is exactly how it went unnoticed long
+    /// enough to be read off a pass table as a per-frame cost
+    /// (iamacoffeepot/aether#4448).
+    #[test]
+    fn a_held_view_dispatches_the_field_once() {
+        let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
+        let (resident, volatile) = ([curve(1)], [curve(2)]);
+        let drawing = Drawing { resident: &resident, volatile: &volatile };
+
+        let mut strokes = Strokes::default();
+        mounted(&mut strokes, &mesh, drawing, (64, 64));
+
+        assert_eq!(strokes.take_dispatches().len(), 2, "the field and the ink, once the textures stand");
+        for frame in 0..4 {
+            assert!(strokes.take_dispatches().is_empty(), "held frame {frame} re-derived the standing planes");
+        }
+        assert!(strokes.draw(&held_view(), 1.0).is_some(), "the sheet still holds the ink it was dispatched");
+
+        assert!(strokes.solve(drawing, Vec3::new(3.0, 1.0, -2.0), Mat4::IDENTITY, 0.01, 1.0), "the solve after a turn");
+        assert_eq!(strokes.take_dispatches().len(), 2, "a turn re-derives both");
+    }
+
+    /// Tripwire: a resize re-fills the planes from the standing view,
+    /// with no solve in between.
+    ///
+    /// A resize releases every texture in the set and creates fresh ones,
+    /// and fresh ones are blank. The camera is very often held while a
+    /// window is dragged, so nothing re-solves — and a layer that only
+    /// dispatched off a solve would leave the ink standing on a blank
+    /// field for as long as the camera stayed put, which is the whole
+    /// class of bug a cadence has to not introduce. Nothing a point or a
+    /// ribbon carries is a function of the canvas, so what this owes is
+    /// the blob and a dispatch rather than a re-pack.
+    #[test]
+    fn a_resize_refills_the_planes_from_the_standing_view() {
+        let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
+        let (resident, volatile) = ([curve(1)], [curve(2)]);
+        let drawing = Drawing { resident: &resident, volatile: &volatile };
+
+        let mut strokes = Strokes::default();
+        mounted(&mut strokes, &mesh, drawing, (64, 64));
+        let first = strokes.take_dispatches();
+        assert_eq!(dispatched_field(&first[0]), (64, 64), "the field the first dispatch was sized to");
+
+        strokes.resized(48, 96);
+        assert_eq!(strokes.take_destroys().len(), TEXTURE_COUNT, "every texture in the set follows the canvas");
+        let creates = strokes.take_creates();
+        assert_eq!((creates[0].width, creates[0].height), (48, 96), "the planes are re-created at the new canvas");
+        for id in 0..TEXTURE_COUNT as u32 {
+            strokes.created(Ok(TEXTURE_COUNT as u32 + id));
+        }
+
+        assert!(strokes.take_geometry_updates().is_empty(), "a resize re-packs nothing");
+        let refilled = strokes.take_dispatches();
+        assert_eq!(refilled.len(), 2, "the fresh planes are blank until something fills them");
+        assert_eq!(dispatched_field(&refilled[0]), (48, 96), "and the blob carries the new extent");
+        assert!(strokes.take_dispatches().is_empty(), "and only once");
+    }
+
+    /// A view for [`Strokes::draw`] to place a billboard against. Its
+    /// framing is not the point of any test here — only whether a sheet
+    /// comes back at all.
+    fn held_view() -> View {
+        View {
+            eye: Vec3::new(0.0, 0.0, 3.0),
+            target: Vec3::new(0.0, 0.0, 0.0),
+            view_proj: Mat4::IDENTITY,
+            aspect: 1.0,
+            field_of_view: 0.45,
         }
     }
 

@@ -685,6 +685,12 @@ fn iris_of(eyes: &[accent::Eye]) -> Option<Vec2> {
 /// ones that answer. Each program identifies itself by its own pass
 /// labels, which is what the reader wants named anyway.
 ///
+/// Both conditions are tabled, held first and orbiting second, because a
+/// program the held frame does not dispatch is exactly what the table
+/// cannot say on its own — its rows stand at whatever its last execution
+/// cost, and only the sample counts beside them distinguish a standing
+/// number from a per-frame one (iamacoffeepot/aether#4448).
+///
 /// ```text
 /// AETHER_CROSSFEED_DIR=/path/to/dir \
 ///     cargo test -p aether-puppet --release --test pace_instrument \
@@ -704,7 +710,28 @@ fn the_frame_divides_by_pass() {
     // The EWMA needs samples, and the readback lands a frame or two
     // behind the encode that placed the queries.
     harness.execute(vec![("measure", HarnessOp::advance(SAMPLES))]).expect("accumulate timing samples");
+    if !table(&mut harness, "held") {
+        return;
+    }
 
+    for sample in 0..SAMPLES {
+        harness
+            .execute(vec![
+                ("turn", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH + sample as f32 * ORBIT_STEP))),
+                ("frame", HarnessOp::advance(1)),
+            ])
+            .expect("orbit frame");
+    }
+    table(&mut harness, "orbit");
+
+    report_handler_cost(&mut harness);
+}
+
+/// One condition's whole table, program by program. `false` when the
+/// instrument is not measuring at all, which is worth reporting once
+/// rather than per program.
+fn table(harness: &mut SubstrateHarness, condition: &str) -> bool {
+    eprintln!("passes: --- {condition} frames, {SAMPLES} of them ---");
     for program_id in 0..PROGRAM_IDS {
         let read = harness
             .execute(vec![(
@@ -716,16 +743,16 @@ fn the_frame_divides_by_pass() {
             ProgramTimingsResult::Ok { rows, .. } => rows,
             ProgramTimingsResult::Absent { reason } => {
                 eprintln!("passes: instrument absent — {reason}");
-                return;
+                return false;
             }
             // Every id past the last the puppet registered.
             ProgramTimingsResult::Err { .. } => continue,
         };
 
-        report_program(program_id, &rows);
+        report_program(program_id, &rows, SAMPLES);
     }
 
-    report_handler_cost(&mut harness);
+    true
 }
 
 /// The other half of the frame: what the component's own handlers cost
@@ -774,7 +801,16 @@ fn report_handler_cost(harness: &mut SubstrateHarness) {
 
 /// One program's table: its whole GPU time, then the entry points that
 /// carry it, widest first, and the ten most expensive individual passes.
-fn report_program(program_id: u32, rows: &[PassTimingRow]) {
+///
+/// Every row carries the samples its mean was folded from, and the
+/// reader needs them. A pass's EWMA is updated only on the frames the
+/// pass actually ran, so a program the frame no longer dispatches keeps
+/// reporting whatever its last execution cost — and a table read without
+/// the sample counts charges that standing number to every frame since.
+/// The field is exactly that case (iamacoffeepot/aether#4448): it
+/// dispatches when the view or the drawing changed, so over a run of
+/// held frames its rows are one sample old and the wash's are the run's.
+fn report_program(program_id: u32, rows: &[PassTimingRow], frames: u32) {
     let millis = |nanos: u64| nanos as f64 / 1.0e6;
     let total: u64 = rows.iter().map(|row| row.mean_nanos).sum();
     let measured = rows.iter().filter(|row| row.samples > 0).count();
@@ -783,26 +819,29 @@ fn report_program(program_id: u32, rows: &[PassTimingRow]) {
         return;
     }
 
-    let mut by_entry: Vec<(&str, u32, u64)> = Vec::new();
+    let mut by_entry: Vec<(&str, u32, u64, u64)> = Vec::new();
     for row in rows {
         match by_entry.iter_mut().find(|(label, ..)| *label == row.label) {
-            Some((_, passes, nanos)) => {
+            Some((_, passes, nanos, samples)) => {
                 *passes += 1;
                 *nanos += row.mean_nanos;
+                *samples = (*samples).max(row.samples);
             }
-            None => by_entry.push((&row.label, 1, row.mean_nanos)),
+            None => by_entry.push((&row.label, 1, row.mean_nanos, row.samples)),
         }
     }
-    by_entry.sort_unstable_by_key(|&(.., nanos)| Reverse(nanos));
+    by_entry.sort_unstable_by_key(|&(.., nanos, _)| Reverse(nanos));
 
+    let samples = rows.iter().map(|row| row.samples).max().unwrap_or(0);
     eprintln!(
-        "passes: program {program_id} — {:.2} ms over {} passes ({measured} measured)",
+        "passes: program {program_id} — {:.2} ms over {} passes ({measured} measured, deepest row {samples} samples \
+         over {frames} frames)",
         millis(total),
         rows.len(),
     );
-    for (label, passes, nanos) in by_entry.iter().take(12) {
+    for (label, passes, nanos, samples) in by_entry.iter().take(12) {
         eprintln!(
-            "  {label:<24} {passes:>4} passes  {:>7.2} ms  {:>5.1}%",
+            "  {label:<24} {passes:>4} passes  {:>7.2} ms  {:>5.1}%  {samples:>4} samples",
             millis(*nanos),
             100.0 * *nanos as f64 / total as f64,
         );
