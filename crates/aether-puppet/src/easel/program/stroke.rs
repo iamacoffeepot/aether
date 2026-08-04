@@ -374,24 +374,42 @@ pub fn ribbon_geometry(
 /// disagree about how to turn it only by the weight gradient across one
 /// triangle edge, which is a fraction of a degree on a mesh of this
 /// density and reaches the picture nowhere.
+/// Assembled on the stack and copied in whole. Written lane by lane
+/// instead it is a bounds check per byte over megabytes of drawing.
 fn pack(vertices: &mut Vec<u8>, pen: Option<&Anchored>, anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) {
     let unorm = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut vertex = [0u8; RIBBON_VERTEX_BYTES];
+    let mut at = 0usize;
+    let mut lay = |written: &[u8]| {
+        vertex[at..at + written.len()].copy_from_slice(written);
+        at += written.len();
+    };
     match pen {
         Some(pen) => {
             for corner in 0..2usize {
-                vertices.extend(pen.positions[corner].to_array().into_iter().flat_map(f32::to_le_bytes));
-                vertices.extend(pen.joints[corner]);
-                vertices.extend(pen.shares[corner].map(unorm));
+                for value in pen.positions[corner].to_array() {
+                    lay(&value.to_le_bytes());
+                }
+                lay(&pen.joints[corner]);
+                lay(&pen.shares[corner].map(unorm));
             }
         }
-        None => vertices.extend(anchor.pos.to_array().into_iter().flat_map(f32::to_le_bytes)),
+        None => {
+            for value in anchor.pos.to_array() {
+                lay(&value.to_le_bytes());
+            }
+        }
     }
     let scalars = [anchor.along.x, anchor.along.y, anchor.along.z, address[0], address[1], anchor.half, anchor.drift];
-    vertices.extend(scalars.into_iter().flat_map(f32::to_le_bytes));
-    if let Some(pen) = pen {
-        vertices.extend(pen.between.to_le_bytes());
+    for value in scalars {
+        lay(&value.to_le_bytes());
     }
-    vertices.extend(channels.map(unorm));
+    if let Some(pen) = pen {
+        lay(&pen.between.to_le_bytes());
+    }
+    lay(&channels.map(unorm));
+
+    vertices.extend_from_slice(&vertex[..at]);
 }
 
 /// Where the ink sheet is created, in texels, for a canvas of `canvas`.

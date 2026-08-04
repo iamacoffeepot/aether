@@ -684,10 +684,20 @@ fn the_render_handler_divides_by_phase() {
     let (width, height) = canvas();
     let canvas = Canvas { width: width as usize, height: height as usize };
 
+    // Both sizes of the resident half, because a rigged subject holds
+    // the ungated one: the tone gate reads normals the vertex stage
+    // poses, so it runs there and the CPU keeps every point it might yet
+    // want. What that costs per frame is `ribbon::reference_depth`,
+    // which walks the whole drawing's points for one float a curve.
+    let points = |curves: &[Curve3]| curves.iter().map(|curve| curve.points.len()).sum::<usize>();
     eprintln!(
-        "phase: at {width}x{height}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats",
+        "phase: at {width}x{height}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats — the resident half \
+         is {} points gated and {} ungated, over {} curves",
         at.resident.len(),
         volatile.len(),
+        points(&at.resident),
+        points(&at.ungated),
+        at.ungated.len(),
     );
     time_the_develop(&at, &view, canvas);
     time_the_eye_moved_half(&at, drawing, &view);

@@ -704,9 +704,11 @@ pub fn posed_point_vertices(drawing: Drawing<'_>, spans: &[Span]) -> Vec<u8> {
 }
 
 fn points(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<'_>>, anchored_layout: bool) -> Vec<u8> {
-    // Written straight into the buffer three times over, differing only
-    // in the corner bits of `slot`. The per-vertex allocation the
-    // readable spelling wants is megabytes of churn at this density.
+    // Assembled once per point on the stack and copied in three times
+    // with only the corner bits of `slot` patched between them, which is
+    // the only thing three vertices of one point disagree about. Written
+    // lane by lane instead it is a bounds check per byte over megabytes
+    // of drawing, and that showed up as whole milliseconds of the frame.
     let stride = if anchored_layout {
         POINT_VERTEX_BYTES
     } else {
@@ -739,57 +741,100 @@ fn points(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<'_>>, anchor
                     .map_or_else(|| Anchored::posed(point.probe, point.normal), |(bound, at)| bound.anchored(at))
             });
             let tail = [at as f32, (last - at) as f32, step, class];
-
-            let slot = (span.start + at as u32) * 4;
-            for corner in 0..3u32 {
-                write_point(&mut packed, anchored.as_ref(), point.probe, point.normal, slot + corner);
-                packed.extend(tail.into_iter().flat_map(f32::to_le_bytes));
-                if let Some(anchored) = anchored.as_ref() {
-                    packed.extend(anchored.between.to_le_bytes());
-                }
-            }
+            let vertex = pack_point(anchored.as_ref(), point.probe, point.normal, span.start + at as u32, tail);
+            vertex.write(&mut packed);
             written = true;
         }
     }
     if !written {
-        // Three copies of one corner — a triangle of zero area, which
-        // rasterizes nothing wherever it lands. It has to carry the
-        // region's own layout, since which of the two the slot was
-        // declared with is what the vertex fetch reads it as.
+        // A triangle of zero area, which rasterizes nothing wherever it
+        // lands. It has to carry the region's own layout, since which of
+        // the two the slot was declared with is what the vertex fetch
+        // reads it as.
         let inert = anchored_layout.then(|| Anchored::posed(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)));
-        for _ in 0..3 {
-            write_point(&mut packed, inert.as_ref(), Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 0);
-            packed.extend([0.0f32; 4].into_iter().flat_map(f32::to_le_bytes));
-            if let Some(inert) = inert.as_ref() {
-                packed.extend(inert.between.to_le_bytes());
-            }
-        }
+        pack_point(inert.as_ref(), Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 0, [0.0; 4]).write_flat(&mut packed);
     }
 
     packed
 }
 
-/// One vertex's leading lanes: the anchorage where the region carries
-/// one, the point's own position and normal where it does not, then the
-/// packed slot.
-///
-/// `slot` arrives with the corner index already folded in — it is the
-/// texel index shifted up two bits plus the corner, which is what
-/// `texel_clip` unpacks.
-fn write_point(packed: &mut Vec<u8>, anchored: Option<&Anchored>, probe: Vec3, normal: Vec3, slot: u32) {
+/// One point's vertex bytes in whichever of the two layouts its region
+/// declared, with `slot` still holding the bare texel index.
+struct Point {
+    bytes: [u8; POINT_VERTEX_BYTES],
+    len: usize,
+    /// Where the `slot` lane starts, which is the one lane the three
+    /// corners disagree about.
+    slot: usize,
+}
+
+impl Point {
+    /// The point's three vertices, each with its own corner index folded
+    /// into the low bits of `slot`.
+    fn write(&self, packed: &mut Vec<u8>) {
+        let bare = f32::from_le_bytes(self.bytes[self.slot..self.slot + 4].try_into().expect("four bytes"));
+        for corner in 0..3u32 {
+            packed.extend_from_slice(&self.bytes[..self.slot]);
+            packed.extend_from_slice(&(bare + corner as f32).to_le_bytes());
+            packed.extend_from_slice(&self.bytes[self.slot + 4..self.len]);
+        }
+    }
+
+    /// The same three vertices as one corner — the stand-in's zero-area
+    /// triangle, which covers no sample wherever it lands.
+    fn write_flat(&self, packed: &mut Vec<u8>) {
+        for _ in 0..3 {
+            packed.extend_from_slice(&self.bytes[..self.len]);
+        }
+    }
+}
+
+fn pack_point(anchored: Option<&Anchored>, probe: Vec3, normal: Vec3, texel: u32, tail: [f32; 4]) -> Point {
+    let mut bytes = [0u8; POINT_VERTEX_BYTES];
+    let mut at = 0usize;
+    let mut lay = |written: &[u8]| {
+        bytes[at..at + written.len()].copy_from_slice(written);
+        at += written.len();
+    };
     match anchored {
         Some(anchored) => {
             for corner in 0..2usize {
-                let both = anchored.positions[corner].to_array().into_iter().chain(anchored.normals[corner].to_array());
-                packed.extend(both.flat_map(f32::to_le_bytes));
-                packed.extend(anchored.joints[corner]);
-                packed.extend(anchored.shares[corner].map(unorm));
+                for value in
+                    anchored.positions[corner].to_array().into_iter().chain(anchored.normals[corner].to_array())
+                {
+                    lay(&value.to_le_bytes());
+                }
+                lay(&anchored.joints[corner]);
+                lay(&anchored.shares[corner].map(unorm));
             }
         }
-        None => packed.extend(probe.to_array().into_iter().chain(normal.to_array()).flat_map(f32::to_le_bytes)),
+        None => {
+            for value in probe.to_array().into_iter().chain(normal.to_array()) {
+                lay(&value.to_le_bytes());
+            }
+        }
     }
-    packed.extend((slot as f32).to_le_bytes());
+    let slot = if anchored.is_some() {
+        POINT_SLOT
+    } else {
+        POSED_POINT_SLOT
+    };
+    lay(&((texel * 4) as f32).to_le_bytes());
+    for value in tail {
+        lay(&value.to_le_bytes());
+    }
+    if let Some(anchored) = anchored {
+        lay(&anchored.between.to_le_bytes());
+    }
+    let len = at;
+
+    Point { bytes, len, slot }
 }
+
+/// Where the `slot` lane starts in each of the two layouts: after the
+/// two corner bindings, or after the point's own position and normal.
+const POINT_SLOT: usize = 2 * (12 + 12 + 4 + 4);
+const POSED_POINT_SLOT: usize = 12 + 12;
 
 /// One region's index buffer: sequential little-endian `u32`
 /// triangle-list indices over the same `spans` [`point_vertices`] was
