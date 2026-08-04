@@ -248,6 +248,7 @@ pub struct UnsubscribeAllWindows {
 pub struct InjectWindowEvent {
     pub window: WindowId,
     pub kind: KindId,
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 

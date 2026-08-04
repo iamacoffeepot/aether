@@ -36,6 +36,7 @@ pub enum ArtifactsError {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.artifacts.put")]
 pub struct Put {
+    #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
     pub parents: Vec<String>,
 }
@@ -66,6 +67,14 @@ pub struct Get {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.artifacts.get_result")]
 pub enum GetResult {
-    Ok { digest: String, bytes: Vec<u8>, parents: Vec<String> },
-    Err { digest: String, error: ArtifactsError },
+    Ok {
+        digest: String,
+        #[serde(with = "aether_data::bytes")]
+        bytes: Vec<u8>,
+        parents: Vec<String>,
+    },
+    Err {
+        digest: String,
+        error: ArtifactsError,
+    },
 }

@@ -32,6 +32,7 @@ pub struct ChildSpec {
     pub subname: String,
     /// The wrapped child's `Config` encoded to its wire shape (empty for a
     /// `Config = ()` child).
+    #[serde(with = "aether_data::bytes")]
     pub config: Vec<u8>,
 }
 
@@ -133,6 +134,7 @@ pub struct LoadScript {
 #[kind(name = "aether.behavior.set_script")]
 pub struct SetScript {
     /// The replacement script's wasm bytes.
+    #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
 }
 

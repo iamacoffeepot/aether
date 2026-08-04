@@ -192,6 +192,7 @@ pub struct SessionDataReady {}
 pub struct SessionData {
     pub session_name: String,
     pub peer: String,
+    #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
 }
 
@@ -204,6 +205,7 @@ pub struct SessionData {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.session_write")]
 pub struct SessionWrite {
+    #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
 }
 

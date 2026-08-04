@@ -50,6 +50,7 @@ pub struct MembershipMutation {
     /// The workpiece whose active membership changes.
     pub workpiece: String,
     /// The bloom the claim attaches to (or releases from) — its digest bytes.
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
 }
 
@@ -62,6 +63,7 @@ pub struct OutboxPayload {
     /// route it.
     pub topic: String,
     /// The opaque payload bytes to republish.
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 
@@ -408,6 +410,7 @@ pub struct Commit {
     pub idempotency_key: String,
     /// The event's canonical `aether_data::wire` bytes (an encoded
     /// [`Event`](crate::reduce::Event)) — the durable replay source.
+    #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
     /// The workpieces this decision releases from their blooms. Applied before
     /// the claims, so a superseding successor can reclaim a workpiece its
@@ -472,6 +475,7 @@ pub struct JournalRecord {
     /// The event's idempotency key.
     pub idempotency_key: String,
     /// The event's canonical `aether_data::wire` bytes.
+    #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
 }
 
@@ -502,6 +506,7 @@ pub enum ReplayJournalResult {
 pub struct Admit {
     /// The event's canonical `aether_data::wire` bytes (an encoded
     /// [`Event`](crate::reduce::Event)).
+    #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
 }
 
@@ -516,6 +521,7 @@ pub enum AdmitResult {
     /// the wire-encoded [`Outcome`](crate::reduce::Outcome).
     Ok {
         /// The wire-encoded reducer outcome.
+        #[serde(with = "aether_data::bytes")]
         outcome: Vec<u8>,
     },
     /// The admitted bytes did not decode into an [`Event`](crate::reduce::Event),
@@ -550,11 +556,13 @@ pub enum QueryResult {
     /// [`ViewDocument`](crate::port::ViewDocument).
     Document {
         /// The wire-encoded `ViewDocument`.
+        #[serde(with = "aether_data::bytes")]
         document: Vec<u8>,
     },
     /// One bloom's view, wire-encoded [`BloomView`](crate::port::BloomView).
     Bloom {
         /// The wire-encoded `BloomView`.
+        #[serde(with = "aether_data::bytes")]
         view: Vec<u8>,
     },
     /// No bloom with the requested id is known.

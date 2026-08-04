@@ -41,6 +41,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod bytes;
 pub mod canonical;
 pub mod hash;
 pub mod ids;
