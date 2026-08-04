@@ -62,12 +62,17 @@ use winit::window::Window;
 // The native impl seams, nested under this `runtime` directory so the one
 // `mod runtime;` gate in the parent covers them (no per-sibling `#[cfg]`):
 // `pipeline` (GPU bundle + shared record helpers), `texture` (the texture
-// registry), `quad` (the quad-batch accumulator), `material` (the
-// material-batch accumulator), `capture` (the similarity-reference resolver),
-// and `config` (the `RenderTuningConfig` knobs + `RenderParams`).
+// registry), `geometry` (the geometry registry), `quad` (the quad-batch
+// accumulator), `material` (the material-batch accumulator), `capture` (the
+// similarity-reference resolver), and `config` (the `RenderTuningConfig`
+// knobs + `RenderParams`).
 mod capture;
 mod config;
 pub use config::DEFAULT_CLEAR_COLOR;
+// The ADR-0171 geometry registry: staged vertex/index bytes realized
+// lazily as wgpu buffers at first GPU use (the draw-pass slice records
+// against the realized side).
+mod geometry;
 // The `HeadlessRenderCapability` companion's runtime half (identity in the
 // crate-root `headless` module) — a nested child so the same `mod runtime;`
 // gate covers it.
@@ -105,15 +110,17 @@ use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTarget
 // modules, so the re-export up to runtime level keeps that exact visibility.
 use self::capture::PendingCapture;
 pub use self::capture::resolve_reference;
+pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::material::MaterialBatch;
 use self::program::ProgramRegistry;
 pub use self::quad::QuadBatch;
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
-    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
-    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy,
-    ProgramDispatch, ProgramRegister, ProgramRegisterResult, RenderCapability, UpdateTexture, ViewProjection,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
+    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame,
+    Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, RenderCapability,
+    UpdateGeometry, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -137,6 +144,10 @@ pub struct RenderCapabilityState {
     material_frame: Vec<MaterialBatch>,
     material_last_submitted: Vec<MaterialBatch>,
     textures: TextureRegistry,
+    /// ADR-0171 geometry resources: the session-scoped registry. Staged
+    /// here at create/update; the draw-pass record path realizes and
+    /// consumes the wgpu buffers.
+    geometries: GeometryRegistry,
     /// ADR-0170 authored render programs: the session-scoped registry.
     programs: ProgramRegistry,
     /// Dispatches queued since the last frame record. Unlike the draw
@@ -524,6 +535,7 @@ impl NativeActor for RenderCapability {
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
+            geometries: GeometryRegistry::new(),
             programs: ProgramRegistry::new(),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
@@ -604,6 +616,34 @@ impl NativeActor for RenderCapability {
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         state.observe(<DestroyTexture as Kind>::ID);
         state.textures.destroy(mail);
+    }
+
+    /// `CreateGeometry` (ADR-0171), on the owned geometry registry —
+    /// validation and id assignment are CPU-side, so the reply needs no
+    /// booted GPU; the buffers realize lazily at first GPU use.
+    #[handler::single]
+    fn on_create_geometry(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateGeometry,
+    ) -> CreateGeometryResult {
+        state.observe(<CreateGeometry as Kind>::ID);
+        state.geometries.create(mail)
+    }
+
+    /// `UpdateGeometry` (ADR-0171), on the owned geometry registry.
+    #[handler::single]
+    fn on_update_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateGeometry) {
+        state.observe(<UpdateGeometry as Kind>::ID);
+        state.geometries.update(mail);
+    }
+
+    /// `DestroyGeometry` (ADR-0171), on the owned geometry registry —
+    /// mirrors `destroy_texture`.
+    #[handler::single]
+    fn on_destroy_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
+        state.observe(<DestroyGeometry as Kind>::ID);
+        state.geometries.destroy(mail);
     }
 
     /// `ProgramRegister` (ADR-0170): validate the WGSL and pass graph,
@@ -991,6 +1031,7 @@ mod tests {
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
+            geometries: GeometryRegistry::new(),
             programs: ProgramRegistry::new(),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: 1024,
