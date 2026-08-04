@@ -31,15 +31,17 @@
 // arithmetic nobody reads better for the rewrite.
 #![allow(clippy::suboptimal_flops)]
 
+use std::cmp::Reverse;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent, LoadResult, Render, WindowId, WindowSize};
 use aether_math::Vec3;
 use aether_puppet::easel::program::{sight, stroke};
 use aether_puppet::extract::{self, Settings};
@@ -47,6 +49,7 @@ use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{Load, Look, anchor, chart};
+use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
 /// The address a loaded component registers at (ADR-0099).
 const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
@@ -75,6 +78,13 @@ const LABEL_PAD: f32 = 0.12;
 const SAMPLES: u32 = 40;
 const WARMUP: u32 = 12;
 
+/// How many program ids the per-pass table asks after. The puppet
+/// registers a handful — the visibility field's, the ink's, the bake's
+/// and the wash's — and the render cap assigns them from zero in
+/// register order, so asking past the last one costs one `Err` reply
+/// apiece and needs no agreement with the component about the count.
+const PROGRAM_IDS: u32 = 8;
+
 /// Azimuths the orbit condition sweeps, one per timed frame — far enough
 /// apart that every frame is a genuine re-split rather than a repeat of
 /// the eye already solved for.
@@ -96,17 +106,25 @@ fn subject_dir() -> Option<PathBuf> {
 /// the one root the harness serves every namespace from, and the copy is
 /// paid once against a subject load that takes seconds anyway.
 fn mounted(dir: &Path, wasm: &Path) -> SubstrateHarness {
+    mounted_with(dir, wasm, false)
+}
+
+/// The same, with the per-pass GPU timing instrument on or off. It is off
+/// for every timed loop: the queries cost a few percent of the tick, so a
+/// whole-frame millisecond measured with them on is not the frame this
+/// branch ships.
+fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness {
     let save = init_save_sandbox("puppet-pace");
     for name in ["subject.obj", "labels.npy"] {
         fs::copy(dir.join(name), save.join(name)).expect("stage the subject");
     }
-    let mut harness = SubstrateHarness::builder()
-        .size(WIDTH, HEIGHT)
-        .namespace_roots(test_namespace_roots(save))
-        .with_render()
-        .with_component_host()
-        .build()
-        .expect("boot a rendering harness with a component host");
+    let builder = SubstrateHarness::builder().size(WIDTH, HEIGHT).namespace_roots(test_namespace_roots(save));
+    let builder = if pass_timings {
+        builder.with_render_pass_timings()
+    } else {
+        builder.with_render()
+    };
+    let mut harness = builder.with_component_host().build().expect("boot a rendering harness with a component host");
 
     let loaded = harness
         .execute(vec![(
@@ -140,6 +158,19 @@ fn mounted(dir: &Path, wasm: &Path) -> SubstrateHarness {
             ),
         )])
         .expect("the subject load settles");
+
+    // How big the surface is. On a desktop chassis the window cap
+    // announces this; the harness has no window, so nothing publishes it
+    // and the easel would sit at no canvas at all — developing nothing,
+    // dispatching nothing, and pacing a frame with no paint in it. Sent
+    // as ordinary mail to the component, which is the same handler the
+    // broadcast would reach.
+    harness
+        .execute(vec![(
+            "canvas",
+            HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(0), width: WIDTH, height: HEIGHT }),
+        )])
+        .expect("the canvas announcement settles");
 
     harness
 }
@@ -185,6 +216,7 @@ fn the_frame_paces_at_the_pinned_framing() {
         .expect("prime the pinned framing");
 
     photograph(&mut harness, "AETHER_PUPPET_GATE_PNG", "the pinned framing");
+    assert_the_develop_repeats(&mut harness);
 
     let still = timed(&mut harness, None);
     let orbit = timed(&mut harness, Some(AZIMUTH));
@@ -199,6 +231,39 @@ fn the_frame_paces_at_the_pinned_framing() {
         .execute(vec![("turn", HarnessOp::send_and_settle(PUPPET, &look(turned))), ("settle", HarnessOp::advance(8))])
         .expect("settle the turned framing");
     photograph(&mut harness, "AETHER_PUPPET_TURNED_PNG", &format!("azimuth {turned:.1} after the orbit"));
+}
+
+/// Tripwire: a held view must develop the same sheet every frame.
+///
+/// The develop runs per frame now rather than once a view settles, so
+/// the whole picture is re-derived from scratch on every tick. Anything
+/// in it that carried over between frames — an accident stream re-rolled
+/// on a different count, a centroid taken off a plane the previous frame
+/// wrote, a transient the pool handed out in a different order — would
+/// show as the paint quietly crawling under a still camera. It reads as
+/// texture rather than as a fault, so nothing but a byte comparison
+/// catches it.
+///
+/// Two captures rather than a develop run twice in a scenario, because
+/// the claim that matters here is about the shipped frame path, and the
+/// per-frame develop is what makes the frame the unit to compare.
+fn assert_the_develop_repeats(harness: &mut SubstrateHarness) {
+    let mut sheets = Vec::new();
+    for label in ["first", "second"] {
+        let captured = harness
+            .execute(vec![("hold", HarnessOp::advance(4)), (label, HarnessOp::capture())])
+            .expect("capture a held frame");
+        sheets.push(captured.captured(label).expect("the capture step ran").to_vec());
+    }
+
+    assert_eq!(
+        sheets[0],
+        sheets[1],
+        "a held view developed two different sheets ({} bytes against {})",
+        sheets[0].len(),
+        sheets[1].len(),
+    );
+    eprintln!("pace: two develops of the held view are byte-identical ({} bytes)", sheets[0].len());
 }
 
 /// Write one frame out under the path `variable` names, or do nothing
@@ -297,6 +362,159 @@ fn the_drawing_divides_by_volatility() {
             megabytes(curves),
             megabytes(staying + travelling),
             megabytes(travelling),
+        );
+    }
+}
+
+/// Where the frame's GPU time goes, pass by pass, across every program
+/// the puppet registers (iamacoffeepot/aether#4423).
+///
+/// A separate run from the pacing above, and it has to be: the timestamp
+/// instrument places two queries per pass per frame and costs a few
+/// percent of the tick, so a whole-frame millisecond measured with it on
+/// is not the frame this branch ships. Read the two together — the
+/// pacing says how long the frame is, this says what it is made of.
+///
+/// Program ids are not visible to a test driving the component, so the
+/// table asks every id the puppet could have been assigned and keeps the
+/// ones that answer. Each program identifies itself by its own pass
+/// labels, which is what the reader wants named anyway.
+///
+/// ```text
+/// AETHER_CROSSFEED_DIR=/path/to/dir \
+///     cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture the_frame_divides_by_pass
+/// ```
+#[test]
+#[ignore = "instrument; needs the shipped subject in AETHER_CROSSFEED_DIR and a release-profile component wasm"]
+fn the_frame_divides_by_pass() {
+    let (Some(wasm), Some(dir)) = (require_runtime("aether_puppet"), subject_dir()) else {
+        return;
+    };
+    let mut harness = mounted_with(&dir, &wasm, true);
+
+    harness
+        .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("prime", HarnessOp::advance(24))])
+        .expect("prime the pinned framing");
+    // The EWMA needs samples, and the readback lands a frame or two
+    // behind the encode that placed the queries.
+    harness.execute(vec![("measure", HarnessOp::advance(SAMPLES))]).expect("accumulate timing samples");
+
+    for program_id in 0..PROGRAM_IDS {
+        let read = harness
+            .execute(vec![(
+                "timings",
+                HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }),
+            )])
+            .expect("query the per-pass timings");
+        let rows = match read.reply::<ProgramTimingsResult>("timings").expect("decode ProgramTimingsResult") {
+            ProgramTimingsResult::Ok { rows, .. } => rows,
+            ProgramTimingsResult::Absent { reason } => {
+                eprintln!("passes: instrument absent — {reason}");
+                return;
+            }
+            // Every id past the last the puppet registered.
+            ProgramTimingsResult::Err { .. } => continue,
+        };
+
+        report_program(program_id, &rows);
+    }
+
+    report_handler_cost(&mut harness);
+}
+
+/// The other half of the frame: what the component's own handlers cost
+/// on the CPU, from the same per-handler EWMA `actor_cost` reads.
+///
+/// The GPU table above and this one do not sum to the wall-clock frame
+/// and are not meant to — the two run concurrently, and the wall clock
+/// also carries the host's encode and the harness' own present. What the
+/// pair answers is which side a frame is spent on, and which handler or
+/// which pass to look at first.
+fn report_handler_cost(harness: &mut SubstrateHarness) {
+    let read = harness
+        .execute(vec![("cost", HarnessOp::send_and_await_reply(PUPPET, &CostTail { kind: None }))])
+        .expect("query the puppet's handler costs");
+    let rows = match read.reply::<CostTailResult>("cost").expect("decode CostTailResult") {
+        CostTailResult::Ok { rows } => rows,
+        CostTailResult::Err { error } => {
+            eprintln!("cost: unavailable — {error}");
+            return;
+        }
+    };
+
+    // A wasm trampoline answers with ids alone, so the kinds this
+    // instrument reads are named from their own `Kind::ID` consts. The
+    // rest print as tagged ids, which is enough to tell them apart.
+    let named = |row: &CostRow| {
+        [(Render::ID, Render::NAME), (Look::ID, Look::NAME), (Load::ID, Load::NAME), (WindowSize::ID, WindowSize::NAME)]
+            .into_iter()
+            .find_map(|(id, name)| (id == row.kind_id).then_some(name.to_owned()))
+            .or_else(|| row.kind_name.clone())
+            .unwrap_or_else(|| row.kind_id.to_string())
+    };
+
+    let mut rows: Vec<_> = rows.into_iter().filter(|row| row.samples > 0).collect();
+    rows.sort_unstable_by_key(|row| Reverse(row.mean_nanos));
+    for row in rows.iter().take(8) {
+        eprintln!(
+            "cost: {:<32} {:>8.3} ms  (mad {:>6.3} ms over {} samples)",
+            named(row),
+            row.mean_nanos as f64 / 1.0e6,
+            row.mad_nanos as f64 / 1.0e6,
+            row.samples,
+        );
+    }
+}
+
+/// One program's table: its whole GPU time, then the entry points that
+/// carry it, widest first, and the ten most expensive individual passes.
+fn report_program(program_id: u32, rows: &[PassTimingRow]) {
+    let millis = |nanos: u64| nanos as f64 / 1.0e6;
+    let total: u64 = rows.iter().map(|row| row.mean_nanos).sum();
+    let measured = rows.iter().filter(|row| row.samples > 0).count();
+    if total == 0 {
+        eprintln!("passes: program {program_id} — {} passes, none measured", rows.len());
+        return;
+    }
+
+    let mut by_entry: Vec<(&str, u32, u64)> = Vec::new();
+    for row in rows {
+        match by_entry.iter_mut().find(|(label, ..)| *label == row.label) {
+            Some((_, passes, nanos)) => {
+                *passes += 1;
+                *nanos += row.mean_nanos;
+            }
+            None => by_entry.push((&row.label, 1, row.mean_nanos)),
+        }
+    }
+    by_entry.sort_unstable_by_key(|&(.., nanos)| Reverse(nanos));
+
+    eprintln!(
+        "passes: program {program_id} — {:.2} ms over {} passes ({measured} measured)",
+        millis(total),
+        rows.len(),
+    );
+    for (label, passes, nanos) in by_entry.iter().take(12) {
+        eprintln!(
+            "  {label:<24} {passes:>4} passes  {:>7.2} ms  {:>5.1}%",
+            millis(*nanos),
+            100.0 * *nanos as f64 / total as f64,
+        );
+    }
+
+    let mut hottest: Vec<&PassTimingRow> = rows.iter().collect();
+    hottest.sort_unstable_by_key(|row| Reverse(row.mean_nanos));
+    for row in hottest.iter().take(10) {
+        eprintln!(
+            "  pass {:>4} {:<24} {}x{} /{} x{}  {:>7.3} ms",
+            row.pass,
+            row.label,
+            row.width,
+            row.height,
+            row.divisor,
+            row.iterations,
+            millis(row.mean_nanos),
         );
     }
 }

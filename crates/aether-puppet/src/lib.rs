@@ -588,10 +588,11 @@ impl WasmActor for Puppet {
                 anchors,
                 face,
             });
-            // The CPU split, deferred behind the easel's own gate: the
-            // wash smears along the drawing's strokes, so it wants the
-            // visible runs — and it wants them a hundred times less
-            // often than the frame does.
+            // The CPU split, asked for rather than handed over: the wash
+            // wants the visible runs to rasterize its own ink coverage
+            // plane from, and the easel is the only caller left that
+            // needs them — the frame's ink comes off the visibility
+            // field (ADR-0172) and never sees a CPU triangle.
             let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
             let split = || Self::split(subject, drawing, eye);
             let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &split, chart };

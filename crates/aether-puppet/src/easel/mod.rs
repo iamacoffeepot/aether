@@ -113,12 +113,12 @@ pub struct Subject<'a> {
     pub scores: &'a [[f32; labels::CLASSES]],
     pub settings: &'a Settings,
     /// The drawing solved for this eye, asked for rather than handed
-    /// over: since ADR-0172 the frame's ink is rasterized from the
-    /// visibility field and no CPU triangles exist per frame, so the
-    /// only consumer left is the flow bake below — and it runs at
-    /// develop cadence, behind the settle gate. Passing a slice would
-    /// put the split back on every frame to serve a call made on one in
-    /// a hundred.
+    /// over: the frame's own ink is rasterized from the visibility field
+    /// (ADR-0172) and no CPU triangles exist for it, so the easel is the
+    /// only caller that still needs the visible runs — it rasterizes its
+    /// ink coverage plane from them, and the flow solve reads that plane.
+    /// A closure rather than a slice because a caller with no easel work
+    /// to do never pays for the split.
     pub drawn: &'a dyn Fn() -> Vec<DrawTriangle>,
     pub chart: Option<Chart<'a>>,
 }
@@ -779,6 +779,92 @@ fn iris_centre(eyes: &[accent::Eye]) -> Option<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::labels::CLASSES;
+    use crate::mesh::Mesh;
+
+    /// A quad standing well inside the frame, every vertex skin.
+    fn quad() -> Mesh {
+        Mesh::from_obj_bytes(b"v -0.5 -0.5 0\nv 0.5 -0.5 0\nv 0.5 0.5 0\nv -0.5 0.5 0\nf 1 2 3\nf 1 3 4\n", 0)
+            .expect("fixture mesh")
+    }
+
+    fn view() -> View {
+        let eye = Vec3::new(0.0, 0.0, 5.0);
+        View {
+            eye,
+            target: Vec3::ZERO,
+            view_proj: Mat4::perspective_rh(1.0, 0.75, 0.1, 100.0) * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+            aspect: 0.75,
+            field_of_view: 1.0,
+        }
+    }
+
+    /// Tripwire: the easel must actually reach its dispatches.
+    ///
+    /// Every mail the develop ships is gated on the replies to the mail
+    /// before it — registers, then plane creates, then one geometry
+    /// create at a time — and each gate is a condition on state some
+    /// other method owns. A gate that can never open produces no error
+    /// and no warning anywhere: the component keeps developing, keeps
+    /// staging a frame, and simply never sends a dispatch, so the sheet
+    /// is absent and the drawing renders over bare background. That is
+    /// exactly what a mis-wired register queue or a create counter off by
+    /// one looks like from outside, and nothing else in the suite would
+    /// notice.
+    ///
+    /// So this drives the whole protocol against a stand-in render cap —
+    /// ids handed back in send order, as the real one does — and asserts
+    /// the easel arrives at both dispatches and stands its sheet.
+    #[test]
+    fn the_develop_reaches_its_dispatches_through_the_whole_reply_protocol() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let drawn = Vec::new;
+
+        let mut easel = Easel::default();
+        easel.resized(160, 200);
+
+        let mut next_id = 0u32;
+        let mut ids = || {
+            next_id += 1;
+            next_id
+        };
+        // Ten render stages is far more than the protocol needs — the
+        // point is that it converges, not how fast.
+        for _ in 0..10 {
+            let subject = Subject { mesh: &mesh, scores: &scores, settings: &settings, drawn: &drawn, chart: None };
+            easel.develop(&subject, &view());
+
+            for _ in easel.take_program_destroys() {}
+            for _ in easel.take_registers() {
+                easel.registered(Ok(ids()));
+            }
+            for _ in easel.take_destroys() {}
+            for _ in easel.take_creates() {
+                easel.created(Ok(ids()));
+            }
+            for _ in easel.take_geometry_creates() {
+                easel.geometry_created(Ok(ids()));
+            }
+            for _ in easel.take_geometry_updates() {}
+            if easel.take_dispatch().len() == 2 {
+                assert!(
+                    easel.draw(&view(), 1.0).is_some(),
+                    "a dispatched develop must stand its sheet for the frame to show",
+                );
+                return;
+            }
+        }
+
+        panic!(
+            "the easel never reached its dispatches: programs {:?}, textures {}, geometries {:?}",
+            easel.programs,
+            easel.textures.is_some(),
+            easel.geometries.map(Resident::id),
+        );
+    }
 
     // Tripwire: a canvas change must release the paper pulped for the old
     // one. The paper's grain is sampled at the canvas' own rate, so a
