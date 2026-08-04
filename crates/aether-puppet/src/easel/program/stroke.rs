@@ -23,19 +23,30 @@
 //!
 //! # What the vertex stage does
 //!
-//! Every curve is rasterized whole. The stage reads the point's
-//! verdict, reach, run arc and curve coverage out of the field, folds
-//! them into one width scale, and displaces the vertex along the rail
-//! offset the CPU solved. Hidden points scale to zero and their
-//! segments rasterize nothing, so the runs the CPU used to cut are not
-//! cut anywhere — they are what is left when the hidden widths vanish.
+//! Every curve is rasterized whole. The stage solves the point's rail
+//! pair against the live eye — the eye-facing perpendicular, the depth
+//! weighting, the hand-wobble — then reads the point's verdict, reach,
+//! run arc and curve coverage out of the field, folds those into one
+//! width scale, and displaces the vertex by the scaled offset. Hidden
+//! points scale to zero and their segments rasterize nothing, so the
+//! runs the CPU used to cut are not cut anywhere — they are what is
+//! left when the hidden widths vanish.
 //!
 //! # What stays on the CPU
 //!
-//! The rail solve: the eye-facing perpendicular, the depth weighting,
-//! and the hand-wobble, all of which are per-point and view-dependent
-//! and none of which the field knows about. They are packed as vertex
-//! attributes at re-split cadence, exactly as ADR-0172 has it.
+//! What the eye decides per *curve*, which is one float:
+//! [`ribbon::reference_depth`], delivered through the field's own
+//! [`sight::REFERENCE`](super::sight::REFERENCE) plane. Everything the
+//! rails need per point is a function of the curve alone — the chord
+//! across a point, the wobble's world argument, the class and per-point
+//! weights — so the ribbon buffer divides by volatility as the points do
+//! (iamacoffeepot/aether#4440), and a resident curve's ribbon is
+//! uploaded once per subject rather than once per eye.
+//!
+//! ADR-0172 has the rail solve staying on the CPU and travelling at
+//! re-split cadence. Measured, that was 18 MB a re-split for a solve
+//! whose only view-dependent input per point is the eye itself, so the
+//! record's division was drawn one step too early.
 
 use aether_math::{Mat4, Vec3};
 use aether_render::{
@@ -44,8 +55,8 @@ use aether_render::{
 };
 
 use super::sight::Layout;
-use crate::feature::Drawing;
-use crate::ribbon::{self, Rail};
+use crate::feature::{Drawing, Half};
+use crate::ribbon::{self, Anchor};
 use crate::style;
 use crate::visibility;
 
@@ -54,22 +65,33 @@ pub const STROKE_WGSL: &str = include_str!("stroke.wgsl");
 
 /// Dispatch-binding indices, in the order [`program`] declares them.
 ///
-/// The four planes are the field's own bindings, supplied by naming the
+/// The five planes are the field's own bindings, supplied by naming the
 /// same texture ids the sight dispatch wrote — they resolve at
 /// `Divided { divisor: 2 }` against this program's doubled reference.
 pub const SEEN: u32 = 0;
 pub const REACH: u32 = 1;
 pub const COVERAGE: u32 = 2;
 pub const TOTAL: u32 = 3;
+pub const REFERENCE: u32 = 4;
 /// The supersampled ink sheet, and so the reference extent.
-pub const INK: u32 = 4;
+pub const INK: u32 = 5;
 
 /// How many bindings a dispatch supplies.
-pub const BINDING_COUNT: usize = 5;
+pub const BINDING_COUNT: usize = 6;
 
-/// Geometry slot index: the drawing's ribbons, and nothing else. The
-/// subject is not rasterized here — see [`program`].
-pub const RIBBON: u32 = 0;
+/// Geometry slot indices: the drawing's ribbons in two buffers, divided
+/// by volatility the way the field's points are. The subject is not
+/// rasterized here — see [`program`].
+///
+/// The two draw in this order into one raster, the resident half
+/// clearing it and the volatile half loading what it left, which is
+/// also the order the whole drawing composited in when it was one
+/// buffer: [`Drawing`] concatenates resident first.
+pub const RESIDENT: u32 = 0;
+pub const VOLATILE: u32 = 1;
+
+/// How many geometry slots a dispatch supplies.
+pub const GEOMETRY_COUNT: usize = 2;
 
 /// Edge multiple of the ink target over the canvas.
 ///
@@ -99,29 +121,35 @@ pub fn ink_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }
 }
 
-/// The ribbon geometry's layout: the rail centre, the offset that
-/// reaches the rail at full pressure, the field texel the point owns,
-/// its ink colour, and whether the mark was authored.
+/// The ribbon geometry's layout: [`ribbon::Anchor`] in full, the two
+/// field texels the vertex reads, and the ink colour.
 ///
-/// The offset is carried rather than a direction and a width because
-/// the vertex stage's whole contribution is one scalar — the scale it
-/// reads from the field — and a vertex that scales to zero must land
-/// exactly on its partner so the segment collapses rather than folding.
+/// Every lane is a function of the curve alone, which is the whole
+/// point — the eye enters in the vertex stage, out of the uniform blob
+/// and the reference plane, so a curve that has not changed shape packs
+/// the same bytes from every angle.
+///
+/// The two `address` lanes are texel indices. `x` is the point's own,
+/// with two bits stolen at the bottom for what a vertex stage cannot
+/// otherwise ask: which of the pair's two rails it is, and whether the
+/// mark was authored. `y` is the curve's first texel, where the
+/// [`sight::REFERENCE`](super::sight::REFERENCE) plane carries the
+/// reference depth.
 #[must_use]
 pub fn ribbon_slot() -> GeometrySlotSpec {
     GeometrySlotSpec {
         layout: vec![
             VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 2, format: VertexFormat::Float32 },
-            VertexAttribute { location: 3, format: VertexFormat::Unorm8x4 },
-            VertexAttribute { location: 4, format: VertexFormat::Float32 },
+            VertexAttribute { location: 2, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 3, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 4, format: VertexFormat::Unorm8x4 },
         ],
     }
 }
 
 /// Bytes one ribbon vertex packs, in [`ribbon_slot`] declaration order.
-pub const RIBBON_VERTEX_BYTES: usize = 12 + 12 + 4 + 4 + 4;
+pub const RIBBON_VERTEX_BYTES: usize = 12 + 12 + 8 + 8 + 4;
 
 /// Uniform window for both passes — the WGSL `StrokeParams` block.
 pub struct StrokeUniforms {
@@ -169,86 +197,94 @@ impl StrokeUniforms {
     }
 }
 
-/// The drawing's ribbons, packed for [`ribbon_slot`].
+/// One half's ribbons, packed for [`ribbon_slot`].
 ///
 /// Two vertices a point — the two rails — so a segment is the quad
 /// between consecutive pairs. The drawing and the layout are the same
 /// pair the field was built from, which is what makes the packed texel
-/// index address this point's own verdict.
+/// indices address this point's own verdict and this curve's own
+/// reference depth.
 ///
-/// One buffer rather than the two the points divide into (#4435): every
-/// rail here is solved against the eye — the perpendicular, the depth
-/// weighting, the wobble's world argument — so a resident curve's
-/// ribbon vertices change with the camera even though the curve does
-/// not.
+/// Two buffers, as the points divide into two (#4435), and for the same
+/// reason now that the rail solve has crossed to the vertex stage:
+/// nothing packed here is a function of the eye, so a resident curve's
+/// ribbon is uploaded once per subject and left alone while the camera
+/// turns (#4440).
 ///
-/// A curve the rail solve declines (under two points, or under its
-/// class' length floor) contributes no vertices and no indices. Its
-/// field span stays allocated and unread, which costs texels rather
-/// than correctness.
+/// A curve with no segment at all contributes no vertices and no
+/// indices. A curve the *eye* declines — under its class' length floor
+/// at this distance — is packed like any other and collapses in the
+/// vertex stage instead, since which curves those are is not known
+/// until the frame that asks.
 ///
-/// Vertices and indices come back together because the rail solve is
-/// the expensive half and runs every frame the eye moves — asking for
-/// the two separately would solve the whole drawing twice.
+/// A half that laid out to nothing still packs one stand-in vertex and
+/// a triangle of three copies of it, for the reason
+/// [`sight::point_vertices`](super::sight::point_vertices) packs a
+/// stand-in point: a dispatch supplies one id per declared geometry
+/// slot or it warn-drops whole.
 #[must_use]
-pub fn ribbon_geometry(drawing: Drawing<'_>, layout: &Layout, eye: Vec3) -> (Vec<u8>, Vec<u8>) {
+pub fn ribbon_geometry(drawing: Drawing<'_>, layout: &Layout, half: Half) -> (Vec<u8>, Vec<u8>) {
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
-    let mut solved = Vec::new();
+    let mut anchored = Vec::new();
     let mut base = 0u32;
-    for (index, curve) in drawing.curves().enumerate() {
-        solved.clear();
+    for (index, curve) in drawing.half(half) {
+        anchored.clear();
         let Some(span) = layout.span_of(index) else {
             continue;
         };
-        if !ribbon::rails(curve, eye, 0, &mut solved) {
+        if !ribbon::anchors(curve, 0, &mut anchored) {
             continue;
         }
 
         let colour = ribbon::ink(curve.pen);
         let channels = [colour.r, colour.g, colour.b, 1.0];
-        let authored = if curve.authored {
-            1.0f32
-        } else {
-            0.0
-        };
-        for (at, rail) in solved.iter().enumerate() {
-            let slot = (span.start + at as u32) as f32;
-            for side in [-1.0f32, 1.0] {
-                vertices.extend_from_slice(&pack(rail, side, slot, channels, authored));
+        let authored = u32::from(curve.authored);
+        for (at, anchor) in anchored.iter().enumerate() {
+            for side in 0..2u32 {
+                let address = [((span.start + at as u32) * 4 + authored * 2 + side) as f32, span.start as f32];
+                vertices.extend_from_slice(&pack(anchor, address, channels));
             }
         }
 
-        for at in 1..solved.len() as u32 {
+        for at in 1..anchored.len() as u32 {
             let (left, right) = (base + 2 * (at - 1), base + 2 * (at - 1) + 1);
             let (next_left, next_right) = (base + 2 * at, base + 2 * at + 1);
             for corner in [left, next_left, next_right, left, next_right, right] {
                 indices.extend_from_slice(&corner.to_le_bytes());
             }
         }
-        base += 2 * solved.len() as u32;
+        base += 2 * anchored.len() as u32;
+    }
+
+    if vertices.is_empty() {
+        let inert = Anchor { pos: Vec3::new(0.0, 0.0, 0.0), along: Vec3::new(0.0, 0.0, 0.0), half: 0.0, drift: 0.0 };
+        vertices.extend_from_slice(&pack(&inert, [0.0, 0.0], [0.0; 4]));
+        indices.extend([0u32; 3].into_iter().flat_map(u32::to_le_bytes));
     }
 
     (vertices, indices)
 }
 
-fn pack(rail: &Rail, side: f32, slot: f32, channels: [f32; 4], authored: f32) -> [u8; RIBBON_VERTEX_BYTES] {
+fn pack(anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) -> [u8; RIBBON_VERTEX_BYTES] {
     let mut vertex = [0u8; RIBBON_VERTEX_BYTES];
     let scalars = [
-        rail.centre.x,
-        rail.centre.y,
-        rail.centre.z,
-        rail.offset.x * side,
-        rail.offset.y * side,
-        rail.offset.z * side,
-        slot,
+        anchor.pos.x,
+        anchor.pos.y,
+        anchor.pos.z,
+        anchor.along.x,
+        anchor.along.y,
+        anchor.along.z,
+        address[0],
+        address[1],
+        anchor.half,
+        anchor.drift,
     ];
-    for (lane, value) in vertex[0..28].chunks_exact_mut(4).zip(scalars) {
+    for (lane, value) in vertex[0..40].chunks_exact_mut(4).zip(scalars) {
         lane.copy_from_slice(&value.to_le_bytes());
     }
-    for (lane, value) in vertex[28..32].iter_mut().zip(channels) {
+    for (lane, value) in vertex[40..44].iter_mut().zip(channels) {
         *lane = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     }
-    vertex[32..36].copy_from_slice(&authored.to_le_bytes());
 
     vertex
 }
@@ -261,8 +297,9 @@ pub fn sheet_size(canvas: (usize, usize)) -> (usize, usize) {
 
 /// The whole ink pass as one register graph.
 ///
-/// Two passes: the ribbons into a raster transient, then the resolve
-/// that turns it into the sheet the frame composites.
+/// Three passes: the two ribbon halves into a raster transient — the
+/// resident one clearing it, the volatile one loading what it left —
+/// then the resolve that turns it into the sheet the frame composites.
 ///
 /// # There is no depth here, and that is a deviation from ADR-0172
 ///
@@ -300,22 +337,19 @@ pub fn sheet_size(canvas: (usize, usize)) -> (usize, usize) {
 /// a quarter of the ink at a half-covered pixel.
 #[must_use]
 pub fn program() -> ProgramRegister {
-    let planes = [SEEN, REACH, COVERAGE, TOTAL].map(|index| InputSlot::Binding { index }).to_vec();
+    let planes = [SEEN, REACH, COVERAGE, TOTAL, REFERENCE].map(|index| InputSlot::Binding { index }).to_vec();
+    let ribbons = |geometry: u32, load: PassLoad| ProgramPass {
+        stage: PassStage::Draw(DrawPass { vertex_entry_point: "vs_stroke".to_owned(), geometry, depth: None, load }),
+        entry_point: "fs_stroke".to_owned(),
+        inputs: planes.clone(),
+        output: OutputSlot::Transient { index: RASTER },
+        uniform_offset: 0,
+        uniform_length: StrokeUniforms::BYTES,
+        repeat: None,
+    };
     let passes = vec![
-        ProgramPass {
-            stage: PassStage::Draw(DrawPass {
-                vertex_entry_point: "vs_stroke".to_owned(),
-                geometry: RIBBON,
-                depth: None,
-                load: PassLoad::Clear,
-            }),
-            entry_point: "fs_stroke".to_owned(),
-            inputs: planes,
-            output: OutputSlot::Transient { index: RASTER },
-            uniform_offset: 0,
-            uniform_length: StrokeUniforms::BYTES,
-            repeat: None,
-        },
+        ribbons(RESIDENT, PassLoad::Clear),
+        ribbons(VOLATILE, PassLoad::Load),
         ProgramPass {
             stage: PassStage::Fragment,
             entry_point: "fs_resolve".to_owned(),
@@ -334,7 +368,7 @@ pub fn program() -> ProgramRegister {
         wgsl: STROKE_WGSL.to_owned(),
         bindings,
         transients: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
-        geometries: vec![ribbon_slot()],
+        geometries: vec![ribbon_slot(); GEOMETRY_COUNT],
         depth_transients: Vec::new(),
         passes,
     }
@@ -343,6 +377,8 @@ pub fn program() -> ProgramRegister {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::easel::program::sight;
+    use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
 
     /// Tripwire: the packed stride is what the register checks the
     /// vertex stage against, and a lane that slides here reads the
@@ -361,5 +397,40 @@ mod tests {
             .sum();
 
         assert_eq!(stride, RIBBON_VERTEX_BYTES);
+    }
+
+    /// Tripwire: each half's indices address its own buffer.
+    ///
+    /// The two halves are separate geometries, so a vertex counter that
+    /// ran on across the split would leave the volatile half indexing
+    /// past its own end — which a driver answers with whatever it
+    /// likes, not with an error.
+    #[test]
+    fn each_half_indexes_only_its_own_vertices() {
+        let resident = [curve(1, 0.0), curve(2, 0.4)];
+        let volatile = [curve(3, 0.8)];
+        let drawing = Drawing { resident: &resident, volatile: &volatile };
+        let layout = sight::layout(drawing, (64, 64)).expect("fits");
+
+        for half in [Half::Resident, Half::Volatile] {
+            let (vertices, indices) = ribbon_geometry(drawing, &layout, half);
+            let count = (vertices.len() / RIBBON_VERTEX_BYTES) as u32;
+            for corner in indices.chunks_exact(4) {
+                let at = u32::from_le_bytes(corner.try_into().expect("four bytes"));
+                assert!(at < count, "{half:?} indexes vertex {at} of {count}");
+            }
+        }
+    }
+
+    fn curve(seed: u64, at: f32) -> Curve3 {
+        Curve3 {
+            points: (0..6)
+                .map(|i| SurfacePoint::on_surface(Vec3::new(at + i as f32 * 0.05, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)))
+                .collect(),
+            class: FeatureClass::Silhouette,
+            pen: Pen::Ink,
+            seed,
+            authored: false,
+        }
     }
 }

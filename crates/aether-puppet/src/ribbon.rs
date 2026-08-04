@@ -46,6 +46,23 @@ const ANGULAR_HALF_WIDTH: f32 = 0.00035;
 /// already in page pixels — so the class amplitude lands exactly once.
 const ANGULAR_WOBBLE: f32 = 1.0 / PAGE_PIXELS_PER_RADIAN;
 
+/// Nearest and furthest a point's own depth cue is allowed to reach.
+///
+/// The ink pass' vertex stage clamps by the same pair, restated in its
+/// WGSL because a shader constant cannot be imported. The two must move
+/// together.
+const DEPTH_WEIGHT_FLOOR: f32 = 0.82;
+const DEPTH_WEIGHT_CEILING: f32 = 1.22;
+
+/// What [`reference_depth`] answers for a curve that is not drawn at
+/// this eye at all.
+///
+/// A real reference depth is a distance and so never negative, which is
+/// what lets one number carry both the value and the verdict — the ink
+/// pass reads it out of a single plane and collapses the curve's rails
+/// where it is negative.
+pub const NOT_DRAWN: f32 = -1.0;
+
 /// One point's rail pair, solved but not yet widened.
 ///
 /// `offset` reaches from the centre to the right rail at full pressure,
@@ -59,6 +76,32 @@ pub struct Rail {
     pub centre: Vec3,
     pub offset: Vec3,
     pub taper: f32,
+}
+
+/// One point's rail solve with the eye factored out.
+///
+/// Every field is a function of the curve alone, so a curve that has
+/// not changed shape packs the same anchors from every angle — which is
+/// what lets the ink pass upload a resident curve's ribbon once and
+/// derive its rails per frame in the vertex stage
+/// (iamacoffeepot/aether#4440).
+///
+/// The two scalars are the eye-free halves of their products. `half` is
+/// the angular half-width before the distance to the eye scales it into
+/// a world one, and `drift` is the wobble's displacement before the
+/// same distance does — so the stage that has the eye multiplies each
+/// by the depth it measures and nothing else has to travel.
+#[derive(Clone, Copy)]
+pub struct Anchor {
+    /// Where the pen goes, before the wobble displaces it.
+    pub pos: Vec3,
+    /// The chord across the point — the next point less the previous —
+    /// whose cross product with the view gives the offset's direction.
+    pub along: Vec3,
+    /// Angular half-width at full pressure, per unit of depth.
+    pub half: f32,
+    /// Hand-wander displacement, per unit of depth.
+    pub drift: f32,
 }
 
 pub fn ink(pen: Pen) -> Rgb {
@@ -81,90 +124,141 @@ pub fn ink(pen: Pen) -> Rgb {
     }
 }
 
-/// One curve's rail pairs, or nothing if it is too short to read once
-/// projected.
+/// One curve's anchors, or nothing if it carries no segment at all.
 ///
-/// Everything here is view-dependent and so is re-solved whenever the
-/// eye moves — the perpendicular, the depth weighting, the wobble's
-/// world argument. The taper is solved too, but only against the arc of
-/// the curve it was handed: a caller that split the curve into visible
-/// runs first gets ends anchored on those runs, and a caller that hands
-/// the whole curve over gets ends anchored on the curve. The ink pass
-/// is the second kind and overrides the taper from the field.
-pub fn rails(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<Rail>) -> bool {
+/// The whole rail solve save the eye, which is exactly the part that
+/// can be packed once and left on the GPU. Nothing here is a function
+/// of where the viewer stands: the chord across a point is the curve's
+/// own, the wobble's argument is world position (a stroke bends the
+/// same way from every angle and stays continuous across a weld), and
+/// the two scalars are the eye-free halves of their products.
+pub fn anchors(curve: &Curve3, jitter: u64, out: &mut Vec<Anchor>) -> bool {
     if curve.points.len() < 2 {
         return false;
     }
 
-    let weight = curve.class.base_width();
-    let amplitude = curve.class.wobble_amplitude();
+    let (weight, amplitude) = (curve.class.base_width(), curve.class.wobble_amplitude());
+    // The wobble's phase is per-stroke and its argument is world
+    // position, so neither is keyed to the page.
+    let seed = curve.seed ^ jitter;
+    let last = curve.points.len() - 1;
 
-    // Arc measured in radians rather than world units, so the length floor
-    // and the pressure ramp both mean the same thing at any distance.
+    out.extend(curve.points.iter().enumerate().map(|(index, point)| Anchor {
+        pos: point.pos,
+        along: curve.points[(index + 1).min(last)].pos - curve.points[index.saturating_sub(1)].pos,
+        half: ANGULAR_HALF_WIDTH * weight * point.weight,
+        drift: wander(seed, point.pos) * ANGULAR_WOBBLE * amplitude,
+    }));
+
+    true
+}
+
+/// The stroke's own average distance to the eye, or [`NOT_DRAWN`] where
+/// the curve does not read at this eye at all.
+///
+/// This is the whole of what the eye decides about a curve rather than
+/// about one of its points, and so the whole of what the ink pass has
+/// to deliver per frame — one float per curve against a rail buffer's
+/// megabytes (iamacoffeepot/aether#4440). Two questions share the walk
+/// because both are sums over the curve against the same distances.
+///
+/// The average is taken per stroke rather than per scene so the depth
+/// cue reads as one line turning through depth, not as a global fog.
+///
+/// The length floor does not reach an authored mark, and that exemption
+/// is not a nicety. It is a noise rejector, and the chart draws no
+/// noise: a cupid's bow is a fifth of a mouth wide, a lip corner tick is
+/// smaller still, and the iris hook arrives as two short arcs because a
+/// lid crosses it. Every one of those is under the floor and every one
+/// of them was silently missing — the mouth came out as two bare lines
+/// and the eyes as blanks, with nothing having errored.
+pub fn reference_depth(curve: &Curve3, eye: Vec3) -> f32 {
+    if curve.points.len() < 2 {
+        return NOT_DRAWN;
+    }
+
+    // Arc measured in radians rather than world units, so the length
+    // floor means the same thing at any distance.
+    let (mut total, mut arc) = (0.0f32, 0.0f32);
+    for (index, point) in curve.points.iter().enumerate() {
+        let depth = (point.pos - eye).length();
+        total += depth;
+        if let Some(next) = curve.points.get(index + 1) {
+            arc += (next.pos - point.pos).length() / depth.max(1e-4);
+        }
+    }
+    if !curve.authored && arc < curve.class.min_length() / PAGE_PIXELS_PER_RADIAN {
+        return NOT_DRAWN;
+    }
+
+    total / curve.points.len() as f32
+}
+
+/// One point's rail pair against an eye: where its centre lands once
+/// the wobble displaces it, and the offset reaching the right rail at
+/// full pressure.
+///
+/// The one place the eye meets the solve, and so the one place the ink
+/// pass' vertex stage has to reproduce — line for line, since a
+/// disagreement here is a drawing of a different width.
+#[must_use]
+pub fn rail(anchor: &Anchor, reference: f32, eye: Vec3) -> (Vec3, Vec3) {
+    let to_eye = eye - anchor.pos;
+    let depth = to_eye.length().max(1e-4);
+    // Perpendicular to the stroke and to the view at once, which is
+    // what keeps a line from vanishing when it turns edge-on.
+    let across = anchor.along.cross(to_eye);
+    let across = if across.length() < 1e-9 {
+        Vec3::new(0.0, 0.0, 0.0)
+    } else {
+        across.normalize()
+    };
+
+    // Nearer stroke points are bolder — the one cue that keeps a flat
+    // line drawing from reading as a decal on glass. The angular
+    // half-width holds screen width constant through depth, so this
+    // rides on top of it rather than being cancelled by it.
+    let depth_weight = (reference / depth).clamp(DEPTH_WEIGHT_FLOOR, DEPTH_WEIGHT_CEILING);
+
+    (anchor.pos + across * (anchor.drift * depth), across * (anchor.half * depth * depth_weight))
+}
+
+/// One curve's rail pairs, or nothing if it is too short to read once
+/// projected.
+///
+/// The three pieces above put together, and after ADR-0172 the parity
+/// oracle rather than the per-frame producer: the frame's ink derives
+/// its rails from the same three in the ink pass' vertex stage. The
+/// taper is the one part not shared — it is solved here against the arc
+/// of the curve this was handed, so a caller that split the curve into
+/// visible runs first gets ends anchored on those runs, while the ink
+/// pass reads its taper out of the visibility field instead.
+pub fn rails(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<Rail>) -> bool {
+    let reference = reference_depth(curve, eye);
+    let mut anchored = Vec::with_capacity(curve.points.len());
+    if reference < 0.0 || !anchors(curve, jitter, &mut anchored) {
+        return false;
+    }
+
+    // The taper's own parameter, walked a second time because it is a
+    // per-point prefix rather than the curve's total — and because this
+    // is the oracle's path, where a second walk costs nothing that the
+    // frame pays for.
     let angular: Vec<f32> = curve
         .points
         .windows(2)
         .scan(0.0f32, |total, pair| {
-            let span = (pair[1].pos - pair[0].pos).length();
-            let depth = (pair[0].pos - eye).length().max(1e-4);
-            *total += span / depth;
+            *total += (pair[1].pos - pair[0].pos).length() / (pair[0].pos - eye).length().max(1e-4);
             Some(*total)
         })
         .collect();
     let length = angular.last().copied().unwrap_or(0.0);
-    // The floor does not reach an authored mark, and that exemption is not a
-    // nicety. It is a noise rejector, and the chart draws no noise: a cupid's
-    // bow is a fifth of a mouth wide, a lip corner tick is smaller still, and
-    // the iris hook arrives as two short arcs because a lid crosses it. Every
-    // one of those is under the floor and every one of them was silently
-    // missing — the mouth came out as two bare lines and the eyes as blanks,
-    // with nothing having errored.
-    if !curve.authored && length < curve.class.min_length() / PAGE_PIXELS_PER_RADIAN {
-        return false;
-    }
 
-    // The wobble's phase is per-stroke and its argument is world position,
-    // so a stroke bends the same way from every angle and stays continuous
-    // across a weld. Neither is true of anything keyed to the page.
-    let seed = curve.seed ^ jitter;
+    out.extend(anchored.iter().enumerate().map(|(index, anchor)| {
+        let (centre, offset) = rail(anchor, reference, eye);
 
-    // The stroke's own average distance, against which each of its points is
-    // near or far. Taken per stroke rather than per scene so the cue reads as
-    // one line turning through depth, not as a global fog.
-    let reference_depth =
-        curve.points.iter().map(|point| (point.pos - eye).length()).sum::<f32>() / curve.points.len() as f32;
-
-    let rail = |index: usize| -> Rail {
-        let point = curve.points[index];
-        let previous = curve.points[index.saturating_sub(1)].pos;
-        let next = curve.points[(index + 1).min(curve.points.len() - 1)].pos;
-
-        let to_eye = eye - point.pos;
-        let depth = to_eye.length().max(1e-4);
-        let along = next - previous;
-        // Perpendicular to the stroke and to the view at once, which is
-        // what keeps a line from vanishing when it turns edge-on.
-        let across = along.cross(to_eye);
-        let across = if across.length() < 1e-9 {
-            Vec3::new(0.0, 0.0, 0.0)
-        } else {
-            across.normalize()
-        };
-
-        let taper = pressure(angular.get(index.saturating_sub(1)).copied().unwrap_or(0.0), length);
-        // Nearer stroke points are bolder — the one cue that keeps a flat
-        // line drawing from reading as a decal on glass. The angular
-        // half-width above holds screen width constant through depth, so
-        // this rides on top of it rather than being cancelled by it.
-        let depth_weight = (reference_depth / depth).clamp(0.82, 1.22);
-        let half = ANGULAR_HALF_WIDTH * depth * weight * depth_weight * point.weight;
-        let drift = wander(seed, point.pos) * ANGULAR_WOBBLE * depth * amplitude;
-        let centre = point.pos + across * drift;
-
-        Rail { centre, offset: across * half, taper }
-    };
-
-    out.extend((0..curve.points.len()).map(rail));
+        Rail { centre, offset, taper: pressure(angular.get(index.saturating_sub(1)).copied().unwrap_or(0.0), length) }
+    }));
 
     true
 }

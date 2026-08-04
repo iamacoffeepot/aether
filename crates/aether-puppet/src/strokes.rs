@@ -29,11 +29,12 @@ use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::{
     CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, MaterialRect, MaterialTexturedRect,
     ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling, TextureUsage, UpdateGeometry,
+    VertexAttribute,
 };
 
 use crate::easel::View;
 use crate::easel::program::{sight, stroke};
-use crate::feature::Drawing;
+use crate::feature::{Drawing, Half};
 use crate::mesh::Mesh;
 
 /// A resource the render cap assigns an id to: nothing asked yet, an
@@ -82,17 +83,25 @@ impl Ordered {
     }
 }
 
+/// One geometry's packed vertices and indices, staged together because
+/// nothing ever ships one without the other.
+type Packed = (Vec<u8>, Vec<u8>);
+
 /// One frame's solved drawing, staged between the CPU solve and the
 /// mail that carries it.
 ///
-/// The resident points are not here. They belong to the subject rather
-/// than to the frame, and they are staged in [`Strokes::resident_bytes`]
-/// beside the subject's own mesh.
+/// The resident half is not here. It belongs to the subject rather than
+/// to the frame, and it is staged in [`Strokes::resident`] beside the
+/// subject's own mesh.
 struct Solved {
-    points: Vec<u8>,
-    point_indices: Vec<u8>,
-    ribbons: Vec<u8>,
-    ribbon_indices: Vec<u8>,
+    points: Packed,
+    ribbons: Packed,
+    /// One texel per curve, over the whole drawing rather than one
+    /// half: [`ribbon::reference_depth`] is per eye for a resident
+    /// curve exactly as for a volatile one.
+    ///
+    /// [`ribbon::reference_depth`]: crate::ribbon::reference_depth
+    curves: Packed,
     sight_uniforms: Vec<u8>,
     stroke_uniforms: Vec<u8>,
     /// Whether the buffers above have already been moved out — by the
@@ -100,6 +109,18 @@ struct Solved {
     /// the emptied vectors afterwards would replace the resident
     /// drawing with nothing.
     travelled: bool,
+}
+
+/// The subject's own packed drawing, waiting for the create or update.
+///
+/// Both halves of it are functions of the surface rather than of the
+/// eye — the field's points were already (#4435), and the ribbons are
+/// now that the rail solve reads the camera in the vertex stage
+/// (#4440) — so this is packed once per subject and then left on the
+/// GPU for as long as the subject stands.
+struct Staged {
+    points: Packed,
+    ribbons: Packed,
 }
 
 /// The ink layer's state machine.
@@ -117,15 +138,15 @@ pub struct Strokes {
     geometries: Ordered,
     subject: Resident,
     /// The subject's packed bytes, waiting for the create or update.
-    subject_bytes: Option<(Vec<u8>, Vec<u8>)>,
-    /// The resident points' packed bytes, waiting for the same create or
+    subject_bytes: Option<Packed>,
+    /// The resident half's packed bytes, waiting for the same create or
     /// update the subject's do. Staged by the first solve after the
     /// subject changed rather than by `subject_changed` itself, because
     /// the pack needs the layout and the layout needs the curves the new
     /// subject was extracted into.
-    resident_bytes: Option<(Vec<u8>, Vec<u8>)>,
-    /// Whether the resident points are still owed a re-pack. Set with
-    /// the subject, cleared by the solve that packs them.
+    resident: Option<Staged>,
+    /// Whether the resident half is still owed a re-pack. Set with the
+    /// subject, cleared by the solve that packs it.
     resident_stale: bool,
     solved: Option<Solved>,
     /// At least one dispatch has landed, so the sheet holds ink rather
@@ -148,13 +169,15 @@ const INK_DEPTH_FLOOR: f32 = 0.25;
 
 /// Programs registered, in send order.
 const PROGRAM_COUNT: usize = 2;
-/// The four field planes plus the ink sheet.
+/// The five field planes plus the ink sheet.
 const TEXTURE_COUNT: usize = sight::PLANE_COUNT + 1;
-/// The field's three — subject, resident points, volatile points — then
-/// the ribbons.
-const GEOMETRY_COUNT: usize = sight::GEOMETRY_COUNT + 1;
-/// Where the ribbons sit among them.
-const RIBBONS: usize = sight::GEOMETRY_COUNT;
+/// The field's four — subject, resident points, volatile points,
+/// curves — then the ink's two ribbon halves.
+const GEOMETRY_COUNT: usize = sight::GEOMETRY_COUNT + stroke::GEOMETRY_COUNT;
+/// Where the ribbon halves sit among them, in the ink program's own
+/// slot order.
+const RIBBONS: [usize; stroke::GEOMETRY_COUNT] =
+    [sight::GEOMETRY_COUNT + stroke::RESIDENT as usize, sight::GEOMETRY_COUNT + stroke::VOLATILE as usize];
 
 impl Strokes {
     /// A canvas change orphans every texture in the set — the field's
@@ -209,22 +232,26 @@ impl Strokes {
     /// ribbons the ink is rasterized from, and stage both uniform
     /// blobs.
     ///
-    /// Only the volatile half of the points is packed here. The resident
-    /// half is packed once per subject and left on the GPU — its curves
-    /// do not move, and [`sight::layout`] gives them the same texels
-    /// every frame, so the buffer already up there is still the right
-    /// one. That is the whole of #4435: at the shipped framing the
-    /// resident half is 88% of the drawing's points, and it stops
-    /// travelling.
+    /// Only the volatile half of either travels. The resident half of
+    /// each is packed once per subject and left on the GPU — its curves
+    /// do not move, [`sight::layout`] gives them the same texels every
+    /// frame, and since #4440 nothing in a ribbon vertex is a function
+    /// of the eye either, so the buffers already up there are still the
+    /// right ones. At the shipped framing that is 88% of the drawing's
+    /// points and the same share of its ribbons.
     ///
-    /// The ribbons stay one buffer. Every rail is solved against the
-    /// eye, so a resident curve's ribbon vertices change with the camera
-    /// even where its points do not.
+    /// What the eye still decides is one float per curve —
+    /// [`ribbon::reference_depth`], packed here into a per-curve
+    /// geometry the field rasterizes into its reference plane, at a
+    /// hundred kilobytes against the eighteen megabytes of rails it
+    /// stands in for.
     ///
     /// Returns false when the drawing does not fit the field — the
     /// layout refuses a curve past the scan's depth or a drawing past
     /// the canvas' texel count — which leaves the caller on its CPU
     /// path for that frame rather than showing a wrong picture.
+    ///
+    /// [`ribbon::reference_depth`]: crate::ribbon::reference_depth
     pub fn solve(&mut self, drawing: Drawing<'_>, eye: Vec3, view_proj: Mat4, bias: f32, aspect: f32) -> bool {
         if self.disabled {
             return false;
@@ -236,16 +263,16 @@ impl Strokes {
         };
 
         if mem::take(&mut self.resident_stale) {
-            self.resident_bytes =
-                Some((sight::point_vertices(drawing, layout.resident()), sight::point_indices(layout.resident())));
+            self.resident = Some(Staged {
+                points: (sight::point_vertices(drawing, layout.resident()), sight::point_indices(layout.resident())),
+                ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Resident),
+            });
         }
 
-        let (ribbons, ribbon_indices) = stroke::ribbon_geometry(drawing, &layout, eye);
         self.solved = Some(Solved {
-            points: sight::point_vertices(drawing, layout.volatile()),
-            point_indices: sight::point_indices(layout.volatile()),
-            ribbons,
-            ribbon_indices,
+            points: (sight::point_vertices(drawing, layout.volatile()), sight::point_indices(layout.volatile())),
+            ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
+            curves: (sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)),
             sight_uniforms: sight::SightUniforms { view_proj, eye, field, bias }.encode(),
             stroke_uniforms: stroke::StrokeUniforms { view_proj, eye, bias, field }.encode(),
             travelled: false,
@@ -273,8 +300,9 @@ impl Strokes {
         self.textures.answered(texture_id, TEXTURE_COUNT);
     }
 
-    /// The reply to one requested geometry create: subject, points,
-    /// ribbons.
+    /// The reply to one requested geometry create, in slot order:
+    /// subject, the two point halves, the curves, the two ribbon
+    /// halves.
     pub fn geometry_created(&mut self, result: Result<u32, ()>) {
         let Ok(geometry_id) = result else {
             self.geometries.clear();
@@ -313,7 +341,7 @@ impl Strokes {
         stale.into_iter().map(|texture_id| DestroyTexture { texture_id }).collect()
     }
 
-    /// The creates for one canvas size: four writable field planes at
+    /// The creates for one canvas size: five writable field planes at
     /// canvas resolution, then the ink sheet at twice its edge.
     ///
     /// Every one is `Writable` — a program writes all five — and the
@@ -352,10 +380,10 @@ impl Strokes {
         creates
     }
 
-    /// The four geometry creates, once, in slot order. The subject's
-    /// bytes and the resident points' have to be staged by then — a
+    /// The six geometry creates, once, in slot order. The subject's
+    /// bytes and the resident half's have to be staged by then — a
     /// prepass with no subject occludes nothing, and a dispatch names
-    /// one id per declared slot or warn-drops whole, so three of four
+    /// one id per declared slot or warn-drops whole, so five of six
     /// buffers is no create at all.
     ///
     /// Nothing is taken until every buffer is present, because a take
@@ -365,10 +393,10 @@ impl Strokes {
         if self.disabled || self.geometries.asking || self.geometries.ready(GEOMETRY_COUNT) {
             return Vec::new();
         }
-        if self.subject_bytes.is_none() || self.resident_bytes.is_none() || self.solved.is_none() {
+        if self.subject_bytes.is_none() || self.resident.is_none() || self.solved.is_none() {
             return Vec::new();
         }
-        let (subject, resident) = (self.subject_bytes.take(), self.resident_bytes.take());
+        let (subject, resident) = (self.subject_bytes.take(), self.resident.take());
         let (Some(subject), Some(resident), Some(solved)) = (subject, resident, self.solved.as_mut()) else {
             return Vec::new();
         };
@@ -376,30 +404,30 @@ impl Strokes {
         self.geometries.asking = true;
         self.subject = Resident::Creating;
         solved.travelled = true;
+        let create = |layout: Vec<VertexAttribute>, packed: Packed| CreateGeometry {
+            layout,
+            vertices: packed.0,
+            indices: packed.1,
+        };
         vec![
-            CreateGeometry { layout: sight::subject_slot().layout, vertices: subject.0, indices: subject.1 },
-            CreateGeometry { layout: sight::points_slot().layout, vertices: resident.0, indices: resident.1 },
-            CreateGeometry {
-                layout: sight::points_slot().layout,
-                vertices: mem::take(&mut solved.points),
-                indices: mem::take(&mut solved.point_indices),
-            },
-            CreateGeometry {
-                layout: stroke::ribbon_slot().layout,
-                vertices: mem::take(&mut solved.ribbons),
-                indices: mem::take(&mut solved.ribbon_indices),
-            },
+            create(sight::subject_slot().layout, subject),
+            create(sight::points_slot().layout, resident.points),
+            create(sight::points_slot().layout, mem::take(&mut solved.points)),
+            create(sight::curves_slot().layout, mem::take(&mut solved.curves)),
+            create(stroke::ribbon_slot().layout, resident.ribbons),
+            create(stroke::ribbon_slot().layout, mem::take(&mut solved.ribbons)),
         ]
     }
 
     /// Every later frame's geometry, replacing the buffers the GPU holds
     /// in place.
     ///
-    /// The subject and the resident points travel only when the subject
-    /// changed. The volatile points and the ribbons travel every frame
-    /// the eye moved, which is what they were solved for — and between
-    /// them they are the drawing's minority: 12% of its points at the
-    /// shipped framing.
+    /// The subject and the resident half travel only when the subject
+    /// changed. The volatile half and the per-curve references travel
+    /// every frame the eye moved, which is what they were solved for —
+    /// and between them they are the drawing's minority: 12% of its
+    /// points at the shipped framing, the same share of its ribbons,
+    /// and one float a curve.
     pub fn take_geometry_updates(&mut self) -> Vec<UpdateGeometry> {
         if !self.geometries.ready(GEOMETRY_COUNT) {
             return Vec::new();
@@ -407,12 +435,15 @@ impl Strokes {
         let ids = &self.geometries.ids;
 
         let mut updates = Vec::new();
-        for (slot, staged) in
-            [(sight::SUBJECT, self.subject_bytes.take()), (sight::RESIDENT, self.resident_bytes.take())]
-        {
-            if let Some((vertices, indices)) = staged {
-                updates.push(UpdateGeometry { geometry_id: ids[slot as usize], vertices, indices });
-            }
+        let mut ship = |slot: usize, packed: Packed| {
+            updates.push(UpdateGeometry { geometry_id: ids[slot], vertices: packed.0, indices: packed.1 });
+        };
+        if let Some(subject) = self.subject_bytes.take() {
+            ship(sight::SUBJECT as usize, subject);
+        }
+        if let Some(resident) = self.resident.take() {
+            ship(sight::RESIDENT as usize, resident.points);
+            ship(RIBBONS[stroke::RESIDENT as usize], resident.ribbons);
         }
         // Moved out rather than cloned: the volatile drawing is
         // megabytes of vertex bytes at this scale and it is rebuilt
@@ -420,16 +451,9 @@ impl Strokes {
         // frame. The dispatch that follows needs only the uniforms.
         if let Some(solved) = self.solved.as_mut().filter(|solved| !solved.travelled) {
             solved.travelled = true;
-            updates.push(UpdateGeometry {
-                geometry_id: ids[sight::VOLATILE as usize],
-                vertices: mem::take(&mut solved.points),
-                indices: mem::take(&mut solved.point_indices),
-            });
-            updates.push(UpdateGeometry {
-                geometry_id: ids[RIBBONS],
-                vertices: mem::take(&mut solved.ribbons),
-                indices: mem::take(&mut solved.ribbon_indices),
-            });
+            ship(sight::VOLATILE as usize, mem::take(&mut solved.points));
+            ship(sight::CURVES as usize, mem::take(&mut solved.curves));
+            ship(RIBBONS[stroke::VOLATILE as usize], mem::take(&mut solved.ribbons));
         }
 
         updates
@@ -462,7 +486,7 @@ impl Strokes {
             ProgramDispatch {
                 program_id: programs[1],
                 bindings: textures.clone(),
-                geometries: vec![geometries[RIBBONS]],
+                geometries: RIBBONS.map(|slot| geometries[slot]).to_vec(),
                 uniforms: solved.stroke_uniforms,
             },
         ]
@@ -529,5 +553,64 @@ impl Strokes {
                 tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
             }],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
+
+    /// A subject for the prepass to have something to stage. Its shape
+    /// is not the point — the drawing below is not extracted from it.
+    const TRIANGLE: &[u8] = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+
+    fn curve(seed: u64) -> Curve3 {
+        Curve3 {
+            points: (0..6)
+                .map(|at| SurfacePoint::on_surface(Vec3::new(at as f32 * 0.05, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)))
+                .collect(),
+            class: FeatureClass::Silhouette,
+            pen: Pen::Ink,
+            seed,
+            authored: false,
+        }
+    }
+
+    /// Tripwire: once the subject stands, a turn ships the volatile
+    /// half and the per-curve references, and nothing else.
+    ///
+    /// This is what #4435 and #4440 bought between them, and it is
+    /// invisible from the picture: a resident buffer that travelled
+    /// every frame would render identically and cost the eighteen
+    /// megabytes both issues were about. The converse fails silently
+    /// too — a volatile buffer that stopped travelling draws the eye
+    /// the drawing was first solved for, for the rest of the session.
+    #[test]
+    fn a_turn_ships_the_volatile_half_and_the_references() {
+        let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
+        let (resident, volatile) = ([curve(1)], [curve(2)]);
+        let drawing = Drawing { resident: &resident, volatile: &volatile };
+        let solve = |strokes: &mut Strokes, eye| strokes.solve(drawing, eye, Mat4::IDENTITY, 0.01, 1.0);
+
+        let mut strokes = Strokes::default();
+        strokes.resized(64, 64);
+        strokes.subject_changed(&mesh);
+        assert!(solve(&mut strokes, Vec3::new(0.0, 0.0, 3.0)), "the first solve");
+        assert_eq!(strokes.take_geometry_creates().len(), GEOMETRY_COUNT, "one create per declared slot");
+        for id in 0..GEOMETRY_COUNT as u32 {
+            strokes.geometry_created(Ok(id));
+        }
+
+        assert!(solve(&mut strokes, Vec3::new(3.0, 1.0, -2.0)), "the solve after the turn");
+        let travelled: Vec<u32> =
+            strokes.take_geometry_updates().into_iter().map(|update| update.geometry_id).collect();
+
+        // The ids answer in slot order, so an id here is its own slot.
+        assert_eq!(
+            travelled,
+            vec![sight::VOLATILE, sight::CURVES, RIBBONS[stroke::VOLATILE as usize] as u32],
+            "the subject, the resident points and the resident ribbons stay put",
+        );
     }
 }

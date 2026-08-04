@@ -43,7 +43,7 @@ use aether_kinds::{LoadComponent, LoadResult};
 use aether_math::Vec3;
 use aether_puppet::easel::program::{sight, stroke};
 use aether_puppet::extract::{self, Settings};
-use aether_puppet::feature::{Curve3, Drawing};
+use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{Load, Look, anchor, chart};
@@ -272,23 +272,31 @@ fn the_drawing_divides_by_volatility() {
 
         let drawing = Drawing { resident: &resident, volatile: &volatile };
         let layout = sight::layout(drawing, (WIDTH, HEIGHT)).expect("the drawing fits");
-        let region =
-            |spans: &[sight::Span]| sight::point_vertices(drawing, spans).len() + sight::point_indices(spans).len();
-        let (ribbons, ribbon_indices) = stroke::ribbon_geometry(drawing, &layout, eye);
-        let ribbons = ribbons.len() + ribbon_indices.len();
-        let (resident_bytes, volatile_bytes) = (region(layout.resident()), region(layout.volatile()));
+        let both = |packed: (Vec<u8>, Vec<u8>)| packed.0.len() + packed.1.len();
+        let points = |spans: &[sight::Span]| both((sight::point_vertices(drawing, spans), sight::point_indices(spans)));
+        let ribbons = |half| both(stroke::ribbon_geometry(drawing, &layout, half));
+        let curves = both((sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)));
+
+        // The drawing's two halves, each carrying its points and its
+        // ribbons, and the per-curve references that belong to neither
+        // — a reference depth is the eye's for a resident curve as
+        // much as for a volatile one (#4440).
+        let staying = points(layout.resident()) + ribbons(Half::Resident);
+        let travelling = points(layout.volatile()) + ribbons(Half::Volatile) + curves;
         let megabytes = |bytes: usize| bytes as f64 / 1.0e6;
 
         eprintln!(
-            "census azimuth {azimuth:>4}: {} resident curves + {} volatile | points {:.2} MB resident + {:.2} MB \
-             volatile | ribbons {:.2} MB | whole drawing {:.2} MB, per re-split {:.2} MB",
+            "census azimuth {azimuth:>4}: {} resident curves + {} volatile | resident {:.2} MB | volatile {:.2} MB \
+             (points {:.2} + ribbons {:.2}) | references {:.3} MB | whole drawing {:.2} MB, per re-split {:.2} MB",
             resident.len(),
             volatile.len(),
-            megabytes(resident_bytes),
-            megabytes(volatile_bytes),
-            megabytes(ribbons),
-            megabytes(resident_bytes + volatile_bytes + ribbons),
-            megabytes(volatile_bytes + ribbons),
+            megabytes(staying),
+            megabytes(travelling),
+            megabytes(points(layout.volatile())),
+            megabytes(ribbons(Half::Volatile)),
+            megabytes(curves),
+            megabytes(staying + travelling),
+            megabytes(travelling),
         );
     }
 }

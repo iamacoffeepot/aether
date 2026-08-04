@@ -268,11 +268,12 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &Cr
     }
 }
 
-/// The four writable textures one dispatch writes into: the three
+/// The writable textures one dispatch writes into: the field's own
 /// `R32Float` planes (nearest — `R32Float` refuses a filtering sampler,
 /// and the values are quantities either way) and the probe's `Rgba8`.
 fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -> Vec<u32> {
-    const PLANE_LABELS: [&str; sight::PLANE_COUNT] = ["create_seen", "create_reach", "create_coverage", "create_total"];
+    const PLANE_LABELS: [&str; sight::PLANE_COUNT] =
+        ["create_seen", "create_reach", "create_coverage", "create_total", "create_reference"];
     let (width, height) = (width as u32, height as u32);
 
     let mut targets: Vec<u32> = PLANE_LABELS
@@ -398,6 +399,10 @@ struct Rig {
     /// The two point buffers the field is rasterized from, in slot
     /// order: the resident half and the volatile one.
     points: [u32; 2],
+    /// The per-curve buffer the reference plane is rasterized from —
+    /// one texel a curve, re-pointed with the volatile half because
+    /// its value is the eye's (iamacoffeepot/aether#4440).
+    curves: u32,
     width: usize,
     height: usize,
 }
@@ -408,12 +413,12 @@ impl Rig {
         mesh: &Mesh,
         drawing: Drawing<'_>,
         layout: &Layout,
-        width: usize,
-        height: usize,
+        eye: Vec3,
+        canvas: (usize, usize),
     ) -> Self {
         Self {
             program_id: register(harness, &probed_program()),
-            bindings: create_targets(harness, width, height),
+            bindings: create_targets(harness, canvas.0, canvas.1),
             subject: create_geometry(
                 harness,
                 "create_subject",
@@ -443,8 +448,17 @@ impl Rig {
                     },
                 ),
             ],
-            width,
-            height,
+            curves: create_geometry(
+                harness,
+                "create_curves",
+                &CreateGeometry {
+                    layout: sight::curves_slot().layout,
+                    vertices: sight::curve_vertices(drawing, layout, eye),
+                    indices: sight::curve_indices(layout),
+                },
+            ),
+            width: canvas.0,
+            height: canvas.1,
         }
     }
 
@@ -452,7 +466,7 @@ impl Rig {
         ProgramDispatch {
             program_id: self.program_id,
             bindings: self.bindings.clone(),
-            geometries: vec![self.subject, self.points[0], self.points[1]],
+            geometries: vec![self.subject, self.points[0], self.points[1], self.curves],
             uniforms: SightUniforms { view_proj, eye, field: (self.width as u32, self.height as u32), bias }.encode(),
         }
     }
@@ -503,25 +517,38 @@ fn re_point(
     mesh: &Mesh,
     drawing: Drawing<'_>,
     layout: &Layout,
-    width: usize,
-    height: usize,
+    eye: Vec3,
+    canvas: (usize, usize),
 ) -> Rig {
     let Some(rig) = held else {
-        return Rig::mount(harness, mesh, drawing, layout, width, height);
+        return Rig::mount(harness, mesh, drawing, layout, eye, canvas);
     };
 
     harness
-        .execute(vec![(
-            "update_points",
-            HarnessOp::send_and_settle(
-                "aether.render",
-                &UpdateGeometry {
-                    geometry_id: rig.points[1],
-                    vertices: sight::point_vertices(drawing, layout.volatile()),
-                    indices: sight::point_indices(layout.volatile()),
-                },
+        .execute(vec![
+            (
+                "update_points",
+                HarnessOp::send_and_settle(
+                    "aether.render",
+                    &UpdateGeometry {
+                        geometry_id: rig.points[1],
+                        vertices: sight::point_vertices(drawing, layout.volatile()),
+                        indices: sight::point_indices(layout.volatile()),
+                    },
+                ),
             ),
-        )])
+            (
+                "update_curves",
+                HarnessOp::send_and_settle(
+                    "aether.render",
+                    &UpdateGeometry {
+                        geometry_id: rig.curves,
+                        vertices: sight::curve_vertices(drawing, layout, eye),
+                        indices: sight::curve_indices(layout),
+                    },
+                ),
+            ),
+        ])
         .expect("update_geometry sequence");
 
     rig
@@ -996,7 +1023,7 @@ fn the_gpu_field_splits_the_drawing_where_the_cpu_oracle_does() {
         // verdicts below are read back through it at all four: a
         // resident span that moved with the volatile half would show up
         // here as the whole surface reading someone else's occlusion.
-        let rig = re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, CANVAS_WIDTH, CANVAS_HEIGHT);
+        let rig = re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, eye, (CANVAS_WIDTH, CANVAS_HEIGHT));
 
         let field = rig.read_field(&mut harness, eye, view_proj, bias);
         let context = format!("azimuth {azimuth}");
@@ -1035,7 +1062,7 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
         .with_render()
         .build()
         .expect("harness");
-    let rig = Rig::mount(&mut harness, &mesh, drawing, &layout, CANVAS_WIDTH, CANVAS_HEIGHT);
+    let rig = Rig::mount(&mut harness, &mesh, drawing, &layout, eye, (CANVAS_WIDTH, CANVAS_HEIGHT));
     let before = rig.read_field(&mut harness, eye, view_proj, bias);
 
     // The pose: the slab swung across to the other side of her, so it
@@ -1148,7 +1175,8 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
         }
         let oracle_millis = started.elapsed().as_secs_f64() * 1000.0;
 
-        let rig = re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
+        let rig =
+            re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, eye, (CROSSFEED_WIDTH, CROSSFEED_HEIGHT));
 
         let field = rig.read_field(&mut harness, eye, view_proj, bias);
         let context = format!("crossfeed azimuth {azimuth}");

@@ -154,15 +154,28 @@ struct Point {
     @location(2) @interpolate(flat) stroke: vec4<f32>,
 }
 
-// Place a point's triangle over exactly its own texel.
+// Clip position of one corner of a texel-sized triangle, placed over
+// exactly the texel the packed slot names.
 //
 // The three corners sit nine tenths of a texel out from the centre, so
-// the texel's own centre is covered and no neighbour's is — a point
+// the texel's own centre is covered and no neighbour's is — a triangle
 // writes one texel and never its neighbour's, whatever the field size.
 // The corner index rides the low two bits of `slot` because a vertex
 // stage cannot ask which of a triangle's corners it is: `@builtin
 // (vertex_index)` under an indexed draw is the *index value*, which
-// three corners of one point would share.
+// three corners of one texel would share.
+fn texel_clip(slot: f32) -> vec4<f32> {
+    let packed = u32(slot);
+    let at = vec2<f32>(texel_of(packed >> 2u));
+    var corners = array<vec2<f32>, 3>(vec2<f32>(0.0, -0.9), vec2<f32>(-0.9, 0.9), vec2<f32>(0.9, 0.9));
+    let corner = corners[packed & 3u];
+
+    let centre = (at + vec2<f32>(0.5, 0.5) + corner) / params.field;
+
+    return vec4<f32>(centre.x * 2.0 - 1.0, 1.0 - centre.y * 2.0, 0.0, 1.0);
+}
+
+// One stroke point over its own texel.
 @vertex
 fn vs_point(
     @location(0) probe: vec3<f32>,
@@ -171,15 +184,8 @@ fn vs_point(
     @location(3) ends: vec2<f32>,
     @location(4) along: vec2<f32>,
 ) -> Point {
-    let packed = u32(slot);
-    let at = vec2<f32>(texel_of(packed >> 2u));
-    var corners = array<vec2<f32>, 3>(vec2<f32>(0.0, -0.9), vec2<f32>(-0.9, 0.9), vec2<f32>(0.9, 0.9));
-    let corner = corners[packed & 3u];
-
-    let centre = (at + vec2<f32>(0.5, 0.5) + corner) / params.field;
-
     var out: Point;
-    out.clip = vec4<f32>(centre.x * 2.0 - 1.0, 1.0 - centre.y * 2.0, 0.0, 1.0);
+    out.clip = texel_clip(slot);
     out.probe = probe;
     out.normal = normal;
     // `stroke` is read as (span, head, tail, grazes) by every fragment
@@ -262,6 +268,40 @@ fn fs_head(point: Point) -> @location(0) vec4<f32> {
 @fragment
 fn fs_tail(point: Point) -> @location(0) vec4<f32> {
     return vec4<f32>(point.stroke.z, 0.0, 0.0, 1.0);
+}
+
+// One curve, at the texel its first point owns — in this plane and no
+// other, since the reference is the curve's rather than that point's.
+struct Curve {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) @interpolate(flat) reference: f32,
+}
+
+@vertex
+fn vs_curve(@location(0) slot: f32, @location(1) reference: f32) -> Curve {
+    var out: Curve;
+    out.clip = texel_clip(slot);
+    out.reference = reference;
+
+    return out;
+}
+
+// `ribbon::reference_depth`, solved on the CPU and delivered here.
+//
+// The one number of the rail solve the eye decides per curve rather
+// than per point, and the reason the ink pass' ribbons can stay put
+// while the camera turns: everything else the rails need is a function
+// of the curve alone and rides the vertex buffer, so a frame's whole
+// view-dependence in the ink is this plane and the uniform blob.
+//
+// Its sign is the verdict. A reference depth is a distance and so never
+// negative, which lets a curve that does not read at this eye — under
+// two points, or under its class' length floor — arrive as a negative
+// rather than as a second plane, and collapse the ink pass' rails
+// where it lands.
+@fragment
+fn fs_reference(curve: Curve) -> @location(0) vec4<f32> {
+    return vec4<f32>(curve.reference, 0.0, 0.0, 1.0);
 }
 
 // Seed of the reach scan: zero arc at every barrier, far everywhere
