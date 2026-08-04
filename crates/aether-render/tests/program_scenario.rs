@@ -385,3 +385,147 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
         );
     }
 }
+
+/// Cache invalidation for the executor's per-pass setup (issue #4431):
+/// a program's bind groups and texture views are built once and reused
+/// across dispatches, so the two ways a binding's content can change
+/// underneath them both have to reach the pixels.
+///
+/// The named bugs, both of which fail silently as a frame that renders
+/// the *previous* dispatch's content: an `update_texture` whose fresh
+/// bytes never reach the frame because the cached entry is treated as
+/// the content rather than as a handle to it (the re-upload lands in
+/// the same GPU texture the cached view names, so a cache that skips
+/// realization on a hit shows the stale pixels); and a rebind of a
+/// different texture id into the same binding slot that reuses the
+/// bind group built for the old id, so the dispatch samples a texture
+/// it was never handed.
+#[test]
+fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    // Red per texel, left column dark and right column bright: under
+    // threshold 0.5 then invert-from-1.0 the left column reads white.
+    let dark_left: Vec<u8> = [51u8, 204, 102, 230].iter().flat_map(|&red| [red, 0, 0, 255]).collect();
+    let bright_left: Vec<u8> = [204u8, 51, 230, 102].iter().flat_map(|&red| [red, 0, 0, 255]).collect();
+
+    let source_id = create_texture(
+        &mut harness,
+        "create_source",
+        &CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels: dark_left.clone(),
+        },
+    );
+    let output_id = create_texture(
+        &mut harness,
+        "create_output",
+        &CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Writable,
+            pixels: Vec::new(),
+        },
+    );
+    let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
+        ProgramRegisterResult::Ok { program_id } => program_id,
+        ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
+    };
+
+    let uniforms: Vec<u8> = [0.5f32, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect();
+    let dispatch = |source: u32| ProgramDispatch {
+        program_id,
+        bindings: vec![source, output_id],
+        geometries: Vec::new(),
+        uniforms: uniforms.clone(),
+    };
+
+    // The 2x2 output stretches over the 32x32 quad at (16, 8), so the
+    // texel column centers land at x=24 and x=40 and y=24 probes both.
+    // Which column is the brighter one is the whole signal here, so the
+    // probes are compared against each other rather than against
+    // absolute levels the sampling path would have to keep promising.
+    let mut columns = |harness: &mut SubstrateHarness, label: &'static str, pre: Vec<_>| {
+        let captured =
+            harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture program output");
+        let img = decode_png(captured.captured(label).expect("capture step ran")).expect("decode program capture png");
+        (i32::from(rgba_at(&img, 24, 24)[0]), i32::from(rgba_at(&img, 40, 24)[0]))
+    };
+    // Well past any filtering or transfer wobble, well inside a real flip.
+    let separation = 100;
+
+    // First dispatch: nothing is cached yet, so this is the reference —
+    // the dark source column thresholds low and inverts to a bright one.
+    let (left, right) = columns(
+        &mut harness,
+        "first",
+        vec![envelope("aether.render", &dispatch(source_id)), envelope("aether.render", &output_overlay(output_id))],
+    );
+    assert!(
+        left - right > separation,
+        "the reference dispatch must read a bright left column over a dark right one; got {left}|{right}",
+    );
+
+    // Second dispatch: same bindings, so every cached bind group is
+    // reused — but `update_texture` re-uploaded into the texture the
+    // cached view names, so the columns must swap.
+    let (updated_left, updated_right) = columns(
+        &mut harness,
+        "updated",
+        vec![
+            envelope(
+                "aether.render",
+                &aether_render::UpdateTexture {
+                    texture_id: source_id,
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                    pixels: bright_left,
+                },
+            ),
+            envelope("aether.render", &dispatch(source_id)),
+            envelope("aether.render", &output_overlay(output_id)),
+        ],
+    );
+    assert!(
+        updated_right - updated_left > separation,
+        "an update_texture under a cached bind group must reach the frame, flipping which column is bright; \
+         got {updated_left}|{updated_right}",
+    );
+
+    // Third dispatch: a different texture id in binding 0, which is the
+    // cache key's own business — the input bind group must be rebuilt
+    // against the new id rather than reused from the old one.
+    let rebound_id = create_texture(
+        &mut harness,
+        "create_rebound",
+        &CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels: dark_left,
+        },
+    );
+    let (rebound_left, rebound_right) = columns(
+        &mut harness,
+        "rebound",
+        vec![envelope("aether.render", &dispatch(rebound_id)), envelope("aether.render", &output_overlay(output_id))],
+    );
+    assert!(
+        rebound_left - rebound_right > separation,
+        "rebinding a new texture id must rebuild the pass's input bind group, restoring the reference \
+         columns; got {rebound_left}|{rebound_right}",
+    );
+}

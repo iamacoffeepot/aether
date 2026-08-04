@@ -20,9 +20,11 @@ use super::texture::TextureRegistry;
 use crate::kinds::vertex_stride_bytes;
 use crate::{ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat};
 
+mod cache;
 mod record;
 mod validate;
 
+use cache::DispatchCache;
 use validate::ProgramPlan;
 
 /// Minimum bytes a pass binds for its uniform window: a zero-length
@@ -30,11 +32,15 @@ use validate::ProgramPlan;
 /// every pipeline layout carries the same group-0 shape.
 const MIN_BOUND_UNIFORM_BYTES: u64 = 4;
 
-/// One registered program: the validated plan plus the per-pass GPU
-/// resources built at register time.
+/// One registered program: the validated plan, the per-pass GPU
+/// resources built at register time, and the per-dispatch setup the
+/// executor derives once and reuses while the dispatch keeps binding the
+/// same resources. The cache lives here rather than in the registry so
+/// `program_destroy` releases it with the program it belongs to.
 struct RegisteredProgram {
     plan: ProgramPlan,
     passes_gpu: Vec<PassGpu>,
+    cache: DispatchCache,
 }
 
 /// Per-pass GPU resources: the compiled pipeline and the layouts the
@@ -143,7 +149,8 @@ impl ProgramRegistry {
 
         let program_id = self.next_id;
         self.next_id += 1;
-        self.entries.insert(program_id, RegisteredProgram { plan, passes_gpu });
+        let cache = DispatchCache::new(&plan);
+        self.entries.insert(program_id, RegisteredProgram { plan, passes_gpu, cache });
         ProgramRegisterResult::Ok { program_id }
     }
 
@@ -171,8 +178,9 @@ impl ProgramRegistry {
         geometries: &mut GeometryRegistry,
         dispatches: &[ProgramDispatch],
     ) {
+        let Self { entries, transient_pool, .. } = self;
         for dispatch in dispatches {
-            let Some(program) = self.entries.get(&dispatch.program_id) else {
+            let Some(program) = entries.get_mut(&dispatch.program_id) else {
                 tracing::warn!(
                     target: "aether_render",
                     program_id = dispatch.program_id,
@@ -180,7 +188,7 @@ impl ProgramRegistry {
                 );
                 continue;
             };
-            record::record_dispatch(gpu, encoder, program, &mut self.transient_pool, textures, geometries, dispatch);
+            record::record_dispatch(gpu, encoder, program, transient_pool, textures, geometries, dispatch);
         }
     }
 }
