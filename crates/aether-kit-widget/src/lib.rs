@@ -117,6 +117,7 @@ use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
+use aether_render::QuadBlend;
 use aether_render::{
     DrawSolidQuads, DrawTexturedQuads, RenderCapability, SolidQuad, TexturedQuad as RenderTexturedQuad,
 };
@@ -432,6 +433,7 @@ pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
             DirectRun::Textured { texture_id, clip, quads } => {
                 ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
                     texture_id,
+                    blend: QuadBlend::Straight,
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
                     quads,

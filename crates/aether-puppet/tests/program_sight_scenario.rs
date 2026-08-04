@@ -100,6 +100,7 @@ use aether_puppet::feature::{Curve3, FeatureClass, SurfacePoint};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{anchor, chart, visibility};
+use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
     PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec,
@@ -333,6 +334,7 @@ fn register(harness: &mut SubstrateHarness, mail: &ProgramRegister) -> u32 {
 fn overlay(texture_id: u32, width: usize, height: usize) -> DrawTexturedQuads {
     DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

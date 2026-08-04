@@ -8,23 +8,35 @@ use std::sync::{Arc, Mutex};
 
 use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
-    MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw, MaterialPassRecord,
-    MaterialPipelines, OverlayDraw, Pipeline, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
-    QuadPipeline, Targets, TextureBindings, build_main_pipeline, build_material_pipelines, build_quad_pipeline,
-    build_texture_bindings, push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices,
-    push_textured_params, push_world_quad_vertices, record_material_pass, record_quad_overlay_pass,
+    CompositeBlend, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
+    MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
+    QUAD_VERTICES_PER_QUAD, QuadPipeline, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
+    build_quad_pipeline, build_texture_bindings, push_coverage_params, push_material_rect_vertices,
+    push_screen_quad_vertices, push_textured_params, push_world_quad_vertices, record_material_pass,
+    record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::QuadBatch;
 use super::texture::TextureRegistry;
-use crate::DrawTexturedQuads;
+use crate::{DrawTexturedQuads, QuadBlend};
+
+/// The mail vocabulary's blend, as the record layer's selector. Two
+/// enums rather than one because the substrate's render module owns no
+/// kind types — the mapping is this one function.
+fn composite_blend(blend: QuadBlend) -> CompositeBlend {
+    match blend {
+        QuadBlend::Straight => CompositeBlend::Straight,
+        QuadBlend::Premultiplied => CompositeBlend::Premultiplied,
+    }
+}
 
 fn observed_batch(batch: &QuadBatch) -> DrawTexturedQuads {
     DrawTexturedQuads {
         texture_id: batch.texture_id,
         space: batch.space.clone(),
         clip: batch.clip.clone(),
+        blend: batch.blend,
         quads: batch.quads.clone(),
     }
 }
@@ -156,6 +168,7 @@ pub(super) fn record_overlay_batches(
             continue;
         }
         draws.push(OverlayDraw {
+            blend: composite_blend(batch.blend),
             bind_group: realized.bind_group(),
             first_vertex,
             vertex_count,
@@ -235,7 +248,7 @@ pub(super) fn record_material_batches(
     let vertex_count = u32::try_from(MATERIAL_VERTICES_PER_RECT).expect("material rect vertex count fits u32");
     for batch in batches {
         match batch {
-            MaterialBatch::Textured { texture_id, rects } => {
+            MaterialBatch::Textured { texture_id, blend, rects } => {
                 let Some(entry) = registry.entries.get(texture_id) else {
                     continue;
                 };
@@ -274,6 +287,7 @@ pub(super) fn record_material_batches(
                         [rect.u0, rect.v0, rect.u1, rect.v1],
                     );
                     draws.push(MaterialPassDraw::Textured(MaterialDraw {
+                        blend: composite_blend(*blend),
                         bind_group: realized.bind_group(),
                         first_vertex,
                         vertex_count,
@@ -322,6 +336,9 @@ pub(super) fn record_material_batches(
                         [0.0, 0.0, 1.0, 1.0],
                     );
                     draws.push(MaterialPassDraw::Coverage(MaterialDraw {
+                        // A coverage material builds its colour from
+                        // bands rather than compositing a source image.
+                        blend: CompositeBlend::Straight,
                         bind_group: realized.bind_group(),
                         first_vertex,
                         vertex_count,

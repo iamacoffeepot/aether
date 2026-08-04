@@ -118,6 +118,7 @@ use aether_puppet::easel::regions::{self, RegionPlanes};
 use aether_puppet::extract::Settings;
 use aether_puppet::labels::{self, Labels};
 use aether_puppet::mesh::Mesh;
+use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
     PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling,
@@ -329,6 +330,7 @@ fn register(harness: &mut SubstrateHarness, mail: &ProgramRegister) -> u32 {
 fn overlay(texture_id: u32, width: usize, height: usize) -> DrawTexturedQuads {
     DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

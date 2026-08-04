@@ -10,7 +10,7 @@ use aether_kinds::{ClipRect, FontMetrics, GlyphAdvance, QuadSpace};
 use aether_math::Rgba;
 use aether_substrate::actor::native::NativeCtx;
 
-use aether_render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
+use aether_render::{DrawTexturedQuads, QuadBlend, RenderCapability, TexturedQuad};
 
 use super::atlas::AtlasEntry;
 
@@ -22,7 +22,9 @@ pub fn emit_draw(
     clip: Option<ClipRect>,
     quads: Vec<TexturedQuad>,
 ) {
-    let draw = DrawTexturedQuads { texture_id, space, clip, quads };
+    // A rasterized glyph atlas is an ordinary image: coverage rides
+    // alpha and the colour beside it was never scaled by it.
+    let draw = DrawTexturedQuads { texture_id, space, clip, blend: QuadBlend::Straight, quads };
     ctx.actor::<RenderCapability>().send(&draw);
 }
 

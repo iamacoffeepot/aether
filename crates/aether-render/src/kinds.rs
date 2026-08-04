@@ -385,6 +385,43 @@ pub struct DestroyGeometry {
     pub geometry_id: u32,
 }
 
+/// How a textured composite lays its source over what is already in
+/// the target.
+///
+/// The distinction is what the source's colour channels already carry.
+/// `Straight` is an ordinary image: colour and coverage are
+/// independent, so the blend weights the colour by the alpha it is
+/// handed — `src.rgb * src.a + dst.rgb * (1 - src.a)`. `Premultiplied`
+/// is an image whose colour has already been scaled by its own
+/// coverage, so the blend adds it as it stands — `src.rgb + dst.rgb *
+/// (1 - src.a)`.
+///
+/// The second exists because render-to-texture produces it whether or
+/// not anyone asked. A fragment pass writing an `Rgba8` target
+/// alpha-blends onto a transparent clear, so writing `(colour, a)`
+/// stores `(colour * a, a)` — every partially covered texel of a
+/// program's output is premultiplied by construction. Compositing that
+/// as `Straight` weights it by its coverage a second time and squares
+/// it: a half-covered texel lays down a quarter of its colour. On the
+/// drawing that found this (ADR-0172's ink, one- to two-pixel strokes,
+/// so almost every inked pixel is a partial one) it cost about 39% of
+/// the ink's weight.
+///
+/// Straight alpha cannot be recovered after the fact, either — the
+/// un-premultiply wants a colour in the texels coverage did not reach,
+/// and writing one there multiplies it by its own zero alpha on the way
+/// in. So the choice belongs at the composite, which is here.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuadBlend {
+    /// Colour and coverage independent. Every sender before ADR-0172
+    /// meant this, and it stays the default.
+    #[default]
+    Straight,
+    /// Colour already scaled by its own coverage — what a program's
+    /// `Rgba8` output always is.
+    Premultiplied,
+}
+
 /// One textured quad in a `DrawTexturedQuads` batch. `(x, y)` is the
 /// top-left corner and `(width, height)` the size, both in the unit
 /// the batch's `space` selects — window pixels for `Screen`, pixel
@@ -409,7 +446,8 @@ pub struct TexturedQuad {
 
 /// `aether.render.draw_textured_quads` — draw a batch of textured,
 /// alpha-blended quads sampling one texture, in the projection `space`
-/// selects. Accumulated per frame with the same immediate-mode
+/// selects and under the blend `blend` selects. Accumulated per frame
+/// with the same immediate-mode
 /// contract as `aether.draw_triangle`: send it every frame the quads
 /// should appear, or they vanish next frame. `texture_id` is a
 /// registry id from a prior `CreateTexture`; an unknown id warn-drops
@@ -422,6 +460,10 @@ pub struct DrawTexturedQuads {
     /// Optional framebuffer-pixel scissor applied to this batch. `None`
     /// leaves the draw unclipped.
     pub clip: Option<ClipRect>,
+    /// How the sampled texel lays over the target. `Straight` for an
+    /// ordinary uploaded image, `Premultiplied` for a texture a render
+    /// program wrote.
+    pub blend: QuadBlend,
     pub quads: Vec<TexturedQuad>,
 }
 
@@ -500,6 +542,9 @@ pub struct MaterialTexturedRect {
 #[kind(name = "aether.render.material.textured")]
 pub struct DrawMaterialTextured {
     pub texture_id: u32,
+    /// How the sampled texel lays over the target, exactly as it means
+    /// on [`DrawTexturedQuads`].
+    pub blend: QuadBlend,
     pub rects: Vec<MaterialTexturedRect>,
 }
 

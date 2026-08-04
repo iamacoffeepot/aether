@@ -69,7 +69,8 @@ pub struct TextureBindings {
 /// [`TextureBindings`].
 #[allow(clippy::struct_field_names)]
 pub struct QuadPipeline {
-    pipeline: wgpu::RenderPipeline,
+    straight: wgpu::RenderPipeline,
+    premultiplied: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
@@ -108,6 +109,21 @@ impl RealizedTexture {
     }
 }
 
+/// How a textured composite lays its source over the target.
+///
+/// `Straight` weights the source colour by the alpha it is handed;
+/// `Premultiplied` adds it as it stands, for a source whose colour was
+/// already scaled by its own coverage — which is what any texture a
+/// render program wrote necessarily is. The two differ only in the
+/// source factor, so a pass switches between them by pipeline and
+/// nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CompositeBlend {
+    #[default]
+    Straight,
+    Premultiplied,
+}
+
 /// One draw inside the overlay pass: the group-1 bind group for the
 /// batch's texture, and the vertex sub-range (in vertices, not bytes)
 /// the batch's expanded quads occupy in the shared vertex buffer.
@@ -117,6 +133,7 @@ pub struct OverlayDraw<'a> {
     pub vertex_count: u32,
     /// Optional framebuffer-pixel scissor: `[x, y, width, height]`.
     pub clip: Option<[f32; 4]>,
+    pub blend: CompositeBlend,
 }
 
 /// Build the shared texture + sampler bindings used by texture-sampling
@@ -235,35 +252,45 @@ pub fn build_quad_pipeline(
         ],
     };
 
-    let fragment_targets = [Some(super::color_target_state(color_format, wgpu::BlendState::ALPHA_BLENDING))];
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("aether quad pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(&vertex_layout),
-        },
-        fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            // Quads are authored as two triangles in a fixed winding;
-            // overlay UI shouldn't be culled by face orientation.
-            cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        // Overlay quads draw on top of the world pass with no depth
-        // interaction at all — the main pass already resolved depth.
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState { count: super::MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
-        multiview_mask: None,
-        cache: None,
-    });
+    // One pipeline per blend. Everything else — layout, shader, vertex
+    // layout, depth, multisample — is shared, so the pair costs a second
+    // pipeline object and nothing at record time but a rebind.
+    let build = |label, blend| {
+        let fragment_targets = [Some(super::color_target_state(color_format, blend))];
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // Quads are authored as two triangles in a fixed winding;
+                // overlay UI shouldn't be culled by face orientation.
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            // Overlay quads draw on top of the world pass with no depth
+            // interaction at all — the main pass already resolved depth.
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: super::MSAA_SAMPLE_COUNT,
+                ..wgpu::MultisampleState::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    let straight = build("aether quad pipeline", wgpu::BlendState::ALPHA_BLENDING);
+    let premultiplied = build("aether quad premultiplied pipeline", wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("aether quad vertex buffer"),
@@ -272,7 +299,7 @@ pub fn build_quad_pipeline(
         mapped_at_creation: false,
     });
 
-    QuadPipeline { pipeline, vertex_buffer, viewport_buffer, viewport_bind_group }
+    QuadPipeline { straight, premultiplied, vertex_buffer, viewport_buffer, viewport_bind_group }
 }
 
 /// Create a GPU texture from staged `pixels` and build its group-1 bind
@@ -573,7 +600,6 @@ pub fn record_quad_overlay_pass(
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    pass.set_pipeline(&pipeline.pipeline);
     pass.set_bind_group(0, &pipeline.viewport_bind_group, &[]);
     pass.set_vertex_buffer(0, pipeline.vertex_buffer.slice(..vertex_bytes.len() as u64));
     for draw in draws {
@@ -583,6 +609,10 @@ pub fn record_quad_overlay_pass(
         let Some(scissor) = clamped_scissor(draw.clip, targets.width(), targets.height()) else {
             continue;
         };
+        pass.set_pipeline(match draw.blend {
+            CompositeBlend::Straight => &pipeline.straight,
+            CompositeBlend::Premultiplied => &pipeline.premultiplied,
+        });
         pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
         pass.set_bind_group(1, draw.bind_group, &[]);
         pass.draw(draw.first_vertex..draw.first_vertex + draw.vertex_count, 0..1);

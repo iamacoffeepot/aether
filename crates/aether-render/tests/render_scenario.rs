@@ -57,6 +57,7 @@ use aether_kinds::{
     LoadResult, NamedMail, QuadScale, QuadSpace, SimilarityCheck,
 };
 use aether_math::{Rgb, Rgba};
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
     DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
@@ -403,6 +404,7 @@ fn textured_quad_draws_screen_space_rect() {
         "aether.render",
         &DrawTexturedQuads {
             texture_id,
+            blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: None,
             quads: vec![TexturedQuad {
@@ -551,6 +553,7 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
+                blend: QuadBlend::Straight,
                 space: textured_space.clone(),
                 clip: Some(textured_clip.clone()),
                 quads: vec![textured_quad.clone()],
@@ -602,17 +605,29 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         v1: 1.0,
         tint: Rgba::new(1.0, 0.2, 0.1, 1.0),
     };
-    let valid_batch =
-        DrawTexturedQuads { texture_id, space: QuadSpace::Screen, clip: None, quads: vec![valid_quad.clone()] };
+    let valid_batch = DrawTexturedQuads {
+        texture_id,
+        space: QuadSpace::Screen,
+        clip: None,
+        blend: QuadBlend::Straight,
+        quads: vec![valid_quad.clone()],
+    };
     let submissions = vec![
         envelope(
             "aether.render",
-            &DrawTexturedQuads { texture_id, space: QuadSpace::Screen, clip: None, quads: Vec::new() },
+            &DrawTexturedQuads {
+                texture_id,
+                space: QuadSpace::Screen,
+                clip: None,
+                blend: QuadBlend::Straight,
+                quads: Vec::new(),
+            },
         ),
         envelope(
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
+                blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: Some(ClipRect { x: 74.0, y: 0.0, width: 5.0, height: 5.0 }),
                 quads: vec![valid_quad.clone()],
@@ -642,6 +657,7 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
     let over_budget_count = QUAD_VERTEX_BUFFER_BYTES / bytes_per_quad + 1;
     let oversized = DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![valid_quad; over_budget_count],
@@ -754,6 +770,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         "aether.render",
         &DrawTexturedQuads {
             texture_id,
+            blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: None,
             quads: vec![TexturedQuad {
@@ -834,6 +851,7 @@ fn destroyed_texture_draw_drops_from_frame() {
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
+                blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
                 quads: vec![TexturedQuad {
@@ -924,6 +942,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
+                blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
                 quads: vec![TexturedQuad {
@@ -1066,6 +1085,7 @@ fn textured_material_depth_tests_against_main_geometry() {
             "aether.render",
             &DrawMaterialTextured {
                 texture_id,
+                blend: QuadBlend::Straight,
                 rects: vec![MaterialTexturedRect {
                     rect: MaterialRect {
                         x: -0.8,
@@ -1125,6 +1145,7 @@ fn textured_material_rect_extends_along_its_basis() {
         "aether.render",
         &DrawMaterialTextured {
             texture_id,
+            blend: QuadBlend::Straight,
             rects: vec![MaterialTexturedRect {
                 rect: MaterialRect {
                     x: -0.8,
@@ -1345,6 +1366,7 @@ fn textured_quad_clip_bounds_pixels() {
         "aether.render",
         &DrawTexturedQuads {
             texture_id,
+            blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: Some(ClipRect { x: 18.0, y: 14.0, width: 14.0, height: 12.0 }),
             quads: vec![TexturedQuad {
@@ -1933,6 +1955,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
             "aether.render",
             &DrawMaterialTextured {
                 texture_id,
+                blend: QuadBlend::Straight,
                 rects: vec![MaterialTexturedRect {
                     rect: MaterialRect {
                         x: -0.8,
@@ -1955,6 +1978,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
+                blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
                 quads: vec![TexturedQuad {
@@ -2081,6 +2105,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
             "aether.render",
             &DrawTexturedQuads {
                 texture_id: sampled_id,
+                blend: QuadBlend::Straight,
                 space: QuadSpace::Screen,
                 clip: None,
                 quads: vec![TexturedQuad {
@@ -2100,6 +2125,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
             "aether.render",
             &DrawMaterialTextured {
                 texture_id: writable_id,
+                blend: QuadBlend::Straight,
                 rects: vec![MaterialTexturedRect {
                     rect: MaterialRect {
                         x: -0.8,
@@ -2176,6 +2202,7 @@ fn nearest_sampling_preserves_label_texel_identity() {
     // them; x=30 sits at interpolation fraction ~0.4.
     let quad = |texture_id: u32, y: f32| DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {
@@ -2212,5 +2239,116 @@ fn nearest_sampling_preserves_label_texel_identity() {
         (60..=230).contains(&linear_left),
         "left of center the linear quad must read a blended midtone, not a texel identity; \
          got red {linear_left}",
+    );
+}
+
+/// The mean red of a centred sample of `img`.
+fn centre_red(img: &Image) -> f32 {
+    let (x0, x1, y0, y1) = (14u32, 18u32, 14u32, 18u32);
+    let mut total = 0f32;
+    let mut count = 0f32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let at = ((y * img.width + x) * 4) as usize;
+            total += f32::from(img.rgba[at]);
+            count += 1.0;
+        }
+    }
+
+    total / count
+}
+
+/// One 32x32 frame with a 16x16 quad of the given texture composited
+/// under `blend`.
+fn composited_red(harness: &mut SubstrateHarness, label: &'static str, texture_id: u32, blend: QuadBlend) -> f32 {
+    let pre = vec![envelope(
+        "aether.render",
+        &DrawTexturedQuads {
+            texture_id,
+            blend,
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![TexturedQuad {
+                x: 8.0,
+                y: 8.0,
+                width: 16.0,
+                height: 16.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            }],
+        },
+    )];
+    let captured =
+        harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
+
+    centre_red(&decode_png(captured.captured(label).expect("the capture step ran")).expect("decode capture png"))
+}
+
+/// An 8x8 texture of one repeated texel.
+fn flat_texture(harness: &mut SubstrateHarness, label: &'static str, texel: [u8; 4]) -> u32 {
+    let created = harness
+        .execute(vec![(
+            label,
+            HarnessOp::send_and_await_reply(
+                "aether.render",
+                &sampled_linear(8, 8, TextureFormat::Rgba8, texel.repeat(64)),
+            ),
+        )])
+        .expect("create_texture sequence");
+    match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    }
+}
+
+/// Tripwire: which composite algebra each blend actually selects.
+///
+/// The two differ only in the source factor, so the discriminating pair
+/// is an opaque source and a half-covered one. At full coverage
+/// `src.rgb * 1` and `src.rgb` are the same number, so the blends must
+/// agree — which is what says `Premultiplied` reaches a pipeline
+/// identical in every other respect, rather than being brighter for some
+/// unrelated reason. At half coverage they must not agree: straight
+/// alpha weights the source by a coverage its colour already carries and
+/// lays down a quarter of it, premultiplied lays down the half that is
+/// there. That gap is the whole reason the field exists (ADR-0172), and
+/// pinning it is what catches the arm being wired to the wrong pipeline
+/// — a failure that otherwise renders as a plausible picture that is
+/// merely too faint.
+#[test]
+fn the_two_blends_agree_on_an_opaque_source_and_part_on_a_covered_one() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(32, 32).with_render().build().expect("boot");
+
+    // Opaque red. Premultiplying by an alpha of one changes nothing, so
+    // the two blends describe the same operation on it.
+    let opaque = flat_texture(&mut harness, "opaque", [255, 0, 0, 255]);
+    let opaque_straight = composited_red(&mut harness, "opaque_straight", opaque, QuadBlend::Straight);
+    let opaque_premultiplied = composited_red(&mut harness, "opaque_premul", opaque, QuadBlend::Premultiplied);
+    assert!(
+        (opaque_straight - opaque_premultiplied).abs() <= 2.0,
+        "at full coverage the blends must agree; straight {opaque_straight} vs premultiplied \
+         {opaque_premultiplied} means the premultiplied pipeline differs in more than its source factor",
+    );
+
+    // Half-covered red, stored the way a render program's own output
+    // stores it: colour already scaled by its coverage.
+    let half = flat_texture(&mut harness, "half", [128, 0, 0, 128]);
+    let half_straight = composited_red(&mut harness, "half_straight", half, QuadBlend::Straight);
+    let half_premultiplied = composited_red(&mut harness, "half_premul", half, QuadBlend::Premultiplied);
+    assert!(
+        half_premultiplied > half_straight + 20.0,
+        "at half coverage premultiplied must lay down materially more than straight; got \
+         {half_premultiplied} against {half_straight} — the arm is reaching the straight pipeline",
+    );
+    assert!(
+        half_premultiplied < opaque_straight + 2.0,
+        "half coverage cannot lay down more than the opaque source it was cut from; got \
+         {half_premultiplied} against {opaque_straight}",
     );
 }

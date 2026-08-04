@@ -53,6 +53,7 @@ use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx,
 use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::Rgba;
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, RenderCapability, TextureFormat,
     TextureSampling, TextureUsage, TexturedQuad,
@@ -214,6 +215,7 @@ impl WasmActor for BundleComponent {
         };
         ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
             texture_id: tile.texture_id,
+            blend: QuadBlend::Straight,
             space: QuadSpace::Screen,
             clip: None,
             quads: alloc::vec![TexturedQuad {

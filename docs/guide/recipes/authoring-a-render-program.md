@@ -175,7 +175,7 @@ bundle so the freshly written pixels appear in the captured frame:
       "params": { "program_id": 0, "bindings": [SOURCE_ID, OUTPUT_ID], "geometries": [],
                   "uniforms": [0, 0, 0, 63, 0, 0, 128, 63] } },
     { "recipient_name": "aether.render", "kind_name": "aether.render.draw_textured_quads",
-      "params": { "texture_id": OUTPUT_ID, "space": "Screen", "clip": null,
+      "params": { "texture_id": OUTPUT_ID, "space": "Screen", "clip": null, "blend": "Straight",
                   "quads": [ { "x": 16.0, "y": 8.0, "width": 128.0, "height": 128.0,
                                "u0": 0.0, "v0": 0.0, "u1": 1.0, "v1": 1.0,
                                "tint": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 } } ] } }
@@ -341,7 +341,7 @@ drawn pixels land in the captured frame:
                   "uniforms": [0,0,128,63, 0,0,128,63, 0,0,128,63, 0,0,128,63,
                                0,0,0,63,   0,0,0,0,    0,0,0,0,    0,0,0,0] } },
     { "recipient_name": "aether.render", "kind_name": "aether.render.draw_textured_quads",
-      "params": { "texture_id": TARGET_ID, "space": "Screen", "clip": null,
+      "params": { "texture_id": TARGET_ID, "space": "Screen", "clip": null, "blend": "Straight",
                   "quads": [ { "x": 16.0, "y": 8.0, "width": 128.0, "height": 128.0,
                                "u0": 0.0, "v0": 0.0, "u1": 1.0, "v1": 1.0,
                                "tint": { "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 } } ] } }
