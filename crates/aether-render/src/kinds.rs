@@ -330,7 +330,9 @@ pub fn vertex_stride_bytes(layout: &[VertexAttribute]) -> usize {
 #[kind(name = "aether.render.create_geometry")]
 pub struct CreateGeometry {
     pub layout: Vec<VertexAttribute>,
+    #[serde(with = "aether_data::bytes")]
     pub vertices: Vec<u8>,
+    #[serde(with = "aether_data::bytes")]
     pub indices: Vec<u8>,
 }
 
@@ -362,7 +364,9 @@ pub enum CreateGeometryResult {
 #[kind(name = "aether.render.update_geometry")]
 pub struct UpdateGeometry {
     pub geometry_id: u32,
+    #[serde(with = "aether_data::bytes")]
     pub vertices: Vec<u8>,
+    #[serde(with = "aether_data::bytes")]
     pub indices: Vec<u8>,
 }
 
