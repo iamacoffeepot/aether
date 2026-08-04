@@ -3,11 +3,18 @@
 //! The wash has the [`easel`](crate::easel) for this; the ink has this.
 //! The two are shaped alike — register once, create per canvas size,
 //! dispatch per repaint, present as a rect — and differ in cadence,
-//! which is the whole reason they are separate state machines. The
-//! easel develops when the view *stops* moving. The ink is re-solved
-//! whenever the view moves at all, so everything here is sized for the
-//! per-frame path: no settle gate, geometry replaced in place rather
-//! than recreated, and the uniform blob rewritten every frame.
+//! which is the whole reason they are separate state machines.
+//!
+//! The easel develops every frame. The ink does not, and does not need
+//! to: its planes and its sheet are a function of the drawing, the view
+//! and the canvas, so a frame that moved none of the three would spend
+//! forty-eight passes deriving what is already standing in its own
+//! textures. What that costs the layer is the bookkeeping to say when
+//! one of them moved — [`Strokes::dispatched`] — and everything else
+//! here is sized for the frames that did: geometry replaced in place
+//! rather than recreated, only the volatile half of it travelling, and
+//! the uniform blobs written at dispatch time, which is where the
+//! canvas is known.
 //!
 //! Two programs run, in order, against one set of textures:
 //!
