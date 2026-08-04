@@ -327,20 +327,29 @@ impl WasmActor for Puppet {
     /// The surface changed shape, so the projection has to follow it —
     /// and the easel's canvas with it.
     ///
-    /// The drawing is re-solved as well, by the eye it was already drawn
-    /// from. Nothing extracted here is a function of the aspect, but the
-    /// matrix every layer projects through is, and the ink's is held
-    /// from the solve that laid it down rather than rebuilt per frame —
-    /// so without this a window dragged while the camera sits still
-    /// re-fills the field through the projection of the shape it used to
-    /// be.
+    /// An aspect that moved re-solves the drawing, by the eye it was
+    /// already drawn from. Nothing extracted here is a function of the
+    /// aspect, but the matrix every layer projects through is, and the
+    /// ink's is held from the solve that laid it down rather than
+    /// rebuilt per frame — so without this a window dragged while the
+    /// camera sits still re-fills the field through the projection of
+    /// the shape it used to be.
+    ///
+    /// Only when it moved. A desktop window republishes its size on
+    /// every redraw, so this handler runs per frame at a steady size —
+    /// and a re-solve keyed on the announcement rather than on the
+    /// change would put the whole extraction back on every frame of a
+    /// held camera, which is the cost the eye check exists to avoid.
     #[handler::single]
     fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
         if size.width > 0 && size.height > 0 {
-            self.aspect = size.width as f32 / size.height as f32;
+            let aspect = size.width as f32 / size.height as f32;
             self.easel.resized(size.width, size.height);
             self.strokes.resized(size.width, size.height);
-            self.drawn_from = None;
+            if self.aspect != aspect {
+                self.aspect = aspect;
+                self.drawn_from = None;
+            }
         }
     }
 
