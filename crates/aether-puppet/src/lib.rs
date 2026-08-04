@@ -179,8 +179,9 @@ pub struct Puppet {
     cursor: Vec2,
     aspect: f32,
     /// Last frame's view-dependent curves, and the frame they were solved
-    /// for: the silhouette, the charted face and the suggestive
-    /// contours. The other half of the drawing is `surface`.
+    /// for: the silhouette, the charted face and the suggestive contours.
+    /// The other half of the drawing is `surface` — until a pose moves it
+    /// here too, which is what the split by volatility is for.
     ///
     /// Silhouette and visibility are the only view-dependent work, so a
     /// frame drawn from an eye we have already solved is the same frame.
@@ -206,8 +207,10 @@ pub struct Puppet {
     rig: Rig,
     pose: Pose,
     /// The subject skinned to `posed_at`, and the surface curves carried
-    /// onto it and re-gated against the normals it gave them. Both are
-    /// `None` at rest, where the rest subject *is* the posed one.
+    /// onto it and re-gated against the normals it gave them. Neither is
+    /// read at rest, where the sculpt itself *is* the posed surface and
+    /// `surface` is the drawing; `posed` is allocated once with the rig so
+    /// a pose writes into it rather than reallocating a mesh per frame.
     posed: Option<Mesh>,
     posed_surface: Vec<Curve3>,
     posed_at: Option<Pose>,
