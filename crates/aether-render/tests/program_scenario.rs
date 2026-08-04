@@ -106,6 +106,29 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &Cr
     }
 }
 
+/// A 2x2 linear-sampled `Rgba8` texture staged from `pixels`, or the
+/// writable output the graph draws into when `pixels` is empty — the two
+/// shapes every binding in `ping_pong_register` takes.
+fn create_2x2(harness: &mut SubstrateHarness, label: &'static str, pixels: Vec<u8>) -> u32 {
+    let usage = if pixels.is_empty() {
+        TextureUsage::Writable
+    } else {
+        TextureUsage::Sampled
+    };
+    create_texture(
+        harness,
+        label,
+        &CreateTexture {
+            width: 2,
+            height: 2,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage,
+            pixels,
+        },
+    )
+}
+
 fn register_reply(
     harness: &mut SubstrateHarness,
     label: &'static str,
@@ -412,30 +435,8 @@ fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
     let dark_left: Vec<u8> = [51u8, 204, 102, 230].iter().flat_map(|&red| [red, 0, 0, 255]).collect();
     let bright_left: Vec<u8> = [204u8, 51, 230, 102].iter().flat_map(|&red| [red, 0, 0, 255]).collect();
 
-    let source_id = create_texture(
-        &mut harness,
-        "create_source",
-        &CreateTexture {
-            width: 2,
-            height: 2,
-            format: TextureFormat::Rgba8,
-            sampling: TextureSampling::Linear,
-            usage: TextureUsage::Sampled,
-            pixels: dark_left.clone(),
-        },
-    );
-    let output_id = create_texture(
-        &mut harness,
-        "create_output",
-        &CreateTexture {
-            width: 2,
-            height: 2,
-            format: TextureFormat::Rgba8,
-            sampling: TextureSampling::Linear,
-            usage: TextureUsage::Writable,
-            pixels: Vec::new(),
-        },
-    );
+    let source_id = create_2x2(&mut harness, "create_source", dark_left.clone());
+    let output_id = create_2x2(&mut harness, "create_output", Vec::new());
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
         ProgramRegisterResult::Ok { program_id } => program_id,
         ProgramRegisterResult::Err { reason } => panic!("register failed: {reason}"),
@@ -454,7 +455,7 @@ fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
     // Which column is the brighter one is the whole signal here, so the
     // probes are compared against each other rather than against
     // absolute levels the sampling path would have to keep promising.
-    let mut columns = |harness: &mut SubstrateHarness, label: &'static str, pre: Vec<_>| {
+    let columns = |harness: &mut SubstrateHarness, label: &'static str, pre: Vec<_>| {
         let captured =
             harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture program output");
         let img = decode_png(captured.captured(label).expect("capture step ran")).expect("decode program capture png");
@@ -506,18 +507,7 @@ fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
     // Third dispatch: a different texture id in binding 0, which is the
     // cache key's own business — the input bind group must be rebuilt
     // against the new id rather than reused from the old one.
-    let rebound_id = create_texture(
-        &mut harness,
-        "create_rebound",
-        &CreateTexture {
-            width: 2,
-            height: 2,
-            format: TextureFormat::Rgba8,
-            sampling: TextureSampling::Linear,
-            usage: TextureUsage::Sampled,
-            pixels: dark_left,
-        },
-    );
+    let rebound_id = create_2x2(&mut harness, "create_rebound", dark_left);
     let (rebound_left, rebound_right) = columns(
         &mut harness,
         "rebound",
